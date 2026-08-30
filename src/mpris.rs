@@ -1,0 +1,538 @@
+//! One MPRIS2 media player per Sonos group.
+//!
+//! Anything that already speaks MPRIS - Omarchy's `omarchy.media` bar widget,
+//! Waybar's `mpris` module, `playerctl`, desktop media keys - gets Sonos control
+//! for free. State comes from the player's own events; nothing here polls.
+
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+use std::time::Instant;
+
+use mpris_server::zbus::{self, fdo};
+use mpris_server::{
+    LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface,
+    Time, TrackId,
+};
+
+use crate::sonos::local::Connection;
+use crate::sonos::proto::{self, MetadataStatus, PlayModes, PlaybackActions, Repeat};
+
+/// `org.mpris.MediaPlayer2.<suffix>`. "Media Room" becomes `x2rock-media-room`,
+/// the same convention the Kotlin daemon used, so existing bar configs carry over.
+pub fn bus_suffix(room: &str) -> String {
+    let mut suffix = String::from("x2rock-");
+    let mut pending_dash = false;
+    for c in room.chars() {
+        if c.is_ascii_alphanumeric() {
+            suffix.push(c.to_ascii_lowercase());
+            pending_dash = false;
+        } else if !pending_dash {
+            suffix.push('-');
+            pending_dash = true;
+        }
+    }
+    suffix.trim_end_matches('-').to_string()
+}
+
+#[derive(Default)]
+struct RoomState {
+    status: Option<PlaybackStatus>,
+    metadata: Metadata,
+    /// MPRIS volume, 0.0-1.0. Reported as 0.0 while muted, since that is what is heard.
+    volume: f64,
+    /// Position at the last event, and when that was, so `Position` can advance
+    /// between events without polling the player.
+    position_millis: u64,
+    position_at: Option<Instant>,
+    /// What the current source allows, and how the queue is being traversed,
+    /// both straight from the last `playbackStatus` event.
+    actions: PlaybackActions,
+    play_modes: PlayModes,
+    /// Every room in this group, coordinator first, as `(player id, name)`.
+    /// Fixed for the life of the player: a group whose membership changes is
+    /// republished from scratch.
+    members: Vec<(String, String)>,
+    /// Each member's own volume, in the same order. Grouped rooms share a group
+    /// volume; this is the balance between them, which MPRIS has no room for.
+    member_volumes: Vec<u8>,
+    /// The queue's version, straight from `playback:1`.
+    queue_version: String,
+    /// Whether the room is on its TV input right now.
+    on_tv_input: bool,
+    /// What a soundbar is receiving over HDMI, e.g. "Dolby Digital 5.1". Empty
+    /// off the TV input, but also on it when the player names no codec and no
+    /// channels, so this is not the way to ask; [`RoomState::on_tv_input`] is.
+    input_format: String,
+    /// Whether this room has a TV input to switch to at all.
+    has_tv_input: bool,
+}
+
+/// MPRIS has `CanGoNext` but no `CanLoop` or `CanShuffle`, so whether the current
+/// source allows those goes out as namespaced metadata keys - the one place the
+/// spec lets a player add its own fields - for clients that want to grey out a
+/// button rather than have the set fail.
+const CAN_REPEAT: &str = "x2rock:canRepeat";
+const CAN_REPEAT_ONE: &str = "x2rock:canRepeatOne";
+const CAN_SHUFFLE: &str = "x2rock:canShuffle";
+/// The rooms in this group. MPRIS describes one player, and has no way to say
+/// that player is really several speakers - but a bar widget wants to show it,
+/// and needs it to tell "everything is grouped" from "there is only one room".
+const MEMBERS: &str = "x2rock:members";
+/// Bumps whenever the queue changes, however it changed - including from the
+/// Sonos app. A client showing the queue re-reads it when this moves, which is
+/// what keeps a queue view correct without anything polling for it.
+const QUEUE_VERSION: &str = "x2rock:queueVersion";
+/// Each member's own volume, aligned with [`MEMBERS`].
+///
+/// Sent as decimal strings rather than numbers, because a D-Bus array of ints
+/// does not survive the trip: Quickshell hands `as` to QML as an ordinary array
+/// but `ai` arrives with no length and no indexing, so every slider read zero.
+/// An array of strings is what [`MEMBERS`] already proves works.
+const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
+/// What a soundbar is receiving, and whether it has a TV input to receive on.
+/// The format is the interesting one: a source that has quietly fallen back to
+/// stereo is invisible anywhere else, and this is what makes it a glance.
+const INPUT_FORMAT: &str = "x2rock:inputFormat";
+const ON_TV_INPUT: &str = "x2rock:onTvInput";
+const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
+
+impl RoomState {
+    fn loop_status(&self) -> LoopStatus {
+        match self.play_modes.repeat() {
+            Repeat::Off => LoopStatus::None,
+            Repeat::All => LoopStatus::Playlist,
+            Repeat::One => LoopStatus::Track,
+        }
+    }
+
+    /// The track metadata plus the availability hints.
+    fn with_hints(&self) -> Metadata {
+        let mut metadata = self.metadata.clone();
+        metadata.set(CAN_REPEAT, Some(self.actions.can_repeat));
+        metadata.set(CAN_REPEAT_ONE, Some(self.actions.can_repeat_one));
+        metadata.set(CAN_SHUFFLE, Some(self.actions.can_shuffle));
+        let names: Vec<_> = self.members.iter().map(|(_, name)| name.clone()).collect();
+        metadata.set(MEMBERS, Some(names));
+        metadata.set(
+            MEMBER_VOLUMES,
+            Some(
+                self.member_volumes
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        metadata.set(QUEUE_VERSION, Some(self.queue_version.clone()));
+        metadata.set(INPUT_FORMAT, Some(self.input_format.clone()));
+        metadata.set(ON_TV_INPUT, Some(self.on_tv_input));
+        metadata.set(HAS_TV_INPUT, Some(self.has_tv_input));
+        metadata
+    }
+}
+
+/// The MPRIS face of one group. Commands go straight to the player; state is
+/// whatever its events last said.
+pub struct RoomPlayer {
+    connection: Connection,
+    pub group_id: String,
+    pub room: String,
+    state: Mutex<RoomState>,
+}
+
+fn failed(e: anyhow::Error) -> fdo::Error {
+    fdo::Error::Failed(format!("{e:#}"))
+}
+
+/// As [`failed`], for the property setters, which return `zbus::Result`.
+fn set_failed(e: anyhow::Error) -> zbus::Error {
+    failed(e).into()
+}
+
+impl RoomPlayer {
+    pub fn new(
+        connection: Connection,
+        group_id: String,
+        room: String,
+        members: Vec<(String, String)>,
+        has_tv_input: bool,
+    ) -> Self {
+        let member_volumes = vec![0; members.len()];
+        Self {
+            connection,
+            group_id,
+            room,
+            state: Mutex::new(RoomState {
+                members,
+                member_volumes,
+                has_tv_input,
+                ..RoomState::default()
+            }),
+        }
+    }
+
+    /// The players in this group, for deciding whether a republish is due.
+    pub fn member_ids(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .members
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Fold one member's `playerVolume` in; returns the properties to announce,
+    /// or nothing when the level has not actually moved.
+    pub fn apply_member_volume(&self, player_id: &str, volume: &proto::Volume) -> Vec<Property> {
+        let mut state = self.state.lock().unwrap();
+        let Some(at) = state.members.iter().position(|(id, _)| id == player_id) else {
+            return Vec::new();
+        };
+        // Muted reads as nothing heard, matching how group volume is reported.
+        let level = if volume.muted { 0 } else { volume.volume };
+        if state.member_volumes.get(at) == Some(&level) {
+            return Vec::new();
+        }
+        state.member_volumes[at] = level;
+        vec![Property::Metadata(state.with_hints())]
+    }
+
+    /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
+    pub fn apply_playback(&self, status: &proto::PlaybackStatus) -> Vec<Property> {
+        let mpris_status = match status.state() {
+            "PLAYING" | "BUFFERING" => PlaybackStatus::Playing,
+            "PAUSED" => PlaybackStatus::Paused,
+            _ => PlaybackStatus::Stopped,
+        };
+        let actions = status.available_playback_actions;
+        let mut state = self.state.lock().unwrap();
+        state.status = Some(mpris_status);
+        state.position_millis = status.position_millis;
+        state.position_at = Some(Instant::now());
+        // The hints ride on Metadata, so it has to be re-announced when they move -
+        // which is on a change of source, not on every playback event.
+        let queue_moved = status
+            .queue_version
+            .as_deref()
+            .is_some_and(|version| version != state.queue_version);
+        if let Some(version) = status.queue_version.as_deref() {
+            state.queue_version = version.to_owned();
+        }
+        let hints_changed = (
+            state.actions.can_repeat,
+            state.actions.can_repeat_one,
+            state.actions.can_shuffle,
+        ) != (
+            actions.can_repeat,
+            actions.can_repeat_one,
+            actions.can_shuffle,
+        );
+        state.actions = actions;
+        state.play_modes = status.play_modes;
+        let mut properties = vec![
+            Property::PlaybackStatus(mpris_status),
+            Property::CanGoNext(actions.can_skip),
+            Property::CanGoPrevious(actions.can_skip_back),
+            Property::CanPlay(actions.can_play),
+            Property::CanPause(actions.can_pause),
+            Property::CanSeek(actions.can_seek),
+            Property::LoopStatus(state.loop_status()),
+            Property::Shuffle(state.play_modes.shuffle),
+        ];
+        // Both ride on Metadata, so either moving means re-announcing it.
+        if hints_changed || queue_moved {
+            properties.push(Property::Metadata(state.with_hints()));
+        }
+        properties
+    }
+
+    /// Fold a `metadataStatus` event in.
+    pub fn apply_metadata(&self, meta: &MetadataStatus) -> Vec<Property> {
+        let mut state = self.state.lock().unwrap();
+        state.metadata = to_metadata(&self.group_id, meta);
+        // The format is present only on the TV input, but its summary can be
+        // empty there too (no codec named, no channels yet), so being on TV is
+        // its presence, not its wording.
+        let format = meta
+            .container
+            .as_ref()
+            .and_then(|c| c.ht_input_format.as_ref());
+        state.on_tv_input = format.is_some();
+        state.input_format = format.map(|f| f.summary()).unwrap_or_default();
+        vec![Property::Metadata(state.with_hints())]
+    }
+
+    /// Fold a `groupVolume` event in.
+    pub fn apply_volume(&self, volume: &proto::Volume) -> Vec<Property> {
+        let level = if volume.muted {
+            0.0
+        } else {
+            f64::from(volume.volume) / 100.0
+        };
+        self.state.lock().unwrap().volume = level;
+        vec![Property::Volume(level)]
+    }
+
+    async fn playback(&self, command: &str) -> fdo::Result<()> {
+        self.connection
+            .playback(&self.group_id, command)
+            .await
+            .map_err(failed)
+    }
+
+    /// Refuse, rather than silently send, a mode the current source cannot do.
+    /// The same sentence the CLI prints, so both faces of x2rock agree.
+    fn cannot(&self, what: &str) -> zbus::Error {
+        fdo::Error::NotSupported(format!("what {} is playing cannot be {what}", self.room)).into()
+    }
+}
+
+fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
+    let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
+    let container = meta.container.as_ref();
+    let title = track
+        .and_then(|t| t.name.as_deref())
+        .or_else(|| container.and_then(|c| c.name.as_deref()));
+    let artist = track
+        .and_then(|t| t.artist.as_ref())
+        .and_then(|a| a.name.as_deref());
+    let album = track
+        .and_then(|t| t.album.as_ref())
+        .and_then(|a| a.name.as_deref());
+    let art = track
+        .and_then(|t| t.image_url.as_deref())
+        .or_else(|| container.and_then(|c| c.image_url.as_deref()));
+
+    let mut builder = Metadata::builder().trackid(track_id(group_id, title, artist));
+    if let Some(title) = title {
+        builder = builder.title(title);
+    }
+    if let Some(artist) = artist {
+        builder = builder.artist([artist]);
+    }
+    if let Some(album) = album {
+        builder = builder.album(album);
+    }
+    if let Some(art) = art {
+        builder = builder.art_url(art);
+    }
+    if let Some(ms) = track.and_then(|t| t.duration_millis) {
+        builder = builder.length(Time::from_millis(ms as i64));
+    }
+    builder.build()
+}
+
+/// MPRIS wants an object path per track. Sonos ids are not valid path segments,
+/// so derive one from what identifies the track to a listener.
+fn track_id(group_id: &str, title: Option<&str>, artist: Option<&str>) -> TrackId {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (title, artist).hash(&mut hasher);
+    let group: String = group_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = format!("/com/rahga/x2rock/{group}/track/{:x}", hasher.finish());
+    TrackId::try_from(path).expect("path built only from [A-Za-z0-9_/]")
+}
+
+impl RootInterface for RoomPlayer {
+    async fn raise(&self) -> fdo::Result<()> {
+        Ok(())
+    }
+    async fn quit(&self) -> fdo::Result<()> {
+        Ok(())
+    }
+    async fn can_quit(&self) -> fdo::Result<bool> {
+        Ok(false)
+    }
+    async fn fullscreen(&self) -> fdo::Result<bool> {
+        Ok(false)
+    }
+    async fn set_fullscreen(&self, _fullscreen: bool) -> zbus::Result<()> {
+        Ok(())
+    }
+    async fn can_set_fullscreen(&self) -> fdo::Result<bool> {
+        Ok(false)
+    }
+    async fn can_raise(&self) -> fdo::Result<bool> {
+        Ok(false)
+    }
+    async fn has_track_list(&self) -> fdo::Result<bool> {
+        Ok(false)
+    }
+    async fn identity(&self) -> fdo::Result<String> {
+        Ok(self.room.clone())
+    }
+    async fn desktop_entry(&self) -> fdo::Result<String> {
+        Ok("x2rock".into())
+    }
+    async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+impl PlayerInterface for RoomPlayer {
+    async fn next(&self) -> fdo::Result<()> {
+        self.playback("skipToNextTrack").await
+    }
+    async fn previous(&self) -> fdo::Result<()> {
+        self.playback("skipToPreviousTrack").await
+    }
+    async fn pause(&self) -> fdo::Result<()> {
+        self.playback("pause").await
+    }
+    async fn play_pause(&self) -> fdo::Result<()> {
+        self.playback("togglePlayPause").await
+    }
+    async fn stop(&self) -> fdo::Result<()> {
+        // Sonos has no stop distinct from pause for most sources.
+        self.playback("pause").await
+    }
+    async fn play(&self) -> fdo::Result<()> {
+        self.playback("play").await
+    }
+    async fn seek(&self, offset: Time) -> fdo::Result<()> {
+        self.connection
+            .seek_by(&self.group_id, offset.as_millis())
+            .await
+            .map_err(failed)
+    }
+    async fn set_position(&self, _track_id: TrackId, position: Time) -> fdo::Result<()> {
+        self.connection
+            .seek_to(&self.group_id, position.as_millis().max(0) as u64)
+            .await
+            .map_err(failed)
+    }
+    async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
+        Err(fdo::Error::NotSupported("x2rock cannot open URIs".into()))
+    }
+    async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .status
+            .unwrap_or(PlaybackStatus::Stopped))
+    }
+    async fn loop_status(&self) -> fdo::Result<LoopStatus> {
+        Ok(self.state.lock().unwrap().loop_status())
+    }
+    async fn set_loop_status(&self, loop_status: LoopStatus) -> zbus::Result<()> {
+        let repeat = match loop_status {
+            LoopStatus::None => Repeat::Off,
+            LoopStatus::Playlist => Repeat::All,
+            LoopStatus::Track => Repeat::One,
+        };
+        let actions = self.state.lock().unwrap().actions;
+        if !actions.allows(repeat) {
+            return Err(self.cannot(repeat.denied_as()));
+        }
+        self.connection
+            .set_repeat(&self.group_id, repeat)
+            .await
+            .map_err(set_failed)
+    }
+    async fn rate(&self) -> fdo::Result<PlaybackRate> {
+        Ok(1.0)
+    }
+    async fn set_rate(&self, _rate: PlaybackRate) -> zbus::Result<()> {
+        Ok(())
+    }
+    async fn shuffle(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().play_modes.shuffle)
+    }
+    async fn set_shuffle(&self, shuffle: bool) -> zbus::Result<()> {
+        // Turning it off is always allowed, as with repeat.
+        if shuffle && !self.state.lock().unwrap().actions.can_shuffle {
+            return Err(self.cannot("shuffled"));
+        }
+        self.connection
+            .set_shuffle(&self.group_id, shuffle)
+            .await
+            .map_err(set_failed)
+    }
+    async fn metadata(&self) -> fdo::Result<Metadata> {
+        Ok(self.state.lock().unwrap().with_hints())
+    }
+    async fn volume(&self) -> fdo::Result<f64> {
+        Ok(self.state.lock().unwrap().volume)
+    }
+    async fn set_volume(&self, volume: f64) -> zbus::Result<()> {
+        let level = (volume.clamp(0.0, 1.0) * 100.0).round() as u8;
+        self.connection
+            .set_group_volume(&self.group_id, level)
+            .await
+            .map_err(set_failed)
+    }
+    async fn position(&self) -> fdo::Result<Time> {
+        let state = self.state.lock().unwrap();
+        let mut millis = state.position_millis;
+        if state.status == Some(PlaybackStatus::Playing)
+            && let Some(at) = state.position_at
+        {
+            millis += at.elapsed().as_millis() as u64;
+        }
+        Ok(Time::from_millis(millis as i64))
+    }
+    async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
+        Ok(1.0)
+    }
+    async fn maximum_rate(&self) -> fdo::Result<PlaybackRate> {
+        Ok(1.0)
+    }
+    async fn can_go_next(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().actions.can_skip)
+    }
+    async fn can_go_previous(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().actions.can_skip_back)
+    }
+    async fn can_play(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().actions.can_play)
+    }
+    async fn can_pause(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().actions.can_pause)
+    }
+    async fn can_seek(&self) -> fdo::Result<bool> {
+        Ok(self.state.lock().unwrap().actions.can_seek)
+    }
+    async fn can_control(&self) -> fdo::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bus_suffix_matches_the_kotlin_convention() {
+        assert_eq!(bus_suffix("Media Room"), "x2rock-media-room");
+        assert_eq!(bus_suffix("Kitchen"), "x2rock-kitchen");
+        assert_eq!(bus_suffix("Björn's Den!!"), "x2rock-bj-rn-s-den");
+        assert_eq!(bus_suffix("  "), "x2rock");
+    }
+
+    #[test]
+    fn track_ids_are_valid_paths_and_stable() {
+        let a = track_id(
+            "RINCON_48A6:836412709",
+            Some("Espresso"),
+            Some("Sabrina Carpenter"),
+        );
+        let b = track_id(
+            "RINCON_48A6:836412709",
+            Some("Espresso"),
+            Some("Sabrina Carpenter"),
+        );
+        let c = track_id("RINCON_48A6:836412709", Some("Other"), None);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(
+            a.as_str()
+                .starts_with("/com/rahga/x2rock/RINCON_48A6_836412709/track/")
+        );
+    }
+}

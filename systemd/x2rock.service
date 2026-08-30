@@ -1,0 +1,13 @@
+[Unit]
+Description=x2rock: Sonos rooms as MPRIS2 media players
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/x2rock daemon
+# The daemon reconnects on its own; this only catches a crash.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

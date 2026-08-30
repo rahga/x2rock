@@ -1,0 +1,367 @@
+# x2rock
+
+Local-first Sonos control for Linux, in Rust.
+
+A CLI plus an MPRIS2 server, targeting [Omarchy](https://omarchy.org) 4.0 "Quattro" and its
+Quickshell top bar. **No Sonos login required** — x2rock talks to speakers directly on the local
+network.
+
+The bar widget is Omarchy's. The CLI and the daemon are not: they carry no dependency on Omarchy,
+Quickshell or Hyprland and run on any Linux — see [Other Linux
+desktops](#other-linux-desktops).
+
+> Status: complete for daily use. Rooms, volume — per room as well as per group — transport,
+> favorites, the queue and its editing, grouping and party mode, soundbar TV input with the audio
+> format it is actually receiving, all from the CLI, over MPRIS, or from the bar widget.
+>
+> Every one of those was exercised against real speakers rather than against the protocol
+> documentation, which repeatedly turned out to be the only way to learn what is true: the
+> undocumented facts that shaped the design are collected in
+> [docs/architecture.md](docs/architecture.md).
+
+## Why local-first
+
+Sonos speakers expose the same JSON Control API on the LAN that Sonos's cloud exposes remotely,
+over a WebSocket on port 1443, with no OAuth and no internet round-trip. It is the transport the
+official Sonos mobile app itself has used since 2024. x2rock is built on it directly:
+
+- **No account, no login, no cloud dependency** for normal use.
+- **Push events, not polling** — the LAN API supports real subscriptions.
+- **One outbound connection**, which matters on Linux boxes with a default-deny firewall (Omarchy
+  ships one) and on locked-down office networks.
+
+Queue navigation uses UPnP/SOAP on port 1400, because the Control API — cloud or local — has no
+view of the local Sonos queue.
+
+## Install
+
+Build it, install the binary, run the daemon. That much is the same on every Linux; the bar widget
+is an extra step on Omarchy.
+
+```sh
+git clone https://github.com/rahga/x2rock
+cd x2rock
+cargo build --release
+install -Dm755 target/release/x2rock ~/.local/bin/x2rock
+```
+
+Find the speakers next, once per network — every other command reconnects to what this remembers:
+
+```sh
+x2rock discover
+x2rock rooms
+```
+
+If `rooms` lists your speakers, the CLI is done. Last, run the daemon as a user service, which is
+what publishes each room as an MPRIS2 player:
+
+```sh
+mkdir -p ~/.config/systemd/user && cp systemd/x2rock.service ~/.config/systemd/user/
+systemctl --user enable --now x2rock.service
+```
+
+Discover first, as above: the daemon connects only to players it has been told about, and will not
+scan an unfamiliar network on its own. Doing it the other way round is not fatal, though — the
+daemon re-reads the remembered players between reconnect attempts, so a `discover` that comes later
+is picked up within a minute rather than needing a restart.
+
+### On Omarchy
+
+Arch's `rust` package tracks current stable, so `pacman -S rust` is enough if you would rather not
+install rustup.
+
+The bar widget is a Quickshell plugin, installed by copy:
+
+```sh
+cp -r quickshell/x2rock.sonos ~/.config/omarchy/plugins/
+omarchy-shell shell rescanPlugins
+omarchy plugin enable x2rock.sonos --section right
+```
+
+It needs `x2rock` on `PATH` (for the scroll gesture and favorites) and `x2rock daemon` running,
+both of which the steps above did. If the pill does not appear, that is what to check —
+`systemctl --user status x2rock`, then `x2rock rooms`. With no daemon there are no players, and the
+widget hides itself rather than sitting there empty.
+
+What it shows, and every key it reads from `shell.json`, is under [Omarchy bar
+widget](#omarchy-bar-widget).
+
+### On Ubuntu
+
+Two things bite here, both quietly:
+
+- **`apt`'s Rust is too old.** x2rock needs 1.88; no current Ubuntu packages it — 24.04 LTS is on
+  1.75, and the interim releases are behind as well, so `apt install cargo` is a dead end rather
+  than a maybe. Cargo at least refuses in one plain line naming the version it wants. Install a
+  current toolchain from [rustup.rs](https://rustup.rs) and build again.
+- **`~/.local/bin` may not be on `PATH` yet.** Ubuntu's `.profile` adds it only if it already
+  exists when the shell starts, so the `install` above creates it too late for the session you ran
+  it in. `x2rock` is then "not found", and the daemon and the service both fail with nothing
+  obviously wrong. Log out and back in, or `export PATH="$HOME/.local/bin:$PATH"` for the session
+  at hand.
+
+There is no bar widget on Ubuntu — it is a Quickshell plugin and wants Omarchy. The daemon is not:
+GNOME's and KDE's media controls, `playerctl`, Waybar and the desktop media keys all drive Sonos
+through MPRIS, which is most of the widget's value. See [Other Linux
+desktops](#other-linux-desktops).
+
+## Usage
+
+```sh
+x2rock discover          # find players on this network and remember them
+x2rock rooms             # rooms and their playback state
+x2rock now               # what is playing
+x2rock play | pause | toggle | next | prev
+x2rock vol               # show volume
+x2rock vol 30            # set it
+x2rock vol +5            # nudge it
+x2rock vol mute | unmute
+x2rock vol 30 --player   # this room's own speaker, not the group it plays with
+x2rock repeat            # show repeat mode
+x2rock repeat all | one | off
+x2rock shuffle on | off
+x2rock queue             # the queue, current track marked
+x2rock play 4            # play the 4th track in the queue
+x2rock queue remove 4    # drop a track, or a range: remove 4-8
+x2rock queue move 4 1    # move a track to another position
+x2rock queue save "Tonight"   # save the queue as a Sonos playlist
+x2rock queue clear --yes # empty it; Sonos keeps no undo
+x2rock queue sources     # saved playlists and favorites, and which can be added
+x2rock queue add "Bedtime" [--next]   # append a saved playlist
+x2rock favorites         # saved favorites
+x2rock favorites bedtime # only those matching
+x2rock favorite "80s Flash"   # play one, by name or id
+x2rock -r "Living Room" group Kitchen   # Kitchen joins Living Room, playing what it plays
+x2rock ungroup Kitchen   # Kitchen leaves, on its own again
+x2rock -r "Living Room" tv   # switch a soundbar to its TV input
+x2rock -r Kitchen party  # party mode: every room joins Kitchen
+x2rock party off         # break it up, every room on its own
+x2rock daemon            # every room as an MPRIS2 player, until stopped
+```
+
+`group` adds rooms to `--room`'s group; name as many as you like. `ungroup` takes its room
+positionally and needs no `--room`, since a room is only ever in one group. Both print the group as
+it ended up, so the result is visible rather than merely claimed. A room that joins a group plays
+what that group plays; when it leaves, its own queue is still there but it comes back stopped at
+the first track rather than where it was.
+
+`now` on a soundbar shows what the TV is actually sending — `TV Audio  [Dolby Digital Surround
+5.1]`, or `[Dolby Digital 2.0]` when the source has quietly fallen back to stereo, which is
+otherwise invisible. `tv` switches a soundbar to its TV input; rooms without one say so rather
+than trying.
+
+`party` is `group` with every other room named for you — the classic Sonos party mode, hosted by
+whichever room you point it at.
+
+`favorite` is the one command that can start a room from nothing: `play` only resumes, so a room
+with an empty queue has nothing for it to do. A query matches an id exactly or a name
+case-insensitively, and several matches are reported rather than guessed between — except when one
+of them is the whole name, so `favorite Bedtime` is not made ambiguous by "Bedtime P5 Mix". Loading
+a favorite replaces what the room had queued, which is what Sonos itself does.
+
+With one group in the household no room needs naming. Otherwise pass `-r "Media Room"` or set
+`X2ROCK_ROOM`. `rooms --json`, `now --json` and `favorites --json` emit a flat schema meant for
+bar widgets.
+
+Discovery is explicit. `x2rock discover` sweeps the local subnet once and remembers what it finds
+per network (keyed by gateway, in `~/.local/state/x2rock/networks.json`); every other command
+just reconnects to what was remembered. On a network x2rock has never seen it refuses to scan on
+its own — a laptop should not probe hotel or client WiFi unasked — and tells you to run
+`discover`. On a known network where the remembered players have moved, it rescans once.
+
+## MPRIS
+
+`x2rock daemon` publishes each group as `org.mpris.MediaPlayer2.x2rock-<room>` — "Media Room"
+becomes `x2rock-media-room`. Anything that speaks MPRIS then controls Sonos with no further setup:
+Omarchy's built-in `omarchy.media` bar widget (`omarchy plugin enable omarchy.media`), Waybar's
+`mpris` module, `playerctl`, desktop media keys.
+
+State comes from the player's own push events, not polling. The daemon keeps one WebSocket per
+group coordinator, pings them to survive firewall idle timeouts, and reconnects with backoff.
+logind says when the machine wakes and NetworkManager says when it lands on a network, so sockets
+that did not survive a suspend or a move are replaced within seconds rather than waiting out the
+keepalive's silence timeout. Only arriving counts: losing the network is left alone, because there
+is nothing to reconnect to until one comes back. When no player is reachable — the normal case for
+a laptop away from home — it backs off quietly and republishes when one appears.
+
+The daemon runs as a systemd user service; [Install](#install) sets that up.
+
+## Omarchy bar widget
+
+`quickshell/x2rock.sonos/` is a Quickshell bar widget for Omarchy Quattro that shows every Sonos
+room with the piece nothing else on the bar has: **per-room volume**. (Omarchy's built-in
+`omarchy.media` shows one active player and has no volume; `omarchy.audio` controls the laptop's
+own output.)
+
+- The bar pill is a speaker glyph, lit while the focused room is playing; **scroll it to change
+  that room's volume** (relative, the way Sonos wants stateless controls). Middle-click toggles
+  play/pause, click opens the popup, and hovering names the room and the track in a tooltip.
+- The popup lists every room: now-playing, previous/play/pause/next, repeat (one button cycling
+  off → all → one) and shuffle, and a volume slider. Repeat and shuffle are dimmed when the
+  source cannot do them — a radio stream, say — the way previous and next are dimmed when the
+  source cannot skip.
+- A `󰌷` on each room row opens grouping: the rooms playing together, each with its **own volume
+  slider**, and every other room a click away from joining. The popup's own slider stays the
+  group's, so the two are not the same control wearing different hats.
+- A `󰲹` on each room row opens that room's queue: click a track to jump to it, and the row
+  under the cursor grows buttons to move it up or down or drop it. It re-reads when the daemon says
+  the queue moved — the `x2rock:queueVersion` it publishes changes however the queue changed,
+  including from the Sonos app — so the view stays right without polling.
+- A `◉` on each room row starts party mode **hosted by that room**: everyone joins it and
+  plays what it plays. Once everyone is in there is only one row left, and its button ends the
+  party. Hidden in a one-speaker household. Grouped rooms list their members under the room name.
+- A `󰓎` on each room row opens that room's favorites, so picking something to play never means
+  picking a room as well. **Type to filter** by name or service, `↑`/`↓` and `Enter` to choose,
+  `Esc` to close; the mouse works throughout. This is a separate panel rather than part of the
+  popup, because a bar popup cannot take keyboard focus — which is also why opening it closes the
+  room list.
+- Cover art appears beside each room and each favorite. Sonos serves most of it from the speaker
+  itself (`http://<player>:1400/getaa?...`, no account and no internet); the rest comes from the
+  music service's own CDN, and some sources have none, so a missing cover falls back to a themed
+  glyph rather than a hole. Deliberately **not** on the bar pill: that is always on screen, and a
+  full-colour thumbnail there would fight whatever palette the bar is themed to. Set
+  `"art": false` on the widget's `shell.json` entry to drop it from the popup too.
+- Every glyph, the cover size, and the state and members lines are set from that same `shell.json`
+  entry — the widget installs by copy, so editing its QML does not survive an update, and
+  `shell.json` does. `quickshell/x2rock.sonos/README.md` documents every key, and is installed
+  alongside the widget so it is there to read wherever the plugin ends up.
+- Display is entirely event-driven off the x2rock daemon's MPRIS players — the widget never polls.
+  No daemon, no players, and the widget hides itself. Favorites are the one exception, because
+  MPRIS has no notion of them: they come from `x2rock favorites --json`, read when the picker is
+  opened rather than on any timer.
+
+Installing it is three commands, under [Install](#install) along with the binary and the daemon
+it needs.
+
+## Other Linux desktops
+
+Omarchy Quattro is the target, and the bar widget needs it — it is a Quickshell plugin. Nothing
+else here does. `grep -ri omarchy src/` finds nothing; the CLI and the daemon are ordinary Linux
+programs and are useful on their own.
+
+On any Linux with systemd and a session D-Bus:
+
+- **The CLI works unchanged.** Discovery reads the interface netmask and `/proc/net/arp`; the queue
+  is UPnP over plain HTTP; everything else is the Sonos LAN WebSocket.
+- **`x2rock daemon` publishes every room as an MPRIS2 player**, which is a desktop-agnostic
+  interface — `playerctl`, Waybar's `mpris` module, GNOME's and KDE's media controls and desktop
+  media keys all drive Sonos with no further setup. That is most of the widget's value without the
+  widget.
+
+Worth knowing before installing:
+
+- **Rust 1.88 or newer** — often newer than the version a distribution packages, so `rustup` is
+  the reliable route. [Install](#install) has the build; [Requirements](#requirements) has the why.
+- **logind and NetworkManager are optional.** They are how the daemon learns it woke from suspend
+  or landed on a different network. Without either it still recovers, just more slowly — the
+  keepalive finds the dead socket instead — and says so once at startup: *"not watching for resume
+  from suspend (...); a dead socket will be found by the keepalive instead"*. That line is expected
+  on a machine without them, not a fault to chase.
+- **The systemd unit assumes a graphical session.** `systemd/x2rock.service` is `WantedBy=
+  graphical-session.target`, which never fires on a headless box. For a server, point it at
+  `default.target` instead and enable lingering (`loginctl enable-linger $USER`) so the user
+  manager runs without a login.
+- **The queue commands need the Sonos UPnP setting enabled**, as they do everywhere.
+
+## Queue
+
+`x2rock queue` lists the queue with the current track marked; `x2rock play N` jumps to track N;
+`remove`, `move`, `save` and `clear` change it. The queue is not reachable through the Control API
+— cloud or local — so this goes over UPnP/SOAP on port 1400, which needs the Sonos UPnP setting
+enabled.
+
+Sonos versions the queue, and enforces it: a change sent against a version that has moved on is
+refused outright rather than applied to the wrong tracks. So each change reads the current version
+immediately before sending, and if someone edits the same queue from the Sonos app in that instant,
+the change fails and says so instead of silently doing the wrong thing.
+
+`clear` requires `--yes`, because Sonos keeps no undo for it. `save` first is a cheap insurance
+policy: it costs nothing and turns any later mistake into two taps in the Sonos app.
+
+`queue add` appends a saved Sonos playlist, or any favorite that is a single track. What it cannot
+append is a station or a collection — an album, a playlist, a radio stream — because Sonos will only
+play one of those *in place of* the queue rather than adding it. `queue sources` says which is which
+in its third column, and `queue add` explains itself rather than passing on a bare UPnP error. To
+play a station or collection, `x2rock favorite <name>` replaces the queue with it, which is what the
+Sonos app does too.
+
+## Non-goals
+
+- Android (see [`x2rocktv`](https://github.com/rahga/x2rocktv) for the Kotlin/JVM Android TV app)
+- Cloud OAuth / control from outside the LAN (deliberately cut; the transport seam remains)
+- Searching music services. This controls rooms, queues and volume; finding something new to play
+  is what the Sonos app is for.
+- Pre-Quattro Omarchy, Waybar-first design
+
+## Tested devices
+
+Everything here was developed against these, on one household:
+
+| Device | Firmware | Notes |
+|---|---|---|
+| Sonos Beam ×3 | 95.1-78010 | TV input and the HDMI audio format were verified on these |
+| Sonos One SL | 95.1-78010 | the original test speaker |
+| IKEA SYMFONISK Bookshelf | 86.7-77050 | a third-party Sonos player, behaving identically on markedly older firmware |
+
+Reports from anything else are welcome — open an issue. Two would be especially
+useful, because they are the places the code is written for a case it has never
+actually met:
+
+- **An Arc, Arc Ultra, or anything doing Atmos.** The audio-format display
+  handles height channels and would show `5.1.2`, but no speaker here has ever
+  reported a height channel, so that path is untried. A soundbar that does is
+  the one report that would confirm it.
+- **A Port or an Amp**, which have real analog line-in. `playback:1 loadLineIn`
+  refuses a Beam outright — "player does not have line-in" — so switching input
+  goes over UPnP instead. On a Port or Amp that Control API command presumably
+  does work, which would be worth knowing before anyone else designs around the
+  refusal.
+
+Era, Move, Roam, Sub, and the older Play:1/3/5, Playbar and Playbase are all
+untested rather than known-bad; nothing in the design expects a particular
+model.
+
+**Sonos Ace headphones are not a target.** They are Bluetooth headphones rather
+than players on the network, and everything here starts from a speaker with an
+address to talk to.
+
+## Requirements
+
+- Linux, and a Sonos S2 speaker on the same network.
+- **Rust 1.88 or newer** to build it (`edition = "2024"`, and let-chains). This is declared as
+  `rust-version` in `Cargo.toml`, so an older toolchain is refused by Cargo with a plain message
+  naming the version it wants rather than a page of syntax errors. Distribution packages are often
+  behind; `rustup` is the reliable route. Nothing here chases the newest thing for its own sake —
+  it is simply not held back either.
+- For the queue commands (`x2rock queue`, `x2rock play N`): the Sonos **UPnP** setting enabled
+  (Sonos app → Settings → Privacy & Security → UPnP). Playback control needs nothing.
+
+### Firewall note
+
+x2rock needs no inbound connections and works unchanged behind a default-deny firewall, which is
+what Omarchy ships. That is also why it does not use SSDP or mDNS to find speakers: a default-deny
+inbound policy silently drops multicast replies, so discovery would find nothing and give no error.
+Instead, `x2rock discover` probes the local subnet over outbound TCP, and results are remembered
+per network.
+
+## Design
+
+The reasoning behind every choice here — why the local WebSocket over the cloud API, how discovery
+copes with a default-deny firewall, the protocol facts verified against real hardware — is in
+[docs/architecture.md](docs/architecture.md).
+
+## Credits
+
+Informed by prior reverse-engineering of the Sonos protocols by the community, in particular:
+
+- [`sonos-websocket`](https://github.com/jjlawren/sonos-websocket) by jjlawren, whose
+  handshake was the concrete reference for connecting to the LAN API.
+- [Stephan van Rooij's Sonos API documentation](https://sonos.svrooij.io/) for the UPnP side.
+
+## Licence
+
+[0BSD](LICENSE) — public-domain-equivalent. Use it for anything, no attribution required.
+
+That extends to packaging: nobody needs to ask. The only build constraint is the Rust version
+above, and there is nothing else unusual — no build scripts, no vendored code, no network access at
+build time beyond fetching crates.
