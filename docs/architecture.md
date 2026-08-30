@@ -2520,7 +2520,12 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
 - **The channel counts are the point, not the codec name.** A source that has
   fallen back reports its codec unchanged and drops the channels - "Dolby
   Digital 2.0" where "Dolby Digital Surround 5.1" was expected. Observed live:
-  the same Beam read 2.0, then 5.0, then 2.0 again as the content changed.
+  the same Beam read 2.0, then 5.1, then 2.0 again as the content changed.
+- **The LFE count arrives as `numLFEChannels`, in caps.** It is the one field
+  here that `serde(rename_all = "camelCase")` gets wrong - the derived name is
+  `numLfeChannels`, so the field needs an explicit `rename`. With `default` on
+  it this failed silently: every layout lost its `.1` and read 5.0, and a 2.1
+  source looked like plain stereo to `is_surround`.
 - **With the television off it reports `streamDescription: "No Signal"` and no
   channels**, which is worth rendering as "No Signal" rather than "No Signal
   0.0".

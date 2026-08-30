@@ -366,7 +366,9 @@ pub struct Container {
 pub struct HomeTheaterFormat {
     #[serde(default)]
     pub num_ground_channels: u8,
-    #[serde(default)]
+    /// The player spells this one `numLFEChannels`, which is not the casing
+    /// `rename_all` derives from the field name.
+    #[serde(default, rename = "numLFEChannels")]
     pub num_lfe_channels: u8,
     #[serde(default)]
     pub num_height_channels: u8,
@@ -529,5 +531,17 @@ mod tests {
         assert!(radio.allows(Repeat::Off));
         assert!(!radio.allows(Repeat::All));
         assert!(!radio.allows(Repeat::One));
+    }
+
+    #[test]
+    fn lfe_channel_survives_the_wire_name() {
+        // Verbatim from a Beam on its TV input: the player spells LFE in caps,
+        // which is not what camelCase would produce from `num_lfe_channels`.
+        let wire = r#"{"numGroundChannels":5,"numLFEChannels":1,
+            "numHeightChannels":0,"streamDescription":"Dolby Digital Surround"}"#;
+        let format: HomeTheaterFormat = serde_json::from_str(wire).unwrap();
+        assert_eq!(format.channels(), "5.1");
+        assert_eq!(format.summary(), "Dolby Digital Surround 5.1");
+        assert!(format.is_surround());
     }
 }
