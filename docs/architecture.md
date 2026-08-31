@@ -535,6 +535,106 @@ Probed for the contract first, then exercised on real rooms.
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
 
+## Bar-widget interop with `omarchy.media`, and the room-name decision (2026-08-31)
+
+Verified against Omarchy 4.0.2 running from `/usr/share/omarchy/shell`. **Only the office Media
+Room was reachable, so everything below about *multiple* players is read out of Omarchy's source
+rather than exercised — that half needs the home household to confirm.**
+
+### Settling which widget drew what
+
+`qs -p /usr/share/omarchy/shell ipc call shell debugBarGeometry` returns every bar slot's id,
+section, x and width. Coordinates are logical; multiply by the scale (1.25 on a 1920px screen
+here) to compare against a `grim` capture. Use it. Reading a screenshot by eye misattributed the
+now-playing text twice before this call settled it:
+
+- `omarchy.media` — center, x=830 w=203 (physical 1037–1291): the "now playing" text.
+- `x2rock.sonos` — right, x=1396 w=18 (physical 1745–1767): icon only, as `BarWidget.qml:758`
+  sizes it (`glyph.implicitWidth + Style.space(14)`).
+
+So with the daemon running, the track name in the bar is **Omarchy's** widget rendering x2rock's
+MPRIS data. x2rock's own pill contributes nothing but the speaker glyph.
+
+### `omarchy.media` never shows the room
+
+Its bar label is `trackTitle + "  ·  " + trackArtist`. Its popup source rows use
+`trackTitle || identity` and `trackArtist || identity`. Since x2rock always supplies a title and
+an artist, the MPRIS `Identity` — which is the room name — never renders anywhere in that widget.
+Two rooms playing the same album produce two visually identical rows.
+
+### Which player it picks
+
+`plugins/services/media/Service.qml`, `selectActivePlayer()`:
+
+```
+preferred && preferred.isPlaying
+  → oldestPlayingPlayer(true)    // requires a local PipeWire stream
+  → oldestPlayingPlayer(false)
+  → streamPreferred → streamCandidate → preferred → trackPlayer → …
+```
+
+- `oldestPlayingPlayer(true)` demands `playerHasPlaybackStream()`, a fuzzy name match of the
+  player against local PipeWire *output* streams. A Sonos room has no local stream — the audio is
+  on the speaker — so it can never pass that round, and **local playback outranks any room** unless
+  the room is the pinned `preferredPlayerKey` *and* playing.
+- "oldest" means start-order, stamped by `syncPlayingOrder()` the first time a player is seen
+  playing and held until it stops. Among several playing rooms the bar keeps whichever started
+  first; starting a second room does not move it, and the widget's middle-click / scroll then acts
+  on the first room rather than the one just started.
+- With everything paused it falls through to `preferred`, else `trackPlayer` — the first
+  `Mpris.players` entry carrying metadata, i.e. D-Bus arrival order, which is not stable across
+  daemon restarts.
+
+### One player per group, not per room
+
+`src/mpris.rs:20` and `daemon.rs:348` publish one bus per Sonos *group*, named for the
+coordinator. Party mode collapses the whole household to a single MPRIS player. This is why a
+multi-room house can look better behaved here than it is: grouped rooms never exercise the
+multi-player paths above.
+
+### Why the room name came out of the x2rock pill (decided 2026-08-31)
+
+Given the line above, a room name on the pill would have named the *coordinator* rather than the
+room in front of you, and re-labelled itself on every regroup. It also could not switch rooms, so
+it was a label with nothing behind it. The pill stays an icon; the room list lives in the popup.
+
+### The interop that would justify putting it back — designed, not built
+
+`shell.qml:279` is `function firstPartyServiceFor(pluginId) { return serviceFor(pluginId) }` — no
+first-party gate — and `Bar.qml`'s `injectProps()` hands every widget, third-party included, the
+`bar` reference. So x2rock's widget can reach Omarchy's media service the same way Omarchy's own
+widget does:
+
+```qml
+readonly property var mediaService: bar?.shell?.firstPartyServiceFor("omarchy.media")
+mediaService?.selectPlayer(roomPlayer.dbusName)   // pins the bar pill to that room
+```
+
+`playerKey()` is just `player.dbusName`, which the widget already holds from
+`Quickshell.Services.Mpris` — no need to recompute `bus_suffix()` in QML.
+
+Caveats, all from the selection order above: the pin only wins outright while that player is
+playing; `runAction` overwrites `preferredPlayerKey` on every successful transport action, so a
+click on the media pill re-pins it; it is session state, lost on shell restart; and it is an
+undeclared dependency on an Omarchy internal. That last one is harmless if `omarchy.media` is not
+placed in the bar — its manifest is `keepLoaded` with kind `service`, so the service exists and
+the call is a visual no-op.
+
+The **reciprocal read is probably the better feature**: `mediaService.activePlayer` tells x2rock's
+popup which room the bar pill is currently showing, so the popup can mark it. That hands
+`omarchy.media` the room identity it structurally cannot express, without putting a name back on
+the pill.
+
+### Unexplained, low priority
+
+With a single paused room, the `omarchy.media` marquee sat frozen at the same pixel offset across
+four captures ten minutes apart, showing `Espresso` with the artist clipped out of view.
+`running: labelText.needsScroll && !root.popupOpen` points at a stuck `popupOpen`, but the
+bar-level `openPanelIndicator` (`Bar.qml:1641`, `panelOpen: root.activePopout === slot.activeItem`)
+had already cleared by then, and `qs ipc call shell call omarchy.media close ""` answers
+`unknown`. Worth a second look at home, where several players may make the trigger obvious.
+
+
 ## Quickshell facts learned wiring the per-room volume sliders (2026-08-29)
 
 - **An `ai` metadata value does not reach QML as an array.** MPRIS metadata
@@ -895,7 +995,13 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
+1. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
+   room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
+   mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
+   not confirmed is whether it behaves with several rooms on the bus, since only one room was
+   reachable when it was written up. **Pick this up from the home household.**
+
+2. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
