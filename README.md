@@ -330,6 +330,28 @@ speaks to nothing but the local network, so a music service being slow or unreac
 play, pause or volume — a widget losing search keeps every control it had. See
 [docs/architecture.md](docs/architecture.md), "Rule: search never enters the daemon".
 
+## Keeping things you cannot search for
+
+Most music services need a linked account before they will answer a search, and x2rock has no way
+to get one. But *replaying* something needs no credential at all — the id is enough, and the player
+resolves the account it already holds. So discovery and repetition are separate problems, and only
+the first one is closed:
+
+```sh
+x2rock keep                  # remember what is playing
+x2rock keep "Friday mix"     # ...under a name of your own
+x2rock bookmarks             # what has been kept
+x2rock bookmark Bodies       # play it again
+x2rock bookmark Bodies --next  # queue it after the current track
+```
+
+Start it once from the Sonos app, keep it, and it is on the bar from then on. This works for
+YouTube Music, Spotify, Apple Music and everything else the household has linked — x2rock never
+sees a token.
+
+`--container` keeps the album, playlist or station rather than the single track. Kept items live in
+`$XDG_STATE_HOME/x2rock/bookmarks.json`, on this machine rather than in the household.
+
 ## Probing the API
 
 `x2rock raw` sends one Control API command and prints the reply, header included:

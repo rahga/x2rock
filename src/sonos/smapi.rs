@@ -46,6 +46,24 @@ pub struct Service {
     /// Where the manifest lives, which is where the search endpoints and the
     /// presentation map are named.
     pub manifest_uri: Option<String>,
+    /// `serviceId * 256 + type`, from `AvailableServiceTypeList`. The number a
+    /// cdudn is built from: `SA_RINCON<type>_X_#Svc<type>-0-Token`, which is how
+    /// enqueued content names the account the player should resolve it with.
+    /// Absent for a service the type list does not mention.
+    pub service_type: Option<u32>,
+}
+
+impl Service {
+    /// The `<desc id="cdudn">` an enqueued item must carry for this service.
+    ///
+    /// Derived, not scavenged: the arithmetic reproduces the `SA_RINCON77575`
+    /// that Sonos Radio's own favorites carry (303 * 256 + 7), which is what
+    /// gives any confidence that it is right for services with no favorite to
+    /// copy from.
+    pub fn cdudn(&self) -> Option<String> {
+        let t = self.service_type?;
+        Some(format!("SA_RINCON{t}_X_#Svc{t}-0-Token"))
+    }
 }
 
 /// One search hit, flattened from `mediaMetadata`.
@@ -76,7 +94,14 @@ pub struct Category {
 /// The list is every service Sonos knows about, not the household's - there is
 /// no command that gives the second. Filtering to what is usable is the caller's
 /// job and mostly means [`Auth::Anonymous`].
-pub fn parse_services(descriptor_list: &str) -> Result<Vec<Service>> {
+pub fn parse_services(descriptor_list: &str, type_list: &str) -> Result<Vec<Service>> {
+    // serviceId -> serviceId * 256 + type. The list gives only the combined
+    // number, so the id it belongs to is the number shifted back down.
+    let types: std::collections::HashMap<u32, u32> = type_list
+        .split(',')
+        .filter_map(|t| t.trim().parse::<u32>().ok())
+        .map(|t| (t / 256, t))
+        .collect();
     let doc = Document::parse(descriptor_list).context("parsing service descriptors")?;
     let mut out = Vec::new();
     for node in doc.descendants().filter(|n| n.has_tag_name("Service")) {
@@ -105,6 +130,7 @@ pub fn parse_services(descriptor_list: &str) -> Result<Vec<Service>> {
                 .find(|n| n.has_tag_name("Manifest"))
                 .and_then(|n| n.attribute("Uri"))
                 .map(str::to_string),
+            service_type: id.parse().ok().and_then(|n: u32| types.get(&n).copied()),
         });
     }
     if out.is_empty() {
@@ -308,8 +334,35 @@ mod tests {
       </Services>"#;
 
     #[test]
+    fn a_cdudn_is_derived_from_the_service_type_list() {
+        // 303 * 256 + 7 = 77575, which is the SA_RINCON this household's Sonos
+        // Radio favorites actually carry - the check that the arithmetic is
+        // right for services with no favorite to copy from.
+        let services = parse_services(
+            r#"<Services><Service Id="303" Name="Sonos Radio" Uri="https://x/y">
+                 <Policy Auth="DeviceLink"/></Service>
+               <Service Id="284" Name="YouTube Music" Uri="https://y/z">
+                 <Policy Auth="AppLink"/></Service>
+               <Service Id="999" Name="Unlisted" Uri="https://z/z">
+                 <Policy Auth="Anonymous"/></Service></Services>"#,
+            "77575,72711",
+        )
+        .unwrap();
+        assert_eq!(services[0].service_type, Some(77575));
+        assert_eq!(
+            services[0].cdudn().as_deref(),
+            Some("SA_RINCON77575_X_#Svc77575-0-Token")
+        );
+        assert_eq!(services[1].service_type, Some(72711), "284 * 256 + 7");
+        // A service the type list does not mention has no cdudn to offer, and
+        // says so rather than inventing one.
+        assert_eq!(services[2].service_type, None);
+        assert!(services[2].cdudn().is_none());
+    }
+
+    #[test]
     fn descriptors_split_by_how_they_authenticate() {
-        let services = parse_services(DESCRIPTORS).unwrap();
+        let services = parse_services(DESCRIPTORS, "").unwrap();
         // The one with no Uri at all is dropped rather than carried as unusable.
         assert_eq!(services.len(), 2);
 
@@ -329,12 +382,12 @@ mod tests {
 
     #[test]
     fn an_empty_descriptor_list_is_an_error_not_an_empty_catalogue() {
-        assert!(parse_services(r#"<Services SchemaVersion="1"/>"#).is_err());
+        assert!(parse_services(r#"<Services SchemaVersion="1"/>"#, "").is_err());
     }
 
     #[tokio::test]
     async fn a_linked_service_is_refused_before_the_network() {
-        let ytm = &parse_services(DESCRIPTORS).unwrap()[1];
+        let ytm = &parse_services(DESCRIPTORS, "").unwrap()[1];
         let err = search(ytm, "all", "jazz", 0, 5)
             .await
             .unwrap_err()

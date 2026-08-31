@@ -30,8 +30,22 @@ use serde::{Deserialize, Serialize};
 use crate::sonos::smapi::{self, Category, Service};
 use crate::sonos::upnp::Upnp;
 
+/// Bumped whenever the *shape* of what is cached changes.
+///
+/// The player's `AvailableServiceListVersion` says whether the catalogue moved;
+/// it says nothing about whether this program still reads it the same way. A
+/// field added to `Service` deserializes as `None` from an older file forever,
+/// because the version matches and nothing refetches - which is exactly how
+/// `service_type` came back empty and made every cdudn underivable. Keying on
+/// both is the fix.
+const SCHEMA: u32 = 1;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Catalogue {
+    /// The shape this file was written in. Absent, and therefore 0, in anything
+    /// written before this field existed - which is what makes it work.
+    #[serde(default)]
+    schema: u32,
     /// `AvailableServiceListVersion`, verbatim. Empty when nothing is cached.
     #[serde(default)]
     version: String,
@@ -63,7 +77,10 @@ impl Catalogue {
         path()
             .and_then(|p| Ok(fs::read_to_string(p)?))
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
+            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
+            // A file this program no longer understands is treated as absent
+            // rather than read half-heartedly.
+            .filter(|c| c.schema == SCHEMA)
             .unwrap_or_default()
     }
 
@@ -84,7 +101,7 @@ impl Catalogue {
     /// dropped, for when a service has changed under a version that did not move.
     /// Returns whether anything changed, so the caller can skip writing.
     pub async fn refresh(&mut self, upnp: &Upnp, force: bool) -> Result<bool> {
-        let (descriptors, version) = match upnp.list_services().await {
+        let answer = match upnp.list_services().await {
             Ok(answer) => answer,
             Err(e) if !self.services.is_empty() => {
                 // The player is the cheap half and it is on the LAN, so failing
@@ -97,11 +114,12 @@ impl Catalogue {
             Err(e) => return Err(e),
         };
 
-        if !force && version == self.version && !self.services.is_empty() {
+        if !force && answer.version == self.version && !self.services.is_empty() {
             return Ok(false);
         }
-        self.services = smapi::parse_services(&descriptors)?;
-        self.version = version;
+        self.services = smapi::parse_services(&answer.descriptors, &answer.types)?;
+        self.version = answer.version;
+        self.schema = SCHEMA;
         // A category list belongs to a version of the catalogue, not to a
         // service id, so they all go when the version moves.
         self.categories.clear();
@@ -180,6 +198,7 @@ mod tests {
             uri: "https://example.test/x".into(),
             auth,
             manifest_uri: None,
+            service_type: None,
         }
     }
 
@@ -218,6 +237,7 @@ mod tests {
     #[test]
     fn searchable_keeps_only_the_ones_needing_no_account() {
         let cat = Catalogue {
+            schema: SCHEMA,
             version: "v1".into(),
             services: vec![
                 service("1", "TuneIn", smapi::Auth::Anonymous),
@@ -237,5 +257,23 @@ mod tests {
         let empty: Catalogue = serde_json::from_str("{}").unwrap();
         assert!(empty.services().is_empty());
         assert!(serde_json::from_str::<Catalogue>("not json").is_err());
+    }
+
+    #[test]
+    fn a_file_from_an_older_shape_is_not_trusted() {
+        // What actually happened: a cache written before `service_type` existed
+        // kept deserializing cleanly, matched the player's version, and so was
+        // never refetched - leaving every cdudn underivable.
+        let old = r#"{"version":"RINCON:58","services":[
+            {"id":"284","name":"YouTube Music","uri":"https://x","auth":"Linked",
+             "manifest_uri":null}]}"#;
+        let parsed: Catalogue = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.schema, 0, "no schema field means schema 0");
+        assert_eq!(parsed.services.len(), 1, "it still parses...");
+        assert!(
+            parsed.services[0].service_type.is_none(),
+            "...but incompletely"
+        );
+        assert_ne!(parsed.schema, SCHEMA, "so load() discards it");
     }
 }

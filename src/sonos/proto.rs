@@ -316,9 +316,39 @@ pub struct MetadataStatus {
     pub next_item: Option<QueueItem>,
 }
 
+/// How Sonos names a piece of a service's catalogue: what it is, which service
+/// it belongs to, and which of the household's accounts on that service.
+///
+/// The three together are enough to enqueue the item again later, without any
+/// credential of our own - the player resolves the account it already holds.
+/// `accountId` reads like `sn_3`, and the same `3` appears as `sn=3` inside the
+/// player's own `x-sonosapi-*` URIs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicObjectId {
+    pub object_id: String,
+    pub service_id: Option<String>,
+    pub account_id: Option<String>,
+}
+
+impl MusicObjectId {
+    /// The account serial from `sn_3`, as the `sn=` a playback URI wants.
+    pub fn account_serial(&self) -> Option<&str> {
+        self.account_id.as_deref()?.strip_prefix("sn_")
+    }
+
+    /// Whether this names real service content. A player reports `objectId: "-1"`
+    /// for a container it has nothing to say about - a radio station's "album",
+    /// for instance - and that is not something to store or replay.
+    pub fn is_real(&self) -> bool {
+        !self.object_id.is_empty() && self.object_id != "-1"
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
+    pub id: Option<MusicObjectId>,
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub kind: Option<String>,
@@ -385,6 +415,7 @@ pub struct QueueItem {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
+    pub id: Option<MusicObjectId>,
     pub name: Option<String>,
     pub artist: Option<Named>,
     pub album: Option<Named>,

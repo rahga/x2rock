@@ -61,6 +61,15 @@ pub struct Upnp {
     ip: IpAddr,
 }
 
+/// What `ListAvailableServices` answers with, unparsed.
+pub struct Services {
+    pub descriptors: String,
+    /// `AvailableServiceTypeList`: comma-separated `serviceId * 256 + type`.
+    pub types: String,
+    /// `AvailableServiceListVersion`, for deciding whether a cache is stale.
+    pub version: String,
+}
+
 #[derive(Debug)]
 pub struct QueueItem {
     /// 1-based, as Sonos numbers them.
@@ -320,7 +329,7 @@ impl Upnp {
     /// number `musicServiceAccounts:1` reports as `availableServicesVersion`
     /// when the set changes, so a cache can be checked against it rather than
     /// against a guessed expiry.
-    pub async fn list_services(&self) -> Result<(String, String)> {
+    pub async fn list_services(&self) -> Result<Services> {
         let text = self
             .soap(Service::MusicServices, "ListAvailableServices", &[])
             .await?;
@@ -331,7 +340,16 @@ impl Upnp {
         let version = text_of(&envelope, "AvailableServiceListVersion")
             .unwrap_or_default()
             .to_string();
-        Ok((descriptors, version))
+        // The type list is the other half of a service's identity: each entry is
+        // `serviceId * 256 + type`, and the type is what a cdudn is built from.
+        let types = text_of(&envelope, "AvailableServiceTypeList")
+            .unwrap_or_default()
+            .to_string();
+        Ok(Services {
+            descriptors,
+            types,
+            version,
+        })
     }
 
     /// One page of DIDL-Lite into items. Split out from `browse_content` so the

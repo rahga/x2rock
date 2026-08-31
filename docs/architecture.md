@@ -825,6 +825,30 @@ Which makes the feature concrete: **remember what played, and start it again.** 
 readable while something plays; storing them is a local matter. Discovery stays with the Sonos app,
 repetition moves to the bar.
 
+### Built: `keep` / `bookmarks` / `bookmark` (2026-08-31)
+
+`src/bookmarks.rs`, stored in `$XDG_STATE_HOME/x2rock/bookmarks.json`. `keep` reads the playing
+track's `universalMusicObjectId` from `playbackMetadata`, `bookmark` rebuilds the URI and a
+synthesized DIDL and enqueues it. Verified against YouTube Music: kept while the album played,
+then replayed from the bookmark alone with `positionMillis` advancing 14740 → 19016.
+
+Two things it taught, both worth more than the feature:
+
+- **The cache had no schema version, and that is a real design fault.** Adding `service_type` to
+  the cached `Service` left every existing file deserializing *cleanly* — `Option` defaults to
+  `None` — while still matching the player's `AvailableServiceListVersion`, so nothing refetched
+  and every cdudn was underivable. The invalidation key answered "has the catalogue moved?" and
+  never "do we still read it the same way?". `Catalogue` now carries a `SCHEMA` constant and
+  `load()` discards a file that does not match, which is a rule any on-disk cache in this project
+  should follow. Pinned by a test built from the exact file that broke.
+- **Two failures were wearing one message.** "Service 284 is not in this player's service list" was
+  reported for a service that *was* in the list but had no type to derive a cdudn from, which sent
+  the debugging in the wrong direction. Split.
+
+`from_id` refuses what cannot be replayed rather than storing it: `objectId: "-1"` (what a player
+reports for a live stream's notional container), a missing `serviceId`, a missing `accountId` —
+each with its own reason, because each means something different went wrong.
+
 One caution for whoever builds it: the earlier add with *empty* metadata blanked the titles of the
 whole queue and they did not come back. Always send a metadata document.
 

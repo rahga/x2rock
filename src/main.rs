@@ -1,3 +1,4 @@
+mod bookmarks;
 mod catalogue;
 mod daemon;
 mod discover;
@@ -126,6 +127,30 @@ enum Command {
         /// service shows when given nothing better.
         #[arg(long)]
         title: Option<String>,
+    },
+    /// Remember what is playing, so it can be started again later.
+    ///
+    /// The answer to a service x2rock cannot search: play it once from the
+    /// Sonos app, keep it, and it is on the bar from then on.
+    Keep {
+        /// What to call it. Defaults to what the player calls it.
+        name: Option<String>,
+        /// Keep the album, playlist or station rather than the single track.
+        #[arg(long)]
+        container: bool,
+    },
+    /// List what has been kept.
+    Bookmarks {
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Play something kept earlier, by name.
+    Bookmark {
+        query: String,
+        /// Queue it after the current track instead of replacing what plays.
+        #[arg(long)]
+        next: bool,
     },
     /// Switch a soundbar to its TV input.
     Tv,
@@ -1102,6 +1127,52 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Kept items are x2rock's own and live on this machine, so listing them
+    // needs no household at all.
+    if let Command::Bookmarks { query, json } = &cli.command {
+        let list = bookmarks::Bookmarks::load()?;
+        let mut items: Vec<_> = list.items.iter().collect();
+        if let Some(query) = query {
+            let needle = query.to_lowercase();
+            items.retain(|b| b.name.to_lowercase().contains(&needle));
+        }
+        if *json {
+            let rows: Vec<_> = items
+                .iter()
+                .map(|b| {
+                    // Same field names as `favorites --json` and `search --json`,
+                    // so the widget's picker can concatenate all three.
+                    json!({
+                        "id": b.object_id,
+                        "name": b.name,
+                        "type": b.kind,
+                        "description": b.artist,
+                        "service": b.service_name,
+                        "art_url": b.art_url,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string(&rows)?);
+        } else if items.is_empty() {
+            println!("Nothing kept. Play something and run `x2rock keep`.");
+        } else {
+            for b in items {
+                let by = b
+                    .artist
+                    .as_deref()
+                    .map(|a| format!(" — {a}"))
+                    .unwrap_or_default();
+                let on = b
+                    .service_name
+                    .as_deref()
+                    .map(|s| format!("  [{s}]"))
+                    .unwrap_or_default();
+                println!("{}{by}{on}", b.name);
+            }
+        }
+        return Ok(());
+    }
+
     // Grouping resolves rooms itself: `ungroup` names its room positionally and
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
@@ -1256,6 +1327,103 @@ async fn main() -> Result<()> {
             }
             upnp.seek_track(n).await?;
             player.playback(group, "play").await?;
+        }
+        Command::Keep { name, container } => {
+            let meta = player.metadata(group).await?;
+            // The track by default: "play this again" almost always means the
+            // song, and the container is there for the times it means the album.
+            let (id, fallback, artist, art, kind) = if container {
+                let c = meta
+                    .container
+                    .ok_or_else(|| anyhow!("nothing is playing to keep"))?;
+                (c.id, c.name, None, c.image_url, c.kind)
+            } else {
+                let t = meta
+                    .current_item
+                    .and_then(|i| i.track)
+                    .ok_or_else(|| anyhow!("nothing is playing to keep"))?;
+                (
+                    t.id,
+                    t.name,
+                    t.artist.and_then(|a| a.name),
+                    t.image_url,
+                    Some("track".to_string()),
+                )
+            };
+            let id = id.ok_or_else(|| {
+                anyhow!("the player reported no id for what is playing, so it cannot be kept")
+            })?;
+            let title = name.or(fallback).ok_or_else(|| {
+                anyhow!("what is playing has no name; give one: x2rock keep <name>")
+            })?;
+
+            let mut bookmark = bookmarks::Bookmark::from_id(&title, &id)?;
+            bookmark.artist = artist;
+            bookmark.art_url = art;
+            bookmark.kind = kind;
+            // The service's own name, for the listing. Best effort: a catalogue
+            // that cannot be read costs a label, not the bookmark.
+            let mut catalogue = catalogue::Catalogue::load();
+            let _ = catalogue
+                .refresh(&Upnp::new(session.connection.ip()), false)
+                .await;
+            bookmark.service_name = catalogue
+                .services()
+                .iter()
+                .find(|s| s.id == bookmark.service_id)
+                .map(|s| s.name.clone());
+
+            let mut list = bookmarks::Bookmarks::load()?;
+            let replaced = list.keep(bookmark);
+            list.save()?;
+            println!("{} {title}", if replaced { "Updated" } else { "Kept" });
+        }
+        Command::Bookmark { query, next } => {
+            let list = bookmarks::Bookmarks::load()?;
+            let bookmark = list.find(&query)?;
+
+            // The cdudn names the account the player resolves the content with,
+            // and it is derived from the service type list rather than copied
+            // from anything - see `Service::cdudn`.
+            let mut catalogue = catalogue::Catalogue::load();
+            catalogue
+                .refresh(&Upnp::new(session.connection.ip()), false)
+                .await?;
+            // Two different failures, worth telling apart: a service the player
+            // has never heard of, and one it lists but gives no type for.
+            let service = catalogue
+                .services()
+                .iter()
+                .find(|s| s.id == bookmark.service_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "service {} is not in this player's service list, so {:?} cannot be played",
+                        bookmark.service_id,
+                        bookmark.name
+                    )
+                })?;
+            let cdudn = service.cdudn().ok_or_else(|| {
+                anyhow!(
+                    "{} has no service type in this player's list, so {:?} cannot name its account",
+                    service.name,
+                    bookmark.name
+                )
+            })?;
+
+            let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+            let length = upnp
+                .add_to_queue(&bookmark.uri(), &bookmark.didl(&cdudn), next)
+                .await?;
+            if !next {
+                // Appended, so it is the last track. Make the queue the source
+                // first: after a station it is not, and Seek fails with 701.
+                if !upnp.playing_from_queue().await? {
+                    upnp.use_queue(&target.coordinator_id).await?;
+                }
+                upnp.seek_track(length).await?;
+                player.playback(group, "play").await?;
+            }
+            println!("{:<24} {}", target.name, bookmark.name);
         }
         Command::Favorite { query } => {
             let household = session.connection.household_id().await?;
@@ -1537,6 +1705,7 @@ async fn main() -> Result<()> {
         | Command::Ungroup { .. }
         | Command::Party { .. }
         | Command::Raw { .. }
+        | Command::Bookmarks { .. }
         | Command::Search { .. }
         | Command::PlayItem { .. }
         | Command::Discover
