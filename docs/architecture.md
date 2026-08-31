@@ -2093,6 +2093,46 @@ decisions in it are worth keeping if it is ever rewritten:
 - **`--watch` attaches the event receiver before sending**, because a `subscribe` can be answered
   by an event that overtakes the reply.
 
+### `--scope player` was addressing the right player over the wrong socket (fixed 2026-08-31)
+
+`--scope group` reconnects to the group's coordinator before sending, because only the coordinator
+answers for a group. `--scope player` set `playerId` and did not do the equivalent, so a
+player-scoped probe went out over whichever socket the session happened to open. The player it
+reached answered:
+
+```
+ERROR_INVALID_OBJECT_ID — "Incorrect playerId"
+```
+
+for an id that was perfectly correct — it simply was not *that* player's id. Every player-scoped
+namespace was unreachable without also passing `--ip` for the same room named in `--room`, and the
+error pointed at the id rather than at the connection. `playerVolume:1 getVolume` on Living Room
+failed with the default connection and succeeded with `-i 192.168.86.25`, which is what isolated
+it. Now it opens a connection to the named player, mirroring the group branch.
+
+**A player answers player-scoped commands only for itself.** That is the general fact, and it is
+the same shape as the coordinator rule one level down.
+
+### Which scope each namespace wants (verified 2026-08-31)
+
+Sent `subscribe` to each namespace at all four scopes and recorded which one the player accepted:
+
+| Scope | Namespaces |
+|---|---|
+| `group` | `playback:1`, `playbackMetadata:1`, `groupVolume:1` |
+| `player` | `playerVolume:1`, `homeTheater:1`, `audioClip:1` |
+| `household` | `groups:1`, `favorites:1`, `playlists:1`, `musicServiceAccounts:1` |
+
+The wrong scope always answers `ERROR_MISSING_PARAMETERS` naming the key it wanted — `Missing
+groupId`, `Missing playerId`, `Missing householdId` — so the error says which scope to use. Two
+namespaces answer `ERROR_MISSING_PARAMETERS` at *every* scope: `playbackSession:1`, which wants
+`--session`, and `settings:1`, whose required parameter is still unidentified.
+
+The target key lives in the **header**, so putting `groupId` in `PARAMS` does nothing; the body is
+only ever the command's own parameters. This is now in `raw --help`, with the table and five
+worked examples, because the tool is driven far more often by an agent reading `--help` than by a
+person who remembers last week's probe.
+
 ### `musicService:1` is real, and it is `musicServiceAccounts:1`
 
 The 2026-08-28 note recorded that `musicService:1 search` returns `ERROR_UNSUPPORTED_COMMAND`. That

@@ -237,16 +237,39 @@ enum Command {
     /// feature: the API is wider than this CLI covers, and settling what a
     /// namespace actually answers should not need a rebuild. A refusal is a
     /// result here, so a player-side error prints and still exits 0.
+    ///
+    /// Every command is addressed to something, and which key it wants is a
+    /// property of the namespace: see --scope, which is the flag most probes
+    /// get wrong on the first try.
+    #[command(after_long_help = RAW_EXAMPLES)]
     Raw {
         /// Namespace, e.g. `musicService:1`.
         namespace: String,
         /// Command within it, e.g. `getSessions`.
         command: String,
         /// The command's parameters, as one JSON object. Defaults to `{}`.
+        ///
+        /// These go in the message body. The target key does not - it belongs
+        /// in the header, so passing `{"groupId": "..."}` here does nothing
+        /// and the player still answers "Missing groupId". Use --scope.
         #[arg(value_name = "PARAMS")]
         options: Option<String>,
-        /// What the command is addressed to. Household is the default because
-        /// the namespaces left to explore are mostly household-scoped.
+        /// What the command is addressed to. Per-namespace, and the player
+        /// will not infer it: `ERROR_MISSING_PARAMETERS - Missing groupId`
+        /// (or playerId, or householdId) means this flag is wrong, not the
+        /// command. Verified against real players:
+        ///
+        /// group - playback:1, playbackMetadata:1, groupVolume:1
+        ///
+        /// player - playerVolume:1, homeTheater:1, audioClip:1
+        ///
+        /// household - groups:1, favorites:1, playlists:1,
+        /// musicServiceAccounts:1
+        ///
+        /// Household is the default because the namespaces left to explore
+        /// are mostly household-scoped. `group` and `player` resolve through
+        /// --room and connect to the right player themselves, so --ip is
+        /// never needed to reach one.
         #[arg(long, value_enum, default_value_t = RawScope::Household)]
         scope: RawScope,
         /// After the command, keep the socket open this many seconds and print
@@ -267,12 +290,38 @@ enum Command {
     Daemon,
 }
 
+/// Worked examples for `raw --help`. Every one of these was run against a real
+/// player, so a reader copying one is copying something that answered.
+const RAW_EXAMPLES: &str = "\
+Examples:
+  # What a soundbar is receiving over HDMI (group-scoped).
+  x2rock -r 'Living Room' raw --scope group playbackMetadata:1 getMetadataStatus
+
+  # One player's own volume, not its group's (player-scoped).
+  x2rock -r 'Living Room' raw --scope player playerVolume:1 getVolume
+
+  # Household state needs no --room.
+  x2rock raw favorites:1 getFavorites
+
+  # A subscribe replies empty and the state arrives after, so watch for it.
+  x2rock raw --watch 5 musicServiceAccounts:1 subscribe
+
+  # Parameters are one JSON object, in the body.
+  x2rock -r Kitchen raw --scope group playback:1 seek '{\"positionMillis\": 30000}'
+";
+
 /// Which target key a raw command carries, which is per-namespace and is half
 /// of what a probe is trying to find out.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RawScope {
+    /// `householdId`. Household-wide state: groups, favorites, playlists,
+    /// music service accounts.
     Household,
+    /// `groupId` for --room's group, sent to that group's coordinator, which
+    /// is the only player that answers for it.
     Group,
+    /// `playerId` for --room's own player, sent to that player. A player
+    /// answers player-scoped commands only for itself.
     Player,
     /// No target key at all. Some commands take none, and an unaddressed
     /// command is also the cheapest way to see a namespace reject the shape
@@ -1716,11 +1765,25 @@ async fn main() -> Result<()> {
                 connection = session::coordinator(&session, &target).await?;
             }
             RawScope::Player => {
+                // A player answers player-scoped commands only for itself, so
+                // naming one over a socket to another gets ERROR_INVALID_OBJECT_ID
+                // - "Incorrect playerId" - for an id that is perfectly correct.
                 let player = match cli.room.as_deref() {
-                    Some(room) => session.groups.player_named(room)?.id.clone(),
-                    None => session.groups.resolve(None)?.coordinator_id.clone(),
+                    Some(room) => session.groups.player_named(room)?,
+                    None => {
+                        let id = session.groups.resolve(None)?.coordinator_id.clone();
+                        session
+                            .groups
+                            .player(&id)
+                            .ok_or_else(|| anyhow!("group coordinator {id} is not a known player"))?
+                    }
                 };
-                envelope["playerId"] = json!(player);
+                envelope["playerId"] = json!(player.id);
+                if let Some(ip) = player.ip()
+                    && ip != connection.ip()
+                {
+                    connection = Connection::open(ip).await?;
+                }
             }
             RawScope::None => {}
         }

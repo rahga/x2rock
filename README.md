@@ -431,9 +431,17 @@ x2rock raw playback:1 getPlaybackStatus --scope group
 
 It exists because the API is wider than this CLI covers, and settling what a namespace answers
 should not need a rebuild. A player-side refusal prints and still exits 0 — for a probe,
-`ERROR_UNSUPPORTED_COMMAND` is the answer, not a failure. `--scope` picks the target key
-(`household`, `group`, `player`, `none`), and `--watch` holds the socket open afterwards, which is
-the only way to read a `subscribe`: its reply is empty and the state turns up as an event.
+`ERROR_UNSUPPORTED_COMMAND` is the answer, not a failure. `--watch` holds the socket open
+afterwards, which is the only way to read a `subscribe`: its reply is empty and the state turns up
+as an event.
+
+`--scope` picks the target key (`household`, `group`, `player`, `none`), and it is the flag a probe
+usually gets wrong first: `playback:1` and `playbackMetadata:1` want `group`, `playerVolume:1` and
+`homeTheater:1` want `player`, `favorites:1` and `groups:1` want `household`. The key travels in
+the header, not the body, so putting `groupId` in `PARAMS` does nothing. Getting it wrong answers
+`ERROR_MISSING_PARAMETERS` naming the key it wanted, which is the tell. `raw --help` carries the
+full table and worked examples — it is written for whoever is driving this next, which is more
+often an agent than a person.
 
 Read the reply's `header.namespace` before believing a namespace is missing — the player
 canonicalises some of them, and `musicService:1` answering as `musicServiceAccounts:1` is what a
