@@ -1242,9 +1242,71 @@ header has never been the interesting half of a request that is misbehaving.
   and TIDAL or Deezer are the obvious candidates.
 - **Whether any device-link service offers a searchable catalogue** rather than a personal library.
   Sonos Radio is the most likely to, being stations rather than purchases.
-- **`linkDeviceId`**, still left out of both link calls because Bandcamp worked without it. First
-  thing to try for iHeartRadio and Deezer, which answered a minimal `getDeviceLinkCode` with
-  nothing.
+- **`linkDeviceId`**, still left out of both link calls. No longer a leading hypothesis for
+  anything: 10 of the 14 answer without it, iHeartRadio among them, and the 4 that do not fail for
+  four unrelated reasons. See "All 14 probed".
+
+### All 14 probed: 10 answer, and 4 fail in four different ways (verified 2026-08-31)
+
+One `getDeviceLinkCode` each. **Ten hand over a link URL immediately:**
+
+```
+AccuRadio        https://www.accuradio.com/sonos/login/?code=XJWOLY
+Bandcamp         https://bandcamp.com/login?sonos_link_code=...
+FIT Radio        https://www.fitradio.com/sonoslogin?sonos_code=Z6MKJ3H
+iHeartRadio      https://www.iheart.com/activate/sonos/?code=88224
+Mixcloud         https://app.mixcloud.com/oauth/authorize?client_id=...
+Murfie           https://www.murfie.com/sonos/link/15KBLX6K
+NhacCuaTui       https://sonos.nhaccuatui.com/device/link?linkCode=...
+Saavn            https://www.saavn.com/login.php?ctx=sonos&linkcode=...
+TIDAL            https://login.tidal.com/authorize?redirect_uri=...
+Tribe of Noise   https://sonos.tribeofnoise.com/sessions/start/4AYWS
+```
+
+**This corrects the earlier note that iHeartRadio and Deezer "returned nothing".** iHeartRadio
+answers fine — a five-digit activation code, the shortest of any of them. Only Deezer does not, and
+the four failures are four different problems, none of them `linkDeviceId`:
+
+- **Deezer** — HTTP 200 with an **empty body**. Not a parse problem; the service says nothing.
+- **Classical Archives** — a fault whose entire message is `str3`.
+- **Sonos Backgrounds** — a reply with no `linkCode` in it. Plausibly not a real music service.
+- **Sonos Radio** — its SMAPI server **crashes**: `TypeError: method is not a function`, SOAP 1.2,
+  HTTP 500. Sonos's own service is the only one that returns a stack-trace-shaped error, which
+  closes the hopeful guess that Sonos Radio would be the device-link service with a real catalogue.
+
+So `linkDeviceId` is no longer the leading hypothesis for anything, and the deferred question is
+not "make more services answer" — 10 of 14 already do.
+
+### Two parser gaps the survey found, both fixed
+
+Neither was reachable from Bandcamp, which is why building against one service was not enough:
+
+1. **SOAP 1.2.** SMAPI is specified as 1.1 and Sonos Radio replies in 1.2, where a fault has no
+   `faultcode` and no `faultstring`: the code is `Code/Value` plus `Subcode/Value`, the message is
+   `Reason/Text`. Reading only the 1.1 names turned "TypeError: method is not a function" into "a
+   fault with no faultstring" — the useful answer was in the reply and got discarded. All code
+   values are joined, so a pending check works whichever half carries the word, and a 1.2-shaped
+   `NOT_LINKED_RETRY` is now pending too, though nothing has sent one.
+2. **An empty 200 is not a reply.** Deezer's empty body fell through to the XML reader and reported
+   "parsing getDeviceLinkCode response", blaming the parser for a service that said nothing.
+
+The pattern in both: an error message that named the wrong culprit. `X2ROCK_DUMP_SMAPI` found each
+in one run.
+
+### The free radio services are the cheap way forward
+
+Four of the ten that answer are free, catalogue-shaped services needing no purchase: **AccuRadio,
+FIT Radio, iHeartRadio, Tribe of Noise**. Any one of them settles, for the price of one browser
+login, the two things Bandcamp cannot:
+
+- **Whether a linked service offers a searchable catalogue** rather than a personal library. A
+  radio service has no collection to be empty, so a search that returns nothing there would mean
+  something quite different from Bandcamp's zero.
+- **Whether `match` ever runs.** It has never executed, because Bandcamp sends no
+  `userIdHashCode`. Any service that sends one exercises it.
+
+iHeartRadio is the pick: the largest catalogue of the four, and its five-digit code makes the
+browser step the shortest.
 
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 

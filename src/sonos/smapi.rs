@@ -514,6 +514,17 @@ async fn call_soap(
             without_credentials(&envelope)
         );
     }
+    // An empty 200 is not a reply. Deezer answers `getDeviceLinkCode` with
+    // exactly that, and letting it fall through to the XML reader reported
+    // "parsing getDeviceLinkCode response" - blaming the parser for a service
+    // that said nothing at all.
+    if text.trim().is_empty() {
+        return Ok(Err(Fault {
+            code: String::new(),
+            message: format!("answered HTTP {status} with an empty body"),
+            sonos_error: None,
+        }));
+    }
     if let Some(fault) = fault_in(&text) {
         return Ok(Err(fault));
     }
@@ -553,9 +564,40 @@ fn fault_in(text: &str) -> Option<Fault> {
             .and_then(|n| n.text())
             .map(str::to_string)
     };
+    // SMAPI is specified as SOAP 1.1, and services mostly oblige - but Sonos
+    // Radio answers in **1.2**, where a fault has no `faultcode` or
+    // `faultstring` at all: the code is `Code/Value` plus an optional
+    // `Subcode/Value`, and the message is `Reason/Text`. Reading only the 1.1
+    // names turned "TypeError: method is not a function" - a straight answer
+    // about a service that is broken - into "a fault with no faultstring".
+    let soap12_code = || {
+        let values: Vec<String> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("Code"))
+            .flat_map(|code| {
+                code.descendants()
+                    .filter(|n| n.has_tag_name("Value"))
+                    .filter_map(|n| n.text())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        (!values.is_empty()).then(|| values.join(" "))
+    };
+    let soap12_reason = || {
+        doc.descendants()
+            .find(|n| n.has_tag_name("Reason"))
+            .and_then(|r| r.descendants().find(|n| n.has_tag_name("Text")))
+            .and_then(|n| n.text())
+            .map(str::to_string)
+    };
     Some(Fault {
-        code: field("faultcode").unwrap_or_default(),
-        message: field("faultstring").unwrap_or_else(|| "a fault with no faultstring".to_string()),
+        // Every code value joined rather than just the first, so a pending
+        // check works whichever half of a 1.2 code carries the word.
+        code: field("faultcode").or_else(soap12_code).unwrap_or_default(),
+        message: field("faultstring")
+            .or_else(soap12_reason)
+            .unwrap_or_else(|| "a fault with no message".to_string()),
         sonos_error: field("SonosError").and_then(|v| v.trim().parse().ok()),
     })
 }
@@ -817,6 +859,47 @@ mod tests {
         let fault = fault_in(body).expect("a fault at HTTP 200 is still a fault");
         assert!(fault.is_pending());
         assert_eq!(fault.message, "Link Code not found retry...");
+    }
+
+    #[test]
+    fn a_soap_12_fault_is_read_as_well_as_an_11_one() {
+        // Verbatim from Sonos Radio, 2026-08-31. SMAPI says SOAP 1.1 and this
+        // is 1.2, so there is no faultcode and no faultstring to find.
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
+            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+                           xmlns:tns="http://www.sonos.com/Services/1.1"><soap:Body>
+            <soap:Fault><soap:Code><soap:Value>SOAP-ENV:Server</soap:Value>
+            <soap:Subcode><soap:Value>InternalServerError</soap:Value></soap:Subcode>
+            </soap:Code>
+            <soap:Reason><soap:Text>TypeError: method is not a function</soap:Text></soap:Reason>
+            </soap:Fault></soap:Body></soap:Envelope>"#;
+        let fault = fault_in(body).expect("a 1.2 fault is still a fault");
+        assert_eq!(fault.message, "TypeError: method is not a function");
+        assert_eq!(fault.code, "SOAP-ENV:Server InternalServerError");
+        assert!(
+            !fault.is_pending(),
+            "a crashing service is not a person typing"
+        );
+    }
+
+    #[test]
+    fn a_pending_fault_in_soap_12_shape_is_still_pending() {
+        // No service has sent one, but the 1.1 assumption already cost a
+        // readable error once; a device link is the worst place to repeat it.
+        let body = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+            <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value>
+            <soap:Subcode><soap:Value>NOT_LINKED_RETRY</soap:Value></soap:Subcode></soap:Code>
+            <soap:Reason><soap:Text>keep waiting</soap:Text></soap:Reason>
+            </soap:Fault></soap:Body></soap:Envelope>"#;
+        assert!(fault_in(body).unwrap().is_pending());
+    }
+
+    #[test]
+    fn an_empty_body_is_not_a_fault_shape_but_it_is_a_failure() {
+        // fault_in has nothing to find in it, which is why the emptiness has to
+        // be checked before the parser is asked.
+        assert!(fault_in("").is_none());
+        assert!(fault_in("   \n ").is_none());
     }
 
     #[test]
