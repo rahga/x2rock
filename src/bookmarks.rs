@@ -108,13 +108,18 @@ impl Bookmark {
 
     /// The URI a player is handed to play this.
     ///
-    /// `flags=65544` is what the player itself puts in the URIs it builds for
-    /// service tracks; it is carried across verbatim rather than reasoned about,
-    /// because nothing here knows what the bits mean.
+    /// `flags=65544` is what the player puts in the URIs it builds for YouTube
+    /// Music, carried across verbatim rather than reasoned about because nothing
+    /// here knows what the bits mean. It is *not* universal - the player uses
+    /// `flags=8232` for Mixcloud - but both values were enqueued and played
+    /// successfully for Mixcloud, so the field is not load-bearing for these two
+    /// services and is left alone rather than guessed at per service.
     pub fn uri(&self) -> String {
         format!(
             "x-sonosapi-hls-static:{}?sid={}&flags=65544&sn={}",
-            self.object_id, self.service_id, self.account
+            encode_object_id(&self.object_id),
+            self.service_id,
+            self.account
         )
     }
 
@@ -149,12 +154,40 @@ impl Bookmark {
                 r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
                 "{cdudn}</desc></item></DIDL-Lite>"
             ),
-            object = esc(&self.object_id),
+            object = esc(&encode_object_id(&self.object_id)),
             title = esc(&self.name),
             artist = artist,
             cdudn = esc(cdudn),
         )
     }
+}
+
+/// Percent-encode an object id for a playback URI, lowercase hex, as the player
+/// does.
+///
+/// **This is what UPnP 800 was.** The id sits between the scheme and the `?`, so
+/// anything meaning something to a URI parser has to be escaped - and a colon is
+/// exactly that. Every id this was ever tested against came from YouTube Music,
+/// whose ids are alphanumeric with `_` and `-`, so the encoding was a no-op and
+/// its absence invisible. Mixcloud names its shows `cloudcast:2191051074`, and
+/// `AddURIToQueue` refused every such URI with UPnP 800 until the colon was
+/// escaped. Verified by isolating it: with the colon encoded, both `flags`
+/// values are accepted and play; with it raw, both are refused.
+///
+/// The escape set is RFC 3986's unreserved characters, which is stricter than
+/// strictly required and cannot break an id that needed no escaping.
+fn encode_object_id(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            // Lowercase, matching the `%3a` the player itself writes.
+            _ => out.push_str(&format!("%{byte:02x}")),
+        }
+    }
+    out
 }
 
 fn path() -> Result<PathBuf> {
@@ -366,6 +399,43 @@ mod tests {
             b.uri(),
             "x-sonosapi-hls-static:ALkSOiGTPQu2?sid=284&flags=65544&sn=3"
         );
+    }
+
+    #[test]
+    fn an_object_id_is_percent_encoded_into_the_uri_and_the_didl() {
+        // What UPnP 800 was. Mixcloud names its shows `cloudcast:<n>`, and the
+        // colon sits between the scheme and the `?`, where a URI parser reads
+        // it as structure. Verified against a real player: encoded is accepted
+        // and plays, raw is refused.
+        let mix = Bookmark::from_id(
+            "Medicine Cabinet",
+            &id("cloudcast:2191051074", Some("181"), Some("sn_4")),
+        )
+        .unwrap();
+        assert_eq!(
+            mix.uri(),
+            "x-sonosapi-hls-static:cloudcast%3a2191051074?sid=181&flags=65544&sn=4"
+        );
+        assert!(
+            mix.didl("SA_RINCON46343_X_#Svc46343-0-Token")
+                .contains(r#"<item id="00032020cloudcast%3a2191051074""#),
+            "{}",
+            mix.didl("SA_RINCON46343_X_#Svc46343-0-Token")
+        );
+    }
+
+    #[test]
+    fn an_id_needing_no_escaping_is_left_exactly_as_it_was() {
+        // The regression that matters: every YouTube Music id is alphanumeric
+        // with `_` and `-`, which is why the missing encoding went unnoticed,
+        // and encoding must remain a no-op for them.
+        assert_eq!(
+            encode_object_id("ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H"),
+            "ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H"
+        );
+        assert_eq!(encode_object_id("a-b.c~d"), "a-b.c~d");
+        // Lowercase hex, as the player writes it.
+        assert_eq!(encode_object_id("a:b/c?d&e"), "a%3ab%2fc%3fd%26e");
     }
 
     #[test]

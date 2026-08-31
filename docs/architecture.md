@@ -1650,9 +1650,72 @@ service being asked. A Mixcloud endpoint handed a YouTube object id has every re
 its own terms. E could not separate "wrong account" from "meaningless id", and it was reported as
 though it could — a two-variable experiment written up as a one-variable one.
 
-### What remains: the id is probably not an id
+### Found: it was a missing percent-encode, and Mixcloud plays
 
-The surviving hypothesis is that **`cloudcast:2191563811` is not a DIDL object id at all.** It is an
+`x2rock keep` on a Mixcloud show playing from the phone app harvested this:
+
+```
+object_id  cloudcast:2191051074      account  4
+art_url    .../getaa?s=1&u=x-sonosapi-hls-static%3acloudcast%253a2191051074%3fsid%3d181%26flags%3d8232%26sn%3d4
+```
+
+The art URL leaks the player's own playback URI, and `GetPositionInfo` confirms it verbatim:
+
+```
+x-sonosapi-hls-static:cloudcast%3a2191051074?sid=181&flags=8232&sn=4     the player
+x-sonosapi-hls-static:cloudcast:2191051074?sid=181&flags=65544&sn=4      what x2rock built
+```
+
+Two differences, and a four-way test isolated which one mattered:
+
+| | colon encoded | colon raw |
+|---|---|---|
+| `flags=8232` | **accepted, plays** | refused, UPnP 800 |
+| `flags=65544` | **accepted, plays** | refused, UPnP 800 |
+
+**The colon. That is the whole bug.** The object id sits between the scheme and the `?`, where a URI
+parser reads a colon as structure, and `uri()` never escaped it. Every id this had ever been tested
+against came from YouTube Music — alphanumeric with `_` and `-` — so the encoding was a no-op and
+its absence invisible. Fixed by percent-encoding the id in both the URI and the DIDL `id`, lowercase
+hex as the player writes it, with a test pinning that a YouTube id comes through byte-identical.
+
+`x2rock bookmark` now plays the Mixcloud show through the shipping path, and YouTube Music is
+unregressed.
+
+### Which corrects rather a lot
+
+- **The hypothesis in the previous section was wrong.** `cloudcast:2191051074` *is* the object id —
+  the player uses exactly that string. SMAPI ids and DIDL object ids are the same namespace here, and
+  the `00032020` class prefix was right all along.
+- **`flags` is not load-bearing.** The player uses `8232` for Mixcloud and `65544` for YouTube Music,
+  and both values enqueue *and play* Mixcloud. Left at `65544` rather than guessed per service.
+- **Neither is the account serial.** `sn=9`, a serial the household cannot have, plays fine.
+- **"Mixcloud playback does not work" was wrong.** Mixcloud plays. What does not work is
+  `loadStreamUrl`, and the reason is the nonstandard AES-128 key documented above — a 63-byte path
+  where 16 bytes of key belong. The enqueue path sidesteps it entirely by making the *player* resolve
+  the media, which is precisely what the cdudn is for.
+
+### The design consequence, unbuilt
+
+Two mechanisms, and the project currently picks the wrong one for linked services:
+
+- `play-item` and `search --play` / `browse --play` use **`loadStreamUrl`** with a URL x2rock resolved
+  itself. Works for free radio. Fails for Mixcloud, silently, at `IDLE`.
+- `bookmark` uses **`AddURIToQueue` with a cdudn**. Works for both, including content whose stream
+  x2rock cannot resolve at all.
+
+So the enqueue path is strictly more capable for service content, and `play-item` should probably use
+it for anything that came from a service — falling back to `loadStreamUrl` only where there is no
+account serial to name. That is a real change to the one code path every picker row goes through, so
+it is written down rather than done in passing.
+
+Worth noting what made this findable: **the player will tell you its own answer.** `keep` harvests
+what the player itself built, and `GetPositionInfo` prints it. Three hypotheses were argued from
+first principles and all three were wrong; one look at the player's own URI settled it.
+
+### The hypothesis this replaced (wrong, kept for the shape of the mistake)
+
+It was argued that **`cloudcast:2191563811` is not a DIDL object id at all.** It is an
 *SMAPI* id, and nothing has ever established that the two namespaces are the same:
 
 - The YouTube Music object id that works — `ALkSOiGTPQu20Hqb...` — was never obtained from SMAPI. It
@@ -1664,13 +1727,11 @@ The surviving hypothesis is that **`cloudcast:2191563811` is not a DIDL object i
 So both halves of the enqueue URI may be wrong for Mixcloud, and neither was ever verified against
 anything but YouTube Music.
 
-**The next step needs a person, and signing in is not enough:** *play* a Mixcloud show to the room
-from the Sonos app, then run `x2rock keep`. That harvests the player's own object id for Mixcloud
-content, to compare directly against `cloudcast:2191563811`. If the shapes differ, this is settled,
-and the fix is a translation the project does not have — SMAPI id to object id — with no obvious
-source for it other than the player itself.
+The step it called for was right even though the reasoning was not: play a Mixcloud show from the
+app, then `x2rock keep`. The shapes turned out to be **identical**, and the answer was in the same
+harvested record — one field over, in the URI the art link carries.
 
-`match` is unexplained, still fails, and is no longer implicated in this.
+`match` is unexplained, still fails, and is not implicated in any of this.
 
 One loose end worth noting: x2rock glosses UPnP 800 as "no such position in the queue", which is
 wrong here. 800 is UPnP's undefined-error code and the gloss belongs to `Seek`, not
