@@ -203,8 +203,22 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
 
+    // Read to end of stream, but tolerate an unclean one. Plenty of servers -
+    // SomaFM among them - answer a `Connection: close` request by dropping the
+    // socket without a TLS close_notify, which rustls reports as
+    // `UnexpectedEof`. The response is already complete at that point, so
+    // failing on it would turn a working service into an intermittent one.
+    // A truncated body is still caught downstream, by the parse.
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => break,
+            Err(e) => return Err(e).with_context(|| format!("reading from {authority}")),
+        }
+    }
 
     let split = raw
         .windows(4)

@@ -116,6 +116,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Play one search result by its id, without searching again. What the bar
+    /// widget uses once it already has results in hand.
+    PlayItem {
+        #[arg(long, short = 's')]
+        service: String,
+        id: String,
+        /// What the room should display. Defaults to the id, which is what a
+        /// service shows when given nothing better.
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// Switch a soundbar to its TV input.
     Tv,
     /// Group rooms into --room's group, so they play what it plays.
@@ -649,6 +660,91 @@ async fn stop_signal() -> &'static str {
     }
 }
 
+/// Play one item from a service in a room, by the id a search returned.
+///
+/// A **session**, not the queue: a service's content cannot be enqueued, and
+/// Sonos does not intend it to be, so this plays alongside whatever is queued
+/// and leaves it untouched.
+async fn play_item(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    let uri = sonos::smapi::media_uri(service, id).await?;
+    let target = session::target(&session.groups, room)?;
+    let coordinator = session::coordinator(session, &target).await?;
+
+    let opened = coordinator
+        .call(
+            json!({
+                "namespace": "playbackSession:1",
+                "command": "createSession",
+                "groupId": target.group_id,
+            }),
+            json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
+        )
+        .await?;
+    let session_id = opened["sessionId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
+
+    coordinator
+        .call(
+            json!({
+                "namespace": "playbackSession:1",
+                "command": "loadStreamUrl",
+                "sessionId": session_id,
+            }),
+            // stationMetadata is optional, but it is where the name the room
+            // displays comes from; without it the stream plays with nothing
+            // to show.
+            json!({
+                "streamUrl": uri,
+                "playOnCompletion": true,
+                "stationMetadata": {
+                    "name": title,
+                    "type": "station",
+                    "service": { "name": service.name, "id": service.id },
+                },
+            }),
+        )
+        .await?;
+    println!("{} — {title} on {}", target.name, service.name);
+    Ok(())
+}
+
+/// `x2rock play-item`: play a hit whose id is already known.
+///
+/// `search --play N` re-runs the search to find the Nth result, which costs a
+/// second round trip and can land on a different item if the service reorders.
+/// Anything holding results already - the bar widget - should come here instead.
+async fn run_play_item(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    service: &str,
+    id: &str,
+    title: Option<&String>,
+) -> Result<()> {
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state).await?;
+    let mut catalogue = catalogue::Catalogue::load();
+    catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await?;
+    let usable = catalogue.searchable();
+    let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
+    play_item(
+        &session,
+        room,
+        &chosen,
+        id,
+        title.map(String::as_str).unwrap_or(id),
+    )
+    .await
+}
+
 /// `x2rock search`: the CLI talking to a music service, and the only place that
 /// leaves the LAN. See "Rule: search never enters the daemon".
 ///
@@ -783,61 +879,23 @@ async fn run_search(
         let item = items
             .get(nth.checked_sub(1).unwrap_or(usize::MAX))
             .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
-        let uri = sonos::smapi::media_uri(chosen, &item.id).await?;
-        let target = session::target(&live()?.groups, room)?;
-        let coordinator = session::coordinator(live()?, &target).await?;
-
-        // The session is the whole point: it plays alongside the queue
-        // rather than in it, so nothing the household queued is disturbed.
-        let opened = coordinator
-            .call(
-                json!({
-                    "namespace": "playbackSession:1",
-                    "command": "createSession",
-                    "groupId": target.group_id,
-                }),
-                json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
-            )
-            .await?;
-        let session_id = opened["sessionId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
-
-        coordinator
-            .call(
-                json!({
-                    "namespace": "playbackSession:1",
-                    "command": "loadStreamUrl",
-                    "sessionId": session_id,
-                }),
-                // stationMetadata is optional, but it is where the name the
-                // room displays comes from; without it the stream plays
-                // with nothing to show.
-                json!({
-                    "streamUrl": uri,
-                    "playOnCompletion": true,
-                    "stationMetadata": {
-                        "name": item.title,
-                        "type": "station",
-                        "service": { "name": chosen.name, "id": chosen.id },
-                    },
-                }),
-            )
-            .await?;
-        println!("{} — {} on {}", target.name, item.title, chosen.name);
-        return Ok(());
+        return play_item(live()?, room, chosen, &item.id, &item.title).await;
     }
     if json {
         let rows: Vec<_> = items
             .iter()
             .map(|i| {
+                // Deliberately the same field names `favorites --json` uses.
+                // The bar widget merges the two lists into one picker, and
+                // matching shapes keep that a concatenation rather than a
+                // translation layer.
                 json!({
                     "id": i.id,
-                    "title": i.title,
+                    "name": i.title,
                     "type": i.item_type,
-                    "summary": i.summary,
+                    "description": i.summary,
                     "service": chosen.name,
-                    "serviceId": chosen.id,
+                    "art_url": i.art_url,
                 })
             })
             .collect();
@@ -871,6 +929,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
+        Command::PlayItem {
+            ref service,
+            ref id,
+            ref title,
+        } => {
+            return run_play_item(cli.ip, cli.room.as_deref(), service, id, title.as_ref()).await;
+        }
         Command::Search {
             ref term,
             ref service,
@@ -1465,6 +1530,7 @@ async fn main() -> Result<()> {
         | Command::Party { .. }
         | Command::Raw { .. }
         | Command::Search { .. }
+        | Command::PlayItem { .. }
         | Command::Discover
         | Command::Daemon => unreachable!("handled above"),
     }

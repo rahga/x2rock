@@ -319,6 +319,12 @@ Error: YouTube Music needs a linked account, which x2rock cannot supply.
 Run `x2rock search` for the ones that do not.
 ```
 
+In the bar widget, the favorites picker searches too: type a term and a **Search TuneIn** row
+appears under the filtered favorites; choosing it runs the query and the hits join the same list.
+`searchService` in `shell.json` picks the service, and `""` turns it off entirely. A search that
+fails leaves the rows already on screen alone and says so in one line — the CLI is blunt, the
+widget is not.
+
 **This is the only part of x2rock that leaves the LAN, and it is confined to the CLI.** The daemon
 speaks to nothing but the local network, so a music service being slow or unreachable cannot delay
 play, pause or volume — a widget losing search keeps every control it had. See

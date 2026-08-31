@@ -656,10 +656,49 @@ A cold search cost ~950ms and three round trips before any query ran; warm it is
   this catalogue; picking whichever sorted first would be worse than naming the alternatives.
   An exact match still wins over an ambiguous prefix, so a service actually called "Radio" resolves.
 
+### Search in the widget (2026-08-31)
+
+The favorites picker now searches too. Typing filters the favorites as before; with a term typed
+and nothing sent yet, a **`Search TuneIn`** row appears at the end of the list, and choosing it
+runs the query. Hits land in the same list under the same delegate.
+
+Four decisions in it:
+
+- **One list, not two.** Favorites and hits answer the same question — what should this room play —
+  and a person filtering for something they own should not have to decide in advance whether they
+  own it. This is why `search --json` was changed to emit the *same field names* as
+  `favorites --json` (`name`, `type`, `description`, `art_url`): the widget concatenates rather
+  than translates, and one delegate renders both.
+- **The search row is an action, not a result.** Nothing is sent until it is chosen. Searching on
+  every keystroke would put a network round trip behind typing, which is the behaviour this widget
+  exists to avoid.
+- **A reply belongs to the term that asked for it.** The field can be edited while the subprocess
+  runs, so the term in flight is kept in `pendingTerm` and results are only shown while the typed
+  text still matches `searchedTerm`. Without that, a slow answer surfaces under a different word.
+- **Failure is one line, never an empty list.** A non-zero exit sets a status string shown in the
+  count position at the top right, leaving the rows already on screen up. Empty stdout is a
+  failure; `[]` is a real answer meaning the service has nothing. Copied from the favorites picker,
+  which already had all of this right.
+
+`searchService` in `shell.json` picks the service (default `TuneIn`) and `""` turns the feature
+off, leaving the picker exactly as it was with no network call behind it. `searchCount` sets how
+many hits to ask for.
+
+Playing a hit uses **`x2rock play-item -s <service> <id> --title <name>`**, added for this:
+`search --play N` would re-run the query to find the Nth result, costing a second round trip and
+risking a different item if the service reordered. The widget already holds the id.
+
+**Not visually verified.** The QML loads with no errors and the pill renders, but driving the
+picker open needs a click and this machine has no injector — `wtype` does keys only, and Hyprland
+has no click dispatcher. Attempts to auto-open it from `Component.onCompleted`, a `Timer`, and an
+`onPopupOpenChanged` hook all failed to produce a visible panel, which is itself worth knowing if
+anyone tries to script this widget later: the pickers appear to need a real interaction, not just
+`pickingFor` being set. The CLI contract underneath it *is* verified.
+
 ### Still to do
 
-- The widget: a search box in the popup, invoking `x2rock search --json` as its own `Process`,
-  following the favorites picker's failure handling exactly.
+- Open the picker and check the search rows by eye; nothing below the CLI boundary has been seen
+  working.
 - Paging. `search` takes `index` and the CLI always sends 0.
 
 ## `FV:2` and `favorites:1 getFavorites` do **not** always agree (corrected 2026-08-31)

@@ -56,6 +56,10 @@ pub struct Item {
     /// `stream`, `track`, `album`, `artist`, `playlist`, ...
     pub item_type: String,
     pub summary: Option<String>,
+    /// Whatever the service offers as a cover. Services put it in different
+    /// places: `albumArtURI` for a track, a station's logo nested under
+    /// `streamMetadata`.
+    pub art_url: Option<String>,
 }
 
 /// A searchable category, from the service's presentation map.
@@ -187,6 +191,13 @@ pub async fn search(
                     .and_then(|c| c.text())
                     .map(str::to_string)
             };
+            let nested = |parent: &str, tag: &str| {
+                n.children()
+                    .find(|c| c.has_tag_name(parent))
+                    .and_then(|c| c.children().find(|g| g.has_tag_name(tag)))
+                    .and_then(|g| g.text())
+                    .map(str::to_string)
+            };
             Some(Item {
                 id: child("id")?,
                 title: child("title").unwrap_or_default(),
@@ -197,6 +208,7 @@ pub async fn search(
                     .or_else(|| child("artist"))
                     .or_else(|| child("genre"))
                     .or_else(|| child("country")),
+                art_url: child("albumArtURI").or_else(|| nested("streamMetadata", "logo")),
             })
         })
         .collect();
