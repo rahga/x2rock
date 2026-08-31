@@ -211,9 +211,16 @@ impl Bookmarks {
             .position(|b| b.object_id == bookmark.object_id)
         {
             Some(i) => {
-                // Preserve when it was last heard; the caller is naming a thing,
-                // not reporting a play.
-                bookmark.last_played = bookmark.last_played.or(self.items[i].last_played);
+                // Fill in from what is already stored rather than overwriting
+                // with blanks. Keeping the container of a track already kept
+                // arrives with no artist, and losing the one already recorded
+                // would be a silent downgrade of something the person saved.
+                let old = &self.items[i];
+                bookmark.last_played = bookmark.last_played.or(old.last_played);
+                bookmark.artist = bookmark.artist.or_else(|| old.artist.clone());
+                bookmark.art_url = bookmark.art_url.or_else(|| old.art_url.clone());
+                bookmark.service_name = bookmark.service_name.or_else(|| old.service_name.clone());
+                bookmark.kind = bookmark.kind.or_else(|| old.kind.clone());
                 self.items[i] = bookmark;
                 true
             }
@@ -371,6 +378,40 @@ mod tests {
         assert!(didl.contains("<dc:creator>A &amp; B</dc:creator>"));
         assert!(didl.contains(r#"<desc id="cdudn""#));
         assert!(didl.contains("SA_RINCON72711_X_#Svc72711-0-Token"));
+    }
+
+    #[test]
+    fn keeping_again_fills_in_rather_than_blanking_what_is_known() {
+        // Real case: keep the track, then keep the container of the same
+        // object. The container carries no artist, and the artist already
+        // recorded must survive it.
+        let mut list = Bookmarks::default();
+        let mut track = bm("Bodies", "a");
+        track.artist = Some("Offset, JID".into());
+        track.art_url = Some("http://art".into());
+        track.kind = Some("track".into());
+        list.keep(track);
+
+        let bare = bm("Bodies", "a");
+        assert!(bare.artist.is_none(), "the container has none to give");
+        list.keep(bare);
+
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].artist.as_deref(), Some("Offset, JID"));
+        assert_eq!(list.items[0].art_url.as_deref(), Some("http://art"));
+        assert_eq!(list.items[0].kind.as_deref(), Some("track"));
+    }
+
+    #[test]
+    fn a_new_value_still_wins_over_the_stored_one() {
+        let mut list = Bookmarks::default();
+        let mut first = bm("Bodies", "a");
+        first.artist = Some("wrong".into());
+        list.keep(first);
+        let mut second = bm("Bodies", "a");
+        second.artist = Some("right".into());
+        list.keep(second);
+        assert_eq!(list.items[0].artist.as_deref(), Some("right"));
     }
 
     #[test]

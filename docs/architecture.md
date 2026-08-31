@@ -888,9 +888,30 @@ and deliberately: `pinned` defaults to *true* when absent, because anything writ
 existed got there by someone running `keep`. Discarding a file this program no longer understands
 is right for something refetchable in a second and wrong for the only copy of what a person saved.
 
-Unresolved: several daemons write this file if a household runs one unit per room. The atomic
-rename keeps it from corrupting, but two writers can lose each other's entries. Not a problem on
-one unit; worth knowing before recommending several.
+Several daemons write this file if a household runs one unit per room, as the home one does. The
+window is smaller than it first looks — `remember()` loads, notes and saves each time rather than
+holding a copy — so two writers must interleave inside a few milliseconds, and the atomic rename
+means the worst case is a lost timestamp rather than a corrupt file. Not worth a lock on that
+evidence; worth revisiting if entries actually go missing.
+
+### Two things learned keeping an album (2026-08-31)
+
+**`keep --container` is only meaningful while a real container is playing.** After x2rock replays a
+single track, the player reports the *container as the track* — `container.type: "track"`, with the
+track's own object id. That is not a bug in either place, but it means the useful moment to keep an
+album is right after starting it from the Sonos app, before anything else has been queued.
+
+**`keep` was blanking what it did not know.** Keeping the container of a track already kept arrived
+with no artist — containers carry none — and overwrote the artist already stored. An update that
+silently downgrades saved data is worse than one that fails, so `keep` now fills each display field
+from the existing entry when the new one has none, while a genuinely new value still wins. Two
+tests, one for each direction.
+
+**Also observed, unexplained:** the account serial moved. The phone-started album reported
+`accountId: "sn_3"`; after x2rock enqueued a track built with `sn=3`, the player began reporting
+`sn_2` for the same content. Playback is unaffected either way, but a stored serial may not be as
+stable as it looks, and a bookmark that stops working is the symptom to expect. Worth watching on a
+household with more than one account on a service.
 
 ### An intermittent enqueue failure, observed not explained
 
