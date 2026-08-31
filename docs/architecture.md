@@ -1449,11 +1449,15 @@ The room-row button changed from a star to a note, and with it the panel's meani
 household's favorites, and it is now favorites, this machine's kept items, a service's own
 containers, and a search. Four sources, one question — what should this room play.
 
-- **The glyph is plain `♪` (U+266A), not a Nerd Font icon.** Chosen so the button does not depend on
-  a patched font. The cost is real and worth stating: JetBrainsMono Nerd Font has no U+266A, so Qt
-  falls back per-character to Adwaita/Liberation/Nimbus and the note can sit a shade lighter than
-  the MDI glyphs beside it. `nf-md-music` (U+F075A) is two beamed quavers and is the matching-weight
-  alternative, one `shell.json` key away. `party` already set this precedent with `◉`.
+- **The glyph is `nf-md-music` (U+F075A), two beamed quavers.** Plain `♪` (U+266A) was tried first,
+  to avoid depending on a patched font — and reverted the same day, because **the dependency was
+  already there**: sixteen of the widget's seventeen glyphs are Nerd Font icons and the whole thing
+  draws boxes without one. Avoiding it for a single button bought nothing and cost a per-character
+  font fallback, since JetBrainsMono Nerd Font has no U+266A and the note arrived from Adwaita or
+  Liberation at a different weight from its neighbours. The lesson is small and generalises: check
+  what a dependency already costs before paying to avoid it in one place. `♪` stays documented as
+  the right default for a bar whose font is *not* patched, which is what `glyphs.music` is for, and
+  `party`'s `◉` remains the one plain-Unicode default.
 - **The glyph key is `music` now, and `favorites` still works.** Renaming a documented setting to
   reflect a better name is not worth breaking a household's `shell.json` over, so the old key is
   honoured after the merge.
