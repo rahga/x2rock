@@ -550,6 +550,109 @@ Probed for the contract first, then exercised on real rooms.
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
 
+## SMAPI, read properly at last — and search works today (verified 2026-08-31)
+
+Everything this document said about SMAPI before this section was inferred from service descriptors
+and from the Control API spec's passing mentions of it. [The actual
+documentation](https://docs.sonos.com/docs/smapi) had never been read. It should have been read
+first, and reading it turned a blocked feature into a working one inside an hour.
+
+### What SMAPI is
+
+SOAP 1.1 over HTTPS, namespace `http://www.sonos.com/Services/1.1`, described by WSDL. **Sonos is
+the client and the music service is the server** — a service implements SMAPI so that Sonos can
+call it. 32 operations in six groups; the ones that matter here are `search`, `getMetadata`,
+`getMediaMetadata` and `getMediaURI`.
+
+That direction is the thing this document kept getting backwards. There is no sense in which a
+controller "gets search from Sonos". A controller that wants search does what a Sonos player does:
+it calls the service directly, as a SMAPI client.
+
+### The credentials header, and who actually needs one
+
+From [SOAP requests and responses](https://docs.sonos.com/docs/soap-requests-and-responses), the
+`credentials` header carries:
+
+| Element | Status |
+|---|---|
+| `deviceProvider` | **required**, always the string `Sonos` |
+| `loginToken` (`token`, `key`, `householdId`) | required **for services that authenticate** |
+| `deviceCert` | optional; only when the service declares "Requires Device Certificate" |
+| `zonePlayerId` | optional; only when the service declares that capability |
+| `deviceId` | deprecated, ignorable |
+
+`token` is the authentication token and `key` the refresh token — the per-household service
+credential. But the header is only as heavy as the service demands, and this is the fact that
+changes everything:
+
+**32 of the 108 services on this household's descriptor list are `Auth="Anonymous"`.** The split:
+
+| `Policy Auth` | count |
+|---|---|
+| `AppLink` | 62 |
+| `Anonymous` | **32** |
+| `DeviceLink` | 14 |
+
+Anonymous means no `loginToken` at all. And the anonymous third is not a leftover — it is TuneIn
+(254), SomaFM (516), Hype Machine (44), Global Player, CBC Radio, and a long tail of radio
+networks. Exactly the discovery-shaped services.
+
+### Verified end to end, no account, no token, no cert
+
+Against TuneIn (`https://legato.radiotime.com/Radio.asmx`), with a credentials header containing
+nothing but `<deviceProvider>Sonos</deviceProvider>`:
+
+- **Search categories** come from the presentation map, fetched anonymously:
+  `stations → search:station`, `podcasts → search:show`.
+- **`search`** with `id=search:station`, `term=jazz`, `index=0`, `count=5` returned **HTTP 200 and
+  93 total matches**, as `mediaMetadata` with `id`, `title`, `itemType=stream`, genre, country,
+  bitrate and logo URL. The response is the same shape as `getMetadata`, exactly as documented.
+- **`getMediaURI`** for the first result (`s249973`, "Smooth Jazz") returned a playable URL:
+  `http://opml.radiotime.com/Tune.ashx?id=s249973&listenId=…&partnerId=Sonos`.
+
+So the whole chain, with no credential anywhere in it:
+
+```
+ListAvailableServices (LAN, unauthenticated)   → endpoint + Policy Auth + manifest URI
+manifest + presentation map (anonymous CDN)    → search endpoint shape + categories
+SMAPI search  (deviceProvider: Sonos)          → results
+SMAPI getMediaURI                              → a stream URL
+playbackSession:1 createSession + loadStreamUrl → plays it
+```
+
+**The last step is the only untested link.** Both commands are confirmed present on the LAN (they
+answer `ERROR_INVALID_PARAMETER`, not `ERROR_UNSUPPORTED_COMMAND`), and `loadStreamUrl` requires
+only `streamUrl` — but nothing has actually been played this way yet, because doing so starts audio
+in a real room. Run it deliberately.
+
+**A gotcha that cost a request:** sending the envelope with an XML declaration produced
+`s:Client / Expecting state 'Element'.. Encountered 'Text'`, which reads like a malformed-request
+fault and is not one. Send the envelope with no `<?xml?>` prologue and no BOM (`curl --data-binary`
+from a file written with `printf`, not `echo`).
+
+### What this does to the credential question
+
+It shrinks it from "the feature is blocked" to "a third of services work now, and the other
+two-thirds need the household's `loginToken`".
+
+It also explains **UPnP 806** better than "no account did". SMAPI `getSessionId` is the *legacy*
+username-and-password auth path — Sonos's own guidance is that existing integrations keep working
+but new ones should use `getAppLink`. Neither service tried at the office uses it: Sonos Radio is
+`DeviceLink`, YouTube Music is `AppLink`. So `MusicServices:1 GetSessionId` most likely answers 806
+because those services do not do sessions at all, not because the household lacks accounts.
+
+That makes the home runbook much less interesting than it looked, and it should be re-aimed: the
+question worth answering at home is not "does `GetSessionId` work for Sonos Radio" but **"is there
+any read path to a `loginToken`"** — and the honest expectation is no, because
+`SystemProperties:1` can write accounts (`AddOAuthAccountX`) and has nothing that reads them back,
+and S1's `/status/accounts` is gone. If that holds, authenticated services are reachable only by
+x2rock running a `DeviceLink` flow and registering as its own account, which is a real project and
+a scope decision, not a probe.
+
+None of which blocks anything: **build search against the anonymous services first.** It is 32
+services, it needs no secret, and it is verified working.
+
+
 ## What Sonos's own sample app settles (read 2026-08-31)
 
 [`sonos/api-web-sample-app`](https://github.com/sonos/api-web-sample-app) — Sonos's official
@@ -726,11 +829,18 @@ Two things fall out of that list:
   fallback would cost: x2rock would run a device-link flow itself and *register* the account, which
   means holding an OAuth token — the thing this project has so far never had to do.
 
-### Run this at home: `GetSessionId` (open, 2026-08-31)
+### Run this at home: `GetSessionId` (largely superseded, 2026-08-31)
 
-This is the next step for search, and it is one call. It could not be settled at the office, where
-the household has a single linked service and three favorites. **Do it from home, against a
-household with several services linked**, before designing anything.
+**Read "SMAPI, read properly at last" before spending time on this.** The premise it was written on
+was wrong twice over: search is no longer blocked (32 anonymous services work today with no
+credential), and UPnP 806 most likely means "this service does not do sessions" rather than "no
+account here" — SMAPI `getSessionId` is the legacy username-and-password path, and neither service
+tried at the office uses it.
+
+What is still worth ten minutes at home is the *narrow* version: run it against a service whose
+descriptor shows an auth policy that could plausibly involve a session, and treat a second 806 as
+confirmation rather than as news. The real question behind it — whether any read path to a
+`loginToken` exists at all — is not answered by this call.
 
 **1. Find which services this household actually has.** There is still no enumeration action, so
 work backwards from favorites — each carries the service in its `cdudn`:
@@ -1348,20 +1458,16 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Music service search — now a goal, not a non-goal** (reopened 2026-08-31). Discovery is
-   settled and the first two probes are done: `x2rock raw` exists, and the player will *not* search
-   on our behalf — `musicService:1` is `musicServiceAccounts:1`, and it deals in accounts and
-   version markers only. What is left is the credential, and it has narrowed to a single UPnP call,
-   `MusicServices:1 GetSessionId(ServiceId, Username)`, which answers **UPnP 806** for both
-   services tried on the office household. **Run that at home**, against a household with several
-   services linked, before designing anything: if it yields a session id the feature is small, and
-   if it does not, the fallback is registering an account with `AddOAuthAccountX` and holding an
-   OAuth token, which is a different project. Still do not start with the SMAPI client. The
-   commands to run, and what each answer means, are written out under "Run this at home:
-   `GetSessionId`" — it is a copy-paste job, not a research task. Read the odds down first:
-   Sonos's own API spec shows SMAPI is a *service-provider* interface and the Control API has no
-   content discovery in it anywhere, so nothing sanctioned is pointing our way. See "What Sonos's
-   own sample app settles".
+1. **Music service search — build it, against the anonymous services** (reopened 2026-08-31,
+   unblocked the same day). No longer a research question. SMAPI `search` and `getMediaURI` are
+   verified working against TuneIn with no credential beyond `<deviceProvider>Sonos</deviceProvider>`,
+   and 32 of the household's 108 services are `Auth="Anonymous"`. The remaining design work is
+   ordinary: a SOAP client, service and category selection from the manifest and presentation map,
+   and `createSession` + `loadStreamUrl` to play a result — the one link in the chain not yet
+   exercised, because it makes noise in a real room. See "SMAPI, read properly at last".
+   The 76 authenticated services are a **separate, later** question, and probably a different
+   project: they need the household's `loginToken`, nothing documented reads one back, and the
+   fallback is x2rock running a `DeviceLink` flow as its own account.
 
 2. **`createSession` + `loadStreamUrl`** — not a question, a feature that is simply not built yet,
    and the one part of "find something and play it" with nothing unresolved in it. `loadStreamUrl`
