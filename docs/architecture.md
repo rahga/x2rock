@@ -2057,18 +2057,30 @@ Two things fall out of that list:
   fallback would cost: x2rock would run a device-link flow itself and *register* the account, which
   means holding an OAuth token — the thing this project has so far never had to do.
 
-### Run this at home: `GetSessionId` (largely superseded, 2026-08-31)
+### `GetSessionId`: answered, and it answers nothing (closed 2026-08-31)
 
-**Read "SMAPI, read properly at last" before spending time on this.** The premise it was written on
-was wrong twice over: search is no longer blocked (32 anonymous services work today with no
-credential), and UPnP 806 most likely means "this service does not do sessions" rather than "no
-account here" — SMAPI `getSessionId` is the legacy username-and-password path, and neither service
-tried at the office uses it.
+**Do not spend the ten minutes this section used to ask for.** It was finally run against four
+services on one household, with an empty `Username`:
 
-What is still worth ten minutes at home is the *narrow* version: run it against a service whose
-descriptor shows an auth policy that could plausibly involve a session, and treat a second 806 as
-confirmation rather than as news. The real question behind it — whether any read path to a
-`loginToken` exists at all — is not answered by this call.
+| Service | State on this household | `GetSessionId` |
+|---|---|---|
+| YouTube Music (284) | linked in the Sonos app, **plays today** | UPnP **806** |
+| Mixcloud (181) | signed in through the Sonos app | UPnP **806** |
+| iHeartRadio (6) | linked by x2rock only | UPnP **806** |
+| Bandcamp (157) | linked by x2rock only | UPnP **806** |
+
+**806 for the service that demonstrably works.** So the call does not distinguish a registered
+account from an absent one, and it cannot be used to ask "does this household hold an account for
+service N" — which was the only remaining use anyone had for it. The earlier guess that 806 means
+"this service does not do sessions" survives, and `getSessionId` being the legacy
+username-and-password path explains why every modern service refuses it.
+
+The question behind it — whether any read path to a household's `loginToken` exists — is not answered
+here and has no other candidate. Treat it as closed by exhaustion rather than by proof.
+
+**There is still no way to enumerate a household's linked services.** Working backwards from
+favorites' `cdudn` values remains the only method, and it only finds services something was saved
+from.
 
 **1. Find which services this household actually has.** There is still no enumeration action, so
 work backwards from favorites — each carries the service in its `cdudn`:
