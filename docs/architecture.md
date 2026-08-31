@@ -620,10 +620,35 @@ SMAPI getMediaURI                              → a stream URL
 playbackSession:1 createSession + loadStreamUrl → plays it
 ```
 
-**The last step is the only untested link.** Both commands are confirmed present on the LAN (they
-answer `ERROR_INVALID_PARAMETER`, not `ERROR_UNSUPPORTED_COMMAND`), and `loadStreamUrl` requires
-only `streamUrl` — but nothing has actually been played this way yet, because doing so starts audio
-in a real room. Run it deliberately.
+**The whole chain is verified.** Run end to end on the Media Room, 2026-08-31:
+
+```sh
+# search:station "jazz" -> s250015 "Jazz Club" -> getMediaURI
+x2rock raw playbackSession:1 createSession \
+  '{"appId":"com.rahga.x2rock","appContext":"cli"}' --scope group -r "Media Room"
+#   -> sessionCreated: true, sessionState: SESSION_STATE_CONNECTED
+#   -> sessionId: RINCON_48A6B81853E001400:836412709@3406530134
+x2rock raw playbackSession:1 loadStreamUrl \
+  '{"streamUrl":"http://opml.radiotime.com/Tune.ashx?id=s250015&listenId=…&partnerId=Sonos",
+    "playOnCompletion":true,
+    "stationMetadata":{"name":"Jazz Club","type":"station",
+                       "service":{"name":"TuneIn","id":"254"}}}' \
+  --session 'RINCON_48A6B81853E001400:836412709@3406530134'
+#   -> success, empty body; the room starts playing
+```
+
+`x2rock now` then reported `PLAYING  Jazz Club`, and it propagated through x2rock's own daemon to
+MPRIS — `xesam:title "Jazz Club"`, `PlaybackStatus "Playing"` — so the bar widget picked it up with
+no extra work. Notes from doing it:
+
+- `createSession` is **group**-scoped and returns the `sessionId`; everything after it is addressed
+  by that id, which is why `x2rock raw` grew `--session`. A session id is an explicit address, so
+  it overrides `--scope` rather than combining with it.
+- `stationMetadata` is optional but worth sending: it is where the title the room displays comes
+  from. Without it the stream plays with nothing to show.
+- The session survives the CLI process exiting — it belongs to the group, not to the connection.
+- Playback did **not** disturb the queue: `queueVersion` bumped, but this is a session source
+  rather than a queue entry, which is the whole point of the mechanism.
 
 **A gotcha that cost a request:** sending the envelope with an XML declaration produced
 `s:Client / Expecting state 'Element'.. Encountered 'Text'`, which reads like a malformed-request

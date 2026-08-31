@@ -128,6 +128,11 @@ enum Command {
         /// as an event.
         #[arg(long, value_name = "SECONDS")]
         watch: Option<u64>,
+        /// Address the command to a playback session. `playbackSession:1`
+        /// commands after `createSession` are keyed by the session it returned,
+        /// which is not a target `--scope` can derive from the household.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
     /// Scan the local network for players and remember them.
     Discover,
@@ -663,6 +668,7 @@ async fn main() -> Result<()> {
         options,
         scope,
         watch,
+        session: session_id,
     } = &cli.command
     {
         let options: serde_json::Value = match options.as_deref() {
@@ -684,7 +690,13 @@ async fn main() -> Result<()> {
         // Group commands are answered by the coordinator, so a probe that does
         // not go there measures the wrong player's refusal.
         let mut connection = session.connection.clone();
+        // A session id is an explicit address, so it wins over --scope rather
+        // than combining with it: the two would name different targets.
+        if let Some(id) = session_id {
+            envelope["sessionId"] = json!(id);
+        }
         match scope {
+            _ if session_id.is_some() => {}
             RawScope::Household => {
                 envelope["householdId"] = json!(session.connection.household_id().await?);
             }
