@@ -1277,6 +1277,40 @@ the four failures are four different problems, none of them `linkDeviceId`:
 So `linkDeviceId` is no longer the leading hypothesis for anything, and the deferred question is
 not "make more services answer" — 10 of 14 already do.
 
+### Which of the ten are actually worth a login (probed 2026-08-31)
+
+The link URL is a login page, so it can be fetched and read without linking anything. Sign-in
+providers are taken from the served HTML, which is suggestive rather than final — several of these
+are JS-rendered and may offer more than they ship in the first response.
+
+| Service | Page | Sign-in seen | Cost | Shape |
+|---|---|---|---|---|
+| Mixcloud | 200 | Google, Facebook, Twitter | free tier | DJ mixes; **OAuth `authorize` flow**, unlike any linked so far |
+| Saavn (JioSaavn) | 200 | Google, Facebook | free tier | very large catalogue |
+| FIT Radio | 200 | Google, Apple, Facebook | subscription | workout radio |
+| AccuRadio | 200 | Facebook, Apple, password — **no Google** | free | US radio |
+| Tribe of Noise | 200 | none in HTML | free | Creative Commons music |
+| TIDAL | 403 to curl (bot check) | — | paid | **the only protected-stream candidate** |
+| Murfie | 200, 2.7 KB, Facebook only | — | — | company shut down years ago; a zombie in Sonos's catalogue |
+| NhacCuaTui | 200, **175 bytes** | none | — | serves an all but empty page |
+| Bandcamp | linked | — | free | shop-shaped, collection empty |
+| iHeartRadio | linked | — | free | broadcaster, works |
+
+Read for what each would *teach* rather than what would merely work:
+
+- **Mixcloud** is the best next login. Free, Google sign-in, catalogue-shaped, and its `regUrl` is a
+  real OAuth `authorize` endpoint carrying the `linkCode` in `redirect_uri` — a third flow shape
+  after Bandcamp's code-in-URL and iHeartRadio's typed code, and the only one that puts a consent
+  screen in the path. It also has a following/favourites side, so it exercises browse and search at
+  once, and it is a second chance for `match` to succeed.
+- **TIDAL** is the only route to the one architectural unknown left: whether `getMediaURI` ever
+  returns `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry. Every service reached
+  so far hands back a plain URL. Costs a subscription, which is why it is not first.
+- **AccuRadio** looks like the obvious free-radio pick and is the wrong one for a Google account.
+- **Murfie and NhacCuaTui answer `getDeviceLinkCode` and are not worth a login.** A service
+  answering the protocol says nothing about the service being alive, which is worth knowing before
+  reading a refusal as a bug in this code.
+
 ### Two parser gaps the survey found, both fixed
 
 Neither was reachable from Bandcamp, which is why building against one service was not enough:
