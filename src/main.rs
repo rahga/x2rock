@@ -1,3 +1,4 @@
+mod catalogue;
 mod daemon;
 mod discover;
 mod mpris;
@@ -109,6 +110,9 @@ enum Command {
         /// Sonos queue, and Sonos does not intend it to be.
         #[arg(long, value_name = "N")]
         play: Option<usize>,
+        /// Re-read the service catalogue even if its version has not moved.
+        #[arg(long)]
+        refresh: bool,
         #[arg(long)]
         json: bool,
     },
@@ -645,12 +649,250 @@ async fn stop_signal() -> &'static str {
     }
 }
 
+/// `x2rock search`: the CLI talking to a music service, and the only place that
+/// leaves the LAN. See "Rule: search never enters the daemon".
+///
+/// A player is wanted but not required. Listing what can be searched, and a
+/// service's categories, both come from the on-disk catalogue and must keep
+/// working when the household is unreachable - a cache that fails whenever the
+/// thing it caches is unavailable is not doing its job. Only `--play`, and a
+/// first run with nothing cached, genuinely need a player.
+#[allow(clippy::too_many_arguments)]
+async fn run_search(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    term: Option<&String>,
+    service: Option<&String>,
+    category: Option<&String>,
+    count: u32,
+    play: Option<usize>,
+    refresh: bool,
+    json: bool,
+) -> Result<()> {
+    let mut state = State::load()?;
+    let reached = session::connect(ip, &mut state).await;
+    let live = || -> Result<&session::Session> {
+        reached
+            .as_ref()
+            .map_err(|e| anyhow!("no player to play it on: {e:#}"))
+    };
+
+    let mut catalogue = catalogue::Catalogue::load();
+    let mut dirty = false;
+    match &reached {
+        Ok(session) => {
+            dirty = catalogue
+                .refresh(&Upnp::new(session.connection.ip()), refresh)
+                .await?;
+        }
+        Err(e) if catalogue.services().is_empty() => {
+            // Nothing cached and nothing to ask: this is the one case with no
+            // useful answer, so give the connection's own error rather than a
+            // second-hand one about an empty catalogue.
+            return Err(anyhow!("{e:#}"));
+        }
+        Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
+    }
+
+    let usable = catalogue.searchable();
+
+    let Some(query) = service else {
+        let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable_by_key(|n| n.to_lowercase());
+        if json {
+            println!("{}", serde_json::to_string_pretty(&names)?);
+        } else {
+            println!(
+                "{} of {} services can be searched without an account:",
+                usable.len(),
+                catalogue.services().len()
+            );
+            for name in names {
+                println!("  {name}");
+            }
+            println!("\nSearch one with: x2rock search -s <service> <term>");
+        }
+        if dirty {
+            catalogue.save()?;
+        }
+        return Ok(());
+    };
+
+    // Naming a real service that simply needs an account is a different
+    // mistake from naming one that does not exist, and the difference is
+    // worth the extra lookup.
+    let chosen = catalogue::Catalogue::find(&usable, query)
+        .map_err(|e| {
+            match catalogue
+                .services()
+                .iter()
+                .find(|s| s.name.to_lowercase() == query.to_lowercase())
+            {
+                Some(s) => anyhow!(
+                    "{} needs a linked account, which x2rock cannot supply. \
+                     Run `x2rock search` for the ones that do not.",
+                    s.name
+                ),
+                None => e,
+            }
+        })?
+        .clone();
+
+    let categories = catalogue.categories_for(&chosen).await?;
+    dirty |= !categories.is_empty();
+    if dirty {
+        catalogue.save()?;
+    }
+    let chosen = &chosen;
+    ensure!(
+        !categories.is_empty(),
+        "{} publishes no search categories, so it cannot be searched",
+        chosen.name
+    );
+    let picked = match category {
+        Some(want) => {
+            let want = want.to_lowercase();
+            categories
+                .iter()
+                .find(|c| c.id.to_lowercase() == want)
+                .ok_or_else(|| {
+                    let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
+                    anyhow!(
+                        "{} has no category {want:?}. It has: {}",
+                        chosen.name,
+                        known.join(", ")
+                    )
+                })?
+        }
+        None => categories
+            .iter()
+            .find(|c| c.id.eq_ignore_ascii_case("all"))
+            .unwrap_or(&categories[0]),
+    };
+
+    let Some(term) = term else {
+        let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
+        println!("{} can search: {}", chosen.name, known.join(", "));
+        println!("Default is {}. Give a term to search.", picked.id);
+        return Ok(());
+    };
+
+    let (items, total) = sonos::smapi::search(chosen, &picked.mapped_id, term, 0, count).await?;
+
+    if let Some(nth) = play {
+        let item = items
+            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
+            .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
+        let uri = sonos::smapi::media_uri(chosen, &item.id).await?;
+        let target = session::target(&live()?.groups, room)?;
+        let coordinator = session::coordinator(live()?, &target).await?;
+
+        // The session is the whole point: it plays alongside the queue
+        // rather than in it, so nothing the household queued is disturbed.
+        let opened = coordinator
+            .call(
+                json!({
+                    "namespace": "playbackSession:1",
+                    "command": "createSession",
+                    "groupId": target.group_id,
+                }),
+                json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
+            )
+            .await?;
+        let session_id = opened["sessionId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
+
+        coordinator
+            .call(
+                json!({
+                    "namespace": "playbackSession:1",
+                    "command": "loadStreamUrl",
+                    "sessionId": session_id,
+                }),
+                // stationMetadata is optional, but it is where the name the
+                // room displays comes from; without it the stream plays
+                // with nothing to show.
+                json!({
+                    "streamUrl": uri,
+                    "playOnCompletion": true,
+                    "stationMetadata": {
+                        "name": item.title,
+                        "type": "station",
+                        "service": { "name": chosen.name, "id": chosen.id },
+                    },
+                }),
+            )
+            .await?;
+        println!("{} — {} on {}", target.name, item.title, chosen.name);
+        return Ok(());
+    }
+    if json {
+        let rows: Vec<_> = items
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "title": i.title,
+                    "type": i.item_type,
+                    "summary": i.summary,
+                    "service": chosen.name,
+                    "serviceId": chosen.id,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("Nothing on {} for {term:?}.", chosen.name);
+        return Ok(());
+    }
+    for item in &items {
+        let summary = item
+            .summary
+            .as_deref()
+            .map(|s| format!("  {s}"))
+            .unwrap_or_default();
+        println!(
+            "{:<14} {:<10} {}{summary}",
+            item.id, item.item_type, item.title
+        );
+    }
+    if total > items.len() as u32 {
+        println!("\n{} of {total} on {}.", items.len(), chosen.name);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
+        Command::Search {
+            ref term,
+            ref service,
+            ref category,
+            count,
+            play,
+            refresh,
+            json,
+        } => {
+            return run_search(
+                cli.ip,
+                cli.room.as_deref(),
+                term.as_ref(),
+                service.as_ref(),
+                category.as_ref(),
+                count,
+                play,
+                refresh,
+                json,
+            )
+            .await;
+        }
         Command::Daemon => {
             tokio::select! {
                 result = daemon::run(cli.ip) => return result,
@@ -791,194 +1033,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        }
-        return Ok(());
-    }
-
-    // Search never touches the daemon and needs no room: it is the CLI talking
-    // to a music service over the internet, with the LAN used only to ask a
-    // player which services exist. See "Rule: search never enters the daemon".
-    if let Command::Search {
-        term,
-        service,
-        category,
-        count,
-        play,
-        json,
-    } = &cli.command
-    {
-        let upnp = Upnp::new(session.connection.ip());
-        let services = sonos::smapi::parse_services(&upnp.list_services().await?)?;
-        let usable: Vec<_> = services
-            .iter()
-            .filter(|s| s.auth == sonos::smapi::Auth::Anonymous)
-            .collect();
-
-        let Some(query) = service else {
-            let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
-            names.sort_unstable_by_key(|n| n.to_lowercase());
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&names)?);
-            } else {
-                println!(
-                    "{} of {} services can be searched without an account:",
-                    usable.len(),
-                    services.len()
-                );
-                for name in names {
-                    println!("  {name}");
-                }
-                println!("\nSearch one with: x2rock search -s <service> <term>");
-            }
-            return Ok(());
-        };
-
-        let needle = query.to_lowercase();
-        let chosen = usable
-            .iter()
-            .find(|s| s.name.to_lowercase() == needle)
-            .or_else(|| {
-                usable
-                    .iter()
-                    .find(|s| s.name.to_lowercase().starts_with(&needle))
-            })
-            .copied()
-            .ok_or_else(|| {
-                // Naming a real service that simply needs an account is a
-                // different mistake from naming one that does not exist, and
-                // the difference is worth the extra lookup.
-                match services.iter().find(|s| s.name.to_lowercase() == needle) {
-                    Some(s) => anyhow!(
-                        "{} needs a linked account, which x2rock cannot supply. \
-                         Run `x2rock search` for the ones that do not.",
-                        s.name
-                    ),
-                    None => anyhow!(
-                        "no searchable service matching {query:?}. \
-                         Run `x2rock search` to list them."
-                    ),
-                }
-            })?;
-
-        let categories = sonos::smapi::categories(chosen).await?;
-        ensure!(
-            !categories.is_empty(),
-            "{} publishes no search categories, so it cannot be searched",
-            chosen.name
-        );
-        let picked = match category {
-            Some(want) => {
-                let want = want.to_lowercase();
-                categories
-                    .iter()
-                    .find(|c| c.id.to_lowercase() == want)
-                    .ok_or_else(|| {
-                        let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
-                        anyhow!(
-                            "{} has no category {want:?}. It has: {}",
-                            chosen.name,
-                            known.join(", ")
-                        )
-                    })?
-            }
-            None => categories
-                .iter()
-                .find(|c| c.id.eq_ignore_ascii_case("all"))
-                .unwrap_or(&categories[0]),
-        };
-
-        let Some(term) = term else {
-            let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
-            println!("{} can search: {}", chosen.name, known.join(", "));
-            println!("Default is {}. Give a term to search.", picked.id);
-            return Ok(());
-        };
-
-        let (items, total) =
-            sonos::smapi::search(chosen, &picked.mapped_id, term, 0, *count).await?;
-
-        if let Some(nth) = play {
-            let item = items
-                .get(nth.checked_sub(1).unwrap_or(usize::MAX))
-                .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
-            let uri = sonos::smapi::media_uri(chosen, &item.id).await?;
-            let target = session::target(&session.groups, cli.room.as_deref())?;
-            let coordinator = session::coordinator(&session, &target).await?;
-
-            // The session is the whole point: it plays alongside the queue
-            // rather than in it, so nothing the household queued is disturbed.
-            let opened = coordinator
-                .call(
-                    json!({
-                        "namespace": "playbackSession:1",
-                        "command": "createSession",
-                        "groupId": target.group_id,
-                    }),
-                    json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
-                )
-                .await?;
-            let session_id = opened["sessionId"]
-                .as_str()
-                .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
-
-            coordinator
-                .call(
-                    json!({
-                        "namespace": "playbackSession:1",
-                        "command": "loadStreamUrl",
-                        "sessionId": session_id,
-                    }),
-                    // stationMetadata is optional, but it is where the name the
-                    // room displays comes from; without it the stream plays
-                    // with nothing to show.
-                    json!({
-                        "streamUrl": uri,
-                        "playOnCompletion": true,
-                        "stationMetadata": {
-                            "name": item.title,
-                            "type": "station",
-                            "service": { "name": chosen.name, "id": chosen.id },
-                        },
-                    }),
-                )
-                .await?;
-            println!("{} — {} on {}", target.name, item.title, chosen.name);
-            return Ok(());
-        }
-        if *json {
-            let rows: Vec<_> = items
-                .iter()
-                .map(|i| {
-                    json!({
-                        "id": i.id,
-                        "title": i.title,
-                        "type": i.item_type,
-                        "summary": i.summary,
-                        "service": chosen.name,
-                        "serviceId": chosen.id,
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&rows)?);
-            return Ok(());
-        }
-        if items.is_empty() {
-            println!("Nothing on {} for {term:?}.", chosen.name);
-            return Ok(());
-        }
-        for item in &items {
-            let summary = item
-                .summary
-                .as_deref()
-                .map(|s| format!("  {s}"))
-                .unwrap_or_default();
-            println!(
-                "{:<14} {:<10} {}{summary}",
-                item.id, item.item_type, item.title
-            );
-        }
-        if total > items.len() as u32 {
-            println!("\n{} of {total} on {}.", items.len(), chosen.name);
         }
         return Ok(());
     }

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
+use serde::{Deserialize, Serialize};
 
 use super::http;
 
@@ -27,7 +28,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(6);
 const NS: &str = "http://www.sonos.com/Services/1.1";
 
 /// How a service expects to be authenticated, from its `<Policy Auth=...>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Auth {
     /// No credential at all beyond `deviceProvider`. The ones we can use.
     Anonymous,
@@ -35,7 +36,7 @@ pub enum Auth {
     Linked,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub id: String,
     pub name: String,
@@ -58,7 +59,7 @@ pub struct Item {
 }
 
 /// A searchable category, from the service's presentation map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
     /// What a person picks: `stations`, `tracks`, `all`.
     pub id: String,

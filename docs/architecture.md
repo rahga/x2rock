@@ -624,13 +624,42 @@ $ grep -n "smapi\|http::get\|Endpoint::Web" src/daemon.rs src/mpris.rs
 `smapi` is reachable only from `main.rs`'s `search` arm. The daemon and the MPRIS server cannot
 reach the internet, so nothing that reaches the widget over MPRIS can be delayed by a service.
 
+### The catalogue cache (added 2026-08-31)
+
+`src/catalogue.rs`, cached in `$XDG_STATE_HOME/x2rock/services.json` alongside the player list.
+A cold search cost ~950ms and three round trips before any query ran; warm it is ~420ms.
+
+- **Invalidation is a real signal, not an expiry.** `ListAvailableServices` returns
+  `AvailableServiceListVersion` in the *same reply* as the descriptors — here
+  `RINCON_…:58`, the same 58 that `musicServicesChanged` reports as `availableServicesVersion`.
+  So the cheap LAN call decides whether the expensive internet ones can be skipped, and no TTL had
+  to be guessed. Category lists are keyed to the catalogue version rather than to a service id,
+  because a presentation map can change while an id does not.
+- **A player is wanted, not required.** This is the part worth keeping: the first attempt put the
+  cache behind `session::connect`, so with the household unreachable `x2rock search` failed at the
+  connection and the fallback inside the cache was dead code. A cache that fails whenever the thing
+  it caches is unavailable is not doing its job. `search` now runs before the connection, tolerates
+  its failure, and only `--play` — or a first run with nothing cached — insists on a player:
+
+  ```
+  $ X2ROCK_PLAYER=<unreachable> x2rock search
+  x2rock: no player reached, using the cached catalogue (…Connection refused…)
+  32 of 108 services can be searched without an account: …
+
+  $ X2ROCK_PLAYER=<unreachable> x2rock search -s tunein --play 1 jazz
+  Error: no player to play it on: …
+  ```
+- **A corrupt cache reads as empty rather than failing.** Unlike the player list, it is wholly
+  regenerable, and refusing to search over a malformed cache file would be the cache causing the
+  outage it exists to prevent.
+- **A name resolves by exact match, then by *unique* prefix.** "radio" matches a dozen services on
+  this catalogue; picking whichever sorted first would be worse than naming the alternatives.
+  An exact match still wins over an ambiguous prefix, so a service actually called "Radio" resolves.
+
 ### Still to do
 
 - The widget: a search box in the popup, invoking `x2rock search --json` as its own `Process`,
   following the favorites picker's failure handling exactly.
-- The on-disk catalogue cache, so listing services and categories works with no internet and a
-  search costs one round trip instead of three. `musicServicesChanged`'s `availableServicesVersion`
-  is the invalidation signal.
 - Paging. `search` takes `index` and the CLI always sends 0.
 
 ## `FV:2` and `favorites:1 getFavorites` do **not** always agree (corrected 2026-08-31)

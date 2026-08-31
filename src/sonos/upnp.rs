@@ -308,14 +308,24 @@ impl Upnp {
     /// has changed. Parsing belongs to `smapi`, which is what uses it.
     ///
     /// No credential: a player answers this to anyone on the LAN.
-    pub async fn list_services(&self) -> Result<String> {
+    ///
+    /// Returns the descriptors and the list's version, which rides along in the
+    /// same reply. The version is what makes caching honest: it is the same
+    /// number `musicServiceAccounts:1` reports as `availableServicesVersion`
+    /// when the set changes, so a cache can be checked against it rather than
+    /// against a guessed expiry.
+    pub async fn list_services(&self) -> Result<(String, String)> {
         let text = self
             .soap(Service::MusicServices, "ListAvailableServices", &[])
             .await?;
         let envelope = Document::parse(&text).context("parsing ListAvailableServices")?;
-        text_of(&envelope, "AvailableServiceDescriptorList")
+        let descriptors = text_of(&envelope, "AvailableServiceDescriptorList")
             .map(str::to_string)
-            .ok_or_else(|| anyhow!("no service descriptors in the reply"))
+            .ok_or_else(|| anyhow!("no service descriptors in the reply"))?;
+        let version = text_of(&envelope, "AvailableServiceListVersion")
+            .unwrap_or_default()
+            .to_string();
+        Ok((descriptors, version))
     }
 
     pub async fn browse_content(&self, object_id: &str) -> Result<Vec<BrowseItem>> {
