@@ -2816,9 +2816,28 @@ rediscover these the hard way:
    Two loose ends that block nothing. **`match`** has never succeeded — see "`match`, and why
    nothing needs it yet". **Bandcamp** stays deferred until there is something in the collection.
 
-   The 62 app-link services remain a separate call: Google gates the endpoint on an API key before
-   user auth is even reached, and protected streams need `httpHeaders` or `contentKey`, which
-   `loadStreamUrl` cannot carry.
+   The 62 app-link services remain a separate call, but **the barrier is now one wall shorter than
+   this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
+   `loadStreamUrl` cannot carry" was true and is no longer the whole story: the enqueue path does not
+   resolve the stream at all, so the player supplies its own credential and protected content plays.
+   A kept YouTube Music track demonstrates it today, with x2rock holding no Google credential.
+
+   So for YouTube Music specifically, **playback is solved and only discovery is missing.** What
+   stands between here and a search is a single decision, not a puzzle: `getAppLink` answers 403
+   asking for an API key, and YouTube Music's manifest — fetched anonymously from Sonos's CDN —
+   still carries one (`apiKey: {cr, zp}`, re-confirmed 2026-08-31). Presenting a key Sonos
+   distributes for its own clients is a different act from completing a link flow a service
+   publishes for whoever asks, and it should be decided deliberately rather than because the bytes
+   are reachable. Two things stay unknown even if it were decided: app-link expects a hand-off to
+   the service's own mobile app, which a Linux desktop cannot do, and whether Google serves the
+   browser fallback at all.
+
+   Worth noting what is *not* a route, so it is not re-tried: the Control API has no content
+   discovery anywhere in its 53 paths, UPnP `Search` reports empty `SearchCaps`,
+   `musicService:1 search` does not exist and that namespace is about accounts, and `GetSessionId`
+   answers 806 even for a service that plays. And the object id cannot be derived from outside —
+   `ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H` is 48 opaque characters, not a YouTube video
+   id, so searching YouTube by another route gives nothing a player would accept.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
