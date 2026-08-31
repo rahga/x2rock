@@ -289,9 +289,16 @@ Sonos app does too.
 
 - Android (see [`x2rocktv`](https://github.com/rahga/x2rocktv) for the Kotlin/JVM Android TV app)
 - Cloud OAuth / control from outside the LAN (deliberately cut; the transport seam remains)
-- Searching music services. This controls rooms, queues and volume; finding something new to play
-  is what the Sonos app is for.
+- Sonos S1. Every supported device runs S2 (`<swGen>2</swGen>` in the player's device
+  description); no S1 accommodation is carried anywhere in the code.
 - Pre-Quattro Omarchy, Waybar-first design
+
+Searching music services **was** a non-goal and is not any more — see
+[docs/architecture.md](docs/architecture.md), "Music service search, reopened". It was ruled out on
+the belief that reaching a service needs a Sonos account. It does not: a service is linked to the
+household, and a speaker will hand any LAN controller the service's endpoint, its manifest and its
+search categories with no login at all. What is still unsolved is the credential to sign a search
+with, so there is nothing to use yet — but the reason it was excluded no longer holds.
 
 ## Tested devices
 
@@ -327,7 +334,7 @@ address to talk to.
 
 ## Requirements
 
-- Linux, and a Sonos S2 speaker on the same network.
+- Linux, and a Sonos **S2** speaker on the same network. S1 is not supported.
 - **Rust 1.88 or newer** to build it (`edition = "2024"`, and let-chains). This is declared as
   `rust-version` in `Cargo.toml`, so an older toolchain is refused by Cargo with a plain message
   naming the version it wants rather than a page of syntax errors. Distribution packages are often

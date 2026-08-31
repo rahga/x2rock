@@ -53,11 +53,20 @@ A concrete porting guide is under "Porting to Android TV" below.
 - **Also in scope, and required**: UPnP queue navigation (see below). Playing a chosen track from
   the queue is a core requirement, and only UPnP can do it.
 - **Cut from v1**: cloud OAuth (Sonos Control API over `api.ws.sonos.com`). Off-LAN control is not
-  wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since
-  account-linked features (multi-household, music services) would arrive through it, but build no
-  OAuth, no token storage and no `login` command for v1.
+  wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since off-LAN
+  control is what would arrive through it, but build no OAuth, no token storage and no `login`
+  command for v1. An earlier draft of this bullet also listed *music services* as an account-linked
+  feature waiting on the cloud. That was wrong — a service is linked to the **household**, not to a
+  Sonos account, and the LAN hands out everything needed to address one. See "Music service search,
+  reopened (verified 2026-08-31)".
+- **S2 only.** Every supported device runs Sonos S2. S1 is not supported and no S1 accommodation
+  belongs in this code. The check is `<swGen>` in
+  `http://<player>:1400/xml/device_description.xml`, which reads `2` on every device here. This is
+  not a reluctant cut: S1 and S2 systems cannot be mixed in one household anyway, so supporting
+  both would mean carrying two content and grouping models to reach households this tool's target
+  desktop is unlikely to be sitting on.
 - **Out of scope**: Android, any pre-Quattro Omarchy/Hyprland/Waybar-specific work (Quattro
-  replaced that whole stack — don't design around it).
+  replaced that whole stack — don't design around it), and Sonos S1.
 
 ## Integration path (revised — this is the core decision)
 
@@ -142,17 +151,23 @@ The neat part: `playback:1` events carry a **`queueVersion`** field. So the WebS
 version actually bumps. You get push semantics for a resource UPnP would otherwise make you poll,
 without ever needing GENA eventing.
 
-### Music search is a separate, larger problem
+### Music search: harder than the rest, but not closed
 
-A search bar that pulls tracks from streaming services is **not** reachable from either transport
-here. `musicService:1` exists as a namespace but its `search` command returns
-`ERROR_UNSUPPORTED_COMMAND`, and Sonos's `ContentDirectory` reports **empty**
-`SearchCapabilities` — it implements no UPnP `Search` action at all.
+**Revised 2026-08-31 — the original text here was right about the transports and wrong about the
+reason.** Two of its three claims hold:
 
-Service search goes through **SMAPI**, the interface music providers implement, which needs the
-service's own endpoint and per-service authentication. That is a substantially bigger lift than
-anything else in this document and is correctly out of scope for phase one. Local library and
-queue/favorites search — filtering what `Browse` already returns — is cheap and worth doing first.
+- `musicService:1` exists as a namespace but its `search` command returned
+  `ERROR_UNSUPPORTED_COMMAND` (2026-08-28).
+- Sonos's `ContentDirectory` reports **empty** `SearchCapabilities` — it implements no UPnP
+  `Search` action at all. Re-confirmed 2026-08-31.
+
+The third claim — that service search goes through SMAPI, "which needs the service's own endpoint
+and per-service authentication", and is therefore beyond a tool with no Sonos account — conflated
+a *Sonos* account with a *service* account. The endpoint is handed out free over the LAN, and the
+service link belongs to the household rather than to any controller. Local library and
+queue/favorites search — filtering what `Browse` already returns — is still the cheapest thing and
+still worth doing first, but it is no longer the only thing on the table. See "Music service
+search, reopened (verified 2026-08-31)".
 
 **Never use UPnP eventing (GENA `SUBSCRIBE`).** See below.
 
@@ -534,6 +549,85 @@ Probed for the contract first, then exercised on real rooms.
   This is Sonos's own behaviour, not something x2rock introduces, and the Sonos app permits the
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
+
+## Music service search, reopened (verified 2026-08-31)
+
+Search was ruled out of scope on 2026-08-29, and the decision rested on one claim: that reaching a
+music service needs "per-service authentication", meaning the Sonos account this tool deliberately
+does not have. **That claim conflated two different accounts and is wrong.**
+
+The first counter-evidence was ordinary use, not a probe. The Sonos app on iPhone and on Android,
+*not* signed in to a Sonos account, lists services — Sonos Radio, YouTube Music — searches them,
+and a Sonos One SL plays what the search returns. Whatever search needs, a Sonos login is not it.
+
+The reason is that a music service is linked to the **household**, not to a controller. Any
+controller on the LAN inherits the link. This document had already recorded half of that without
+following it through: `favorites:1 getFavorites` works on the LAN with no login, and each favorite
+carries the service's own account token inside `r:resMD`.
+
+### Probed 2026-08-31 (office household, Sonos One SL, firmware 95.0-77060 / displayVersion 18.4)
+
+- **`MusicServices ListAvailableServices` answers unauthenticated over the LAN** — 53KB, 108
+  services. Each descriptor carries the SMAPI endpoint (`Uri` and `SecureUri`), a `Capabilities`
+  bitmask, a `<Policy Auth=...>` and a `<Manifest Uri=...>`. "Needs the service's own endpoint" was
+  never a barrier; the speaker gives it away.
+  - `Id="284" Name="YouTube Music"`, `Auth="AppLink"`, `https://music.googleapis.com/v1:sendRequest`
+  - `Id="303" Name="Sonos Radio"`, `Auth="DeviceLink"`, `https://sali.sonos.superhi.fi/smapi`
+- **The `Manifest` URI is fetchable anonymously** from Sonos's CDN (`cf.ws.sonos.com/p/m/<uuid>`)
+  and declares typed endpoints. The two services differ in shape, which matters for the client:
+  - Sonos Radio declares a dedicated search endpoint —
+    `{"type":"search","uri":"https://sali.sonos.superhi.fi/content/search","version":"2.3"}` —
+    alongside `browse`, `radio` and `reporting`.
+  - YouTube Music declares only `reporting`, so its search is the classic SOAP `search` action at
+    its `SecureUri`.
+  - So a client needs **both** paths, and the manifest is what tells it which to use.
+- **The presentation map (`cf.ws.sonos.com/p/p/<uuid>`, also anonymous) declares the search
+  categories**, which is exactly what a search UI needs to offer:
+  - Sonos Radio: `stations`, `artists`, `genres`, `all`
+  - YouTube Music: `artists`, `playlists`, `tracks` (mapped `SONGS`), `albums`, `all`
+- **Which services a household has linked is derivable from `FV:2`.** Every favorite here carries
+  `<desc id="cdudn">SA_RINCON77575_X_#Svc77575-0-Token</desc>`, and 77575 = 303·256 + 7 — service
+  303, Sonos Radio. No account call needed to learn the linked set.
+- Note the household difference: the office household has **3** favorites and one linked service.
+  The 41-favorite count and the `Svc51463` token recorded elsewhere in this document are the home
+  household. Numbers in this document are per-household; the mechanisms are not.
+
+### What still stands
+
+- **UPnP `Search` does not exist.** `GetSearchCapabilities` returned an empty `SearchCaps` again on
+  2026-08-31. Search will not come from `ContentDirectory`.
+- `musicService:1 search` returned `ERROR_UNSUPPORTED_COMMAND` on 2026-08-28. **Not re-probed** —
+  the CLI has no raw Control-API command and this machine has no websocket client — so treat it as
+  probably-still-true rather than confirmed.
+
+### What is genuinely unsolved: the credential
+
+The endpoint is free; the credential is not in our hands. `SA_RINCON77575_X_#Svc77575-0-Token` is a
+*reference*, not a secret — the literal trailing `Token` is a placeholder the **player** resolves
+against its own stored credential. That is precisely why passing `r:resMD` through verbatim works
+for enqueuing: the player substitutes. A search issued by x2rock straight at the service endpoint
+gets no such substitution.
+
+Three questions settle the design, cheapest first:
+
+1. **Re-probe `musicService:1` on current firmware** — `search`, and whatever else the namespace
+   answers. If the *player* will run the search, the credential problem disappears and this becomes
+   a small feature. This needs a raw Control-API command in the CLI, which is worth having on its
+   own merits and is the obvious first commit.
+2. **Where a controller's SMAPI credential comes from** with no Sonos account. `Policy Auth` is
+   `AppLink` or `DeviceLink` — device-link flows that mint a per-controller token. Whether an
+   already-linked household will hand one over, or whether x2rock must run the link flow itself
+   once and store the result, is the pivot: the first is small, the second is a real feature with
+   token storage, and it would be the first secret this tool has ever had to keep.
+3. **Whether a service track can be enqueued** — the experiment named on 2026-08-29 and never run,
+   because every favorite on the home household is a container or a station. Still the right test,
+   and cheaper now: Sonos Radio search returns stations, and stations from that service are already
+   known to play here.
+
+Also unexplored, and possibly a way around `AddURIToQueue`'s refusals entirely: `playbackSession:1`
+`loadStreamUrl` and `loadCloudQueue`. A cloud queue would mean x2rock serving HTTP the speaker can
+reach, which the firewall section makes awkward but not impossible.
+
 
 ## Bar-widget interop with `omarchy.media`, and the room-name decision (2026-08-31)
 
@@ -995,28 +1089,36 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
+1. **Music service search — now a goal, not a non-goal** (reopened 2026-08-31). The transports and
+   the discovery half are settled and written up under "Music service search, reopened"; what is
+   open is the credential. Work it in the order given there: a raw Control-API command in the CLI,
+   then re-probe `musicService:1 search`, and only if the player will not search for us go after a
+   controller-side SMAPI credential. Do not start with the SMAPI client — that is the expensive
+   branch and it may turn out to be unnecessary.
+
+2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
    mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
    not confirmed is whether it behaves with several rooms on the bus, since only one room was
    reachable when it was written up. **Pick this up from the home household.**
 
-2. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
+3. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
 
 ## Resolved since the original draft
 
-- ~~Agent-driven music search~~ — **out of scope, decided 2026-08-29.** Searching a music service
-  is not what this widget is for; it is a bar control for rooms, queues and volume, and the Sonos
-  app is where a household goes looking for something new to play. Two things make the call easy
-  rather than reluctant. It needs SMAPI, with per-service endpoints and authentication, which is a
-  larger lift than everything else here combined. And `AddURIToQueue` already refuses service-backed
-  containers and stations outright, so even a working search might have had nothing it could
-  enqueue — whether an individual service *track* fares better was never testable here, since every
-  favorite on this household is a container or a station. Should this ever be revisited, that is
-  the question to settle first, and it is cheap: find one service track and try to enqueue it.
+- ~~Music search is out of scope~~ — **decided 2026-08-29, reversed 2026-08-31.** The 08-29 entry
+  gave two reasons. The first, that search "needs SMAPI, with per-service endpoints and
+  authentication", was wrong: it read *service* authentication as a *Sonos account*, when a service
+  is linked to the household and the LAN gives up the endpoint for free. The second — that
+  `AddURIToQueue` refuses service-backed containers and stations, so a search might have had
+  nothing it could enqueue — is still unrefuted, and the cheap experiment it named (find one
+  service *track* and try to enqueue it) is still the right test; it has simply never been run.
+  The entry is kept here rather than deleted because the way it went wrong is worth remembering:
+  a single unexamined word in a rationale closed a feature for two days. See "Music service search,
+  reopened (verified 2026-08-31)".
 
 - ~~Is a bespoke Quickshell widget worth building in v1?~~ — built, 2026-08-28/29, and it went
   further than the question imagined: per-room volume, transport, favorites with a type-to-filter
