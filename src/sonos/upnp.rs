@@ -88,6 +88,12 @@ pub struct BrowseItem {
     /// this is passed on exactly as it arrived rather than parsed and remade.
     pub metadata: String,
     pub art_url: Option<String>,
+    /// A service's navigation entry rather than something to play: `FV:2`
+    /// carries these alongside real favorites, marked `<r:type>shortcut</r:type>`
+    /// and with an empty `<res>`. "Trending Now" and "Discover Sonos Radio" are
+    /// two of them. They belong in the Sonos app's browse tree, not in a list of
+    /// things a room can be told to play.
+    pub shortcut: bool,
 }
 
 impl BrowseItem {
@@ -328,6 +334,36 @@ impl Upnp {
         Ok((descriptors, version))
     }
 
+    /// One page of DIDL-Lite into items. Split out from `browse_content` so the
+    /// shape of what a player actually sends can be tested without one.
+    fn items_from_didl(&self, didl_text: &str) -> Result<Vec<BrowseItem>> {
+        let didl = Document::parse(didl_text)?;
+        // Playlists come back as containers and favorites as items; both are
+        // enqueued the same way.
+        Ok(didl
+            .descendants()
+            .filter(|n| n.has_tag_name("item") || n.has_tag_name("container"))
+            .map(|node| {
+                let child = |name: &str| {
+                    node.children()
+                        .find(|c| c.tag_name().name() == name)
+                        .and_then(|c| c.text())
+                };
+                BrowseItem {
+                    id: node.attribute("id").unwrap_or_default().to_owned(),
+                    title: child("title").unwrap_or_default().to_owned(),
+                    uri: child("res").map(str::to_owned),
+                    metadata: child("resMD").unwrap_or_default().to_owned(),
+                    art_url: child("albumArtURI").map(|uri| self.absolute(uri)),
+                    // The marker, not the missing `res`: a real favorite whose
+                    // content the service resolves can also arrive without one,
+                    // and dropping those would lose things that do play.
+                    shortcut: child("type").is_some_and(|t| t.eq_ignore_ascii_case("shortcut")),
+                }
+            })
+            .collect())
+    }
+
     pub async fn browse_content(&self, object_id: &str) -> Result<Vec<BrowseItem>> {
         let mut items = Vec::new();
         let mut start = 0;
@@ -357,30 +393,11 @@ impl Upnp {
             if total == 0 || didl_text.trim().is_empty() {
                 break;
             }
-            let didl = Document::parse(didl_text)
+            let page = self
+                .items_from_didl(didl_text)
                 .with_context(|| format!("parsing DIDL-Lite of {object_id}"))?;
-
-            let mut got = 0;
-            // Playlists come back as containers and favorites as items; both
-            // are enqueued the same way.
-            for node in didl
-                .descendants()
-                .filter(|n| n.has_tag_name("item") || n.has_tag_name("container"))
-            {
-                got += 1;
-                let child = |name: &str| {
-                    node.children()
-                        .find(|c| c.tag_name().name() == name)
-                        .and_then(|c| c.text())
-                };
-                items.push(BrowseItem {
-                    id: node.attribute("id").unwrap_or_default().to_owned(),
-                    title: child("title").unwrap_or_default().to_owned(),
-                    uri: child("res").map(str::to_owned),
-                    metadata: child("resMD").unwrap_or_default().to_owned(),
-                    art_url: child("albumArtURI").map(|uri| self.absolute(uri)),
-                });
-            }
+            let got = page.len() as u32;
+            items.extend(page);
             start += got;
             if got == 0 || start >= total || start >= MAX_QUEUE_ITEMS {
                 break;
@@ -777,6 +794,40 @@ mod tests {
         assert_eq!(insert_before(5, 2), 2);
         // Staying put is not a move, and must not drift.
         assert_eq!(insert_before(3, 3), 3);
+    }
+
+    #[test]
+    fn a_service_shortcut_is_told_apart_from_a_favorite() {
+        // Straight from this household: FV:2 carries Sonos Radio's navigation
+        // entries beside real favorites. They have an empty <res>, so they can
+        // be neither enqueued nor played, and the Sonos app does not show them
+        // as favorites either.
+        let didl = r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
+              xmlns:dc="http://purl.org/dc/elements/1.1/"
+              xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">
+            <item id="FV:2/0"><dc:title>Trending Now</dc:title><res></res>
+              <r:type>shortcut</r:type></item>
+            <item id="FV:2/9"><dc:title>Real Favorite</dc:title>
+              <res>x-sonosapi-stream:s24940</res><r:type>instantPlay</r:type></item>
+            <item id="FV:2/8"><dc:title>No Type At All</dc:title>
+              <res>x-sonosapi-stream:s111</res></item>
+          </DIDL-Lite>"#;
+        let items = Upnp::new("127.0.0.1".parse().unwrap())
+            .items_from_didl(didl)
+            .unwrap();
+        assert_eq!(
+            items.len(),
+            3,
+            "parsing keeps everything; filtering is the caller's"
+        );
+        assert!(items[0].shortcut, "marked shortcut");
+        assert!(!items[1].shortcut, "a real favorite with a type of its own");
+        assert!(!items[2].shortcut, "no r:type is not a shortcut");
+        // An empty <res> parses as no text at all, so `uri` is None rather than
+        // Some(""). Worth pinning: it means `uri.is_none()` cannot distinguish a
+        // shortcut from a favorite the service resolves, which is exactly why
+        // the r:type marker is what decides.
+        assert!(items[0].uri.is_none());
     }
 
     #[test]

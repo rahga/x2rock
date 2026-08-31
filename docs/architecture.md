@@ -721,22 +721,49 @@ without hands.
 
 - Paging. `search` takes `index` and the CLI always sends 0.
 
-## `FV:2` and `favorites:1 getFavorites` do **not** always agree (corrected 2026-08-31)
+## `FV:2` carries shortcuts; `getFavorites` does not (settled 2026-08-31)
 
-Recorded on 2026-08-28 as agreeing, at 41 each on the home household. On the office household they
-disagree outright:
+Recorded on 2026-08-28 as agreeing at 41 each on the home household, then apparently contradicted on
+the office household:
 
-- `favorites:1 getFavorites` → `{"items": [], "version": "RINCON_…:3"}` — **empty**.
+- `favorites:1 getFavorites` → `{"items": []}` — **empty**.
 - UPnP `Browse FV:2` → **three** items: "Discover Sonos Radio", "Sonos Presents", "Trending Now".
 
-All three are Sonos Radio's own, and none was created by anyone here. The likeliest reading is that
-the Control API lists favorites a *person* saved, while `FV:2` also carries the defaults a service
-contributes — which the earlier check could not have caught, because a household with 41 real
-favorites hides the distinction entirely.
+They do not actually disagree about favorites. All three of those carry
+`<r:type>shortcut</r:type>` and an **empty `<res>`**, and their `r:description` is "Sonos Radio":
+they are the service's own navigation entries, not saved favorites. The Control API is right to
+omit them.
 
-This is not academic: `x2rock favorites` uses the Control API and prints "No favorites." on this
-household, while the Sonos app and the widget's picker show three playable entries. Worth settling
-at home by comparing both lists item by item rather than by count.
+**Confirmed against the Sonos app**, which is the tie-breaker: on iPhone and Android the favorites
+list for this household shows *empty*. Nobody saved anything here, and the app does not present the
+shortcuts as favorites either. So `x2rock favorites` printing "No favorites." was correct all
+along, and the earlier note guessing at "defaults a service contributes" was directionally right
+but had no mechanism.
+
+The real defect was elsewhere. `x2rock queue sources` browses `FV:2` over UPnP and was listing all
+three as `favorite play` — offering things with no resource, which then failed a step later with
+`"Trending Now" has nothing to play`. `BrowseItem` now carries a `shortcut` flag taken from the
+`r:type` marker, and the sources list drops them, so both paths agree on nothing-to-play.
+
+Two details worth keeping:
+
+- **The marker decides, not the missing `res`.** A real favorite whose content the service resolves
+  can also arrive without one, and filtering on `uri.is_none()` would lose things that do play.
+- An empty `<res></res>` parses as *no text*, so `uri` is `None` rather than `Some("")` — which is
+  why `uri` alone could never have told the two apart. Pinned in a test.
+
+### What the app's search list says about this household
+
+Also from the phone: tapping search offers **Sonos Radio** and **YouTube Music**, and nothing else.
+That is the household's *registered* set — the answer to the enumeration question this document has
+been unable to get out of any API. Worth noting the asymmetry it exposes:
+
+- The Sonos app searches the services the household has **linked** (2 here).
+- `x2rock search` searches the services that need **no** linking (32 here).
+
+The two sets do not overlap at all. x2rock offers more search than the app does on this household,
+just not the two the household actually uses. Which is the whole case for the account-linking work,
+and the whole reason YouTube Music being closed matters.
 
 ## Linking an account: what the browser flow actually is (verified 2026-08-31)
 

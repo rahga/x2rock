@@ -1345,6 +1345,10 @@ async fn main() -> Result<()> {
                 Some(QueueAction::Sources { query, json }) => {
                     let mut sources = upnp.browse_content("SQ:").await?;
                     sources.extend(upnp.browse_content("FV:2").await?);
+                    // Shortcuts are not sources: they have no resource, so they
+                    // can neither be enqueued nor played, and offering one only
+                    // produces "has nothing to play" a step later.
+                    sources.retain(|item| !item.shortcut);
                     if let Some(query) = &query {
                         let needle = query.to_lowercase();
                         sources.retain(|i| i.title.to_lowercase().contains(&needle));
@@ -1356,6 +1360,10 @@ async fn main() -> Result<()> {
                     // so they are searched as one list.
                     let mut sources = upnp.browse_content("SQ:").await?;
                     sources.extend(upnp.browse_content("FV:2").await?);
+                    // Shortcuts are not sources: they have no resource, so they
+                    // can neither be enqueued nor played, and offering one only
+                    // produces "has nothing to play" a step later.
+                    sources.retain(|item| !item.shortcut);
                     let item = find_content(&sources, &query)?;
                     let uri = item
                         .uri
