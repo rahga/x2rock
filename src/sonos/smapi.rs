@@ -152,6 +152,16 @@ pub struct Item {
     /// places: `albumArtURI` for a track, a station's logo nested under
     /// `streamMetadata`.
     pub art_url: Option<String>,
+    /// A `mediaCollection` rather than a `mediaMetadata`: something to descend
+    /// into rather than something to play.
+    ///
+    /// **`canPlay` is deliberately not what decides this.** iHeartRadio marks an
+    /// `artist_radio` collection `canPlay`, and handing its id to `getMediaURI`
+    /// is refused with the accepted grammar spelled out - `artist_radio_track`,
+    /// `live_stations.`, `podcast_show`. So `canPlay` means "this collection can
+    /// be played" in some sense the service understands, not "this id resolves",
+    /// and the reliable question is which element the item arrived in.
+    pub container: bool,
 }
 
 /// A searchable category, from the service's presentation map.
@@ -281,7 +291,41 @@ pub async fn search(
         ),
     )
     .await?;
-    let doc = Document::parse(&body).context("parsing search response")?;
+    parse_items(&body, "search")
+}
+
+/// `getMetadata`: what a container holds.
+///
+/// The other half of reaching a linked service, and the only way to reach the
+/// parts of one that a search term cannot name - a personal library, a
+/// "For You", a genre tree. `root` is where every service starts.
+pub async fn metadata(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    index: u32,
+    count: u32,
+) -> Result<(Vec<Item>, u32)> {
+    let body = call(
+        service,
+        token,
+        "getMetadata",
+        &format!(
+            "<id>{}</id><index>{index}</index><count>{count}</count>",
+            escape(id)
+        ),
+    )
+    .await?;
+    parse_items(&body, "getMetadata")
+}
+
+/// The items in a `search` or `getMetadata` reply, and the total it claims.
+///
+/// One parser for both because the payload is the same: `mediaCollection` for
+/// something to descend into, `mediaMetadata` for something to play, and the
+/// services mix them freely in either call.
+fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
+    let doc = Document::parse(body).with_context(|| format!("parsing {what} response"))?;
     let total = doc
         .descendants()
         .find(|n| n.has_tag_name("total"))
@@ -316,6 +360,7 @@ pub async fn search(
                     .or_else(|| child("genre"))
                     .or_else(|| child("country")),
                 art_url: child("albumArtURI").or_else(|| nested("streamMetadata", "logo")),
+                container: n.has_tag_name("mediaCollection"),
             })
         })
         .collect();

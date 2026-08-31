@@ -118,6 +118,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Walk a music service's own containers: a personal library, a "For You",
+    /// a genre tree - the parts of a service no search term can name.
+    ///
+    /// The other half of `search`. A search takes a word; this takes a place.
+    Browse {
+        /// Service to browse, by name. Omit to list the ones that can be.
+        #[arg(long, short = 's')]
+        service: Option<String>,
+        /// The container to open. Defaults to `root`, where every service starts.
+        container: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        count: u32,
+        /// Play the Nth row, 1-based, in --room. Refused for a container, which
+        /// is something to open rather than something to play.
+        #[arg(long, value_name = "N")]
+        play: Option<usize>,
+        /// Re-read the service catalogue even if its version has not moved.
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Play one search result by its id, without searching again. What the bar
     /// widget uses once it already has results in hand.
     PlayItem {
@@ -1028,6 +1050,146 @@ async fn run_link(
     Ok(())
 }
 
+/// `x2rock browse`: a music service's own containers, walked one level at a time.
+///
+/// The half of a linked service that `search` cannot reach. "Play something from
+/// my playlists" is not a search - it names a place, not a word - and every
+/// service puts those places behind `getMetadata` starting at `root`.
+///
+/// A player is wanted but not required, on the same terms as `search`: listing
+/// what can be browsed comes from the on-disk catalogue, and only `--play` and a
+/// first run with nothing cached genuinely need one.
+#[allow(clippy::too_many_arguments)]
+async fn run_browse(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    service: Option<&String>,
+    container: Option<&str>,
+    count: u32,
+    play: Option<usize>,
+    refresh: bool,
+    json: bool,
+) -> Result<()> {
+    let mut state = State::load()?;
+    let reached = session::connect(ip, &mut state).await;
+    let live = || -> Result<&session::Session> {
+        reached
+            .as_ref()
+            .map_err(|e| anyhow!("no player to play it on: {e:#}"))
+    };
+
+    let mut catalogue = catalogue::Catalogue::load();
+    match &reached {
+        Ok(session) => {
+            if catalogue
+                .refresh(&Upnp::new(session.connection.ip()), refresh)
+                .await?
+            {
+                catalogue.save()?;
+            }
+        }
+        Err(e) if catalogue.services().is_empty() => return Err(anyhow!("{e:#}")),
+        Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
+    }
+
+    let linked = credentials::Credentials::load()?;
+    // The same set `search` offers. Browsing needs exactly what searching needs -
+    // an endpoint and, for a linked service, a token - so a service that can be
+    // searched can be walked, and one that cannot, cannot.
+    let usable = catalogue.searchable(&linked);
+
+    let Some(query) = service else {
+        let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable_by_key(|n| n.to_lowercase());
+        if json {
+            println!("{}", serde_json::to_string_pretty(&names)?);
+        } else {
+            println!("{} services can be browsed:", usable.len());
+            for name in names {
+                println!("  {name}");
+            }
+            println!("\nOpen one with: x2rock browse -s <service>");
+        }
+        return Ok(());
+    };
+
+    let chosen = catalogue::Catalogue::find(&usable, query)?.clone();
+    let token = linked.get(&chosen.id).map(|a| a.token());
+    // `root` is where every service starts, and no service documents it - it is
+    // simply what the players ask for.
+    let at = container.unwrap_or("root");
+    let (items, total) = sonos::smapi::metadata(&chosen, token.as_ref(), at, 0, count).await?;
+
+    if let Some(nth) = play {
+        let item = items
+            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
+            .ok_or_else(|| anyhow!("no row {nth}; {at} has {}", items.len()))?;
+        // A container is a place, and refusing here is kinder than letting
+        // getMediaURI refuse it with a grammar error about ids.
+        ensure!(
+            !item.container,
+            "{:?} is a container. Open it with: x2rock browse -s {} {}",
+            item.title,
+            chosen.name,
+            item.id
+        );
+        return play_item(
+            live()?,
+            room,
+            &chosen,
+            token.as_ref(),
+            &item.id,
+            &item.title,
+        )
+        .await;
+    }
+
+    if json {
+        let rows: Vec<_> = items
+            .iter()
+            .map(|i| {
+                // The field names `favorites`, `search` and `bookmarks` already
+                // use, plus the one thing only browsing has: whether a row is a
+                // place or a thing.
+                json!({
+                    "id": i.id,
+                    "name": i.title,
+                    "type": i.item_type,
+                    "description": i.summary,
+                    "service": chosen.name,
+                    "art_url": i.art_url,
+                    "container": i.container,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("{} is empty on {}.", at, chosen.name);
+        return Ok(());
+    }
+    for item in &items {
+        let summary = item
+            .summary
+            .as_deref()
+            .map(|s| format!("  {s}"))
+            .unwrap_or_default();
+        // A trailing slash for somewhere to go, the way a directory listing
+        // marks one. Cheaper to read than a column.
+        let name = if item.container {
+            format!("{}/", item.title)
+        } else {
+            item.title.clone()
+        };
+        println!("{:<40} {:<10} {name}{summary}", item.id, item.item_type);
+    }
+    if total > items.len() as u32 {
+        println!("\n{} of {total} in {at}.", items.len());
+    }
+    Ok(())
+}
+
 /// `x2rock search`: the CLI talking to a music service, and the only place that
 /// leaves the LAN. See "Rule: search never enters the daemon".
 ///
@@ -1237,6 +1399,26 @@ async fn main() -> Result<()> {
             ref title,
         } => {
             return run_play_item(cli.ip, cli.room.as_deref(), service, id, title.as_ref()).await;
+        }
+        Command::Browse {
+            ref service,
+            ref container,
+            count,
+            play,
+            refresh,
+            json,
+        } => {
+            return run_browse(
+                cli.ip,
+                cli.room.as_deref(),
+                service.as_ref(),
+                container.as_deref(),
+                count,
+                play,
+                refresh,
+                json,
+            )
+            .await;
         }
         Command::Link {
             ref service,
@@ -2070,6 +2252,7 @@ async fn main() -> Result<()> {
         | Command::Bookmarks { .. }
         | Command::Search { .. }
         | Command::PlayItem { .. }
+        | Command::Browse { .. }
         | Command::Link { .. }
         | Command::Unlink { .. }
         | Command::Accounts { .. }

@@ -331,6 +331,31 @@ speaks to nothing but the local network, so a music service being slow or unreac
 play, pause or volume — a widget losing search keeps every control it had. See
 [docs/architecture.md](docs/architecture.md), "Rule: search never enters the daemon".
 
+## Browsing a service
+
+```sh
+x2rock browse                                   # what can be browsed
+x2rock browse -s iheartradio                    # the service's own root
+x2rock browse -s iheartradio for_you            # open a container
+x2rock browse -s iheartradio for_you --play 1   # play a row
+```
+
+The other half of `search`. A search takes a word; this takes a *place* — a
+personal library, a "For You", a genre tree — and those are the parts of a
+service no search term can name. "Play something from my playlists" is not a
+search, and this is what answers it. Every service starts at `root`; a trailing
+`/` marks a row you can open, and everything else is a row you can play.
+
+It needs exactly what searching needs, so the same 34 services are reachable: the
+32 anonymous ones plus whatever is linked. `--json` adds one field to the shape
+`favorites`, `search` and `bookmarks` already share — `container`, saying whether
+a row is a place or a thing.
+
+A caution worth repeating: **do not trust a service's `canPlay` flag.**
+iHeartRadio marks an `artist_radio` collection playable, and handing its id to
+the play path is refused with a grammar error. What decides is whether the item
+arrived as a container, which is what `browse` reports.
+
 ## Linking an account
 
 ```sh

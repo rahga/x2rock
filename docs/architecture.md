@@ -1428,6 +1428,56 @@ So `browse` is not a nice-to-have for shop-shaped services like Bandcamp. It is 
 the feature for *every* linked service, and the first real user request against linked accounts
 could not be served without it.
 
+## `browse`, and the picker that stopped being about favorites (2026-08-31)
+
+`x2rock browse [-s service] [container]`, and the widget's picker rebuilt around it. Verified three
+levels deep on TuneIn — root, `Music`, `Top Music Stations`, ending in playable `s30119` streams —
+and on iHeartRadio's own containers.
+
+`getMetadata` and `search` return the same payload, so one parser serves both. What browsing needs
+that searching did not is a single new field on an item: **`container`**, true when it arrived as a
+`mediaCollection` rather than a `mediaMetadata`. That is the *only* reliable answer to "can this be
+played", and the reason is written up above — iHeartRadio marks an `artist_radio` collection
+`canPlay` and then refuses its id with a grammar error. `canPlay` is never consulted.
+
+Browsing is offered for exactly the services search is offered for: an endpoint plus, if linked, a
+token. So `searchable()` backs both, and nothing new had to decide reachability.
+
+### The picker is now a music picker
+
+The room-row button changed from a star to a note, and with it the panel's meaning: it was the
+household's favorites, and it is now favorites, this machine's kept items, a service's own
+containers, and a search. Four sources, one question — what should this room play.
+
+- **The glyph is plain `♪` (U+266A), not a Nerd Font icon.** Chosen so the button does not depend on
+  a patched font. The cost is real and worth stating: JetBrainsMono Nerd Font has no U+266A, so Qt
+  falls back per-character to Adwaita/Liberation/Nimbus and the note can sit a shade lighter than
+  the MDI glyphs beside it. `nf-md-music` (U+F075A) is two beamed quavers and is the matching-weight
+  alternative, one `shell.json` key away. `party` already set this precedent with `◉`.
+- **The glyph key is `music` now, and `favorites` still works.** Renaming a documented setting to
+  reflect a better name is not worth breaking a household's `shell.json` over, so the old key is
+  honoured after the merge.
+- **Inside a container the list is that container and nothing else.** Favorites are not mixed in:
+  with them there, "back" has two meanings and the count line describes nothing.
+- **The path is pushed before the reply arrives**, so the title and the back row are right while the
+  call is still in flight. The reply is then only shown if it answers the container on screen —
+  `browseAnsweredFor` against the frame's key — because a slow reply to somewhere already left would
+  silently move someone.
+- **A container that fails to open leaves the path where it is.** iHeartRadio's own My Stations
+  returns a 500, and dropping someone out of a tree they were halfway down would be a worse answer
+  than a one-line status. This is the "one failing container must not fail the listing" rule from the
+  entry above, in the only form the widget needs it.
+- **`Backspace` and `←` go up, but only on an empty filter.** Both keys mean something to a text
+  cursor, and a filter someone is still editing outranks navigation.
+- **`play-item` takes the row's own service**, not `searchService`. A browse row can come from a
+  service the picker was not configured around, and the old code would have handed one service's id
+  to another.
+- **The subtitle drops the service name while browsing.** The title already says which service one
+  is inside; repeating it on fifty rows is noise.
+
+Its own `Process`, like `searchProc` and for the same reason: browsing leaves the LAN, and the rule
+that search never enters the daemon covers this too.
+
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
 Everything above was verified against an account with nothing in it, which is exactly the state
@@ -2438,23 +2488,14 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **`x2rock browse <service> [container]`** (opened 2026-08-31, replacing "play something from a
-   linked service", which is done — see "Played, end to end"). `getMetadata` over the containers a
-   service's `root` returns, with the same `--json` field names `search`, `favorites` and
-   `bookmarks` already emit so the widget's picker concatenates rather than translates. This is the
-   missing half of linked accounts, not a refinement: the first real request against a linked
-   service — "play something from my playlists" — could not be expressed with `search` at all, and
-   was answered with hand-rolled SOAP.
-
-   Two things to get right, both learned the hard way above. `canPlay` on a collection does **not**
-   mean the id can be handed to `getMediaURI`, which has a narrow grammar and refuses an
-   `artist_radio` container; browse should distinguish "descend into this" from "play this". And a
-   container can be broken upstream while the account is fine — iHeartRadio's own My Stations
-   returns a 500 — so one failing container must not fail the listing.
-
-   After that, the widget, where a browse tree is a different shape from a flat picker and
-   `searchService` naming a single service starts to strain with two accounts linked and 32
-   anonymous services.
+1. **Which services the picker should offer, once there are more than one** (opened 2026-08-31,
+   replacing "`x2rock browse`", which is built — see "`browse`, and the picker that stopped being
+   about favorites"). `searchService` names a single service and `browseServices` an array, both by
+   hand in `shell.json`. With 32 anonymous services and a growing number of linked ones, naming them
+   by hand is the part that will not scale, and the widget has no way to ask what is linked. The
+   pieces to build with are there: `x2rock accounts --json` lists what this machine holds a token
+   for, and `x2rock search`/`browse` with no argument list what is reachable. What is undecided is
+   whether the picker should discover services itself or keep the configured-by-hand bargain.
 
    Two loose ends that block nothing. **`match`** has never succeeded — see "`match`, and why
    nothing needs it yet". **Bandcamp** stays deferred until there is something in the collection.
