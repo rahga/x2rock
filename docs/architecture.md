@@ -1401,10 +1401,15 @@ http://stream.revma.ihrhls.com/zc4242/hls.m3u8?...&deviceId=Sonos_Gcd...&profile
 service at all. The household does not need to know about the account because every request already
 names it.
 
-Which reframes `match` from a required last step into an optional one that may not be available to a
-controller. It is still attempted, because it is the documented step and one household's refusal is
-not proof, but the message when it fails is now mild rather than alarming: every `match` this
-project has attempted has been refused, and nothing has yet needed one.
+Which reframed `match` from a required last step into an optional one that may not be available to a
+controller — **and that reframing was wrong within the day.** Mixcloud can be searched, browsed and
+handed to a room, and will not play: its stream needs service-side key derivation, so the *player*
+has to resolve the media, so the player needs a credential, so the account has to be registered on
+the household. See "There *is* a wall, and it is nowhere near where this document put it".
+
+The conclusion to keep is narrower than either version: **`match` is not needed for search or
+browse, and may well be needed for playback of any service whose streams are not self-sufficient.**
+It is still attempted on every link, it has never succeeded, and it is no longer a curiosity.
 
 ### Played, end to end (verified 2026-08-31)
 
@@ -1554,20 +1559,66 @@ The general lesson is the one `canPlay` already taught in a different costume: *
 only thing that says whether an id can be played, and it has to be carried everywhere an item
 goes.** Adding a field to a struct is not the same as plumbing it.
 
-### Still no wall
+### There *is* a wall, and it is nowhere near where this document put it
 
-`getMediaURI` on a Mixcloud track returns a plain HLS URL, the third service in a row to do so:
+**Mixcloud search and browse work. Mixcloud playback does not.** `x2rock browse -s Mixcloud
+trending --play 1` is accepted, the room takes the item and shows its title, and then the player
+oscillates `BUFFERING` → `IDLE` with `positionMillis: 0` and `canPause: false`. It never starts.
+
+`getMediaURI` is not the problem and neither is authentication. It returns a plain HLS URL with no
+`httpHeaders`, no `contentKey`, no `deviceSessionKey` — and every part of that stream is publicly
+fetchable without a credential: the master playlist answers 200, the variant answers 200, and a
+segment answers 200 with 90 KB of audio. The problem is one line inside the playlist:
 
 ```
-https://aod.mixcloud.stream/secure/hls_aes128/...index.m3u8
+#EXT-X-KEY:METHOD=AES-128,URI="data:text/plain,/secure/hls_aes128/2/2/1/8/1268-...-f1b97737e761.m4a"
 ```
 
-Worth reading closely: `hls_aes128` means the stream **is** encrypted, and Sonos still needs no
-`contentKey` — the key URI travels inside the m3u8, the way HLS specifies. Which suggests
-`contentKey` and `deviceSessionKey` are for some other, probably older DRM path, and that the
-"auth is not the last wall" warning may be pointing at a wall that modern services simply do not
-use. Not proven, but three services in and nothing has needed `httpHeaders` yet. TIDAL is still the
-only candidate left that might.
+That `data:` URI's payload is a **63-byte path string**. AES-128 keys are 16 bytes. So a
+standards-compliant HLS client fetches the key, gets something that cannot be a key, and stalls —
+which is exactly what the speaker does. Mixcloud's own player evidently derives the real key from
+that path; nothing else can.
+
+Three corrections follow, and they matter more than the bug did:
+
+1. **A plain URL from `getMediaURI` does not mean playable.** This document has been treating the
+   absence of `httpHeaders` as the all-clear since "Auth is not the last wall" was written. It is
+   not: the wall can sit *downstream of the URL*, inside the stream's own encryption, where no SMAPI
+   field will warn you. Two services played, so the inference looked safe. It was luck.
+2. **`contentKey` and `deviceSessionKey` are not a legacy path** — the paragraph this replaces
+   guessed they were. Mixcloud is precisely a service whose stream needs service-side key
+   derivation, and it sends neither, which is much better explained by **Sonos not playing Mixcloud
+   through `loadStreamUrl` at all.**
+3. So **`match` is back in play**, having been demoted an hour earlier. See below.
+
+### What this does to `match`
+
+The entry above concluded that nothing needs `match`, on the evidence that iHeartRadio's stream URL
+carries its own identity and plays. Mixcloud is the counterexample: a service whose content this
+project can find, name and hand to a room, and cannot make a sound with.
+
+The mechanism that would work is already documented here and already shipping — for a *different*
+feature. `bookmarks` enqueues service content by building DIDL with a
+`SA_RINCON<type>_X_#Svc<type>-0-Token` cdudn, where **the literal trailing `Token` is a placeholder
+the player resolves against its own stored credential.** That is how a kept YouTube Music track
+plays while x2rock holds no YouTube credential at all: the player fetches the stream, not us.
+
+Which suggests the real division of labour, and it is not the one built:
+
+- `loadStreamUrl` works when the URL is genuinely self-sufficient — free radio, and anything whose
+  segments need nothing.
+- **Enqueueing with a cdudn** is what a service-side-encrypted stream needs, because it makes the
+  *player* resolve the media, and the player is the thing with a service credential the service
+  itself will honour.
+- And the player only has that credential if the account is registered on the household — which is
+  what `match` is for.
+
+**The next experiment is concrete and cheap**: take a Mixcloud `cloudcast:` id, build the DIDL
+`bookmarks.rs` already builds, and enqueue it. If it plays, then `loadStreamUrl` is the wrong
+mechanism for linked services generally, `match` becomes required rather than optional, and
+`ERROR_COMMAND_FAILED` with no reason becomes the most important unsolved problem in this project
+rather than a curiosity. If it does not play, Mixcloud is simply not reachable from a third-party
+controller and should be said so plainly.
 
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
