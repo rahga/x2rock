@@ -1613,12 +1613,48 @@ Which suggests the real division of labour, and it is not the one built:
 - And the player only has that credential if the account is registered on the household — which is
   what `match` is for.
 
-**The next experiment is concrete and cheap**: take a Mixcloud `cloudcast:` id, build the DIDL
-`bookmarks.rs` already builds, and enqueue it. If it plays, then `loadStreamUrl` is the wrong
-mechanism for linked services generally, `match` becomes required rather than optional, and
-`ERROR_COMMAND_FAILED` with no reason becomes the most important unsolved problem in this project
-rather than a curiosity. If it does not play, Mixcloud is simply not reachable from a third-party
-controller and should be said so plainly.
+### The experiment, run (2026-08-31)
+
+Done by hand-writing entries into `bookmarks.json` and using the shipping `x2rock bookmark` path, so
+no code was changed to get the answer.
+
+| # | URI / DIDL | Result |
+|---|---|---|
+| A | `cloudcast:2191563811`, sid 181, sn=1 | `AddURIToQueue` → **UPnP 800** |
+| B | same, sn=2 | UPnP 800 |
+| C | `cloudcast%3a2191563811`, sid 181 | UPnP 800 |
+| **control** | the YouTube Music id that already works, sid 284, sn=2 | **plays** |
+| D | YouTube Music id, sid 284, **sn=9** — a serial the household does not have | **plays** |
+| **E** | **YouTube Music id, sid 181** — the working id under Mixcloud's service | **UPnP 800** |
+
+D and E are the whole answer. **`sn=` is not load-bearing** — a serial that cannot exist still
+plays, so the player is not resolving the account from it. And E changes *only* the service: the
+identical object id that plays under 284 is refused under 181. So the refusal is about **the service
+account, not the id shape**, and the earlier suspicion that `cloudcast:`'s colon was to blame is
+wrong.
+
+The chain is therefore:
+
+- **Enqueue-with-cdudn is the right mechanism for service content.** YouTube Music proves it, and
+  proves it on protected content — a kept YTM track plays while x2rock holds no Google credential,
+  because the cdudn's literal trailing `Token` makes the *player* resolve the media.
+- **The player refuses to enqueue content for a service account the household does not hold.** The
+  difference between 284 and 181 on this household is that YouTube Music was linked in the Sonos
+  app and Mixcloud was linked only by x2rock.
+- **Registering that account on the household is exactly what `match` does, and `match` fails.**
+
+So `match` is not a curiosity and not optional: it is **the blocker for playing any linked service
+whose stream is not self-sufficient**, and `ERROR_COMMAND_FAILED` with no reason is now the most
+important unsolved problem in this project.
+
+What would clinch it, and needs a person: **link Mixcloud in the Sonos app**, then re-run test A. If
+it plays, the chain above is proven end to end and the only missing piece is `match`. If it still
+returns 800, then service 181 content cannot be enqueued by anyone and Mixcloud is out of reach from
+a third-party controller regardless of accounts.
+
+One loose end worth noting: x2rock glosses UPnP 800 as "no such position in the queue", which is
+wrong here. 800 is UPnP's undefined-error code and the gloss belongs to `Seek`, not
+`AddURIToQueue`.
 
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
