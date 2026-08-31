@@ -1,5 +1,6 @@
 mod bookmarks;
 mod catalogue;
+mod credentials;
 mod daemon;
 mod discover;
 mod mpris;
@@ -127,6 +128,38 @@ enum Command {
         /// service shows when given nothing better.
         #[arg(long)]
         title: Option<String>,
+    },
+    /// Link a music service account, so its catalogue can be searched.
+    ///
+    /// Opens the service's own login page in whatever browser is already
+    /// configured, waits for it to be finished, and stores the token it mints.
+    /// No Sonos account, no partner registration, no embedded browser.
+    Link {
+        /// Which service, by name. Omit to list the ones that can be linked.
+        service: Option<String>,
+        /// Print the URL instead of opening it. What to use over ssh.
+        #[arg(long)]
+        no_open: bool,
+        /// What the household should call the account. Defaults to the hostname,
+        /// so a household with several machines can tell them apart.
+        #[arg(long)]
+        nickname: Option<String>,
+        /// Store the token without registering the account on the household.
+        /// Search works either way; only playback needs the household to know.
+        #[arg(long)]
+        no_match: bool,
+    },
+    /// Forget a linked account's stored token.
+    ///
+    /// Local only: it does not revoke anything at the service, which is done
+    /// from that service's own account page.
+    Unlink {
+        service: String,
+    },
+    /// List the accounts this machine holds a token for.
+    Accounts {
+        #[arg(long)]
+        json: bool,
     },
     /// Remember what is playing, so it can be started again later.
     ///
@@ -698,10 +731,11 @@ async fn play_item(
     session: &session::Session,
     room: Option<&str>,
     service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
     id: &str,
     title: &str,
 ) -> Result<()> {
-    let uri = sonos::smapi::media_uri(service, id).await?;
+    let uri = sonos::smapi::media_uri(service, token, id).await?;
     let target = session::target(&session.groups, room)?;
     let coordinator = session::coordinator(session, &target).await?;
 
@@ -762,16 +796,228 @@ async fn run_play_item(
     catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
         .await?;
-    let usable = catalogue.searchable();
+    let linked = credentials::Credentials::load()?;
+    let usable = catalogue.searchable(&linked);
     let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
+    let token = linked.get(&chosen.id).map(|a| a.token());
     play_item(
         &session,
         room,
         &chosen,
+        token.as_ref(),
         id,
         title.map(String::as_str).unwrap_or(id),
     )
     .await
+}
+
+/// A rough age, for a list where the exact second has never mattered.
+fn ago(then: u64) -> String {
+    let now = credentials::now();
+    let seconds = now.saturating_sub(then);
+    match seconds {
+        0..=90 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// What the household should call this machine's account, when nothing was given.
+///
+/// The hostname, because a household can have several machines linked to the
+/// same service account and the Sonos app shows this string.
+fn default_nickname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| h.trim().to_string())
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("x2rock on {h}"))
+        .unwrap_or_else(|| "x2rock".to_string())
+}
+
+/// Hand a URL to whatever browser the person already uses.
+///
+/// Spawned and not waited on: `xdg-open` stays attached to some handlers for as
+/// long as the browser lives, and the polling loop below is what should be
+/// running, not a wait.
+fn open_in_browser(url: &str) -> Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("running xdg-open")?;
+    Ok(())
+}
+
+/// `x2rock link`: the device-link flow, end to end.
+///
+/// A player is required, unlike search: the link is minted *for a household*,
+/// and its id is in both SMAPI calls. The browser step is the person's own
+/// browser, and the whole interaction for a service like Bandcamp is: open a
+/// link, log in, done.
+async fn run_link(
+    ip: Option<IpAddr>,
+    service: Option<&String>,
+    no_open: bool,
+    nickname: Option<&String>,
+    no_match: bool,
+) -> Result<()> {
+    let mut linked = credentials::Credentials::load()?;
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state).await?;
+    let mut catalogue = catalogue::Catalogue::load();
+    if catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await?
+    {
+        catalogue.save()?;
+    }
+
+    let Some(query) = service else {
+        let linkable = catalogue.linkable();
+        println!("{} services can be linked:", linkable.len());
+        for s in &linkable {
+            let mark = match linked.get(&s.id) {
+                Some(a) => format!("  (linked {})", ago(a.linked)),
+                None => String::new(),
+            };
+            println!("  {}{mark}", s.name);
+        }
+        println!("\nLink one with: x2rock link <service>");
+        return Ok(());
+    };
+
+    let chosen = catalogue.find_any(query)?.clone();
+    ensure!(
+        chosen.auth == sonos::smapi::Auth::DeviceLink,
+        "{} does not use device linking. {}",
+        chosen.name,
+        match chosen.auth {
+            sonos::smapi::Auth::Anonymous =>
+                "It needs no account at all - search it as it is.".to_string(),
+            _ => format!(
+                "It hands off to its own app, which a Linux desktop cannot do, \
+                 so x2rock cannot link it. Run `x2rock link` for the {} that work.",
+                catalogue.linkable().len()
+            ),
+        }
+    );
+
+    let household = session.connection.household_id().await?;
+    let code = sonos::smapi::device_link_code(&chosen, &household).await?;
+
+    if no_open {
+        println!(
+            "Open this and log in to {}:\n\n  {}\n",
+            chosen.name, code.reg_url
+        );
+    } else {
+        // A failure to open is not a failure to link: the URL is right there,
+        // and this is the one path that matters over ssh.
+        match open_in_browser(&code.reg_url) {
+            Ok(()) => println!("Opened {} in your browser.", chosen.name),
+            Err(e) => println!(
+                "Could not open a browser ({e:#}). Open this yourself:\n\n  {}\n",
+                code.reg_url
+            ),
+        }
+    }
+    if code.show_link_code {
+        println!("Enter this code when asked:\n\n  {}\n", code.link_code);
+    }
+
+    let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
+    eprint!("Waiting for you to finish");
+    let auth = loop {
+        match sonos::smapi::device_auth_token(&chosen, &household, &code.link_code).await {
+            Ok(Some(auth)) => {
+                eprintln!();
+                break auth;
+            }
+            Ok(None) => {
+                use std::io::Write;
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+            }
+            Err(e) => {
+                eprintln!();
+                return Err(e);
+            }
+        }
+        if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
+            eprintln!();
+            bail!(
+                "{} never confirmed the link. Run `x2rock link {}` again to start over.",
+                chosen.name,
+                chosen.name
+            );
+        }
+        tokio::time::sleep(sonos::smapi::LINK_POLL).await;
+    };
+
+    let nickname = nickname.cloned().unwrap_or_else(default_nickname);
+    let hash = auth.user_id_hash_code.clone();
+    let (id, account) = credentials::from_device_auth(
+        &chosen.id,
+        &chosen.name,
+        Some(&household),
+        Some(&nickname),
+        auth,
+    );
+    // Stored before anything else is attempted. A link code is single-use, so
+    // losing the token to a later failure would mean walking back through the
+    // browser to fix something that already worked.
+    linked.remember(&id, account);
+    linked.save()?;
+    println!(
+        "Linked {}. Search it with: x2rock search -s {}",
+        chosen.name, chosen.name
+    );
+
+    if no_match {
+        return Ok(());
+    }
+    let Some(hash) = hash else {
+        println!(
+            "{} sent no userIdHashCode, so the household cannot be told about \
+             the account. Search works; playback through the household may not.",
+            chosen.name
+        );
+        return Ok(());
+    };
+    match session
+        .connection
+        .match_music_service_account(
+            &household,
+            &chosen.id,
+            &hash,
+            &nickname,
+            Some(&code.link_code),
+        )
+        .await
+    {
+        Ok(account_id) => {
+            if let Some(entry) = linked.services.get_mut(&id) {
+                entry.account_id = account_id.clone();
+            }
+            linked.save()?;
+            match account_id {
+                Some(id) => println!("Registered on the household as account {id}."),
+                None => println!("Registered on the household."),
+            }
+        }
+        // The token is already on disk and already useful, so this is a warning
+        // and not an error: failing the command here would suggest the whole
+        // flow needs repeating, and it does not.
+        Err(e) => println!(
+            "Stored the token, but the household refused the account ({e:#}). \
+             Search works; retry the registration with `x2rock link {}`.",
+            chosen.name
+        ),
+    }
+    Ok(())
 }
 
 /// `x2rock search`: the CLI talking to a music service, and the only place that
@@ -819,7 +1065,8 @@ async fn run_search(
         Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
     }
 
-    let usable = catalogue.searchable();
+    let linked = credentials::Credentials::load()?;
+    let usable = catalogue.searchable(&linked);
 
     let Some(query) = service else {
         let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
@@ -827,15 +1074,24 @@ async fn run_search(
         if json {
             println!("{}", serde_json::to_string_pretty(&names)?);
         } else {
+            let linkable = catalogue.linkable().len();
             println!(
-                "{} of {} services can be searched without an account:",
+                "{} of {} services can be searched:",
                 usable.len(),
                 catalogue.services().len()
             );
             for name in names {
-                println!("  {name}");
+                let mark = if linked.services.values().any(|a| a.service_name == name) {
+                    "  (linked)"
+                } else {
+                    ""
+                };
+                println!("  {name}{mark}");
             }
             println!("\nSearch one with: x2rock search -s <service> <term>");
+            if linkable > 0 {
+                println!("{linkable} more can be linked: x2rock link");
+            }
         }
         if dirty {
             catalogue.save()?;
@@ -853,9 +1109,16 @@ async fn run_search(
                 .iter()
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
+                Some(s) if s.auth == sonos::smapi::Auth::DeviceLink => anyhow!(
+                    "{} needs a linked account. Run `x2rock link {}` once, \
+                     then search it like any other.",
+                    s.name,
+                    s.name
+                ),
                 Some(s) => anyhow!(
-                    "{} needs a linked account, which x2rock cannot supply. \
-                     Run `x2rock search` for the ones that do not.",
+                    "{} authenticates by handing off to its own app, which a \
+                     Linux desktop cannot do. Run `x2rock search` for the ones \
+                     that can be searched.",
                     s.name
                 ),
                 None => e,
@@ -902,13 +1165,15 @@ async fn run_search(
         return Ok(());
     };
 
-    let (items, total) = sonos::smapi::search(chosen, &picked.mapped_id, term, 0, count).await?;
+    let token = linked.get(&chosen.id).map(|a| a.token());
+    let (items, total) =
+        sonos::smapi::search(chosen, token.as_ref(), &picked.mapped_id, term, 0, count).await?;
 
     if let Some(nth) = play {
         let item = items
             .get(nth.checked_sub(1).unwrap_or(usize::MAX))
             .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
-        return play_item(live()?, room, chosen, &item.id, &item.title).await;
+        return play_item(live()?, room, chosen, token.as_ref(), &item.id, &item.title).await;
     }
     if json {
         let rows: Vec<_> = items
@@ -964,6 +1229,83 @@ async fn main() -> Result<()> {
             ref title,
         } => {
             return run_play_item(cli.ip, cli.room.as_deref(), service, id, title.as_ref()).await;
+        }
+        Command::Link {
+            ref service,
+            no_open,
+            ref nickname,
+            no_match,
+        } => {
+            return run_link(
+                cli.ip,
+                service.as_ref(),
+                no_open,
+                nickname.as_ref(),
+                no_match,
+            )
+            .await;
+        }
+        // Both of these are about a file on this machine, so neither needs a
+        // player and both work with the household unreachable.
+        Command::Unlink { ref service } => {
+            let mut linked = credentials::Credentials::load()?;
+            let id = linked
+                .services
+                .iter()
+                .find(|(_, a)| a.service_name.eq_ignore_ascii_case(service))
+                .map(|(id, _)| id.clone())
+                .ok_or_else(|| {
+                    anyhow!("no account linked for {service:?}. Run `x2rock accounts` to see them.")
+                })?;
+            let dropped = linked.forget(&id);
+            linked.save()?;
+            if let Some(account) = dropped {
+                println!(
+                    "Forgot the {} token. It is still valid at the service - \
+                     revoke it there if that matters.",
+                    account.service_name
+                );
+            }
+            return Ok(());
+        }
+        Command::Accounts { json } => {
+            let linked = credentials::Credentials::load()?;
+            if json {
+                let rows: Vec<_> = linked
+                    .services
+                    .iter()
+                    .map(|(id, a)| {
+                        // Never the token or the key: this is printed to a
+                        // terminal, into a widget's stdout, and into whatever
+                        // logs those end up in.
+                        json!({
+                            "service_id": id,
+                            "service": a.service_name,
+                            "nickname": a.nickname,
+                            "household": a.household,
+                            "account_id": a.account_id,
+                            "linked": a.linked,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if linked.services.is_empty() {
+                println!("No accounts linked. Run `x2rock link` to see what can be.");
+            } else {
+                for (id, a) in &linked.services {
+                    let registered = match &a.account_id {
+                        Some(account) => format!("household account {account}"),
+                        None => "not registered on the household".to_string(),
+                    };
+                    println!(
+                        "{:<20} {:<10} {:<12} {registered}",
+                        a.service_name,
+                        id,
+                        ago(a.linked)
+                    );
+                }
+            }
+            return Ok(());
         }
         Command::Search {
             ref term,
@@ -1720,6 +2062,9 @@ async fn main() -> Result<()> {
         | Command::Bookmarks { .. }
         | Command::Search { .. }
         | Command::PlayItem { .. }
+        | Command::Link { .. }
+        | Command::Unlink { .. }
+        | Command::Accounts { .. }
         | Command::Discover
         | Command::Daemon => unreachable!("handled above"),
     }

@@ -155,6 +155,56 @@ impl Connection {
         Ok(serde_json::from_value(body)?)
     }
 
+    /// Register a linked music service account on the household.
+    ///
+    /// `musicServiceAccounts:1 match` is the last step of a device link, and the
+    /// one place a controller uses that namespace for anything but cache
+    /// invalidation. An earlier reading of the spec called this a
+    /// service-provider-only endpoint, because `userIdHashCode` is documented as
+    /// something "your SMAPI server" computes - but `getDeviceAuthToken` hands
+    /// that field to whoever completes the link, precisely so the controller can
+    /// come here with it.
+    ///
+    /// Returns the household's own id for the account. Household-scoped, so any
+    /// player will answer.
+    pub async fn match_music_service_account(
+        &self,
+        household_id: &str,
+        service_id: &str,
+        user_id_hash_code: &str,
+        nickname: &str,
+        link_code: Option<&str>,
+    ) -> Result<Option<String>> {
+        let mut options = json!({
+            "serviceId": service_id,
+            "userIdHashCode": user_id_hash_code,
+            "nickname": nickname,
+        });
+        // Sent only when there is one: the field is optional and a null would be
+        // a different request from an absent key.
+        if let Some(code) = link_code {
+            options["linkCode"] = json!(code);
+        }
+        let body = self
+            .call(
+                json!({
+                    "namespace": "musicServiceAccounts:1",
+                    "command": "match",
+                    "householdId": household_id,
+                }),
+                options,
+            )
+            .await?;
+        // The account id is the useful half, but a reply without one is still a
+        // success - the household accepted the account either way, and inventing
+        // an error over a missing field would undo a completed link.
+        Ok(body
+            .get("id")
+            .or_else(|| body.get("accountId"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string))
+    }
+
     /// Replace what a group is playing with a favorite, and start it.
     ///
     /// This is the one way x2rock can begin playback from nothing: `play` only

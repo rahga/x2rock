@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use crate::credentials::Credentials;
 use crate::sonos::smapi::{self, Category, Service};
 use crate::sonos::upnp::Upnp;
 
@@ -38,7 +39,11 @@ use crate::sonos::upnp::Upnp;
 /// because the version matches and nothing refetches - which is exactly how
 /// `service_type` came back empty and made every cdudn underivable. Keying on
 /// both is the fix.
-const SCHEMA: u32 = 1;
+///
+/// 2: `Auth` stopped being Anonymous-or-Linked and became Anonymous, DeviceLink
+/// or AppLink, so every cached `"auth":"Linked"` is unreadable - and a service
+/// wrongly filed as unusable is exactly what linking exists to fix.
+const SCHEMA: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Catalogue {
@@ -130,12 +135,33 @@ impl Catalogue {
         &self.services
     }
 
-    /// The services that can actually be searched without an account.
-    pub fn searchable(&self) -> Vec<&Service> {
+    /// The services that can actually be searched: the anonymous ones, plus any
+    /// this machine holds a token for.
+    ///
+    /// Takes the credentials rather than reading them itself so that the two
+    /// stores stay independent - the catalogue is a cache and this is a secret,
+    /// and only the caller has reason to hold both.
+    pub fn searchable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
         self.services
             .iter()
-            .filter(|s| s.auth == smapi::Auth::Anonymous)
+            .filter(|s| s.auth == smapi::Auth::Anonymous || linked.get(&s.id).is_some())
             .collect()
+    }
+
+    /// The services `x2rock link` could get a credential for, whether or not it
+    /// already has one. `AppLink` is excluded because nothing can drive it.
+    pub fn linkable(&self) -> Vec<&Service> {
+        self.services
+            .iter()
+            .filter(|s| s.auth == smapi::Auth::DeviceLink)
+            .collect()
+    }
+
+    /// A service by name across the *whole* catalogue, for commands that are not
+    /// searching - linking one, or explaining why a name cannot be searched.
+    pub fn find_any(&self, query: &str) -> Result<&Service> {
+        let all: Vec<&Service> = self.services.iter().collect();
+        Self::find(&all, query)
     }
 
     /// A service by name: exact match first, then unique prefix.
@@ -234,21 +260,82 @@ mod tests {
         assert_eq!(Catalogue::find(&refs, "radio").unwrap().id, "1");
     }
 
-    #[test]
-    fn searchable_keeps_only_the_ones_needing_no_account() {
-        let cat = Catalogue {
+    fn three_tiers() -> Catalogue {
+        Catalogue {
             schema: SCHEMA,
             version: "v1".into(),
             services: vec![
                 service("1", "TuneIn", smapi::Auth::Anonymous),
-                service("2", "YouTube Music", smapi::Auth::Linked),
+                service("2", "YouTube Music", smapi::Auth::AppLink),
+                service("200", "Bandcamp", smapi::Auth::DeviceLink),
             ],
             categories: BTreeMap::new(),
-        };
-        let usable = cat.searchable();
+        }
+    }
+
+    fn linked(service_id: &str) -> Credentials {
+        let mut creds = Credentials::default();
+        creds.remember(
+            service_id,
+            crate::credentials::Account {
+                service_name: "Bandcamp".into(),
+                auth_token: "tok".into(),
+                private_key: "key".into(),
+                user_id_hash_code: None,
+                nickname: None,
+                household: None,
+                account_id: None,
+                linked: 1,
+            },
+        );
+        creds
+    }
+
+    #[test]
+    fn searchable_is_the_anonymous_ones_until_something_is_linked() {
+        let cat = three_tiers();
+        let usable = cat.searchable(&Credentials::default());
         assert_eq!(usable.len(), 1);
         assert_eq!(usable[0].name, "TuneIn");
-        assert_eq!(cat.services().len(), 2, "the full list is still there");
+        assert_eq!(cat.services().len(), 3, "the full list is still there");
+    }
+
+    #[test]
+    fn a_stored_token_makes_its_service_searchable() {
+        let cat = three_tiers();
+        let names: Vec<&str> = cat
+            .searchable(&linked("200"))
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["TuneIn", "Bandcamp"]);
+    }
+
+    #[test]
+    fn a_token_for_an_app_link_service_is_honoured_too() {
+        // Nothing can *mint* one, but if one ever arrives by another route the
+        // catalogue should not be the thing standing in the way.
+        let cat = three_tiers();
+        let names: Vec<&str> = cat
+            .searchable(&linked("2"))
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["TuneIn", "YouTube Music"]);
+    }
+
+    #[test]
+    fn linkable_is_the_device_link_tier_only() {
+        let cat = three_tiers();
+        let names: Vec<&str> = cat.linkable().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Bandcamp"], "anonymous needs none, app-link cannot");
+    }
+
+    #[test]
+    fn find_any_reaches_a_service_that_cannot_be_searched_yet() {
+        let cat = three_tiers();
+        assert_eq!(cat.find_any("bandcamp").unwrap().id, "200");
+        assert_eq!(cat.find_any("youtube").unwrap().id, "2");
     }
 
     #[test]
@@ -265,7 +352,7 @@ mod tests {
         // kept deserializing cleanly, matched the player's version, and so was
         // never refetched - leaving every cdudn underivable.
         let old = r#"{"version":"RINCON:58","services":[
-            {"id":"284","name":"YouTube Music","uri":"https://x","auth":"Linked",
+            {"id":"284","name":"YouTube Music","uri":"https://x","auth":"AppLink",
              "manifest_uri":null}]}"#;
         let parsed: Catalogue = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.schema, 0, "no schema field means schema 0");

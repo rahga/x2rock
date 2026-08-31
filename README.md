@@ -310,13 +310,14 @@ endpoint, manifest and search categories with no credential at all. About a thir
 then be searched outright. `--play` opens a playback session rather than enqueuing, so the
 household's queue is left alone.
 
-The other two thirds need the household's own service token, which nothing documented will hand
-back, and x2rock says so plainly rather than half-working:
+The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
+can drive — see below. The remaining sixty-two authenticate by handing off to the service's own
+mobile app, which a Linux desktop cannot do, and x2rock says so plainly rather than half-working:
 
 ```
 $ x2rock search -s "YouTube Music" jazz
-Error: YouTube Music needs a linked account, which x2rock cannot supply.
-Run `x2rock search` for the ones that do not.
+Error: YouTube Music authenticates by handing off to its own app, which a Linux desktop
+cannot do. Run `x2rock search` for the ones that can be searched.
 ```
 
 In the bar widget, the favorites picker searches too: type a term and a **Search TuneIn** row
@@ -330,12 +331,37 @@ speaks to nothing but the local network, so a music service being slow or unreac
 play, pause or volume — a widget losing search keeps every control it had. See
 [docs/architecture.md](docs/architecture.md), "Rule: search never enters the daemon".
 
+## Linking an account
+
+```sh
+x2rock link                                     # services that can be linked
+x2rock link bandcamp                            # link one
+x2rock accounts                                 # what is linked here
+x2rock unlink bandcamp                          # forget the token
+```
+
+Fourteen services — Bandcamp, TIDAL, Deezer, Mixcloud, Sonos Radio, iHeartRadio and others — offer
+**device linking**, and it is a better flow than an OAuth popup. `x2rock link bandcamp` opens the
+service's own login page in whatever browser you already use, waits for you to finish, and stores
+the token the service mints. No Sonos account, no partner registration, no embedded browser, and
+nothing to bundle. Over ssh, `--no-open` prints the URL instead.
+
+The token is x2rock's own, not the household's: it is minted for this machine, and after the link
+that service searches like any other. `x2rock link` also registers the account with your household
+so the speakers know about it; `--no-match` skips that if you only want search.
+
+The token is stored in `~/.local/state/x2rock/credentials.json` at mode **0600** — its own file,
+not mixed into anything else. It is deliberately not put in a keyring: that would encrypt it at
+rest, and it would also put a locked or missing keyring between you and your music in a tool
+expected to work over ssh and inside a bar widget's subprocess. `x2rock unlink` forgets the local
+copy; revoking it properly is done from that service's own account page.
+
 ## Keeping things you cannot search for
 
-Most music services need a linked account before they will answer a search, and x2rock has no way
-to get one. But *replaying* something needs no credential at all — the id is enough, and the player
-resolves the account it already holds. So discovery and repetition are separate problems, and only
-the first one is closed:
+Sixty-two services authenticate by handing off to their own app, so x2rock cannot search them —
+YouTube Music, Spotify and Apple Music among them. But *replaying* something needs no credential at
+all: the id is enough, and the player resolves the account it already holds. Discovery and
+repetition are separate problems, and this closes the second one for every service, linked or not:
 
 ```sh
 x2rock keep                  # remember what is playing

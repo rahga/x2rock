@@ -1102,6 +1102,98 @@ this.
    specifically may not get happy at all.
 
 
+## `x2rock link`, built (2026-08-31)
+
+Step 1 of that order, shipped: `x2rock link [service]`, `x2rock accounts`, `x2rock unlink
+<service>`. `getDeviceLinkCode`, `xdg-open`, polling `getDeviceAuthToken` through the pending
+fault, storing the token, and `musicServiceAccounts:1 match` to register the account. Verified on
+the office household against Bandcamp as far as the browser step; the login itself is a person's
+job and is noted below as the one thing still unconfirmed.
+
+`link` with no argument lists the 14 device-link services, which is the doc's list exactly -
+AccuRadio, Sonos Backgrounds, Bandcamp, Classical Archives, Deezer, FIT Radio, iHeartRadio,
+Mixcloud, Murfie, NhacCuaTui, Saavn, TIDAL, Tribe of Noise, Sonos Radio. `search` with no argument
+still lists 32 of 108, and now says how many more could be linked.
+
+### The finding that cost the most: a fault at HTTP 200
+
+`getDeviceAuthToken`'s pending reply is a SOAP fault, as documented, but it arrives with **HTTP
+200** - and the fault code is `s:NOT_LINKED_RETRY`, not the documented `Client.NOT_LINKED_RETRY`:
+
+```
+HTTP/1.1 200
+<s:Fault><faultcode>s:NOT_LINKED_RETRY</faultcode>
+  <faultstring>Link Code not found retry...</faultstring>
+  <detail><ExceptionInfo>NOT_LINKED_RETRY</ExceptionInfo><SonosError>5</SonosError></detail>
+</s:Fault>
+```
+
+`smapi.rs` had only ever looked for a fault when the status was not 200, which was fine for every
+call it made before this one, because every one of those either worked or failed with a 500. Here
+it read the pending fault as a *successful reply*, found no `authToken` in it, and reported
+"Bandcamp linked but returned no authToken" three seconds into a flow that had not begun. **The
+body decides whether a reply is a fault, not the status.** Both signals are now checked for
+pending - the `NOT_LINKED_RETRY` substring and `SonosError` 5 - because services are inconsistent
+about which they populate and Bandcamp's faultcode already disagrees with the spec.
+
+A related hardening, from the same lesson: a body that will not parse at all falls back to a
+substring check for `NOT_LINKED_RETRY` before being called an error. Seven minutes of polling
+should not abort on one truncated reply, because the cost of aborting is a link code that cannot be
+reused and a person sent back to the browser.
+
+### The first secret, and where it goes
+
+`$XDG_STATE_HOME/x2rock/credentials.json`, mode **0600**, its own file. Decided over the DBus
+Secret Service deliberately. A keyring would encrypt it at rest and would add a dependency plus a
+new failure mode - a locked or absent keyring between a person and their music - to a tool that is
+expected to work over ssh and inside a bar widget's subprocess. The token is scoped to one music
+service and revocable from that service's own account page, and the file leans on the disk
+encryption a laptop already has.
+
+Four decisions in the store worth keeping if it is rewritten:
+
+- **The mode is set when the temporary file is created**, in the `OpenOptions`, not `chmod`ed
+  afterwards. A `chmod` after the write leaves a window where the token sits on disk at the umask's
+  mercy.
+- **A loose file is tightened on read**, with a line to stderr. Warning and carrying on would leave
+  a world-readable secret world-readable.
+- **Keyed by service id, not name.** A name in Sonos's catalogue can change under a stable id.
+- **A corrupt file is an error, not an empty account list** - the bookmarks rule, not the catalogue
+  rule. Silently starting over would present itself as "no account linked" and send someone back
+  through a browser flow to fix a typo they could have edited back.
+- **The token is written before `match` is attempted.** A link code is single-use, so a failure in
+  the household step must not cost the credential that already worked; `match` failing prints a
+  warning and exits 0 with the token saved.
+
+### `Auth` grew a third case, and the cache had to go
+
+`Auth` was Anonymous-or-Linked, which flattened exactly the distinction linking depends on. It is
+now `Anonymous`, `DeviceLink`, `AppLink`, so `SCHEMA` went to 2 and every cached catalogue is
+discarded - a service wrongly filed as unusable is precisely what this feature exists to fix.
+Anything unrecognised maps to `AppLink`, the conservative direction: mislabelling costs a clear
+error instead of a confusing failure part-way through a flow.
+
+Refusals now name the fix. A device-link service says `Run \`x2rock link <name>\``; an app-link one
+says a Linux desktop cannot hand off to a mobile app and does *not* suggest a command that will
+not help.
+
+### What is not yet confirmed
+
+The browser half. `getDeviceLinkCode` answers, the URL opens, and the poll loop waits correctly
+through the pending fault - but nobody has logged in to Bandcamp yet, so `authToken`,
+`privateKey`, `userIdHashCode` have not been seen from a real completion, and `match` has never
+been called with a real hash. The two things most likely to need work when that happens:
+
+1. **`match`'s reply shape.** The account id is read from `id` or `accountId` and a reply with
+   neither is still treated as success, since the household accepted the account either way. Which
+   field it actually uses is unverified.
+2. **Whether a Bandcamp search then works.** The `loginToken` header is built from the documented
+   shape - `token`, `key`, `householdId` - and has never been sent. If a service wants
+   `linkDeviceId` in the link calls too, that is the first thing to try: it is optional in the
+   spec, and it was left out here because the verified probe worked without it. iHeartRadio and
+   Deezer, which returned nothing to a minimal `getDeviceLinkCode`, are the likely candidates.
+
+
 ## Rule: search never enters the daemon (decided 2026-08-31)
 
 Talking to music services is allowed. Breaking the parts that do not need the internet is not.
@@ -2082,16 +2174,19 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Linking an account, for the services search cannot reach** (opened 2026-08-31). Search ships
-   for the 32 anonymous services; the other 76 need a token, and the controller can obtain its own
-   rather than borrowing the household's. The flow is settled and one service has already proven it
-   works — see "Linking an account: what the browser flow actually is". Do **Bandcamp first**: it
-   answers `getDeviceLinkCode` today, and it exercises the whole path end to end without the two
-   complications a larger service adds. It is also the first secret this project would store, which
-   deserves deciding on its own rather than as a detail of a bigger feature. The 62 app-link
-   services, YouTube Music among them, are a separate call again: Google gates the endpoint on an
-   API key before user auth is even reached, and protected streams need `httpHeaders` or
-   `contentKey`, which `loadStreamUrl` cannot carry.
+1. **Finish the Bandcamp link in a browser** (opened 2026-08-31, narrowed the same day).
+   `x2rock link Bandcamp` is built and gets as far as it can without a person: it mints a link
+   code, opens the page, and waits correctly through the pending fault. What is unverified is
+   everything after the login — the token fields from a real completion, `match`'s reply shape, and
+   whether a Bandcamp search then works with a `loginToken` header that has never been sent. See
+   "`x2rock link`, built". One login settles all three.
+
+   After that, the other 13 device-link services, which differ only in request details;
+   `linkDeviceId` is the first thing to try for the two that answered a minimal
+   `getDeviceLinkCode` with nothing (iHeartRadio, Deezer). The 62 app-link services, YouTube Music
+   among them, remain a separate call: Google gates the endpoint on an API key before user auth is
+   even reached, and protected streams need `httpHeaders` or `contentKey`, which `loadStreamUrl`
+   cannot carry.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
