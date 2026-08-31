@@ -10,10 +10,13 @@
 use std::net::IpAddr;
 
 use anyhow::{Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// First element of every response and event.
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize` is here for `x2rock raw`, which prints the header back out: a
+/// probe that hid the header would hide half of what it went to find.
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Header {
     pub namespace: Option<String>,

@@ -300,6 +300,25 @@ household, and a speaker will hand any LAN controller the service's endpoint, it
 search categories with no login at all. What is still unsolved is the credential to sign a search
 with, so there is nothing to use yet — but the reason it was excluded no longer holds.
 
+## Probing the API
+
+`x2rock raw` sends one Control API command and prints the reply, header included:
+
+```sh
+x2rock raw musicServiceAccounts:1 subscribe --watch 8
+x2rock raw playback:1 getPlaybackStatus --scope group
+```
+
+It exists because the API is wider than this CLI covers, and settling what a namespace answers
+should not need a rebuild. A player-side refusal prints and still exits 0 — for a probe,
+`ERROR_UNSUPPORTED_COMMAND` is the answer, not a failure. `--scope` picks the target key
+(`household`, `group`, `player`, `none`), and `--watch` holds the socket open afterwards, which is
+the only way to read a `subscribe`: its reply is empty and the state turns up as an event.
+
+Read the reply's `header.namespace` before believing a namespace is missing — the player
+canonicalises some of them, and `musicService:1` answering as `musicServiceAccounts:1` is what a
+`grep` for the wrong name would have hidden.
+
 ## Tested devices
 
 Everything here was developed against these, on one household:

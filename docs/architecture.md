@@ -550,6 +550,103 @@ Probed for the contract first, then exercised on real rooms.
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
 
+## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
+
+The first open question said to build a raw Control-API command before guessing at anything else.
+Built: `x2rock raw <namespace> <command> [PARAMS]`, with `--scope household|group|player|none` for
+the target key and `--watch <seconds>` to stay attached and print events afterwards. Three
+decisions in it are worth keeping if it is ever rewritten:
+
+- **A refusal is a result.** It prints the error body and still exits 0, because
+  `ERROR_UNSUPPORTED_COMMAND` is the answer a probe usually went to get. Only a transport failure
+  is an error.
+- **It prints the header, not just the body.** The header is where the player says which namespace
+  it thinks it answered, which turned out to be the single most useful field here.
+- **`--watch` attaches the event receiver before sending**, because a `subscribe` can be answered
+  by an event that overtakes the reply.
+
+### `musicService:1` is real, and it is `musicServiceAccounts:1`
+
+The 2026-08-28 note recorded that `musicService:1 search` returns `ERROR_UNSUPPORTED_COMMAND`. That
+is still true, and it was being read wrong. The reply's header says:
+
+```
+"namespace": "musicServiceAccounts:1", "response": "search", "success": false
+```
+
+The player **canonicalises** `musicService:1` to `musicServiceAccounts:1` and then rejects the
+*command*. The control experiment is what makes this solid: a nonsense namespace answers
+`ERROR_UNSUPPORTED_NAMESPACE` with `"namespace": "global"` and the reason
+`v1:totallyBogus:9 namespace is not supported.` So the two failures are different failures.
+`musicService:1` is a supported namespace with no `search` in it — and its real name says what it
+is actually for, which is accounts, not content.
+
+Always read the echoed `namespace` before concluding a namespace is missing.
+
+### What `musicServiceAccounts:1` actually supports
+
+Probed by name; everything not listed returned `ERROR_UNSUPPORTED_COMMAND` (`getAccounts`,
+`getServices`, `getMusicServices`, `getAvailableServices`, `getRegisteredServices`, `list`,
+`getAll`, `refresh`, `create`, `add`, `getSessions`, and the obvious variants).
+
+- **`match`** — supported, and wants a `nickname`: `Parsing terminated:[1].nickname`. An account
+  lookup, not a list.
+- **`subscribe` / `unsubscribe`** — supported, reply body empty.
+- The event that follows a subscribe is **`musicServicesChanged`**, and it carries only version
+  markers, not content:
+  ```json
+  {"_objectType":"musicServicesChanged",
+   "availableServicesVersion":{"version":"58"},
+   "registeredServicesVersion":{"version":"2026-08-31T13:38:41.240774449"}}
+  ```
+  So the Control API's role here is **cache invalidation**: it tells a controller that the
+  available or the registered set has moved, and the controller re-reads the actual lists
+  somewhere else. The word `registeredServices` is the first direct evidence that the household
+  distinguishes "all services Sonos knows" from "services this household has", which is exactly
+  open question 3 — but this namespace will not hand the second one over.
+
+### The UPnP action lists, which should have been read first
+
+Straight from the SCPDs, and definitive — no guessing at command names required:
+
+- **`MusicServices:1`** (`/xml/MusicServices1.xml`): `GetSessionId(ServiceId, Username) → SessionId`,
+  `ListAvailableServices`, `UpdateAvailableServices`. That is the whole service.
+- **`SystemProperties:1`** (`/xml/SystemProperties1.xml`): `GetString`/`SetString`/`Remove`,
+  `GetWebCode`, `AddAccountX`, **`AddOAuthAccountX`**(`AccountType`, `AccountToken`, `AccountKey`,
+  `OAuthDeviceID`, `AuthorizationCode`, `RedirectURI`, `UserIdHashCode`, `AccountTier`,
+  `AccountNickname`), `RemoveAccount`, `ReplaceAccountX`, `EditAccountPasswordX`,
+  `SetAccountNicknameX`, `RefreshAccountCredentialsX`, `EditAccountMd`,
+  `ProvisionCredentialedTrialAccountX`, `ResetThirdPartyCredentials`, `EnableRDM`/`GetRDM`,
+  `DoPostUpdateTasks`.
+
+Two things fall out of that list:
+
+- **`GetSessionId` is the credential path.** It is the one action that hands a controller something
+  it can present to a service, and it takes the `ServiceId` straight out of
+  `ListAvailableServices`. Tried here for `303` (Sonos Radio) and `284` (YouTube Music): both
+  return **UPnP error 806**. Whether 806 means "no account registered for that service on this
+  household", "`Username` may not be empty", or something else is **not settled** — and this is
+  the office household, which has one linked service and three favorites. Re-run it at home
+  against a household with several services linked, and against a service that definitely has an
+  account. That single call is now the pivot for the whole feature.
+- **There is still no enumeration action anywhere.** `AddAccountX` and friends write accounts;
+  nothing reads the list back. `/status/accounts` is gone on this firmware. So enumerating
+  registered services remains unsolved, and the `AddOAuthAccountX` signature shows what the
+  fallback would cost: x2rock would run a device-link flow itself and *register* the account, which
+  means holding an OAuth token — the thing this project has so far never had to do.
+
+### Where this leaves the three questions
+
+1. ~~Re-probe `musicService:1`~~ — **done, and closed.** No search there; the namespace is about
+   accounts, and it only reports versions. The player will not run a search for us.
+2. **The credential** — narrowed from "somehow" to one action: `GetSessionId`, currently answering
+   806 on a thin household. This is the next thing to run, and it needs the home household.
+3. **Enumerating linked services** — still open, and now known *not* to live in
+   `musicServiceAccounts:1`, `MusicServices:1` or `SystemProperties:1`. Next candidates: whatever
+   the app reads after a `musicServicesChanged`, and `ContentDirectory` under a service-scoped
+   `ObjectID` (`S:` returns 0 children here, so not that one as written).
+
+
 ## Music service search, reopened (verified 2026-08-31)
 
 Search was ruled out of scope on 2026-08-29, and the decision rested on one claim: that reaching a
@@ -601,9 +698,10 @@ carries the service's own account token inside `r:resMD`.
 
 - **UPnP `Search` does not exist.** `GetSearchCapabilities` returned an empty `SearchCaps` again on
   2026-08-31. Search will not come from `ContentDirectory`.
-- `musicService:1 search` returned `ERROR_UNSUPPORTED_COMMAND` on 2026-08-28. **Not re-probed** —
-  the CLI has no raw Control-API command and this machine has no websocket client — so treat it as
-  probably-still-true rather than confirmed.
+- `musicService:1 search` returns `ERROR_UNSUPPORTED_COMMAND`. Re-probed 2026-08-31 with the new
+  `x2rock raw`, and it holds — but the reason was misread the first time: the namespace resolves to
+  `musicServiceAccounts:1` and is about accounts, not content. See "`x2rock raw`, and what it found
+  in the account namespaces".
 
 ### What is genuinely unsolved: the credential
 
@@ -1097,12 +1195,15 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Music service search — now a goal, not a non-goal** (reopened 2026-08-31). The transports and
-   the discovery half are settled and written up under "Music service search, reopened"; what is
-   open is the credential. Work it in the order given there: a raw Control-API command in the CLI,
-   then re-probe `musicService:1 search`, and only if the player will not search for us go after a
-   controller-side SMAPI credential. Do not start with the SMAPI client — that is the expensive
-   branch and it may turn out to be unnecessary.
+1. **Music service search — now a goal, not a non-goal** (reopened 2026-08-31). Discovery is
+   settled and the first two probes are done: `x2rock raw` exists, and the player will *not* search
+   on our behalf — `musicService:1` is `musicServiceAccounts:1`, and it deals in accounts and
+   version markers only. What is left is the credential, and it has narrowed to a single UPnP call,
+   `MusicServices:1 GetSessionId(ServiceId, Username)`, which answers **UPnP 806** for both
+   services tried on the office household. **Run that at home**, against a household with several
+   services linked, before designing anything: if it yields a session id the feature is small, and
+   if it does not, the fallback is registering an account with `AddOAuthAccountX` and holding an
+   OAuth token, which is a different project. Still do not start with the SMAPI client.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The

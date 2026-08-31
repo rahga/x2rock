@@ -10,7 +10,7 @@ mod state;
 use std::net::IpAddr;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use sonos::local::Connection;
@@ -106,10 +106,46 @@ enum Command {
     Party {
         mode: Option<String>,
     },
+    /// Send one Control API command and print what comes back. A probe, not a
+    /// feature: the API is wider than this CLI covers, and settling what a
+    /// namespace actually answers should not need a rebuild. A refusal is a
+    /// result here, so a player-side error prints and still exits 0.
+    Raw {
+        /// Namespace, e.g. `musicService:1`.
+        namespace: String,
+        /// Command within it, e.g. `getSessions`.
+        command: String,
+        /// The command's parameters, as one JSON object. Defaults to `{}`.
+        #[arg(value_name = "PARAMS")]
+        options: Option<String>,
+        /// What the command is addressed to. Household is the default because
+        /// the namespaces left to explore are mostly household-scoped.
+        #[arg(long, value_enum, default_value_t = RawScope::Household)]
+        scope: RawScope,
+        /// After the command, keep the socket open this many seconds and print
+        /// every event that arrives. How `subscribe` is read: the reply to a
+        /// subscribe is empty, and the state it asked for turns up afterwards
+        /// as an event.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
     /// Scan the local network for players and remember them.
     Discover,
     /// Publish every room as an MPRIS2 media player, until stopped.
     Daemon,
+}
+
+/// Which target key a raw command carries, which is per-namespace and is half
+/// of what a probe is trying to find out.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RawScope {
+    Household,
+    Group,
+    Player,
+    /// No target key at all. Some commands take none, and an unaddressed
+    /// command is also the cheapest way to see a namespace reject the shape
+    /// rather than the address.
+    None,
 }
 
 #[derive(Subcommand)]
@@ -621,6 +657,110 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Command::Raw {
+        namespace,
+        command,
+        options,
+        scope,
+        watch,
+    } = &cli.command
+    {
+        let options: serde_json::Value = match options.as_deref() {
+            None => json!({}),
+            Some(text) => serde_json::from_str(text)
+                .with_context(|| format!("options must be a JSON object: {text}"))?,
+        };
+        ensure!(
+            options.is_object(),
+            "options must be a JSON object, not {}",
+            match &options {
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Null => "null",
+                _ => "a scalar",
+            }
+        );
+
+        let mut envelope = json!({ "namespace": namespace, "command": command });
+        // Group commands are answered by the coordinator, so a probe that does
+        // not go there measures the wrong player's refusal.
+        let mut connection = session.connection.clone();
+        match scope {
+            RawScope::Household => {
+                envelope["householdId"] = json!(session.connection.household_id().await?);
+            }
+            RawScope::Group => {
+                let target = session::target(&session.groups, cli.room.as_deref())?;
+                envelope["groupId"] = json!(target.group_id);
+                connection = session::coordinator(&session, &target).await?;
+            }
+            RawScope::Player => {
+                let player = match cli.room.as_deref() {
+                    Some(room) => session.groups.player_named(room)?.id.clone(),
+                    None => session.groups.resolve(None)?.coordinator_id.clone(),
+                };
+                envelope["playerId"] = json!(player);
+            }
+            RawScope::None => {}
+        }
+
+        // Attached before the command is sent: a subscribe can be answered by an
+        // event that overtakes the reply, and a receiver created afterwards
+        // would miss exactly the thing the probe went to see.
+        let mut events = connection.events();
+
+        let (header, body) = connection.command(envelope, options).await?;
+        if header.success != Some(true) {
+            let err: sonos::proto::ErrorBody =
+                serde_json::from_value(body.clone()).unwrap_or_default();
+            eprintln!(
+                "{namespace} {command}: {}{}",
+                err.error_code.as_deref().unwrap_or("refused"),
+                err.reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "header": serde_json::to_value(&header)?,
+                "body": body,
+            }))?
+        );
+
+        if let Some(seconds) = watch {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(*seconds);
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, events.recv()).await {
+                    Err(_) => break,
+                    Ok(Err(_)) => break,
+                    Ok(Ok(event)) => {
+                        if event.kind == sonos::proto::Event::LOST {
+                            eprintln!("connection lost");
+                            break;
+                        }
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "event": event.kind,
+                                "namespace": event.namespace,
+                                "groupId": event.group_id,
+                                "playerId": event.player_id,
+                                "body": event.body,
+                            }))?
+                        );
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     // Grouping resolves rooms itself: `ungroup` names its room positionally and
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
@@ -1047,6 +1187,7 @@ async fn main() -> Result<()> {
         | Command::Group { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }
+        | Command::Raw { .. }
         | Command::Discover
         | Command::Daemon => unreachable!("handled above"),
     }
