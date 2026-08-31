@@ -1633,24 +1633,44 @@ identical object id that plays under 284 is refused under 181. So the refusal is
 account, not the id shape**, and the earlier suspicion that `cloudcast:`'s colon was to blame is
 wrong.
 
-The chain is therefore:
+What was concluded from this, and why it was wrong:
 
-- **Enqueue-with-cdudn is the right mechanism for service content.** YouTube Music proves it, and
-  proves it on protected content — a kept YTM track plays while x2rock holds no Google credential,
-  because the cdudn's literal trailing `Token` makes the *player* resolve the media.
-- **The player refuses to enqueue content for a service account the household does not hold.** The
-  difference between 284 and 181 on this household is that YouTube Music was linked in the Sonos
-  app and Mixcloud was linked only by x2rock.
-- **Registering that account on the household is exactly what `match` does, and `match` fails.**
+The reading at the time was that D and E together isolated the *service account* — `sn=` ignored, and
+the same id refused when only the service changed — which made `match` the blocker and the most
+important unsolved problem in the project. That was published and is **withdrawn**.
 
-So `match` is not a curiosity and not optional: it is **the blocker for playing any linked service
-whose stream is not self-sufficient**, and `ERROR_COMMAND_FAILED` with no reason is now the most
-important unsolved problem in this project.
+**Test A was re-run with Mixcloud signed in through the Sonos app**, so the household genuinely holds
+the account — the condition `match` would have created. It returned **UPnP 800 again, unchanged.**
+The `loadStreamUrl` path still stalls at `IDLE`, and `getMediaURI` returns the identical URL. The
+household's knowledge of the account changes neither path, so the account was never the blocker.
 
-What would clinch it, and needs a person: **link Mixcloud in the Sonos app**, then re-run test A. If
-it plays, the chain above is proven end to end and the only missing piece is `match`. If it still
-returns 800, then service 181 content cannot be enqueued by anyone and Mixcloud is out of reach from
-a third-party controller regardless of accounts.
+**Test E was confounded, and that is the part worth keeping.** Putting a YouTube Music object id under
+service 181 changes two things, not one: the account *and* whether the id means anything to the
+service being asked. A Mixcloud endpoint handed a YouTube object id has every reason to refuse it on
+its own terms. E could not separate "wrong account" from "meaningless id", and it was reported as
+though it could — a two-variable experiment written up as a one-variable one.
+
+### What remains: the id is probably not an id
+
+The surviving hypothesis is that **`cloudcast:2191563811` is not a DIDL object id at all.** It is an
+*SMAPI* id, and nothing has ever established that the two namespaces are the same:
+
+- The YouTube Music object id that works — `ALkSOiGTPQu20Hqb...` — was never obtained from SMAPI. It
+  was harvested from the **player's own `r:resMD`** while the track played, which is what `x2rock
+  keep` does and the only way this project has ever acquired a working one.
+- `didl()` hardcodes the item-class prefix `00032020`, derived from that same single YouTube
+  observation. A Mixcloud cloudcast may not be that class.
+
+So both halves of the enqueue URI may be wrong for Mixcloud, and neither was ever verified against
+anything but YouTube Music.
+
+**The next step needs a person, and signing in is not enough:** *play* a Mixcloud show to the room
+from the Sonos app, then run `x2rock keep`. That harvests the player's own object id for Mixcloud
+content, to compare directly against `cloudcast:2191563811`. If the shapes differ, this is settled,
+and the fix is a translation the project does not have — SMAPI id to object id — with no obvious
+source for it other than the player itself.
+
+`match` is unexplained, still fails, and is no longer implicated in this.
 
 One loose end worth noting: x2rock glosses UPnP 800 as "no such position in the queue", which is
 wrong here. 800 is UPnP's undefined-error code and the gloss belongs to `Seek`, not
