@@ -1817,29 +1817,24 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Music service search — build it, against the anonymous services** (reopened 2026-08-31,
-   unblocked the same day). No longer a research question. SMAPI `search` and `getMediaURI` are
-   verified working against TuneIn with no credential beyond `<deviceProvider>Sonos</deviceProvider>`,
-   and 32 of the household's 108 services are `Auth="Anonymous"`. The remaining design work is
-   ordinary: a SOAP client, service and category selection from the manifest and presentation map,
-   and `createSession` + `loadStreamUrl` to play a result — the one link in the chain not yet
-   exercised, because it makes noise in a real room. See "SMAPI, read properly at last".
-   The 76 authenticated services are a **separate, later** question, and probably a different
-   project: they need the household's `loginToken`, nothing documented reads one back, and the
-   fallback is x2rock running a `DeviceLink` flow as its own account.
+1. **Linking an account, for the services search cannot reach** (opened 2026-08-31). Search ships
+   for the 32 anonymous services; the other 76 need a token, and the controller can obtain its own
+   rather than borrowing the household's. The flow is settled and one service has already proven it
+   works — see "Linking an account: what the browser flow actually is". Do **Bandcamp first**: it
+   answers `getDeviceLinkCode` today, and it exercises the whole path end to end without the two
+   complications a larger service adds. It is also the first secret this project would store, which
+   deserves deciding on its own rather than as a detail of a bigger feature. The 62 app-link
+   services, YouTube Music among them, are a separate call again: Google gates the endpoint on an
+   API key before user auth is even reached, and protected streams need `httpHeaders` or
+   `contentKey`, which `loadStreamUrl` cannot carry.
 
-2. **`createSession` + `loadStreamUrl`** — not a question, a feature that is simply not built yet,
-   and the one part of "find something and play it" with nothing unresolved in it. `loadStreamUrl`
-   requires a single field. Both commands are confirmed present on the LAN. Do this before search,
-   not after.
-
-3. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
+2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
    mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
    not confirmed is whether it behaves with several rooms on the bus, since only one room was
    reachable when it was written up. **Pick this up from the home household.**
 
-4. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
+3. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
