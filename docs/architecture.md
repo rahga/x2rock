@@ -550,6 +550,97 @@ Probed for the contract first, then exercised on real rooms.
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
 
+## What Sonos's own sample app settles (read 2026-08-31)
+
+[`sonos/api-web-sample-app`](https://github.com/sonos/api-web-sample-app) — Sonos's official
+web sample, last pushed 2025-05-29 — carries two artefacts worth more than the app itself:
+`sample-app/Client/src/App/museClient/OAS_production.json`, the full **Control API OpenAPI spec**
+(`v2.0.0-production`), and a Postman collection of the same. Together they are the authoritative
+answer to what this API does and does not contain, and they close a question this document had
+been circling.
+
+### The Control API has no content discovery. At all.
+
+**53 paths**, and not one of them searches, browses, or lists anything a service holds: playback,
+volume, groups, favorites, playlists, audio clips, sessions. That is the whole surface.
+
+This is not the LAN transport being a subset of the cloud — it is the *cloud* spec. So the earlier
+finding that `musicService:1` rejects `search` was never about firmware or about the local API. The
+command does not exist anywhere, and no amount of probing a player will produce it. **Question
+closed: the Control API will never search.**
+
+### `musicServiceAccounts match` is for service providers, not controllers
+
+The one music-service endpoint in the API is not the account-enumeration tool it looked like when
+probed. Its required fields are `userIdHashCode`, `nickname` and `serviceId`, and the spec says of
+the first:
+
+> Opaque hash of the user account. You must use the same algorithm used by **your SMAPI server**.
+> See `getDeviceAuthToken` and `getUserInfo` SMAPI requests for details.
+
+with `linkCode` and `linkDeviceId` described in terms of what "your SMAPI service" sends. So `match`
+is how a **music service** registers or looks up its own account on a household. It returns an
+account `id`, but only to a caller that already implements the service side. A controller has no
+way to supply `userIdHashCode`, and this is not a route to borrowing the household's credential.
+
+That reframes the credential question honestly: **SMAPI is a service-provider interface, and Sonos
+never intended a third-party controller to consume it.** `MusicServices:1 GetSessionId` over UPnP
+is still the one candidate for borrowing what the household holds, and nothing here contradicts it
+— but nothing here supports it either, and the odds should be read down accordingly. Run the
+`GetSessionId` probe at home before spending anything more on this.
+
+### What Sonos expects a third-party app to do instead: bring its own content
+
+The sanctioned path is `playbackSession`, and it is fully specified:
+
+- **`createSession`** — required fields are only `appId` and `appContext`, both strings the app
+  picks (`appId` a reverse-DNS name). No registration, no Sonos-side identity. Optional `accountId`
+  names a music service account for the session, and `customData` is an opaque blob other instances
+  of the app can read back. Returns `sessionId`, `sessionState`, `sessionCreated`.
+- **`loadStreamUrl`** — **required fields: `streamUrl`, and nothing else.** Optional
+  `playOnCompletion`, `stationMetadata`, `itemId`. This plays a live stream with no account, no
+  cloud queue and no search.
+- **`loadCloudQueue`** — required: `queueBaseUrl`. The player then pulls the track list from a
+  server the app hosts, with optional `httpAuthorization`, `itemId`, `queueVersion`,
+  `positionMillis` and full `trackMetadata` (whose `id` is `{objectId, serviceId, accountId}` — the
+  place a service account, if we ever had one, would be referenced). `refreshCloudQueue` and
+  `skipToItem` complete it.
+
+This also explains something this document recorded as a puzzle on 2026-08-29: `AddURIToQueue`
+refusing service-backed containers and stations is not an obstacle to work around. Sonos's model
+is that a third-party app does not inject into the Sonos queue at all — it opens a session and
+serves its own content.
+
+### Verified on the LAN, 2026-08-31
+
+The spec is the cloud API, so whether the local WebSocket carries the same namespaces had to be
+checked. Probed with `x2rock raw`, deliberately with *no* parameters so that nothing was created —
+the `ERROR_INVALID_PARAMETER` / `ERROR_UNSUPPORTED_COMMAND` distinction is enough:
+
+| probe | answer | reading |
+|---|---|---|
+| `playbackSession:1 createSession` | `ERROR_INVALID_PARAMETER` | command exists |
+| `playbackSession:1 loadStreamUrl` | `ERROR_INVALID_PARAMETER` | command exists |
+| `audioClip:1 createSession` | `ERROR_UNSUPPORTED_COMMAND` | control: namespace exists, command does not |
+| `playlists:1 getPlaylists` | success — `{playlists, version}` | a whole namespace x2rock does not use yet |
+
+So the session API is present on the LAN.
+
+### What this makes worth building, independently of search
+
+**`createSession` + `loadStreamUrl` is a feature available today**, and it needs nothing that is
+still unsolved: one required field, no account, no credential, no HTTP server of our own. It would
+give x2rock the ability to play an arbitrary stream URL in any room — the thing `play` cannot do
+and `favorite` can only approximate. Worth doing before search, not after, because it is the half
+of "find something and play it" that has no open questions in it.
+
+`loadCloudQueue` is the larger version and needs x2rock to serve HTTP the player can reach, which
+the firewall section makes awkward. Not now.
+
+One gap this exposed in `x2rock raw`: session commands are addressed by `sessionId`, which
+`--scope` has no case for. Add `--session <id>` when the first session command is written for real.
+
+
 ## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
 
 The first open question said to build a raw Control-API command before guessing at anything else.
@@ -792,9 +883,9 @@ Three questions settle the design, cheapest first:
    and cheaper now: Sonos Radio search returns stations, and stations from that service are already
    known to play here.
 
-Also unexplored, and possibly a way around `AddURIToQueue`'s refusals entirely: `playbackSession:1`
-`loadStreamUrl` and `loadCloudQueue`. A cloud queue would mean x2rock serving HTTP the speaker can
-reach, which the firewall section makes awkward but not impossible.
+`playbackSession:1` `loadStreamUrl` and `loadCloudQueue` are not a way *around* `AddURIToQueue`'s
+refusals — they are what Sonos intends instead of it, and both are confirmed present on the LAN.
+See "What Sonos's own sample app settles", which also has their full contracts.
 
 
 ## Bar-widget interop with `omarchy.media`, and the room-name decision (2026-08-31)
@@ -1267,15 +1358,23 @@ rediscover these the hard way:
    if it does not, the fallback is registering an account with `AddOAuthAccountX` and holding an
    OAuth token, which is a different project. Still do not start with the SMAPI client. The
    commands to run, and what each answer means, are written out under "Run this at home:
-   `GetSessionId`" — it is a copy-paste job, not a research task.
+   `GetSessionId`" — it is a copy-paste job, not a research task. Read the odds down first:
+   Sonos's own API spec shows SMAPI is a *service-provider* interface and the Control API has no
+   content discovery in it anywhere, so nothing sanctioned is pointing our way. See "What Sonos's
+   own sample app settles".
 
-2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
+2. **`createSession` + `loadStreamUrl`** — not a question, a feature that is simply not built yet,
+   and the one part of "find something and play it" with nothing unresolved in it. `loadStreamUrl`
+   requires a single field. Both commands are confirmed present on the LAN. Do this before search,
+   not after.
+
+3. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
    mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
    not confirmed is whether it behaves with several rooms on the bus, since only one room was
    reachable when it was written up. **Pick this up from the home household.**
 
-3. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
+4. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
