@@ -738,6 +738,105 @@ This is not academic: `x2rock favorites` uses the Control API and prints "No fav
 household, while the Sonos app and the widget's picker show three playable entries. Worth settling
 at home by comparing both lists item by item rather than by count.
 
+## Linking an account: what the browser flow actually is (verified 2026-08-31)
+
+The question was whether a Linux desktop can link a music service account gracefully — no embedded
+browser, no Sonos partner registration. **For services that offer device linking, yes, and it is
+better than an OAuth popup.** Proven against Bandcamp in one call.
+
+### A correction first
+
+An earlier note here said `musicServiceAccounts:1 match` needs a `userIdHashCode` that "only the
+service's own SMAPI server can compute", and used that to argue a controller could never register
+an account. That is wrong. [`getDeviceAuthToken`](https://docs.sonos.com/docs/add-browser-authentication)
+returns **`authToken`, `privateKey` *and* `userIdHashCode`** to whoever completes the link. The
+field is handed to the controller by design — it is the controller that later calls `match`.
+
+### The flow, and who does what
+
+Per [Add browser authentication](https://docs.sonos.com/docs/add-browser-authentication), the
+**controller** drives it; the player only confirms the account afterwards:
+
+1. Controller calls `getDeviceLinkCode` (device-link services) or `getAppLink` (app-link services).
+2. Service returns `regUrl`, `linkCode`, and `showLinkCode` — the last saying whether the user must
+   type the code or whether it is already embedded in the URL.
+3. Controller opens `regUrl` in a browser. On Linux that is `xdg-open`, in whatever browser the
+   person already uses — **no embedded Chromium, no webview, nothing to bundle.**
+4. Controller polls `getDeviceAuthToken` for up to seven minutes. Pending is a SOAP fault with
+   `faultcode Client.NOT_LINKED_RETRY` and `SonosError` 5 — a fault that means "keep waiting", not
+   a failure.
+5. On success: `authToken`, `privateKey`, `userIdHashCode`.
+
+No Sonos partner registration appears anywhere in it, and no device certificate.
+
+### Verified: Bandcamp handed over a link URL immediately
+
+One `getDeviceLinkCode`, with a credentials header containing nothing but
+`<deviceProvider>Sonos</deviceProvider>`:
+
+```
+regUrl        https://bandcamp.com/login?sonos_link_code=7083934b166ea10c27f9495e71fa6a8b
+linkCode      7083934b166ea10c27f9495e71fa6a8b
+showLinkCode  false
+```
+
+`showLinkCode: false` because the code is already in the URL — so the whole interaction is: open a
+link, log in, done. That is the graceful flow, and it exists today.
+
+### But it is per-service, and YouTube Music is not one of them
+
+The 108 services split three ways by `<Policy Auth>`: **32 Anonymous** (working now), **14
+DeviceLink**, **62 AppLink**.
+
+The 14 device-link services are the tractable next tier: AccuRadio, Bandcamp, Classical Archives,
+Deezer, FIT Radio, iHeartRadio, Mixcloud, Murfie, NhacCuaTui, Saavn, Sonos Backgrounds, Sonos
+Radio, TIDAL, Tribe of Noise. Not all answered the probe — iHeartRadio and Deezer returned nothing
+to a minimal `getDeviceLinkCode`, so the request needs more than the household id and that is a
+per-service detail to work out.
+
+**YouTube Music answers `getAppLink` with HTTP 403:**
+
+```json
+{"error":{"code":403,"status":"PERMISSION_DENIED",
+  "message":"Method doesn't allow unregistered callers (callers without established identity).
+             Please use API Key or other form of API consumer identity to call this API."}}
+```
+
+Two things follow. App-link services expect the Sonos app to *launch the service's mobile app* —
+there is no YouTube Music desktop app to hand off to, so Linux would be on the browser fallback,
+which a service need not offer. And Google gates the endpoint on an API key before the question of
+user auth even arises.
+
+Notably the key is not secret from us: YouTube Music's **manifest**, fetched anonymously from
+Sonos's CDN, carries an `apiKey` object with `cr` and `zp` values. So the 403 is probably
+answerable. Whether x2rock *should* present a key Sonos distributes for its own clients is a
+judgement call and not a technical one — it is a different act from completing a link flow a
+service publishes for whoever asks, and it should be made deliberately rather than because the
+bytes happened to be reachable.
+
+### Auth is not the last wall
+
+Even with a token, playing protected content is a separate problem.
+[`getMediaURI`](https://docs.sonos.com/docs/getmediauri) can return `httpHeaders` for the player to
+send with the media GET, plus `contentKey` and `deviceSessionKey` for encrypted streams.
+`loadStreamUrl` has **no field for headers**; only `loadCloudQueue` does (`httpAuthorization`),
+which means x2rock serving a cloud queue over HTTP the players can reach — behind Omarchy's
+default-deny firewall. Free radio worked with `loadStreamUrl` precisely because it needs none of
+this.
+
+### Recommended order
+
+1. **Device link against Bandcamp**, which already answers. It exercises the whole flow —
+   `getDeviceLinkCode`, `xdg-open`, polling `getDeviceAuthToken` through `NOT_LINKED_RETRY`,
+   storing `authToken`/`privateKey`, and `match` to register the account on the household — against
+   a service that has proven it will talk to us. Also the first time this project stores a secret,
+   which deserves its own thought rather than being smuggled in behind a bigger service.
+2. Then the other device-link services, which differ only in request details.
+3. Then decide about app-link and the API key, with the playback wall priced in. That is a
+   different project, and the honest version of "and then it gets happy" is that YouTube Music
+   specifically may not get happy at all.
+
+
 ## Rule: search never enters the daemon (decided 2026-08-31)
 
 Talking to music services is allowed. Breaking the parts that do not need the internet is not.
