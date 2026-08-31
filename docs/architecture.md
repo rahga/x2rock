@@ -1308,6 +1308,70 @@ login, the two things Bandcamp cannot:
 iHeartRadio is the pick: the largest catalogue of the four, and its five-digit code makes the
 browser step the shortest.
 
+## iHeartRadio linked: a token does buy a catalogue (verified 2026-08-31)
+
+The experiment the Bandcamp result called for, and it answers the open question in the affirmative.
+
+```
+$ x2rock link iHeartRadio
+Opened iHeartRadio in your browser.
+Enter this code when asked:
+
+  45943
+
+Waiting for you to finish...
+Linked iHeartRadio.
+```
+
+Three polls. `showLinkCode: true` this time, so the code-on-screen path is verified too — the
+branch Bandcamp never exercised, since its code rides in the URL.
+
+**Search works over a real catalogue.** Six categories — stations, artists, tracks, albums,
+playlists, podcasts — and `jazz` returns 55 stations. So the deflating Bandcamp finding was about
+*Bandcamp*, not about linking: a device-link credential can absolutely open a searchable catalogue,
+and the difference is whether the service is a shop or a broadcaster. Bandcamp sells you a library;
+iHeartRadio broadcasts a catalogue. Both are reached the same way.
+
+Its token is also the second in a row to make the same point about strictness: `authToken` is 11
+characters and `privateKey` is **empty**. Bandcamp sent `p455w0rd`. Refusing a reply that carries a
+token without a real key would have blocked both services this project has successfully linked.
+
+### `match`, and why nothing needs it yet
+
+`musicServiceAccounts:1 match` ran for the first time here — iHeartRadio does send a
+`userIdHashCode` (`13012528881`) — and it was refused: `ERROR_COMMAND_FAILED`, no reason. Probed
+with `x2rock raw` afterwards:
+
+- Without `linkCode`: an explicit complaint, **`Link code required to add guest account`**.
+- With `linkCode`, real or freshly minted, and with or without `linkDeviceId`:
+  `ERROR_COMMAND_FAILED` and **no reason at all**.
+- `serviceId` as a JSON number or a string makes no difference.
+
+So the household reaches a silent failure path whenever a code is present. The word *guest* is the
+only real clue, and it hints that `match` adds a limited kind of account rather than a full one. A
+fresh unredeemed code failed identically, but that probe used a bogus `userIdHashCode`, so it does
+not cleanly rule out the tidier theory — that `getDeviceAuthToken` and `match` are two *alternative*
+consumers of one single-use code, and the controller taking the token leaves nothing for the
+household to redeem. Testing that properly needs a service linked by calling `match` *before*
+`getDeviceAuthToken`, which is a different flow from the one built here.
+
+**None of which has cost anything, because the account identity travels in the stream URL.**
+`getMediaURI` on an iHeartRadio station returns a plain HLS URL:
+
+```
+http://stream.revma.ihrhls.com/zc4242/hls.m3u8?...&deviceId=Sonos_Gcd...&profileId=13012528881&...
+```
+
+`profileId` is the `userIdHashCode`. No `httpHeaders`, no `contentKey`, no `deviceSessionKey` — so
+`loadStreamUrl` can carry it, and "Auth is not the last wall" turns out not to be a wall for this
+service at all. The household does not need to know about the account because every request already
+names it.
+
+Which reframes `match` from a required last step into an optional one that may not be available to a
+controller. It is still attempted, because it is the documented step and one household's refusal is
+not proof, but the message when it fails is now mild rather than alarming: every `match` this
+project has attempted has been refused, and nothing has yet needed one.
+
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
 Everything above was verified against an account with nothing in it, which is exactly the state
@@ -2318,18 +2382,23 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **What a linked account is actually good for** (opened 2026-08-31, replacing "link an
-   account", which is done). `x2rock link` works end to end — verified against Bandcamp, token
-   minted, stored and accepted. What it revealed is that Bandcamp's SMAPI surface is the account's
-   own collection, not Bandcamp's catalogue, so `search` correctly finds nothing in an empty one.
-   See "`x2rock link`, built".
+1. **Play something from a linked service, and then put it in the widget** (opened 2026-08-31,
+   replacing "what a linked account is good for", which is answered: a catalogue, for a broadcaster
+   like iHeartRadio; a personal library for a shop like Bandcamp). Search works, and `getMediaURI`
+   returns a plain stream URL with no `httpHeaders` or `contentKey`, so nothing is known to stand in
+   the way — but **no linked-service track has actually been played yet**. `x2rock play-item -s
+   iHeartRadio live_stations.4242` is the test, and it makes audible sound in a room, which is why
+   it is written down rather than done quietly.
 
-   Three things follow, cheapest first. **Browse a linked service** (`getMetadata` over the
-   containers `root` returns) — the thing that would make a paid collection playable from the bar,
-   and the reason `search -s Bandcamp` looks broken when nothing is. **Link one service that sends
-   a `userIdHashCode`**, since `musicServiceAccounts:1 match` has never run; TIDAL or Deezer.
-   **Check whether any device-link service offers a real catalogue** rather than a library —
-   Sonos Radio, being stations, is the likeliest.
+   After that, the widget: `search` already emits the field names the picker expects, so a linked
+   service is close to free there. `searchService` in `shell.json` currently names one service; with
+   two linked accounts and 32 anonymous services, whether that stays a single name is a design
+   question, not a plumbing one.
+
+   Two loose ends that no longer block anything. **`match`** has never succeeded — see "`match`, and
+   why nothing needs it yet"; the untested theory is that it and `getDeviceAuthToken` compete for
+   one single-use code. **Browsing** (`getMetadata` over the containers `root` returns) is what a
+   shop-shaped service like Bandcamp needs instead of search, and is unbuilt.
 
    The 62 app-link services remain a separate call: Google gates the endpoint on an API key before
    user auth is even reached, and protected streams need `httpHeaders` or `contentKey`, which

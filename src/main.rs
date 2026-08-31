@@ -1011,10 +1011,18 @@ async fn run_link(
         // The token is already on disk and already useful, so this is a warning
         // and not an error: failing the command here would suggest the whole
         // flow needs repeating, and it does not.
+        //
+        // Worded mildly on purpose. Every `match` this project has attempted
+        // has been refused, and nothing has yet needed it: a service's own
+        // stream URL carries the account identity - iHeartRadio's has the
+        // `userIdHashCode` in it as `profileId` - so the household does not have
+        // to know about the account for x2rock to play from it. An alarming
+        // message here would send someone chasing a step that may simply not be
+        // available to a controller.
         Err(e) => println!(
-            "Stored the token, but the household refused the account ({e:#}). \
-             Search works; retry the registration with `x2rock link {}`.",
-            chosen.name
+            "The household would not register the account ({e:#}), which so far \
+             has not mattered: the token is stored and search works. See \
+             docs/architecture.md, \"match, and why nothing needs it yet\".",
         ),
     }
     Ok(())
