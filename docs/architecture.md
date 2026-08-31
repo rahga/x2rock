@@ -1246,6 +1246,35 @@ header has never been the interesting half of a request that is misbehaving.
   thing to try for iHeartRadio and Deezer, which answered a minimal `getDeviceLinkCode` with
   nothing.
 
+### How to test this when the collection is not empty (deferred 2026-08-31)
+
+Everything above was verified against an account with nothing in it, which is exactly the state
+that cannot tell "the credential is not working" apart from "there is nothing to find". Closing
+that needs one purchase, one wishlist item, or one followed artist on
+[bandcamp.com](https://bandcamp.com) — the account is already linked, so no re-link is needed.
+Then, in order, and each one answers something the empty account could not:
+
+```sh
+X2ROCK_DUMP_SMAPI=1 x2rock search -s bandcamp -c albums <something in the collection>
+```
+
+1. **Do the containers fill?** The probe worth running first is `getMetadata`, which x2rock has no
+   command for yet — so either build `x2rock browse` (the open question's first item) or hand-roll
+   the SOAP call. `artists`/`albums`/`tracks`/`rp`/`rr` reporting a non-zero `total` is the whole
+   answer: the credential works and the library is simply reachable.
+2. **Does `search` see the collection, or only browse?** A wishlist item that `getMetadata` lists
+   but `search` still misses would mean Bandcamp's `search` is scoped to purchases alone, or is not
+   really implemented — worth knowing before any UI leans on it.
+3. **Does a hit play?** `x2rock play-item -s bandcamp <id>` through `getMediaURI`. This is the one
+   that could still fail on its own terms: `getMediaURI` may answer with `httpHeaders` or a
+   `contentKey`, and `loadStreamUrl` has no field for either. That wall is documented above under
+   "Auth is not the last wall" and it has never been hit in practice, because free radio needs
+   none of it. A paid download is the first content that might.
+
+If (1) comes back empty with something genuinely in the collection, suspect the account rather than
+the code: Bandcamp's Sonos integration may want the purchase to be a *download* rather than a
+stream-only item, and re-linking would be the cheap thing to rule out next.
+
 
 ## Rule: search never enters the daemon (decided 2026-08-31)
 
