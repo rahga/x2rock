@@ -585,9 +585,14 @@ carries the service's own account token inside `r:resMD`.
   categories**, which is exactly what a search UI needs to offer:
   - Sonos Radio: `stations`, `artists`, `genres`, `all`
   - YouTube Music: `artists`, `playlists`, `tracks` (mapped `SONGS`), `albums`, `all`
-- **Which services a household has linked is derivable from `FV:2`.** Every favorite here carries
-  `<desc id="cdudn">SA_RINCON77575_X_#Svc77575-0-Token</desc>`, and 77575 = 303·256 + 7 — service
-  303, Sonos Radio. No account call needed to learn the linked set.
+- **`FV:2` reveals *some* linked services, and is not a way to enumerate them.** Every favorite
+  here carries `<desc id="cdudn">SA_RINCON77575_X_#Svc77575-0-Token</desc>`, and 77575 = 303·256 + 7
+  — service 303, Sonos Radio. But that only names services which happen to have a favorite. The
+  phone app on this household also lists YouTube Music, which has no favorite here and so leaves no
+  trace in `FV:2`. **How to enumerate the linked set is still unknown**: `ListAvailableServices`
+  returns all 108 services Sonos knows about rather than the household's, and `/status/accounts` —
+  the S1-era endpoint for exactly this — returns an empty `ZPSupportInfo` on this firmware. Add it
+  to the list below.
 - Note the household difference: the office household has **3** favorites and one linked service.
   The 41-favorite count and the `Svc51463` token recorded elsewhere in this document are the home
   household. Numbers in this document are per-household; the mechanisms are not.
@@ -619,7 +624,10 @@ Three questions settle the design, cheapest first:
    already-linked household will hand one over, or whether x2rock must run the link flow itself
    once and store the result, is the pivot: the first is small, the second is a real feature with
    token storage, and it would be the first secret this tool has ever had to keep.
-3. **Whether a service track can be enqueued** — the experiment named on 2026-08-29 and never run,
+3. **How to enumerate the household's linked services.** Needed by any search UI worth using — a
+   list of 108 services to pick from is not a feature. `/status/accounts` is gone; the answer is
+   probably in `musicService:1` too, which makes it the same first probe as (1).
+4. **Whether a service track can be enqueued** — the experiment named on 2026-08-29 and never run,
    because every favorite on the home household is a container or a station. Still the right test,
    and cheaper now: Sonos Radio search returns stations, and stations from that service are already
    known to play here.
