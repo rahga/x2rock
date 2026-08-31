@@ -862,6 +862,36 @@ nothing is worse than one that looks unavailable.
 state until someone keeps something, so a non-zero exit leaves the section absent rather than
 claiming an error.
 
+### The daemon remembers what plays (2026-08-31)
+
+`keep` requires remembering to press something, which is exactly what a person listening to music
+does not do. So the daemon notes every track that has a real id, and `x2rock bookmarks --all`
+includes them. Kept entries are *pinned*: they never expire, they sort first, and they carry a `*`
+in the listing.
+
+One store, not two. "Recently played" and "saved" are the same list with a flag, which means one
+file, one command set, and `keep` on something the daemon already saw promotes it rather than
+adding a duplicate.
+
+**The write must never be able to break a room.** This is the first state the daemon has ever
+written, and it is a convenience sitting inside the process whose job is transport. So `remember()`
+has no `?` in it: every failure is logged and swallowed. Verified by making the store unreadable
+(`chmod 000`) and confirming `pause`, `play` and `vol` all still worked and the unit stayed active.
+
+Cheap by construction, too: `note()` returns whether anything changed, so a track playing for four
+minutes writes once, not once per event. A pinned entry keeps its name and its pin — only the
+timestamp moves — because someone named it deliberately and the daemon must not rename it back.
+That one is pinned by a test.
+
+**User data migrates; caches get discarded.** The opposite of the rule for the service catalogue,
+and deliberately: `pinned` defaults to *true* when absent, because anything written before the flag
+existed got there by someone running `keep`. Discarding a file this program no longer understands
+is right for something refetchable in a second and wrong for the only copy of what a person saved.
+
+Unresolved: several daemons write this file if a household runs one unit per room. The atomic
+rename keeps it from corrupting, but two writers can lose each other's entries. Not a problem on
+one unit; worth knowing before recommending several.
+
 ### An intermittent enqueue failure, observed not explained
 
 `AddURIToQueue` returned **UPnP 800, "no such position in the queue"**, once, for a call that

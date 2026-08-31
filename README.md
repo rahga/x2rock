@@ -352,6 +352,15 @@ sees a token.
 `--container` keeps the album, playlist or station rather than the single track. Kept items live in
 `$XDG_STATE_HOME/x2rock/bookmarks.json`, on this machine rather than in the household.
 
+The daemon also notes whatever plays, so you need not remember to press anything:
+
+```sh
+x2rock bookmarks --all       # kept items and recent history, newest first
+```
+
+Kept entries are marked `*`, sort first and never expire; the history keeps the last 50. Recording
+it can never affect playback — the daemon logs any failure and carries on.
+
 ## Probing the API
 
 `x2rock raw` sends one Control API command and prints the reply, header included:

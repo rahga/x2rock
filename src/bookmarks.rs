@@ -22,10 +22,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::sonos::proto::MusicObjectId;
 
+/// How many unpinned entries the history keeps. Pinned ones never count.
+const RECENT_CAP: usize = 50;
+
+/// The shape of the file. Unlike the service catalogue, a mismatch here is
+/// **migrated rather than discarded**: a cache can be refetched in a second and
+/// this is the only copy of something a person chose to save. `pinned` defaults
+/// to true precisely because everything written before it existed got there by
+/// someone running `keep`.
+const SCHEMA: u32 = 1;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Bookmarks {
     #[serde(default)]
+    pub schema: u32,
+    #[serde(default)]
     pub items: Vec<Bookmark>,
+}
+
+fn pinned_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +62,14 @@ pub struct Bookmark {
     /// `album`, `station`, `track`, ... as the player described it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Kept on purpose, rather than merely seen. Pinned entries are never
+    /// evicted and are what `x2rock bookmarks` shows by default.
+    #[serde(default = "pinned_by_default")]
+    pub pinned: bool,
+    /// Unix seconds, for ordering the history. Absent on anything saved before
+    /// the daemon started noticing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_played: Option<u64>,
 }
 
 impl Bookmark {
@@ -77,6 +101,8 @@ impl Bookmark {
             artist: None,
             art_url: None,
             kind: None,
+            pinned: false,
+            last_played: None,
         })
     }
 
@@ -163,22 +189,31 @@ impl Bookmarks {
             fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        let mut copy = Self {
+            schema: SCHEMA,
+            items: self.items.clone(),
+        };
+        copy.items.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+        fs::write(&tmp, serde_json::to_string_pretty(&copy)?)?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Add one, replacing any bookmark for the same object.
+    /// Pin something, adding it if it is not already known.
     ///
-    /// Keeping the same thing twice is a person re-saving it, most likely under
-    /// a better name, so the newer one wins rather than the list growing a
-    /// duplicate. Returns whether it replaced something.
-    pub fn keep(&mut self, bookmark: Bookmark) -> bool {
+    /// Keeping what the daemon already noticed is the common case: it promotes
+    /// that entry rather than adding a second one, and takes the new name if a
+    /// better one was given. Returns whether it was already there.
+    pub fn keep(&mut self, mut bookmark: Bookmark) -> bool {
+        bookmark.pinned = true;
         match self
             .items
             .iter()
             .position(|b| b.object_id == bookmark.object_id)
         {
             Some(i) => {
+                // Preserve when it was last heard; the caller is naming a thing,
+                // not reporting a play.
+                bookmark.last_played = bookmark.last_played.or(self.items[i].last_played);
                 self.items[i] = bookmark;
                 true
             }
@@ -187,6 +222,69 @@ impl Bookmarks {
                 false
             }
         }
+    }
+
+    /// Record that something played, without pinning it.
+    ///
+    /// What the daemon calls. Returns whether anything changed, so the common
+    /// case - the same track still playing - costs no write at all.
+    pub fn note(&mut self, mut bookmark: Bookmark, now: u64) -> bool {
+        bookmark.last_played = Some(now);
+        if let Some(i) = self
+            .items
+            .iter()
+            .position(|b| b.object_id == bookmark.object_id)
+        {
+            if self.items[i].last_played == Some(now) {
+                return false;
+            }
+            // A pinned entry keeps its name and its pin; only the timestamp
+            // moves. Someone named this deliberately and the daemon must not
+            // rename it back.
+            self.items[i].last_played = Some(now);
+            return true;
+        }
+        bookmark.pinned = false;
+        self.items.push(bookmark);
+
+        // Evict the oldest unpinned beyond the cap. Anything with no timestamp
+        // predates the history and is treated as oldest.
+        let mut unpinned: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.pinned)
+            .map(|(i, _)| i)
+            .collect();
+        if unpinned.len() > RECENT_CAP {
+            unpinned.sort_by_key(|&i| self.items[i].last_played.unwrap_or(0));
+            let doomed: std::collections::HashSet<usize> = unpinned[..unpinned.len() - RECENT_CAP]
+                .iter()
+                .copied()
+                .collect();
+            let mut i = 0;
+            self.items.retain(|_| {
+                let keep = !doomed.contains(&i);
+                i += 1;
+                keep
+            });
+        }
+        true
+    }
+
+    /// Newest first, pinned entries always present.
+    pub fn listed(&self, include_recent: bool) -> Vec<&Bookmark> {
+        let mut out: Vec<&Bookmark> = self
+            .items
+            .iter()
+            .filter(|b| include_recent || b.pinned)
+            .collect();
+        out.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then(b.last_played.cmp(&a.last_played))
+        });
+        out
     }
 
     /// Find one by name: exact match, then unique substring.
@@ -217,6 +315,10 @@ impl Bookmarks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bm(name: &str, object: &str) -> Bookmark {
+        Bookmark::from_id(name, &id(object, Some("284"), Some("sn_3"))).unwrap()
+    }
 
     fn id(object: &str, service: Option<&str>, account: Option<&str>) -> MusicObjectId {
         MusicObjectId {
@@ -269,6 +371,85 @@ mod tests {
         assert!(didl.contains("<dc:creator>A &amp; B</dc:creator>"));
         assert!(didl.contains(r#"<desc id="cdudn""#));
         assert!(didl.contains("SA_RINCON72711_X_#Svc72711-0-Token"));
+    }
+
+    #[test]
+    fn the_daemon_noticing_something_does_not_pin_it() {
+        let mut list = Bookmarks::default();
+        assert!(list.note(bm("Bodies", "a"), 100));
+        assert!(!list.items[0].pinned, "seen is not the same as saved");
+        assert_eq!(list.items[0].last_played, Some(100));
+        // The same track still playing costs no write.
+        assert!(!list.note(bm("Bodies", "a"), 100));
+        assert!(list.note(bm("Bodies", "a"), 200), "a later play does");
+        assert_eq!(list.items.len(), 1);
+    }
+
+    #[test]
+    fn the_daemon_never_renames_or_unpins_what_someone_kept() {
+        let mut list = Bookmarks::default();
+        let mut named = bm("Friday mix", "a");
+        named.artist = Some("mine".into());
+        list.keep(named);
+        // The player calls the same object something else; the deliberate name
+        // must survive it.
+        list.note(bm("ALk-whatever", "a"), 500);
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].name, "Friday mix");
+        assert!(list.items[0].pinned);
+        assert_eq!(list.items[0].last_played, Some(500), "but the time moves");
+    }
+
+    #[test]
+    fn history_evicts_the_oldest_unpinned_and_never_a_pinned_one() {
+        let mut list = Bookmarks::default();
+        list.keep(bm("pinned", "keepme"));
+        for i in 0..(RECENT_CAP + 5) {
+            list.note(bm(&format!("t{i}"), &format!("o{i}")), 1000 + i as u64);
+        }
+        let unpinned = list.items.iter().filter(|b| !b.pinned).count();
+        assert_eq!(unpinned, RECENT_CAP, "capped");
+        assert!(
+            list.items.iter().any(|b| b.object_id == "keepme"),
+            "pin survives"
+        );
+        // The five oldest went, the newest stayed.
+        assert!(!list.items.iter().any(|b| b.object_id == "o0"));
+        assert!(list.items.iter().any(|b| b.object_id == "o54"));
+    }
+
+    #[test]
+    fn listing_puts_pinned_first_then_the_most_recent() {
+        let mut list = Bookmarks::default();
+        list.note(bm("old", "a"), 100);
+        list.note(bm("new", "b"), 300);
+        list.keep(bm("saved", "c"));
+        assert_eq!(
+            list.listed(true)
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["saved", "new", "old"]
+        );
+        assert_eq!(
+            list.listed(false)
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["saved"],
+            "unpinned history is hidden unless asked for"
+        );
+    }
+
+    #[test]
+    fn a_file_written_before_pinning_existed_stays_pinned() {
+        // User data is migrated, not discarded like the service cache: anything
+        // already in this file got there because someone ran `keep`.
+        let old = r#"{"items":[{"name":"Bodies","object_id":"a","service_id":"284",
+                     "account":"3"}]}"#;
+        let list: Bookmarks = serde_json::from_str(old).unwrap();
+        assert!(list.items[0].pinned, "absent pinned means kept on purpose");
+        assert_eq!(list.schema, 0);
     }
 
     #[test]

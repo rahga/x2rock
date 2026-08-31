@@ -139,9 +139,13 @@ enum Command {
         #[arg(long)]
         container: bool,
     },
-    /// List what has been kept.
+    /// List what has been kept. The daemon also notes what plays, and `--all`
+    /// includes that history.
     Bookmarks {
         query: Option<String>,
+        /// Include what the daemon noticed, not just what was kept on purpose.
+        #[arg(long, short = 'a')]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1129,9 +1133,9 @@ async fn main() -> Result<()> {
 
     // Kept items are x2rock's own and live on this machine, so listing them
     // needs no household at all.
-    if let Command::Bookmarks { query, json } = &cli.command {
+    if let Command::Bookmarks { query, all, json } = &cli.command {
         let list = bookmarks::Bookmarks::load()?;
-        let mut items: Vec<_> = list.items.iter().collect();
+        let mut items = list.listed(*all);
         if let Some(query) = query {
             let needle = query.to_lowercase();
             items.retain(|b| b.name.to_lowercase().contains(&needle));
@@ -1154,7 +1158,12 @@ async fn main() -> Result<()> {
                 .collect();
             println!("{}", serde_json::to_string(&rows)?);
         } else if items.is_empty() {
-            println!("Nothing kept. Play something and run `x2rock keep`.");
+            let hidden = list.items.len();
+            if hidden > 0 && !*all {
+                println!("Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`.");
+            } else {
+                println!("Nothing kept. Play something and run `x2rock keep`.");
+            }
         } else {
             for b in items {
                 let by = b
@@ -1167,7 +1176,10 @@ async fn main() -> Result<()> {
                     .as_deref()
                     .map(|s| format!("  [{s}]"))
                     .unwrap_or_default();
-                println!("{}{by}{on}", b.name);
+                // A mark for the deliberate ones, so `--all` still tells them
+                // apart from whatever happened to play.
+                let mark = if b.pinned { "*" } else { " " };
+                println!("{mark} {}{by}{on}", b.name);
             }
         }
         return Ok(());

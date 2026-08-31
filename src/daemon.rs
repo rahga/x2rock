@@ -440,10 +440,63 @@ async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
     let body = event.body.clone();
     let properties = match event.namespace.as_str() {
         "playback:1" => player.apply_playback(&serde_json::from_value(body)?),
-        "playbackMetadata:1" => player.apply_metadata(&serde_json::from_value(body)?),
+        "playbackMetadata:1" => {
+            let status: proto::MetadataStatus = serde_json::from_value(body)?;
+            remember(&status);
+            player.apply_metadata(&status)
+        }
         "groupVolume:1" => player.apply_volume(&serde_json::from_value(body)?),
         _ => return Ok(()),
     };
     server.properties_changed(properties).await?;
     Ok(())
+}
+
+/// Note what just started playing, so it can be played again later.
+///
+/// **Nothing here may fail the caller.** This is the daemon, whose job is MPRIS
+/// and transport, and a history is a convenience: every error is logged and
+/// swallowed, and the `?`-free body is deliberate. A full disk must cost a line
+/// in the journal, not a room that will no longer pause.
+///
+/// Cheap by construction too: the store is only rewritten when the object id
+/// actually changes, so a track playing for four minutes writes once.
+fn remember(status: &proto::MetadataStatus) {
+    let Some(track) = status.current_item.as_ref().and_then(|i| i.track.as_ref()) else {
+        return;
+    };
+    let (Some(id), Some(name)) = (track.id.as_ref(), track.name.as_deref()) else {
+        return;
+    };
+    let Ok(mut bookmark) = crate::bookmarks::Bookmark::from_id(name, id) else {
+        // A live stream has no id worth storing; that is normal, not an error.
+        return;
+    };
+    bookmark.artist = track.artist.as_ref().and_then(|a| a.name.clone());
+    bookmark.art_url = track.image_url.clone();
+    bookmark.kind = Some("track".into());
+    bookmark.service_name = status
+        .container
+        .as_ref()
+        .and_then(|c| c.service.as_ref())
+        .and_then(|s| s.name.clone());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut list = match crate::bookmarks::Bookmarks::load() {
+        Ok(list) => list,
+        Err(e) => {
+            log(&format!("not recording history: {e:#}"));
+            return;
+        }
+    };
+    if !list.note(bookmark, now) {
+        return;
+    }
+    if let Err(e) = list.save() {
+        log(&format!("could not write history: {e:#}"));
+    }
 }
