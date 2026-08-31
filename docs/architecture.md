@@ -635,6 +635,68 @@ Two things fall out of that list:
   fallback would cost: x2rock would run a device-link flow itself and *register* the account, which
   means holding an OAuth token — the thing this project has so far never had to do.
 
+### Run this at home: `GetSessionId` (open, 2026-08-31)
+
+This is the next step for search, and it is one call. It could not be settled at the office, where
+the household has a single linked service and three favorites. **Do it from home, against a
+household with several services linked**, before designing anything.
+
+**1. Find which services this household actually has.** There is still no enumeration action, so
+work backwards from favorites — each carries the service in its `cdudn`:
+
+```sh
+P=<player-ip>
+curl -s -X POST "http://$P:1400/MediaServer/ContentDirectory/Control" \
+  -H 'Content-Type: text/xml; charset="utf-8"' \
+  -H 'SOAPACTION: "urn:schemas-upnp-org:service:ContentDirectory:1#Browse"' \
+  --data '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>100</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>' \
+  | grep -oE 'SA_RINCON[0-9]+' | sort -u
+```
+
+Each `SA_RINCON<N>` maps to a service id by `N >> 8` — `77575 → 303`, Sonos Radio. That held for
+the one data point here and is worth confirming against a second before trusting it. Cross-check
+the ids against `ListAvailableServices`, which lists all 108 services with their names.
+
+**2. Call `GetSessionId` for each of those service ids.**
+
+```sh
+for svc in <ids from step 1>; do
+  echo "── $svc"
+  curl -s -X POST "http://$P:1400/MusicServices/Control" \
+    -H 'Content-Type: text/xml; charset="utf-8"' \
+    -H 'SOAPACTION: "urn:schemas-upnp-org:service:MusicServices:1#GetSessionId"' \
+    --data "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetSessionId xmlns:u=\"urn:schemas-upnp-org:service:MusicServices:1\"><ServiceId>$svc</ServiceId><Username></Username></u:GetSessionId></s:Body></s:Envelope>" \
+    | sed -e 's/&lt;/</g;s/&gt;/>/g' | grep -oE '<(SessionId|errorCode|errorDescription)>[^<]*'
+done
+```
+
+**3. If every one answers 806, vary the input before concluding anything.** 806 was the same answer
+here for a service the household *does* have and one it does not, so it is not yet known to mean
+"unlinked". Two cheap variations:
+
+- a non-empty `Username` — the argument exists, and nothing so far says it is optional;
+- `musicServiceAccounts:1 match`, which wants a `nickname` and may be the way to learn what
+  username or nickname the account carries:
+  ```sh
+  x2rock raw musicServiceAccounts:1 match '{"nickname":"<try one>"}'
+  ```
+
+**What each outcome means**
+
+- **A `SessionId` comes back** → the credential exists on the LAN, no account, no OAuth. Search
+  becomes a small feature: `ListAvailableServices` for the endpoint, the manifest for its shape
+  (REST `search` endpoint or the older SOAP action), the presentation map for the categories, and
+  this session id in the SMAPI `credentials` header. Write it up and build it.
+- **806 everywhere, including for services that are definitely linked** → the LAN will not hand a
+  controller a credential, and the only path left is registering an account ourselves with
+  `SystemProperties:1 AddOAuthAccountX`. That means running a device-link flow and storing an
+  OAuth token — the first secret this project has ever had to keep, and a decision to take
+  deliberately rather than drift into. Stop and reconsider scope at that point rather than
+  starting the SMAPI client.
+
+Record the answer here either way; a negative result is what closes the question.
+
+
 ### Where this leaves the three questions
 
 1. ~~Re-probe `musicService:1`~~ — **done, and closed.** No search there; the namespace is about
@@ -1203,7 +1265,9 @@ rediscover these the hard way:
    services tried on the office household. **Run that at home**, against a household with several
    services linked, before designing anything: if it yields a session id the feature is small, and
    if it does not, the fallback is registering an account with `AddOAuthAccountX` and holding an
-   OAuth token, which is a different project. Still do not start with the SMAPI client.
+   OAuth token, which is a different project. Still do not start with the SMAPI client. The
+   commands to run, and what each answer means, are written out under "Run this at home:
+   `GetSessionId`" — it is a copy-paste job, not a research task.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
