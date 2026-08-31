@@ -782,9 +782,51 @@ though it cannot now be proved, since the first read is gone. Two things follow:
   what the queue already holds. Whether a synthesized DIDL with the `universalMusicObjectId` triple
   in it would satisfy the player is the next question, and it is untested.
 
-**Also untested: whether the enqueued track actually plays.** It was removed before trying, to leave
-the household's queue as it was found. Enqueuing and playing are different claims and only the
-first has evidence.
+### Both open questions closed: it plays, and metadata fixes the titles (2026-08-31)
+
+Re-run with the room at volume 0. A **synthesized** `EnqueuedURIMetaData` — no `r:resMD` to copy,
+so one was built from scratch — with the service's cdudn in it:
+
+```xml
+<item id="00032020ALkSOiGTPQu2…" parentID="-1" restricted="true">
+  <dc:title>Bodies</dc:title><dc:creator>Offset, JID</dc:creator>
+  <upnp:class>object.item.audioItem.musicTrack</upnp:class>
+  <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/"
+    >SA_RINCON72711_X_#Svc72711-0-Token</desc>
+</item>
+```
+
+- **The title came back**: the queue row reads `Bodies — Offset, JID  2:59`. The duration was never
+  sent, so the player resolved it through the cdudn — the metadata is not merely being echoed, it
+  is being *used* to reach the service.
+- **It plays.** `x2rock play 2` moved the cursor to our row and `positionMillis` advanced
+  19004 → 23239 across four seconds. Streaming, not just a hopeful `PLAYING`.
+
+**The cdudn is derivable, not scavenged.** `SA_RINCON<N>_X_#Svc<N>-0-Token` where `N` is the
+service type from `ListAvailableServices`'s `AvailableServiceTypeList`: YouTube Music is 72711
+(= 284 × 256 + 7), and the same arithmetic reproduces the `SA_RINCON77575` that Sonos Radio's
+favorites actually carry (303 × 256 + 7). So a service's cdudn can be computed for any service in
+the list, from data the player hands out unauthenticated.
+
+### So this works, today, with no account
+
+```
+objectId (from playbackMetadata, or anywhere it can be had)
+  → x-sonosapi-hls-static:<objectId>?sid=<serviceId>&flags=65544&sn=<account serial>
+  → AddURIToQueue with a synthesized DIDL carrying SA_RINCON<type>_X_#Svc<type>-0-Token
+  → the room plays it
+```
+
+x2rock never sees a token. The player resolves the credential it already holds, exactly as it does
+for a favorite. What is missing is only **discovery** — a way to learn an `objectId` for something
+not already playing — and that is what search would have provided.
+
+Which makes the feature concrete: **remember what played, and start it again.** Every id needed is
+readable while something plays; storing them is a local matter. Discovery stays with the Sonos app,
+repetition moves to the bar.
+
+One caution for whoever builds it: the earlier add with *empty* metadata blanked the titles of the
+whole queue and they did not come back. Always send a metadata document.
 
 ### `match` wants a link code
 
