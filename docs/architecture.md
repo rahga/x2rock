@@ -688,17 +688,37 @@ Playing a hit uses **`x2rock play-item -s <service> <id> --title <name>`**, adde
 `search --play N` would re-run the query to find the Nth result, costing a second round trip and
 risking a different item if the service reordered. The widget already holds the id.
 
-**Not visually verified.** The QML loads with no errors and the pill renders, but driving the
-picker open needs a click and this machine has no injector — `wtype` does keys only, and Hyprland
-has no click dispatcher. Attempts to auto-open it from `Component.onCompleted`, a `Timer`, and an
-`onPopupOpenChanged` hook all failed to produce a visible panel, which is itself worth knowing if
-anyone tries to script this widget later: the pickers appear to need a real interaction, not just
-`pickingFor` being set. The CLI contract underneath it *is* verified.
+**Verified in the widget**, by hand: typed a term, chose the search row, played "Texican Radio T"
+into the Media Room from the picker, and watched it come back through the daemon to MPRIS. The
+whole chain — descriptor list, manifest, presentation map, SMAPI `search`, `getMediaURI`,
+`createSession`, `loadStreamUrl`, MPRIS — now runs from one keystroke in a bar popup.
+
+It took a fix to get there, and the bug is the interesting part. **A status line must not pre-empt
+the list it describes.** `pickerStatus` keyed its visibility off `favoritesStatus !== ""`, and the
+list was bound to `!pickerStatus.visible`. On a household with no favorites that status is
+permanently set, so the entire list was hidden — search row included — and typing did nothing
+visible. The status now shows only when there are genuinely no rows, and what it had to say moves
+to the count line while the list is up, so a real favorites *failure* is still reported rather than
+swallowed by the rows that survived it.
+
+Two things worth carrying forward from that:
+
+- It is the same shape as the cache bug: a fallback that fires whenever the thing it describes is
+  unavailable, taking the working part down with it. Copying the favorites picker's status handling
+  faithfully was right up until a row appeared that did not come from favorites, which broke the
+  assumption the handling was built on.
+- **It could only be caught on this household.** With the home household's 41 favorites,
+  `favoritesStatus` is empty and the bug never appears. The office household — three favorites the
+  Control API does not report — is the worse fixture and therefore the better test.
+
+Driving the picker open from a script still does not work: `wtype` does keys only, Hyprland has no
+click dispatcher, and auto-opening from `Component.onCompleted`, a `Timer` and an
+`onPopupOpenChanged` hook all failed to produce a visible panel. The pickers appear to need a real
+interaction, not just `pickingFor` being set. Worth knowing before anyone tries to test this widget
+without hands.
 
 ### Still to do
 
-- Open the picker and check the search rows by eye; nothing below the CLI boundary has been seen
-  working.
 - Paging. `search` takes `index` and the CLI always sends 0.
 
 ## `FV:2` and `favorites:1 getFavorites` do **not** always agree (corrected 2026-08-31)
