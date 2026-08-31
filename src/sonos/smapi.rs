@@ -508,6 +508,12 @@ async fn call_soap(
     // link. Trusting the status there read the pending fault as a successful
     // reply and reported "linked but returned no authToken" seconds into a flow
     // that had not started yet. Verified against Bandcamp 2026-08-31.
+    if std::env::var_os("X2ROCK_DUMP_SMAPI").is_some() {
+        eprintln!(
+            "--- {action} request ---\n{}\n--- reply HTTP {status} ---\n{text}\n---",
+            without_credentials(&envelope)
+        );
+    }
     if let Some(fault) = fault_in(&text) {
         return Ok(Err(fault));
     }
@@ -515,6 +521,24 @@ async fn call_soap(
         return Ok(Err(parse_fault(&text, status)));
     }
     Ok(Ok(text))
+}
+
+/// An envelope with its whole credentials header removed, for `X2ROCK_DUMP_SMAPI`.
+///
+/// The *whole* header, not the token and key within it: a redaction that has to
+/// enumerate which fields are secret is one field away from printing a token
+/// into a terminal or a log, and the header has never been the interesting half
+/// of a request that is behaving oddly.
+fn without_credentials(envelope: &str) -> String {
+    const CLOSE: &str = "</s:Header>";
+    match (envelope.find("<s:Header>"), envelope.find(CLOSE)) {
+        (Some(start), Some(end)) if start < end => format!(
+            "{}<s:Header>(credentials omitted)</s:Header>{}",
+            &envelope[..start],
+            &envelope[end + CLOSE.len()..]
+        ),
+        _ => envelope.to_string(),
+    }
 }
 
 /// The fault in a reply, if the reply is one.
@@ -793,6 +817,28 @@ mod tests {
         let fault = fault_in(body).expect("a fault at HTTP 200 is still a fault");
         assert!(fault.is_pending());
         assert_eq!(fault.message, "Link Code not found retry...");
+    }
+
+    #[test]
+    fn a_dump_can_never_print_a_token() {
+        let body = envelope(
+            "search",
+            "<id>albums</id><term>miles</term>",
+            Some(&Token {
+                token: "s3cret-token".into(),
+                key: "s3cret-key".into(),
+                household: Some("Sonos_house".into()),
+            }),
+        );
+        let dumped = without_credentials(&body);
+        assert!(!dumped.contains("s3cret-token"), "{dumped}");
+        assert!(!dumped.contains("s3cret-key"), "{dumped}");
+        // The half worth reading survives.
+        assert!(
+            dumped.contains("<id>albums</id><term>miles</term>"),
+            "{dumped}"
+        );
+        assert!(dumped.contains("(credentials omitted)"), "{dumped}");
     }
 
     #[test]

@@ -1177,21 +1177,74 @@ Refusals now name the fix. A device-link service says `Run \`x2rock link <name>\
 says a Linux desktop cannot hand off to a mobile app and does *not* suggest a command that will
 not help.
 
-### What is not yet confirmed
+### Linked for real, and the flow works (verified 2026-08-31)
 
-The browser half. `getDeviceLinkCode` answers, the URL opens, and the poll loop waits correctly
-through the pending fault - but nobody has logged in to Bandcamp yet, so `authToken`,
-`privateKey`, `userIdHashCode` have not been seen from a real completion, and `match` has never
-been called with a real hash. The two things most likely to need work when that happens:
+A person logged in. The whole path runs:
 
-1. **`match`'s reply shape.** The account id is read from `id` or `accountId` and a reply with
-   neither is still treated as success, since the household accepted the account either way. Which
-   field it actually uses is unverified.
-2. **Whether a Bandcamp search then works.** The `loginToken` header is built from the documented
-   shape - `token`, `key`, `householdId` - and has never been sent. If a service wants
-   `linkDeviceId` in the link calls too, that is the first thing to try: it is optional in the
-   spec, and it was left out here because the verified probe worked without it. iHeartRadio and
-   Deezer, which returned nothing to a minimal `getDeviceLinkCode`, are the likely candidates.
+```
+$ x2rock link Bandcamp
+Opened Bandcamp in your browser.
+Waiting for you to finish.............................
+Linked Bandcamp. Search it with: x2rock search -s Bandcamp
+```
+
+29 polls, about 90 seconds of someone registering an account. What came back:
+
+- `authToken` — 32 hex characters.
+- `privateKey` — **`p455w0rd`**, literally. Bandcamp does not use the field and says so in the
+  most legible way available to it. The decision to accept a reply with a token and no real key
+  rather than refusing it was the right one, and this is why.
+- `userIdHashCode` — **absent**. So `match` was skipped, with the message it was written for, and
+  the household does not know about the account.
+
+The `loginToken` header is accepted: `getMetadata` on `root` returns Bandcamp's browse tree, which
+is proof the credential is honoured by an endpoint that has one to check.
+
+### The deflating part: a token buys a *collection*, not a catalogue
+
+`search` returns `total 0` for every term in every category, with no fault. Not a bug, and the
+probe says why. Bandcamp's SMAPI root is:
+
+```
+artists / albums / tracks / rp (Recent Purchases) / rr (Recent Releases)
+```
+
+and `getMetadata` on all five reports `total=0`. Those are the *account's* containers, not
+Bandcamp's catalogue: a new account with no purchases, no wishlist and nobody followed has nothing
+in them, so a search over them finds nothing. The categories and their `mappedId`s were never
+wrong — Bandcamp's own presentation map declares exactly `artists`/`albums`/`tracks` with identity
+mappings, and that is what was sent.
+
+**This corrects an assumption this document carried without stating it**: that the 76 services
+search cannot reach are 76 catalogues behind a credential. At least for Bandcamp, the credential
+opens a personal library. Linking is still worth having — it is the only way to reach a paid
+collection from Linux at all — but "link a service and search it" is not the shape of the feature
+for services like this one, and the next service linked should be checked against this question
+first rather than assumed.
+
+That points at browsing, not searching, as the thing worth building next for linked services:
+`getMetadata` over those containers is what would make a Bandcamp collection playable from the bar.
+Its absence is why `search -s Bandcamp` looks broken when nothing is.
+
+### `X2ROCK_DUMP_SMAPI`
+
+Set it and every SMAPI request and reply goes to stderr. It paid for itself twice in one session -
+once on the HTTP 200 fault, once on the empty search - so it stays. The **whole credentials header**
+is replaced with `(credentials omitted)`, not the token and key within it: a redaction that has to
+enumerate which fields are secret is one field away from printing a token into a log, and the
+header has never been the interesting half of a request that is misbehaving.
+
+### Still unconfirmed
+
+- **`match`**, entirely. Bandcamp sends no `userIdHashCode`, so nothing exercised it. The account
+  id is read from `id` or `accountId`, and a reply with neither is treated as success; which field
+  a household actually uses is unverified. A device-link service that *does* send a hash is needed,
+  and TIDAL or Deezer are the obvious candidates.
+- **Whether any device-link service offers a searchable catalogue** rather than a personal library.
+  Sonos Radio is the most likely to, being stations rather than purchases.
+- **`linkDeviceId`**, still left out of both link calls because Bandcamp worked without it. First
+  thing to try for iHeartRadio and Deezer, which answered a minimal `getDeviceLinkCode` with
+  nothing.
 
 
 ## Rule: search never enters the daemon (decided 2026-08-31)
@@ -2174,19 +2227,22 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Finish the Bandcamp link in a browser** (opened 2026-08-31, narrowed the same day).
-   `x2rock link Bandcamp` is built and gets as far as it can without a person: it mints a link
-   code, opens the page, and waits correctly through the pending fault. What is unverified is
-   everything after the login — the token fields from a real completion, `match`'s reply shape, and
-   whether a Bandcamp search then works with a `loginToken` header that has never been sent. See
-   "`x2rock link`, built". One login settles all three.
+1. **What a linked account is actually good for** (opened 2026-08-31, replacing "link an
+   account", which is done). `x2rock link` works end to end — verified against Bandcamp, token
+   minted, stored and accepted. What it revealed is that Bandcamp's SMAPI surface is the account's
+   own collection, not Bandcamp's catalogue, so `search` correctly finds nothing in an empty one.
+   See "`x2rock link`, built".
 
-   After that, the other 13 device-link services, which differ only in request details;
-   `linkDeviceId` is the first thing to try for the two that answered a minimal
-   `getDeviceLinkCode` with nothing (iHeartRadio, Deezer). The 62 app-link services, YouTube Music
-   among them, remain a separate call: Google gates the endpoint on an API key before user auth is
-   even reached, and protected streams need `httpHeaders` or `contentKey`, which `loadStreamUrl`
-   cannot carry.
+   Three things follow, cheapest first. **Browse a linked service** (`getMetadata` over the
+   containers `root` returns) — the thing that would make a paid collection playable from the bar,
+   and the reason `search -s Bandcamp` looks broken when nothing is. **Link one service that sends
+   a `userIdHashCode`**, since `musicServiceAccounts:1 match` has never run; TIDAL or Deezer.
+   **Check whether any device-link service offers a real catalogue** rather than a library —
+   Sonos Radio, being stations, is the likeliest.
+
+   The 62 app-link services remain a separate call: Google gates the endpoint on an API key before
+   user auth is even reached, and protected streams need `httpHeaders` or `contentKey`, which
+   `loadStreamUrl` cannot carry.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The

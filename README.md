@@ -346,9 +346,15 @@ service's own login page in whatever browser you already use, waits for you to f
 the token the service mints. No Sonos account, no partner registration, no embedded browser, and
 nothing to bundle. Over ssh, `--no-open` prints the URL instead.
 
-The token is x2rock's own, not the household's: it is minted for this machine, and after the link
-that service searches like any other. `x2rock link` also registers the account with your household
-so the speakers know about it; `--no-match` skips that if you only want search.
+The token is x2rock's own, not the household's — minted for this machine. `x2rock link` also
+registers the account with your household so the speakers know about it, where the service hands
+over the identifier that needs (`--no-match` skips it; Bandcamp does not send one).
+
+**A caution learned the hard way.** Linking a service does not necessarily give you a catalogue to
+search. Bandcamp's Sonos interface is *your own collection* — purchases, wishlist, followed
+artists — so on a fresh account `x2rock search -s Bandcamp` correctly finds nothing, and looks
+broken while working perfectly. Browsing a linked collection is not built yet. Check what a service
+actually exposes before assuming a link makes it searchable.
 
 The token is stored in `~/.local/state/x2rock/credentials.json` at mode **0600** — its own file,
 not mixed into anything else. It is deliberately not put in a keyring: that would encrypt it at
@@ -405,6 +411,16 @@ the only way to read a `subscribe`: its reply is empty and the state turns up as
 Read the reply's `header.namespace` before believing a namespace is missing — the player
 canonicalises some of them, and `musicService:1` answering as `musicServiceAccounts:1` is what a
 `grep` for the wrong name would have hidden.
+
+For the music-service side, which is SOAP rather than the Control API, `X2ROCK_DUMP_SMAPI=1` prints
+every request and reply to stderr:
+
+```sh
+X2ROCK_DUMP_SMAPI=1 x2rock search -s bandcamp miles
+```
+
+The whole credentials header is replaced with `(credentials omitted)`, so the dump cannot leak a
+token into a terminal or a log.
 
 ## Tested devices
 
