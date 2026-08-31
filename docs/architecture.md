@@ -1516,6 +1516,59 @@ containers, and a search. Four sources, one question — what should this room p
 Its own `Process`, like `searchProc` and for the same reason: browsing leaves the LAN, and the rule
 that search never enters the daemon covers this too.
 
+## Mixcloud: a third flow shape, and a search that answers in places (verified 2026-08-31)
+
+Linked through an OAuth `authorize` endpoint with a consent screen — the third flow shape after
+Bandcamp's code-in-URL and iHeartRadio's typed code, and the one that most resembles what people
+expect from "sign in with". `showLinkCode` false, 28 polls, no `userIdHashCode`, so `match` was
+skipped again. Its `privateKey` is 10 characters and its `authToken` 32.
+
+Its root is the hybrid Bandcamp and iHeartRadio each only half were:
+
+```
+feed / trending / listen-later / categories:music / categories:talk
+new-uploads / queue / user:<username>
+```
+
+and `user:<username>` opens Stream, Uploads, Favorites, Listens, Playlists, Followers, Following.
+So one service carries both a catalogue and a personal library, reached identically. That id
+embedding the account's own username is the third sighting of the pattern — iHeartRadio's
+`my_playlists_<userIdHashCode>`, `profileId` in its stream URL, and now this: everything personal
+about a linked service is keyed into the id, and the household is never consulted.
+
+### The bug it found: a search can answer entirely in containers
+
+**Mixcloud's only search category is `tags`, and every hit is a `tag:` collection rather than a
+track.** No service before it had done this — TuneIn and iHeartRadio both answer searches with
+playable streams — so `search` had quietly assumed its results were things to play:
+
+- `search --json` did not emit `container`, though `browse` did and the field existed on the item.
+- `search --play N` would have handed a collection id to `getMediaURI`.
+- The widget offered every hit as a track, so choosing one would have failed in `play-item`.
+
+All three fixed, and the widget now descends into a container hit instead of playing it. That path
+had to stop assuming a browse frame was open, because a container can now arrive as a *search* hit
+with no frame to inherit a service from.
+
+The general lesson is the one `canPlay` already taught in a different costume: **`container` is the
+only thing that says whether an id can be played, and it has to be carried everywhere an item
+goes.** Adding a field to a struct is not the same as plumbing it.
+
+### Still no wall
+
+`getMediaURI` on a Mixcloud track returns a plain HLS URL, the third service in a row to do so:
+
+```
+https://aod.mixcloud.stream/secure/hls_aes128/...index.m3u8
+```
+
+Worth reading closely: `hls_aes128` means the stream **is** encrypted, and Sonos still needs no
+`contentKey` — the key URI travels inside the m3u8, the way HLS specifies. Which suggests
+`contentKey` and `deviceSessionKey` are for some other, probably older DRM path, and that the
+"auth is not the last wall" warning may be pointing at a wall that modern services simply do not
+use. Not proven, but three services in and nothing has needed `httpHeaders` yet. TIDAL is still the
+only candidate left that might.
+
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
 Everything above was verified against an account with nothing in it, which is exactly the state

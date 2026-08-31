@@ -1343,6 +1343,16 @@ async fn run_search(
         let item = items
             .get(nth.checked_sub(1).unwrap_or(usize::MAX))
             .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
+        // A search can return places rather than things: every Mixcloud hit is a
+        // `tag:` collection, not a track. Refusing here beats letting
+        // getMediaURI refuse it with a grammar error about ids.
+        ensure!(
+            !item.container,
+            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}",
+            item.title,
+            chosen.name,
+            item.id
+        );
         return play_item(live()?, room, chosen, token.as_ref(), &item.id, &item.title).await;
     }
     if json {
@@ -1360,6 +1370,10 @@ async fn run_search(
                     "description": i.summary,
                     "service": chosen.name,
                     "art_url": i.art_url,
+                    // A hit is not always a thing to play. Mixcloud searches
+                    // tags and answers with collections, so a caller that
+                    // assumed otherwise would hand a container to `play-item`.
+                    "container": i.container,
                 })
             })
             .collect();
@@ -1376,10 +1390,14 @@ async fn run_search(
             .as_deref()
             .map(|s| format!("  {s}"))
             .unwrap_or_default();
-        println!(
-            "{:<14} {:<10} {}{summary}",
-            item.id, item.item_type, item.title
-        );
+        // The same trailing slash `browse` uses, and for the same reason: some
+        // services answer a search entirely in collections.
+        let name = if item.container {
+            format!("{}/", item.title)
+        } else {
+            item.title.clone()
+        };
+        println!("{:<14} {:<10} {name}{summary}", item.id, item.item_type);
     }
     if total > items.len() as u32 {
         println!("\n{} of {total} on {}.", items.len(), chosen.name);
