@@ -721,6 +721,102 @@ without hands.
 
 - Paging. `search` takes `index` and the CLI always sends 0.
 
+## YouTube Music without a Sonos account: what the player will hand over (2026-08-31)
+
+Probed while the household played a YouTube Music album started from a phone that is **not signed
+in to a Sonos account**. That detail is the whole point: the service is linked to the *household*,
+and every controller on the LAN inherits it.
+
+### The full MusicObjectId is readable, with no credential
+
+`playbackMetadata:1 getMetadataStatus` returns, for the container and for the current track:
+
+```json
+"id": { "_objectType": "universalMusicObjectId",
+        "accountId": "sn_3", "serviceId": "284",
+        "objectId": "ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H" }
+```
+
+`accountId` is `sn_3` — the same account serial that appears as `sn=3` inside the player's own
+`x-sonosapi-hls-static:` URIs. So the triple that `createSession`'s optional `accountId` and
+`loadCloudQueue`'s `trackMetadata.id` both want is simply *there*, for the asking, on a household
+nobody has logged into.
+
+Also confirmed on the phone: the app's search offers exactly **Sonos Radio** and **YouTube Music**
+— the household's registered set, and the enumeration no API would give up. And its favorites list
+is empty, which is what settled the `FV:2` shortcut question above.
+
+### A service *track* can be enqueued. The 2026-08-29 question is answered.
+
+That entry said `AddURIToQueue` refuses service-backed containers and stations, and that whether an
+individual **track** fares better "was never testable here, since every favorite on this household
+is a container or a station". A phone-started album put one in the queue, so it became testable:
+
+```
+AddURIToQueue
+  EnqueuedURI          x-sonosapi-hls-static:ALkSOiGTPQu2…?sid=284&flags=65544&sn=3
+  EnqueuedURIMetaData  (empty)
+→ FirstTrackNumberEnqueued 2, NumTracksAdded 1, NewQueueLength 2
+```
+
+**Accepted.** So the refusal is about the *kind* of content, not about the service: containers and
+stations no, tracks yes. And the URI carries its own account (`sn=3`), which is why no metadata was
+needed for the player to take it.
+
+### But empty metadata cost the queue its titles
+
+Immediately afterwards, `Browse Q:0` returned **no `dc:title` for either item** — including the
+original, which had shown "Bodies" minutes earlier. Removing the added track did not bring it back,
+and it had not returned several seconds later. `x2rock now` still shows the title correctly, since
+that comes from `playbackMetadata` rather than the queue, so the damage is confined to the queue
+listing.
+
+This is caused by the add, on the evidence — it was the only mutation between the two reads —
+though it cannot now be proved, since the first read is gone. Two things follow:
+
+- The 2026-08-28 insistence that `EnqueuedURIMetaData` must carry the item's `r:resMD` **verbatim**
+  is right, and stronger than it looked: the player accepts an add without it and then has nothing
+  to display, for the whole queue rather than just the new row.
+- A YouTube Music queue item carries **no `r:resMD` at all** — the field the favorites path relies
+  on simply is not there to copy. So "enqueue a service track properly" is not solved by copying
+  what the queue already holds. Whether a synthesized DIDL with the `universalMusicObjectId` triple
+  in it would satisfy the player is the next question, and it is untested.
+
+**Also untested: whether the enqueued track actually plays.** It was removed before trying, to leave
+the household's queue as it was found. Enqueuing and playing are different claims and only the
+first has evidence.
+
+### `match` wants a link code
+
+With all three required fields present but an unknown `userIdHashCode`, `musicServiceAccounts:1
+match` answers:
+
+```
+ERROR_COMMAND_FAILED — "Link code required to add guest account"
+```
+
+So `match` is not a lookup we lack a hash for; with an unrecognised hash it tries to *add* an
+account and wants the `linkCode` from the browser link flow. That confirms the chain from the
+player's side: `getDeviceLinkCode` → user authenticates → `getDeviceAuthToken` returns
+`userIdHashCode` and the link code → `match` registers the account and returns its id.
+
+### Where this leaves YouTube Music
+
+Search stays closed — `music.googleapis.com` answers 403 without Sonos's own encrypted API key, and
+that key is not something to go after. But the ids are readable and a track will enqueue, so the
+shape of a feature x2rock *could* have is: **remember what played and start it again**, referencing
+content by `objectId` and letting the player resolve the credential it already holds. Discovery
+stays with the Sonos app; repetition moves to the bar.
+
+What has to be settled first, in order:
+
+1. Does an enqueued service track actually **play**? Cheap, needs one queue add and a `play 2`.
+2. Can a **synthesized** `EnqueuedURIMetaData` restore the titles, given there is no `r:resMD` to
+   copy? This is the one that decides whether the feature is usable or merely possible.
+3. Does `createSession` with `accountId: "sn_3"` plus `loadCloudQueue` work as an alternative that
+   sidesteps the queue entirely — at the cost of x2rock serving HTTP the players can reach?
+
+
 ## `FV:2` carries shortcuts; `getFavorites` does not (settled 2026-08-31)
 
 Recorded on 2026-08-28 as agreeing at 41 each on the home household, then apparently contradicted on
