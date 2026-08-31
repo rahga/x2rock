@@ -1519,7 +1519,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "webpki-roots 1.0.9",
  "zbus",
 ]
 

@@ -9,13 +9,13 @@
 //! implementation, which answers with `Transfer-Encoding: chunked` and
 //! `Connection: close` (verified), so it dechunks and reads to end of stream.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+
+use super::http;
 
 pub const PORT: u16 = 1400;
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -36,6 +36,7 @@ const PAGE: u32 = 100;
 enum Service {
     AvTransport,
     ContentDirectory,
+    MusicServices,
 }
 
 impl Service {
@@ -43,6 +44,7 @@ impl Service {
         match self {
             Self::AvTransport => "/MediaRenderer/AVTransport/Control",
             Self::ContentDirectory => "/MediaServer/ContentDirectory/Control",
+            Self::MusicServices => "/MusicServices/Control",
         }
     }
 
@@ -50,6 +52,7 @@ impl Service {
         match self {
             Self::AvTransport => "urn:schemas-upnp-org:service:AVTransport:1",
             Self::ContentDirectory => "urn:schemas-upnp-org:service:ContentDirectory:1",
+            Self::MusicServices => "urn:schemas-upnp-org:service:MusicServices:1",
         }
     }
 }
@@ -137,52 +140,23 @@ impl Upnp {
 
     /// One HTTP/1.1 POST, returning `(status, body)`.
     async fn post(&self, path: &str, soap_action: &str, body: &str) -> Result<(u16, String)> {
-        let addr = SocketAddr::from((self.ip, PORT));
-        let mut stream = tokio::time::timeout(TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(|_| anyhow!("timed out connecting to {addr}"))?
-            .with_context(|| format!("connecting to {addr}"))?;
-
-        let request = format!(
-            "POST {path} HTTP/1.1\r\n\
-             Host: {}:{PORT}\r\n\
-             Content-Type: text/xml; charset=\"utf-8\"\r\n\
-             SOAPACTION: \"{soap_action}\"\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body}",
-            self.ip,
-            body.len()
-        );
-        stream.write_all(request.as_bytes()).await?;
-
-        let mut raw = Vec::new();
-        tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut raw))
-            .await
-            .map_err(|_| anyhow!("timed out reading from {addr}"))??;
-
-        let split = raw
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .ok_or_else(|| anyhow!("malformed HTTP response from {addr}"))?;
-        let head = String::from_utf8_lossy(&raw[..split]);
-        let body = &raw[split + 4..];
-
-        let status: u16 = head
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| anyhow!("no HTTP status in response from {addr}"))?;
-        let chunked = head.lines().any(|l| {
-            l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.contains("chunked")
-        });
-        let body = if chunked {
-            dechunk(body)?
-        } else {
-            body.to_vec()
+        let endpoint = http::Endpoint::Lan {
+            ip: self.ip,
+            port: PORT,
         };
-        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+        let action = format!("\"{soap_action}\"");
+        http::post(
+            &endpoint,
+            false,
+            path,
+            &[
+                ("Content-Type", "text/xml; charset=\"utf-8\""),
+                ("SOAPACTION", &action),
+            ],
+            body,
+            TIMEOUT,
+        )
+        .await
     }
 
     /// Invoke one action and return the response envelope, with UPnP faults as errors.
@@ -327,6 +301,23 @@ impl Upnp {
     /// Kept apart from [`Self::browse_queue`] because the two want different
     /// things from the same DIDL: the queue needs positions and durations,
     /// this needs what it would take to enqueue the thing.
+    /// Every music service Sonos knows about, as the raw descriptor list.
+    ///
+    /// This is the whole catalogue, not the household's - there is no command
+    /// for the second, and `musicServiceAccounts:1` only reports that the set
+    /// has changed. Parsing belongs to `smapi`, which is what uses it.
+    ///
+    /// No credential: a player answers this to anyone on the LAN.
+    pub async fn list_services(&self) -> Result<String> {
+        let text = self
+            .soap(Service::MusicServices, "ListAvailableServices", &[])
+            .await?;
+        let envelope = Document::parse(&text).context("parsing ListAvailableServices")?;
+        text_of(&envelope, "AvailableServiceDescriptorList")
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("no service descriptors in the reply"))
+    }
+
     pub async fn browse_content(&self, object_id: &str) -> Result<Vec<BrowseItem>> {
         let mut items = Vec::new();
         let mut start = 0;
@@ -730,33 +721,6 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64((h * 3600 + m * 60) as f64 + s))
 }
 
-/// Decode an HTTP/1.1 chunked body.
-fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len());
-    loop {
-        let line_end = data
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or_else(|| anyhow!("truncated chunked body"))?;
-        let size_text = std::str::from_utf8(&data[..line_end])?
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim();
-        let size = usize::from_str_radix(size_text, 16)
-            .with_context(|| format!("bad chunk size {size_text:?}"))?;
-        data = &data[line_end + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        if data.len() < size + 2 {
-            bail!("truncated chunk");
-        }
-        out.extend_from_slice(&data[..size]);
-        data = &data[size + 2..];
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,14 +732,6 @@ mod tests {
         assert_eq!(parse_hms("0:00:01.500"), Some(Duration::from_millis(1500)));
         assert_eq!(parse_hms("NOT_IMPLEMENTED"), None);
         assert_eq!(parse_hms("1:2:3:4"), None);
-    }
-
-    #[test]
-    fn dechunk_reassembles_and_ignores_extensions() {
-        // "in\r\n\r\nchunks." is 13 bytes = 0xD, and the middle chunk carries an extension.
-        let body = b"4\r\nWiki\r\n6;ext=1\r\npedia \r\nD\r\nin\r\n\r\nchunks.\r\n0\r\n\r\n";
-        assert_eq!(dechunk(body).unwrap(), b"Wikipedia in\r\n\r\nchunks.");
-        assert!(dechunk(b"5\r\nabc").is_err(), "truncated");
     }
 
     #[test]

@@ -550,6 +550,153 @@ Probed for the contract first, then exercised on real rooms.
   same move — so it is documented rather than prevented. But any UI that lists a group's members
   with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
 
+## Search, as built (2026-08-31)
+
+`x2rock search` exists. `x2rock search` alone lists what can be searched, `-s <service>` alone
+lists that service's categories, and a term searches. `--play N` plays the Nth hit.
+
+```
+$ x2rock search
+32 of 108 services can be searched without an account:
+  ... Hype Machine, SomaFM Radio, TuneIn, ...
+
+$ x2rock search -s tunein --count 5 jazz
+s249973        stream     Smooth Jazz  Smooth Jazz
+s328971        stream     One Jazz  Jazz
+...
+5 of 93 on TuneIn.
+
+$ x2rock search -s somafm --count 5 --play 3 ambient
+Media Room — Deep Space One on SomaFM Radio
+```
+
+### How it is put together
+
+- **`sonos/http.rs`** — the HTTP/1.1 client, lifted out of `upnp.rs` and given TLS. One client for
+  both directions: plain to a player on 1400, TLS to a service on 443. `tokio-rustls` and
+  `webpki-roots` were **already in the lock file** via `tokio-tungstenite`, so this cost no new
+  third-party crate. Timeouts belong to the caller, because 8s against a player on the same switch
+  and 6s against a service in another country are different budgets.
+- **`sonos/smapi.rs`** — the SMAPI client. Parses the descriptor list, reads categories out of the
+  manifest and presentation map, and does `search` and `getMediaURI`.
+- **`upnp.rs::list_services`** — `ListAvailableServices`, the one LAN call search needs.
+- **`main.rs`** — the `search` command, and nothing else touches any of it.
+
+### Things worth knowing, learned building it
+
+- **One crypto provider, named explicitly.** `rustls::ClientConfig::builder()` panics at runtime
+  when more than one provider is compiled in and none is installed as the process default — which
+  is exactly this binary now that `tokio-tungstenite` and `tokio-rustls` each bring one. Both
+  `local.rs` and `http.rs` name `aws_lc_rs` through `builder_with_provider`. This would not have
+  shown up until the first TLS handshake.
+- **Certificates are validated here, unlike the player socket.** `local.rs` accepts any
+  certificate because a player presents a self-signed one for its own IP and the transport never
+  leaves the LAN. A music service is a public host with a real chain, and this call does leave the
+  LAN, so it gets real roots.
+- **No XML declaration, no BOM.** Already recorded, and the client now strips a leading BOM from
+  every response too, because services send one and every XML parser then rejects it as content
+  before the declaration.
+- **Two services, two shapes.** TuneIn's categories are `stations`/`podcasts` mapping to
+  `search:station`/`search:show`; SomaFM's differ. The mapped id is what goes on the wire and the
+  plain id is what a person types. Nothing about the code is TuneIn-shaped, which was worth
+  proving with a second service before believing it.
+- **Playing a hit uses a session, not the queue.** `createSession` then `loadStreamUrl`, exactly
+  as the sample app documents. Verified that the queue is **untouched**: `x2rock queue` shows the
+  same single track before and after, while the room plays the stream.
+- **Transport and volume keep working against a session source.** `pause`, `play` and `vol` all
+  act on it normally. Note that pausing a live stream reports `IDLE` rather than `PAUSED` — Sonos
+  stops a live stream rather than holding a position in it, which is correct behaviour and not a
+  bug to chase.
+
+### The isolation, checked rather than asserted
+
+The rule above says the daemon must never acquire an internet timeout. That is now structural and
+can be grepped:
+
+```
+$ grep -rln "http::get\|Endpoint::Web" src/     # who can leave the LAN
+   src/sonos/http.rs
+   src/sonos/smapi.rs
+$ grep -n "smapi\|http::get\|Endpoint::Web" src/daemon.rs src/mpris.rs
+   (nothing)
+```
+
+`smapi` is reachable only from `main.rs`'s `search` arm. The daemon and the MPRIS server cannot
+reach the internet, so nothing that reaches the widget over MPRIS can be delayed by a service.
+
+### Still to do
+
+- The widget: a search box in the popup, invoking `x2rock search --json` as its own `Process`,
+  following the favorites picker's failure handling exactly.
+- The on-disk catalogue cache, so listing services and categories works with no internet and a
+  search costs one round trip instead of three. `musicServicesChanged`'s `availableServicesVersion`
+  is the invalidation signal.
+- Paging. `search` takes `index` and the CLI always sends 0.
+
+## `FV:2` and `favorites:1 getFavorites` do **not** always agree (corrected 2026-08-31)
+
+Recorded on 2026-08-28 as agreeing, at 41 each on the home household. On the office household they
+disagree outright:
+
+- `favorites:1 getFavorites` → `{"items": [], "version": "RINCON_…:3"}` — **empty**.
+- UPnP `Browse FV:2` → **three** items: "Discover Sonos Radio", "Sonos Presents", "Trending Now".
+
+All three are Sonos Radio's own, and none was created by anyone here. The likeliest reading is that
+the Control API lists favorites a *person* saved, while `FV:2` also carries the defaults a service
+contributes — which the earlier check could not have caught, because a household with 41 real
+favorites hides the distinction entirely.
+
+This is not academic: `x2rock favorites` uses the Control API and prints "No favorites." on this
+household, while the Sonos app and the widget's picker show three playable entries. Worth settling
+at home by comparing both lists item by item rather than by count.
+
+## Rule: search never enters the daemon (decided 2026-08-31)
+
+Talking to music services is allowed. Breaking the parts that do not need the internet is not.
+Losing a name lookup must never cost the household its transport or its volume.
+
+The architecture already separates these, and the rule is to keep it that way rather than to build
+anything new for it:
+
+- **State reaches the widget over MPRIS**, published by the daemon from the player's own events.
+  The daemon speaks only to the LAN — the Control API WebSocket on 1443 and UPnP on 1400 — and
+  cover art comes from the player itself (`http://<player>:1400/getaa`). **Nothing the daemon does
+  touches the internet, and search must not change that.** A daemon that fetched a service
+  catalogue would put an internet timeout in front of play/pause for every room.
+- **Actions reach the speakers over MPRIS too**, except the scroll gesture, which shells out to
+  `x2rock vol +N -r <room>` because Sonos wants relative volume and MPRIS cannot express it. That
+  call is LAN-only and stays that way.
+- **Search is therefore a CLI command and nothing else.** The widget invokes it the way it already
+  invokes favorites: a separate `Process`, whose failure is a string inside one picker rather than
+  a fault in the widget.
+
+That last point is not a plan, it is a working precedent. The favorites picker in `BarWidget.qml`
+already does exactly what search needs to do, and it is worth copying rather than reinventing:
+
+- a `Process` of its own, so a hung or failed call cannot reach anything else;
+- a non-zero exit sets a status string shown *in the picker*, leaving rooms, transport and volume
+  untouched;
+- empty stdout is treated as failure rather than as an empty list, because the two mean different
+  things and only the exit code can tell them apart;
+- the results already on screen stay up while a refresh runs, so a network blip degrades to stale
+  data rather than to an empty list.
+
+**The CLI may be blunt.** `x2rock search` failing with a plain error and a non-zero exit is correct
+behaviour; it is a terminal command and the person running it can read. The graceful half belongs
+in the widget, and the split is deliberate: one honest failure mode at the boundary, one forgiving
+presentation above it.
+
+Two things follow for the implementation:
+
+- **Internet calls need their own timeout**, short and bounded, not the LAN's. `upnp.rs` uses 8s
+  against a server on the same switch; a widget-invoked subprocess that might be waiting on a
+  service in another country needs a budget it will actually hit, and it must always terminate.
+- **The service catalogue is cached on disk and usable stale.** With no internet, listing services
+  and categories should still work from the last good read; only the query itself needs to fail.
+  `musicServiceAccounts:1`'s `musicServicesChanged` event carries `availableServicesVersion`, which
+  is the invalidation signal — the one use that namespace turns out to have.
+
+
 ## SMAPI, read properly at last — and search works today (verified 2026-08-31)
 
 Everything this document said about SMAPI before this section was inferred from service descriptors

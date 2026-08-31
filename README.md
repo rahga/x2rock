@@ -25,7 +25,8 @@ Sonos speakers expose the same JSON Control API on the LAN that Sonos's cloud ex
 over a WebSocket on port 1443, with no OAuth and no internet round-trip. It is the transport the
 official Sonos mobile app itself has used since 2024. x2rock is built on it directly:
 
-- **No account, no login, no cloud dependency** for normal use.
+- **No account, no login, no cloud dependency** for normal use. Searching a music service does
+  talk to that service, and only that; control never leaves the LAN.
 - **Push events, not polling** — the LAN API supports real subscriptions.
 - **One outbound connection**, which matters on Linux boxes with a default-deny firewall (Omarchy
   ships one) and on locked-down office networks.
@@ -293,12 +294,35 @@ Sonos app does too.
   description); no S1 accommodation is carried anywhere in the code.
 - Pre-Quattro Omarchy, Waybar-first design
 
-Searching music services **was** a non-goal and is not any more — see
-[docs/architecture.md](docs/architecture.md), "Music service search, reopened". It was ruled out on
-the belief that reaching a service needs a Sonos account. It does not: a service is linked to the
-household, and a speaker will hand any LAN controller the service's endpoint, its manifest and its
-search categories with no login at all. What is still unsolved is the credential to sign a search
-with, so there is nothing to use yet — but the reason it was excluded no longer holds.
+## Searching a music service
+
+```sh
+x2rock search                                   # what can be searched here
+x2rock search -s tunein                         # that service's categories
+x2rock search -s tunein jazz                    # search it
+x2rock search -s somafm --play 3 ambient        # play the third hit
+```
+
+This was a non-goal until it turned out not to need an account. A music service is linked to the
+**household**, not to a Sonos login, and a speaker hands any controller on the LAN the service's
+endpoint, manifest and search categories with no credential at all. About a third of the catalogue
+— 32 of 108 services here, and most of the radio-shaped ones — declare anonymous access and can
+then be searched outright. `--play` opens a playback session rather than enqueuing, so the
+household's queue is left alone.
+
+The other two thirds need the household's own service token, which nothing documented will hand
+back, and x2rock says so plainly rather than half-working:
+
+```
+$ x2rock search -s "YouTube Music" jazz
+Error: YouTube Music needs a linked account, which x2rock cannot supply.
+Run `x2rock search` for the ones that do not.
+```
+
+**This is the only part of x2rock that leaves the LAN, and it is confined to the CLI.** The daemon
+speaks to nothing but the local network, so a music service being slow or unreachable cannot delay
+play, pause or volume — a widget losing search keeps every control it had. See
+[docs/architecture.md](docs/architecture.md), "Rule: search never enters the daemon".
 
 ## Probing the API
 
