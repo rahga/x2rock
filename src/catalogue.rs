@@ -17,8 +17,8 @@
 //! **A cache is only worth having if it survives the thing it protects against.**
 //! With no route to a player or no route to the internet, a stale catalogue is
 //! served and a line goes to stderr. Listing services and categories then keeps
-//! working offline; only the query itself fails. See "Rule: search never enters
-//! the daemon" in docs/architecture.md.
+//! working offline; only the query itself fails. See "Rule: talking to a
+//! service never enters the daemon" in docs/architecture.md.
 
 use std::collections::BTreeMap;
 use std::fs;

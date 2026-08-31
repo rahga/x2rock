@@ -5,9 +5,10 @@
 //! wants search does not ask a player for it - it calls the service itself.
 //!
 //! **This is the only part of x2rock that leaves the LAN**, and it is confined to
-//! the CLI on purpose. See "Rule: search never enters the daemon" in
-//! docs/architecture.md: the daemon publishes MPRIS and must never acquire an
-//! internet timeout in front of play/pause.
+//! the CLI on purpose - `search`, `browse` and `link` all come through here, and
+//! nothing in the daemon does. See "Rule: talking to a service never enters the
+//! daemon" in docs/architecture.md: the daemon publishes MPRIS and must never
+//! acquire an internet timeout in front of play/pause.
 //!
 //! Two kinds of service can be searched. `Policy Auth="Anonymous"` needs nothing
 //! but a `deviceProvider`, which is about a third of the catalogue and most of

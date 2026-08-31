@@ -307,8 +307,9 @@ This was a non-goal until it turned out not to need an account. A music service 
 **household**, not to a Sonos login, and a speaker hands any controller on the LAN the service's
 endpoint, manifest and search categories with no credential at all. About a third of the catalogue
 — 32 of 108 services here, and most of the radio-shaped ones — declare anonymous access and can
-then be searched outright. `--play` opens a playback session rather than enqueuing, so the
-household's queue is left alone.
+then be searched outright. `--play` plays the hit: a live stream opens a playback session and leaves
+the queue alone, while anything on-demand is added to the queue, because that is the only way the
+player will resolve a service's own media. See "Browsing a service" for why both exist.
 
 The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
 can drive — see below. The remaining sixty-two authenticate by handing off to the service's own
@@ -326,10 +327,11 @@ appears under the filtered favorites; choosing it runs the query and the hits jo
 fails leaves the rows already on screen alone and says so in one line — the CLI is blunt, the
 widget is not.
 
-**This is the only part of x2rock that leaves the LAN, and it is confined to the CLI.** The daemon
-speaks to nothing but the local network, so a music service being slow or unreachable cannot delay
-play, pause or volume — a widget losing search keeps every control it had. See
-[docs/architecture.md](docs/architecture.md), "Rule: search never enters the daemon".
+**Talking to a music service is the only thing x2rock does that leaves the LAN, and it is confined
+to the CLI** — `search`, `browse` and `link`, each in a subprocess of its own. The daemon speaks to
+nothing but the local network, so a service being slow or unreachable cannot delay play, pause or
+volume: a widget losing search or browse keeps every control it had. See
+[docs/architecture.md](docs/architecture.md), "Rule: talking to a service never enters the daemon".
 
 ## Browsing a service
 

@@ -1272,8 +1272,10 @@ async fn run_browse(
     Ok(())
 }
 
-/// `x2rock search`: the CLI talking to a music service, and the only place that
-/// leaves the LAN. See "Rule: search never enters the daemon".
+/// `x2rock search`: the CLI talking to a music service. One of three commands
+/// that leave the LAN - `browse` and `link` are the others - and like them it is
+/// CLI-only and unreachable from the daemon. See "Rule: talking to a service
+/// never enters the daemon".
 ///
 /// A player is wanted but not required. Listing what can be searched, and a
 /// service's categories, both come from the on-disk catalogue and must keep

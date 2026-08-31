@@ -1401,15 +1401,22 @@ http://stream.revma.ihrhls.com/zc4242/hls.m3u8?...&deviceId=Sonos_Gcd...&profile
 service at all. The household does not need to know about the account because every request already
 names it.
 
-Which reframed `match` from a required last step into an optional one that may not be available to a
-controller — **and that reframing was wrong within the day.** Mixcloud can be searched, browsed and
-handed to a room, and will not play: its stream needs service-side key derivation, so the *player*
-has to resolve the media, so the player needs a credential, so the account has to be registered on
-the household. See "There *is* a wall, and it is nowhere near where this document put it".
+Which reframes `match` from a required last step into an optional one that may not be available to a
+controller at all.
 
-The conclusion to keep is narrower than either version: **`match` is not needed for search or
-browse, and may well be needed for playback of any service whose streams are not self-sufficient.**
-It is still attempted on every link, it has never succeeded, and it is no longer a curiosity.
+That reframing was itself doubted and then restored on the same day, which is worth recording because
+the doubt was reasoned and wrong. Mixcloud could be searched, browsed and handed to a room and would
+not play, and the chain "its stream needs service-side key derivation → the player must resolve it →
+the player needs a credential → the account must be registered" was written here as fact. It was
+not: Mixcloud's refusal was **a missing percent-encode in x2rock's own URI**, and it plays with no
+`match`, no account serial, and nothing registered by this tool. See "Found: it was a missing
+percent-encode, and Mixcloud plays".
+
+**The standing position, three services in: `match` is needed for nothing yet.** Search, browse and
+playback all work without it, including playback of content whose stream x2rock cannot resolve
+itself. It is still attempted on every link and has never once succeeded. Anything that appears to
+need it should be suspected of being a bug on this side first — that is now the historical record
+twice over.
 
 ### Played, end to end (verified 2026-08-31)
 
@@ -1519,7 +1526,7 @@ containers, and a search. Four sources, one question — what should this room p
   is inside; repeating it on fifty rows is noise.
 
 Its own `Process`, like `searchProc` and for the same reason: browsing leaves the LAN, and the rule
-that search never enters the daemon covers this too.
+that talking to a service never enters the daemon covers this too.
 
 ## Mixcloud: a third flow shape, and a search that answers in places (verified 2026-08-31)
 
@@ -1560,6 +1567,10 @@ only thing that says whether an id can be played, and it has to be carried every
 goes.** Adding a field to a struct is not the same as plumbing it.
 
 ### There *is* a wall, and it is nowhere near where this document put it
+
+> **Superseded — read "Found: it was a missing percent-encode, and Mixcloud plays" below.** The
+> diagnosis in this section is sound about `loadStreamUrl` and wrong about Mixcloud being unplayable;
+> the enqueue path plays it. Kept because the reasoning that overshot is instructive.
 
 **Mixcloud search and browse work. Mixcloud playback does not.** `x2rock browse -s Mixcloud
 trending --play 1` is accepted, the room takes the item and shows its title, and then the player
@@ -1796,10 +1807,14 @@ the code: Bandcamp's Sonos integration may want the purchase to be a *download* 
 stream-only item, and re-linking would be the cheap thing to rule out next.
 
 
-## Rule: search never enters the daemon (decided 2026-08-31)
+## Rule: talking to a service never enters the daemon (decided 2026-08-31)
 
 Talking to music services is allowed. Breaking the parts that do not need the internet is not.
 Losing a name lookup must never cost the household its transport or its volume.
+
+Written when `search` was the only command that left the LAN. **`browse` and `link` now do too**, and
+the rule covers them unchanged: each is a CLI command with its own `Process` behind it, and none of
+them is reachable from the daemon. Read "search" below as "any call to a music service".
 
 The architecture already separates these, and the rule is to keep it that way rather than to build
 anything new for it:
@@ -1814,7 +1829,8 @@ anything new for it:
   call is LAN-only and stays that way.
 - **Search is therefore a CLI command and nothing else.** The widget invokes it the way it already
   invokes favorites: a separate `Process`, whose failure is a string inside one picker rather than
-  a fault in the widget.
+  a fault in the widget. `browse` followed the same shape when it was built, with a `Process` of its
+  own, for exactly this reason.
 
 That last point is not a plan, it is a working precedent. The favorites picker in `BarWidget.qml`
 already does exactly what search needs to do, and it is worth copying rather than reinventing:
@@ -2822,9 +2838,12 @@ rediscover these the hard way:
   authentication", was wrong: it read *service* authentication as a *Sonos account*, when a service
   is linked to the household and the LAN gives up the endpoint for free. The second — that
   `AddURIToQueue` refuses service-backed containers and stations, so a search might have had
-  nothing it could enqueue — is still unrefuted, and the cheap experiment it named (find one
-  service *track* and try to enqueue it) is still the right test; it has simply never been run.
-  The entry is kept here rather than deleted because the way it went wrong is worth remembering:
+  nothing it could enqueue — **is refuted, and this summary said otherwise long after the body of
+  the document had settled it.** A service *track* enqueues and plays: first from a phone-started
+  album (see "A service *track* can be enqueued"), then from a search hit, and finally as the
+  mechanism `play-item` now uses for all on-demand content. Only containers and stations are
+  refused, which is the distinction `upnp:class` draws.
+  The entry is kept rather than deleted because the way it went wrong is worth remembering:
   a single unexamined word in a rationale closed a feature for two days. See "Music service search,
   reopened (verified 2026-08-31)".
 

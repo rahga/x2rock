@@ -11,7 +11,8 @@
 //! **Timeouts are the caller's, not this module's.** A player on the same switch
 //! and a service in another country do not deserve the same patience, and search
 //! is invoked from a bar widget where an unbounded wait is the failure mode that
-//! matters. See "Rule: search never enters the daemon" in docs/architecture.md.
+//! matters. See "Rule: talking to a service never enters the daemon" in
+//! docs/architecture.md.
 
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
