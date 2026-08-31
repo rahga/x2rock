@@ -1372,6 +1372,62 @@ controller. It is still attempted, because it is the documented step and one hou
 not proof, but the message when it fails is now mild rather than alarming: every `match` this
 project has attempted has been refused, and nothing has yet needed one.
 
+### Played, end to end (verified 2026-08-31)
+
+```
+$ x2rock play-item -s iHeartRadio live_stations.2157 --title "The BIG 98"
+Media Room — The BIG 98 on iHeartRadio
+$ x2rock now
+PLAYING  Springsteen — Eric Church
+```
+
+The whole chain: device link, browse, `getMediaURI`, `loadStreamUrl`, audio in the room, and live
+per-track metadata arriving back through the daemon's MPRIS without the daemon knowing a service was
+ever linked. **There is no wall.** "Auth is not the last wall" was written about content that needs
+`httpHeaders` or `contentKey`; a linked broadcaster needs neither.
+
+Three facts learned in the attempt:
+
+- **`getMediaURI` has an id grammar, and it is narrow.** Asking for `artist_radio.41615` was refused
+  with the accepted set spelled out: `artist_radio_track`, `live_stations.`, `podcast_show`. So an
+  `artist_radio` entry is a *container* to browse into, not a playable id, even though `getMetadata`
+  marks it `canPlay` — that flag means "this collection can be played", not "this id can be
+  resolved". Worth remembering before trusting `canPlay` as a filter.
+- **A failed `play-item` leaves the room alone.** `getMediaURI` is called before the session is
+  created, so the refusal above cost nothing: the room kept playing what it was playing. That
+  ordering was accidental rather than designed, and is worth keeping.
+- **iHeartRadio's own "My Stations" is broken**, server-side and nothing to do with x2rock:
+
+  ```
+  faultcode senv:Server.ServiceUnknownError
+  Request to http://ampinternal.ihrprod.net/api/v2/playlists/13012528881?... failed with error
+  {"obj.hits[0].seedProfileId":[{"msg":["error.expected.int"],"args":[]}]}
+  ```
+
+  Their internal playlists API cannot serialize its own first result. `for_you` (57 items) and
+  `nearby_stations` (10) answer fine, so the account is healthy and one container is not.
+
+### The clearest argument yet for `x2rock browse`
+
+The request that produced all of the above was "play something from my iHeart playlists" — and it
+was **not expressible with the CLI as it stands.** Search takes a term; a personal container is not
+a search. Answering it needed hand-rolled SOAP against `getMetadata`, and the account root turned
+out to hold seven containers worth reaching:
+
+```
+for_you (57)      nearby_stations (10)   live_stations   create_station
+my_playlists_<userIdHashCode>  ("My Stations", broken upstream)
+top_podcasts      top_genres
+```
+
+That id embedding the `userIdHashCode` is the same identity `profileId` carries in the stream URL,
+which is a third sighting of the same fact: everything personal about a linked service is keyed by
+that hash, and the household is never consulted.
+
+So `browse` is not a nice-to-have for shop-shaped services like Bandcamp. It is the missing half of
+the feature for *every* linked service, and the first real user request against linked accounts
+could not be served without it.
+
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
 Everything above was verified against an account with nothing in it, which is exactly the state
@@ -2382,23 +2438,26 @@ rediscover these the hard way:
 
 ## Open questions
 
-1. **Play something from a linked service, and then put it in the widget** (opened 2026-08-31,
-   replacing "what a linked account is good for", which is answered: a catalogue, for a broadcaster
-   like iHeartRadio; a personal library for a shop like Bandcamp). Search works, and `getMediaURI`
-   returns a plain stream URL with no `httpHeaders` or `contentKey`, so nothing is known to stand in
-   the way — but **no linked-service track has actually been played yet**. `x2rock play-item -s
-   iHeartRadio live_stations.4242` is the test, and it makes audible sound in a room, which is why
-   it is written down rather than done quietly.
+1. **`x2rock browse <service> [container]`** (opened 2026-08-31, replacing "play something from a
+   linked service", which is done — see "Played, end to end"). `getMetadata` over the containers a
+   service's `root` returns, with the same `--json` field names `search`, `favorites` and
+   `bookmarks` already emit so the widget's picker concatenates rather than translates. This is the
+   missing half of linked accounts, not a refinement: the first real request against a linked
+   service — "play something from my playlists" — could not be expressed with `search` at all, and
+   was answered with hand-rolled SOAP.
 
-   After that, the widget: `search` already emits the field names the picker expects, so a linked
-   service is close to free there. `searchService` in `shell.json` currently names one service; with
-   two linked accounts and 32 anonymous services, whether that stays a single name is a design
-   question, not a plumbing one.
+   Two things to get right, both learned the hard way above. `canPlay` on a collection does **not**
+   mean the id can be handed to `getMediaURI`, which has a narrow grammar and refuses an
+   `artist_radio` container; browse should distinguish "descend into this" from "play this". And a
+   container can be broken upstream while the account is fine — iHeartRadio's own My Stations
+   returns a 500 — so one failing container must not fail the listing.
 
-   Two loose ends that no longer block anything. **`match`** has never succeeded — see "`match`, and
-   why nothing needs it yet"; the untested theory is that it and `getDeviceAuthToken` compete for
-   one single-use code. **Browsing** (`getMetadata` over the containers `root` returns) is what a
-   shop-shaped service like Bandcamp needs instead of search, and is unbuilt.
+   After that, the widget, where a browse tree is a different shape from a flat picker and
+   `searchService` naming a single service starts to strain with two accounts linked and 32
+   anonymous services.
+
+   Two loose ends that block nothing. **`match`** has never succeeded — see "`match`, and why
+   nothing needs it yet". **Bandcamp** stays deferred until there is something in the collection.
 
    The 62 app-link services remain a separate call: Google gates the endpoint on an API key before
    user auth is even reached, and protected streams need `httpHeaders` or `contentKey`, which
