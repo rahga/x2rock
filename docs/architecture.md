@@ -849,6 +849,31 @@ Two things it taught, both worth more than the feature:
 reports for a live stream's notional container), a missing `serviceId`, a missing `accountId` —
 each with its own reason, because each means something different went wrong.
 
+### In the widget (2026-08-31)
+
+Kept items join the picker beneath the household's favorites — a flat list, since both answer "what
+should this room play" and the CLI emits them with the same field names. A **keep** glyph sits in
+each room's switch row, next to the TV input rather than with the grouping pair, because
+remembering what is playing is about this room's own source. It dims when there is no title to hang
+a name on, since the CLI refuses a live stream and a button that looks available and silently does
+nothing is worse than one that looks unavailable.
+
+`bookmarksProc` is quieter on failure than `favoritesProc`: an empty bookmark list is the normal
+state until someone keeps something, so a non-zero exit leaves the section absent rather than
+claiming an error.
+
+### An intermittent enqueue failure, observed not explained
+
+`AddURIToQueue` returned **UPnP 800, "no such position in the queue"**, once, for a call that
+succeeded on each of the next three attempts with no change. It is the same flavour as the Sonos
+app failing to start this album the first time and working seconds later — the household reports
+losing its connection to YouTube Music now and then.
+
+No retry has been added. 800 nominally means the add did not happen, so retrying would be safe, but
+"nominally" is not enough to build on and one observation is not a pattern. Worth watching: if it
+recurs, the question is whether the player or the service is the one dropping out, which
+`playbackStatus` events during the failure would settle.
+
 One caution for whoever builds it: the earlier add with *empty* metadata blanked the titles of the
 whole queue and they did not come back. Always send a metadata document.
 
