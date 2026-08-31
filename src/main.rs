@@ -150,6 +150,12 @@ enum Command {
         /// service shows when given nothing better.
         #[arg(long)]
         title: Option<String>,
+        /// The item's own kind, as `search`/`browse --json` report it in `type`.
+        /// `stream` plays as a stream; anything else goes in the queue, which is
+        /// the only way on-demand service content plays. Omitted, the queue is
+        /// tried first and a refusal falls back to streaming.
+        #[arg(long)]
+        kind: Option<String>,
     },
     /// Link a music service account, so its catalogue can be searched.
     ///
@@ -744,12 +750,85 @@ async fn stop_signal() -> &'static str {
     }
 }
 
-/// Play one item from a service in a room, by the id a search returned.
+/// Play one item from a service in a room, by the id a search or browse returned.
 ///
-/// A **session**, not the queue: a service's content cannot be enqueued, and
-/// Sonos does not intend it to be, so this plays alongside whatever is queued
-/// and leaves it untouched.
+/// **Two mechanisms, and which one is right depends on the item.** Both are
+/// needed; neither covers the other:
+///
+/// - **Enqueue with a cdudn**, as `bookmark` does. The player resolves the media
+///   itself against the credential it holds, which is the only thing that works
+///   for on-demand content whose stream x2rock cannot resolve - a Mixcloud show
+///   hands back an HLS playlist whose AES-128 key URI carries a 63-byte path
+///   where 16 bytes of key belong, so no compliant client can play it and the
+///   room stalls at `IDLE`. The player can.
+/// - **`loadStreamUrl` in a session**, which plays alongside the queue and
+///   leaves it untouched. The only thing that works for a *live stream*:
+///   `AddURIToQueue` refuses an iHeartRadio `live_stations.` id outright with
+///   UPnP 800, and Sonos does not intend stations to sit in a queue.
+///
+/// So: enqueue when there is a cdudn to name an account with and the item is not
+/// a stream, and **fall back to the session on any refusal**, because a refusal
+/// is the player saying this is not queue material. The reverse fallback is not
+/// possible - `loadStreamUrl` fails *silently*, minutes later, at `IDLE`.
 async fn play_item(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    kind: Option<&str>,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    // A stream is never queue material, and a service with no type in the
+    // player's list has no cdudn to build - `SA_RINCONNone` is not an account.
+    let streamish = kind.is_some_and(|k| k.eq_ignore_ascii_case("stream"));
+    if let (false, Some(cdudn)) = (streamish, service.cdudn()) {
+        match enqueue_item(session, room, service, &cdudn, id, title).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("x2rock: {title:?} would not go in the queue ({e:#}); streaming it")
+            }
+        }
+    }
+    stream_item(session, room, service, token, id, title).await
+}
+
+/// Put a service item in the room's queue and jump to it.
+///
+/// Deliberately the same sequence `bookmark` uses, down to making the queue the
+/// current source first: after a station it is not, and `Seek` fails with 701.
+async fn enqueue_item(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    cdudn: &str,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    let target = session::target(&session.groups, room)?;
+    let upnp = Upnp::new(
+        target
+            .coordinator_ip
+            .unwrap_or_else(|| session.connection.ip()),
+    );
+    // No `sn=`: nothing here has ever played, so there is no serial to harvest,
+    // and the player does not need one. See `bookmarks::service_uri`.
+    let uri = bookmarks::service_uri(id, &service.id, None);
+    let length = upnp
+        .add_to_queue(&uri, &bookmarks::service_didl(id, title, cdudn), false)
+        .await?;
+    if !upnp.playing_from_queue().await? {
+        upnp.use_queue(&target.coordinator_id).await?;
+    }
+    upnp.seek_track(length).await?;
+    let coordinator = session::coordinator(session, &target).await?;
+    coordinator.playback(&target.group_id, "play").await?;
+    println!("{} — {title} on {}", target.name, service.name);
+    Ok(())
+}
+
+/// Play a service item as a stream, alongside the queue rather than in it.
+async fn stream_item(
     session: &session::Session,
     room: Option<&str>,
     service: &sonos::smapi::Service,
@@ -809,6 +888,7 @@ async fn run_play_item(
     ip: Option<IpAddr>,
     room: Option<&str>,
     service: &str,
+    kind: Option<&str>,
     id: &str,
     title: Option<&String>,
 ) -> Result<()> {
@@ -827,6 +907,7 @@ async fn run_play_item(
         room,
         &chosen,
         token.as_ref(),
+        kind,
         id,
         title.map(String::as_str).unwrap_or(id),
     )
@@ -1138,6 +1219,7 @@ async fn run_browse(
             room,
             &chosen,
             token.as_ref(),
+            Some(item.item_type.as_str()),
             &item.id,
             &item.title,
         )
@@ -1353,7 +1435,16 @@ async fn run_search(
             chosen.name,
             item.id
         );
-        return play_item(live()?, room, chosen, token.as_ref(), &item.id, &item.title).await;
+        return play_item(
+            live()?,
+            room,
+            chosen,
+            token.as_ref(),
+            Some(item.item_type.as_str()),
+            &item.id,
+            &item.title,
+        )
+        .await;
     }
     if json {
         let rows: Vec<_> = items
@@ -1415,8 +1506,17 @@ async fn main() -> Result<()> {
             ref service,
             ref id,
             ref title,
+            ref kind,
         } => {
-            return run_play_item(cli.ip, cli.room.as_deref(), service, id, title.as_ref()).await;
+            return run_play_item(
+                cli.ip,
+                cli.room.as_deref(),
+                service,
+                kind.as_deref(),
+                id,
+                title.as_ref(),
+            )
+            .await;
         }
         Command::Browse {
             ref service,

@@ -204,10 +204,16 @@ impl Upnp {
         let detail = match code {
             "701" => "no media loaded or action not available in this state",
             "711" => "no such track in the queue",
-            // Mutation has its own pair, and they are worth telling apart:
-            // 800 is a position that does not exist, 1028 is a queue that
-            // moved since the version we were given - someone else editing it.
-            "800" => "no such position in the queue",
+            // 800 is UPnP's *undefined* error, so it means whatever the action
+            // decided it means. It was glossed as "no such position in the
+            // queue", which is only true of `Seek` and `ReorderTracks` - and
+            // that gloss then narrated an `AddURIToQueue` refusal for a
+            // percent-encoding bug and, later, for a live stream that simply
+            // cannot be queued. A wrong explanation is worse than none, so this
+            // says what the code actually is and lets the action name itself.
+            "800" => "the player refused it, with no reason given",
+            // 1028 is a queue that moved since the version we were given -
+            // someone else editing it.
             "1028" => "the queue changed while this was in flight; try again",
             "402" => "invalid arguments",
             _ => doc

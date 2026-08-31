@@ -1695,19 +1695,48 @@ unregressed.
   where 16 bytes of key belong. The enqueue path sidesteps it entirely by making the *player* resolve
   the media, which is precisely what the cdudn is for.
 
-### The design consequence, unbuilt
+### The design consequence, built (2026-08-31)
 
-Two mechanisms, and the project currently picks the wrong one for linked services:
+The guess in the paragraph this replaces — "use the enqueue path for anything from a service" — was
+half right, and the half that was wrong matters: **neither mechanism subsumes the other.**
 
-- `play-item` and `search --play` / `browse --play` use **`loadStreamUrl`** with a URL x2rock resolved
-  itself. Works for free radio. Fails for Mixcloud, silently, at `IDLE`.
-- `bookmark` uses **`AddURIToQueue` with a cdudn**. Works for both, including content whose stream
-  x2rock cannot resolve at all.
+| | on-demand track (Mixcloud) | live stream (iHeartRadio) |
+|---|---|---|
+| `loadStreamUrl` | accepted, then **silently `IDLE`** | plays |
+| `AddURIToQueue` + cdudn | plays | **refused, UPnP 800** |
 
-So the enqueue path is strictly more capable for service content, and `play-item` should probably use
-it for anything that came from a service — falling back to `loadStreamUrl` only where there is no
-account serial to name. That is a real change to the one code path every picker row goes through, so
-it is written down rather than done in passing.
+A station is not queue material and the player says so outright; on-demand content whose stream
+x2rock cannot resolve needs the player to resolve it, which only the queue path arranges. So
+`play_item` now splits:
+
+- **`kind == "stream"` → stream it.** `search`/`browse --json` already report `type`, and the widget
+  passes it as `--kind`.
+- **anything else, when the service has a cdudn → enqueue it**, and **fall back to streaming on any
+  refusal.** The refusal is the player telling us this is not queue material, and it arrives
+  immediately.
+- **No cdudn → stream.** A service absent from the player's type list has no account to name, and
+  `SA_RINCONNone_X_#SvcNone-0-Token` is not one. TuneIn is such a service, and its content is
+  streams anyway.
+
+**The fallback only works in that direction, which is why the order is what it is.** An enqueue
+refusal is immediate and legible; `loadStreamUrl`'s failure is silent, arrives seconds later as
+`IDLE`, and nothing in the reply distinguishes it from success. There is no fallback to build on top
+of a mechanism that does not report failure.
+
+Verified all three ways: a Mixcloud `cloudcast:` plays (it did not before), an iHeartRadio
+`live_stations.` with `--kind stream` plays, and the same stream with **no** `--kind` tries the queue,
+is refused, says so on stderr, and plays.
+
+Two things dropped out of it. `sn=` is not sent at all on this path — nothing here has ever played,
+so there is no serial to harvest, and the player does not need one: the real serial, a wrong one and
+no `sn=` were each accepted and each played. And `bookmarks::service_uri`/`service_didl` now back
+both `bookmark` and `play-item`, so there is one place where a service playback URI is built rather
+than two that could drift.
+
+Also fixed while here: UPnP 800 was glossed as "no such position in the queue", which is true of
+`Seek` and of nothing else. 800 is UPnP's *undefined* error code, and that gloss confidently narrated
+first a percent-encoding bug and then a stream that cannot be queued. It now says the player refused
+without giving a reason, which is all anyone knows.
 
 Worth noting what made this findable: **the player will tell you its own answer.** `keep` harvests
 what the player itself built, and `GetPositionInfo` prints it. Three hypotheses were argued from

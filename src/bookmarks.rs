@@ -115,12 +115,7 @@ impl Bookmark {
     /// successfully for Mixcloud, so the field is not load-bearing for these two
     /// services and is left alone rather than guessed at per service.
     pub fn uri(&self) -> String {
-        format!(
-            "x-sonosapi-hls-static:{}?sid={}&flags=65544&sn={}",
-            encode_object_id(&self.object_id),
-            self.service_id,
-            self.account
-        )
+        service_uri(&self.object_id, &self.service_id, Some(&self.account))
     }
 
     /// The DIDL-Lite that must travel with the URI.
@@ -160,6 +155,44 @@ impl Bookmark {
             cdudn = esc(cdudn),
         )
     }
+}
+
+/// The playback URI for a service item, for callers that have no [`Bookmark`].
+///
+/// `account` is the `sn=` serial, and it is **optional because the player does
+/// not need it**: the cdudn names the account and the player resolves it from
+/// there. Verified against Mixcloud, where the real serial, a wrong one and no
+/// `sn=` at all were each accepted and each played. It is still sent when known,
+/// since that is what the player writes for itself.
+pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
+    let sn = account
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("&sn={a}"))
+        .unwrap_or_default();
+    format!(
+        "x-sonosapi-hls-static:{}?sid={service_id}&flags=65544{sn}",
+        encode_object_id(object_id)
+    )
+}
+
+/// The DIDL for a service item with no [`Bookmark`] behind it.
+///
+/// Built from the same pieces [`Bookmark::didl`] uses, because a search hit and
+/// a kept item are the same thing to a player.
+pub fn service_didl(object_id: &str, title: &str, cdudn: &str) -> String {
+    Bookmark {
+        name: title.to_string(),
+        object_id: object_id.to_string(),
+        service_id: String::new(),
+        account: String::new(),
+        service_name: None,
+        artist: None,
+        art_url: None,
+        kind: None,
+        pinned: false,
+        last_played: None,
+    }
+    .didl(cdudn)
 }
 
 /// Percent-encode an object id for a playback URI, lowercase hex, as the player
