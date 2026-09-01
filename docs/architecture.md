@@ -938,9 +938,15 @@ ERROR_COMMAND_FAILED — "Link code required to add guest account"
 ```
 
 So `match` is not a lookup we lack a hash for; with an unrecognised hash it tries to *add* an
-account and wants the `linkCode` from the browser link flow. That confirms the chain from the
-player's side: `getDeviceLinkCode` → user authenticates → `getDeviceAuthToken` returns
-`userIdHashCode` and the link code → `match` registers the account and returns its id.
+account and wants the `linkCode` from the browser link flow.
+
+**This section originally read that as confirming the chain from the player's side** —
+`getDeviceLinkCode` → user authenticates → `getDeviceAuthToken` returns `userIdHashCode` and the
+link code → `match` registers the account and returns its id. It confirms no such thing. The
+message is unconditional: it is returned identically for a service the household *has* installed
+and one it has not, which was checked directly once a service could be added from the phone. See
+"Four hypotheses this killed" under "The household's account registry, read at last". The chain
+above may well be right — but this error is not evidence for it.
 
 ### Where this leaves YouTube Music
 
@@ -1805,6 +1811,122 @@ X2ROCK_DUMP_SMAPI=1 x2rock search -s bandcamp -c albums <something in the collec
 If (1) comes back empty with something genuinely in the collection, suspect the account rather than
 the code: Bandcamp's Sonos integration may want the purchase to be a *download* rather than a
 stream-only item, and re-linking would be the cheap thing to rule out next.
+
+
+## The household's account registry, read at last (verified 2026-08-31)
+
+Two questions had been open behind every `match` probe: whether a service token is scoped to the
+service or to the household, and whether the household's registration is per-service or once. Both
+are now answered, and neither was answered by `match` — which still has not succeeded even once.
+
+### Token scope is per service. Settled by a control, not by a guess
+
+The test that mattered was not "link a service and see if it searches", which passes under either
+hypothesis and is the same two-variables mistake as test E. The discriminating form is *link one
+service, then search a different one*:
+
+| step | result |
+|---|---|
+| `search -s Mixcloud jazz`, nothing linked | `Mixcloud needs a linked account` |
+| `link iHeartRadio` | linked; `match` refused as always |
+| `search -s iHeartRadio jazz` | 51 results |
+| `search -s Mixcloud jazz`, still unlinked | the identical error, byte for byte |
+
+One variable moved and Mixcloud did not follow it. `credentials.json` holds exactly one entry, keyed
+`6`, with its own token — so **one token per service, per machine**, as `credentials.rs` already
+modelled. The `household` field on an `Account` describes the household a token was minted against;
+it does not scope the token.
+
+The stronger evidence is that the iHeartRadio search returned 51 results while its `account_id` was
+`none`, `match` having failed. Search worked against a token the household had never registered. If
+tokens were household-scoped that could not happen.
+
+### Household registration is per *account*, and a service may have several
+
+Read from the URIs in `FV:2` and `Q:0`, which carry `sid` and `sn` on every entry:
+
+| serial | sid | service |
+|---|---|---|
+| sn_2 | 284 | YouTube Music |
+| sn_5 | 6 | iHeartRadio |
+| sn_6 | 201 | Amazon Music |
+| sn_7 | 151 | *not in the 108-service catalogue* |
+| sn_10 | 303 | Sonos Radio |
+| sn_14 | 333 | TuneIn (New) |
+| sn_15 | 6 | iHeartRadio, again |
+| sn_17 | 181 | Mixcloud |
+
+**`sid 6` appears twice.** One service, two accounts, one household. That settles the question
+outright: registration is per account, not once per household, and the guess at `credentials.rs:50`
+— "Sonos allows several, and choosing between them is a feature nothing has asked for yet" — is
+correct and now has evidence behind it.
+
+The serials are a household-wide counter incrementing per account added, which is why a Mixcloud
+account added from the phone during this session landed at 17 rather than at 1.
+
+`sid 151` is an account for a service that `ListAvailableServices` does not list. The 108-service
+catalogue is what a household may *add*, not what it has, and it is not a superset of what it has.
+
+### Where the registry can be read, and what that method cannot tell you
+
+`S:` browses empty on this firmware, `/status/accounts` returns an empty `ZPSupportInfo`, and
+`musicServices:1` is not a namespace the player answers. `musicServiceAccounts:1` has no read
+command at all — `getAccounts`, `getMusicServiceAccounts`, `list` and `getAccountList` are each
+`ERROR_UNSUPPORTED_COMMAND`. What works is harvesting `sid`/`sn` out of `FV:2` and `Q:0` URIs, and
+`playbackMetadata:1 getMetadataStatus` reports the live one directly as
+`id.accountId: "sn_17"`.
+
+Two limits, both load-bearing for anything built on this:
+
+- **It is a lower bound, not the registry.** Only accounts with favorites or queue entries appear.
+  An account nothing has saved from is invisible.
+- **It cannot distinguish live entries from dead ones.** `sn_5` is an iHeartRadio account the
+  household still lists and nothing plays from.
+
+### Choosing between several accounts is an open question
+
+Told from the phone to play iHeartRadio into Kitchen, the household played from **`sn_15`** — the
+higher of the two serials, and the more recently added. One observation cannot separate "highest
+serial wins" from "the app's remembered default, which happens to be the newest here"; the two
+predict identically here. Distinguishing them needs a household whose *older* account is the active
+one, which is not worth manufacturing.
+
+This matters more than the taxonomy does. Knowing the household holds an account for a service is
+not enough to use it — with several present, choosing wrong plays from the wrong account.
+
+### Four hypotheses this killed, three of them this document's
+
+- ~~`match` refuses because the service is not installed on the household~~. The "guest account"
+  wording invited this reading, and the section "`match` wants a link code" concluded from it that
+  the message "confirms the chain from the player's side". It does not confirm anything. After
+  Mixcloud was added from the phone, `match` for Mixcloud returned **the identical refusal**, word
+  for word, as `match` for iHeartRadio which was not added — with a link code and without one. The
+  message is unconditional parameter validation and says nothing about installation state.
+- ~~`AvailableServiceListVersion` will move when an account is added~~. It did not: `:2234` before
+  and after. That version tracks the offerable catalogue only, so **the catalogue cache cannot
+  detect an account being added or removed**, and the invalidation note under "The catalogue cache"
+  should not be read as covering account state.
+- ~~The single-use-code theory can be tested by calling `match` with an unredeemed code~~. It cannot,
+  by anyone, from a controller. `match` requires a `userIdHashCode`; the hash arrives only from
+  `getDeviceAuthToken`; that call is what redeems the code. **A valid hash and an unspent code cannot
+  coexist.** The theory recorded in "`match`, and why nothing needs it yet" is not disproved — it is
+  unfalsifiable by this route, which is a different and more useful thing to know about it.
+- ~~The household is the thing that authorizes search~~. It is not; see the 51 results above.
+
+### What this does to `x2rock accounts`
+
+`x2rock accounts` prints `not registered on the household` for iHeartRadio while the household holds
+**two** iHeartRadio accounts. The line is true about `match` and misleading as output: it reports on
+this machine's registration attempt, not on the registry, and the registry is readable. Today's link
+minted a third iHeartRadio identity that only this machine knows about.
+
+### The standing position, restated
+
+`match` remains needed for nothing, and the reason is now sharper than "nothing has needed it yet":
+**the registration it performs is something the Sonos app does perfectly well**, and the result is
+readable afterwards. A household that adds a service from the phone has an account serial x2rock can
+find. The open work is not making `match` succeed; it is enumerating accounts without depending on
+saved content, and deciding which account to use when a service has more than one.
 
 
 ## Rule: talking to a service never enters the daemon (decided 2026-08-31)
