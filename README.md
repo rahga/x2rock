@@ -227,8 +227,9 @@ own output.)
   `shell.json` does. `quickshell/x2rock.sonos/README.md` documents every key, and is installed
   alongside the widget so it is there to read wherever the plugin ends up.
 - Display is entirely event-driven off the x2rock daemon's MPRIS players — the widget never polls.
-  No daemon, no players, and the widget hides itself. Favorites are the one exception, because
-  MPRIS has no notion of them: they come from `x2rock favorites --json`, read when the picker is
+  No daemon, no players, and the widget hides itself. The picker is the exception, because MPRIS
+  carries none of what it lists: favorites, kept items and the linked-account list each come from
+  the CLI (`favorites --json`, `bookmarks --json`, `accounts --json`), read when the picker is
   opened rather than on any timer.
 
 Installing it is three commands, under [Install](#install) along with the binary and the daemon
@@ -357,6 +358,15 @@ A caution worth repeating: **do not trust a service's `canPlay` flag.**
 iHeartRadio marks an `artist_radio` collection playable, and handing its id to
 the play path is refused with a grammar error. What decides is whether the item
 arrived as a container, which is what `browse` reports.
+
+In the bar widget, each of these services is a **Browse …** row in the picker.
+Which services get one is discovered, not configured: `searchService`, then
+every account this machine has linked — `x2rock link` already named the
+services that matter, so the widget reads `x2rock accounts --json` instead of
+asking for the same names twice. The anonymous services stay out of the
+discovered list on purpose (nobody chose those 32), and `browseServices` in
+`shell.json` still overrides it by hand: the only way an anonymous service
+beyond `searchService` gets a row, and `[]` turns browsing off.
 
 ## Linking an account
 

@@ -3282,16 +3282,41 @@ TIDAL tracks that were unplayable anyway, and one podcast episode was enqueued t
 removed again. The iHeartRadio token this machine holds was linked today and is the same account as
 the earlier session's (`13012528881`).
 
+## The picker discovers linked services (decided 2026-08-31)
+
+Open question 1 asked whether the picker should discover services itself or keep the
+configured-by-hand bargain. Decided: **both, split along the line of who chose the service.**
+
+- **Linked accounts are discovered.** `x2rock link <service>` is already an act of configuration —
+  a deliberate, per-machine statement that this household uses the service — so requiring the same
+  name typed a second time into `browseServices` configured nothing; it was only an opportunity for
+  the picker and the credentials file to disagree, and its failure mode was real: a freshly linked
+  service that never appears because nobody knew about the key. On picker open the widget now reads
+  `x2rock accounts --json` — one local file; no player, no service, no daemon — and gives every
+  linked account a Browse row after the `searchService` one, deduplicated case-insensitively,
+  sorted by name.
+- **Anonymous services stay configured by hand.** Nobody chose the 32 anonymous services, and a
+  picker that lists a catalogue answers a different question from "what should this room play".
+  `searchService` (default TuneIn) and an explicit `browseServices` remain how one of those earns a
+  row.
+- **An explicit `browseServices` wins verbatim**, `[]` included. The bargain was not removed; it
+  became an override.
+- **Search is untouched: one row, one configured service.** A search fanning out across N services
+  is a different feature — the CLI takes one service per call, and interleaving N result lists is a
+  design nobody has asked for. If it is ever wanted, the discovered list now exists to build from.
+
+Mechanics worth recording: the accounts read re-runs on every picker open, like favorites, so a
+`x2rock link` run in a terminal reaches the picker without a shell restart. Failure is silent and
+falls back to exactly the old default — a row for `searchService` — because the picker with no
+discovery is the picker as it was. And a linked account whose token has gone stale still gets its
+row: the failure surfaces only when the row is opened, confined to `browseProc`, which is "one
+failing container must not fail the listing" again at the level of services.
+
 ## Open questions
 
-1. **Which services the picker should offer, once there are more than one** (opened 2026-08-31,
-   replacing "`x2rock browse`", which is built — see "`browse`, and the picker that stopped being
-   about favorites"). `searchService` names a single service and `browseServices` an array, both by
-   hand in `shell.json`. With 32 anonymous services and a growing number of linked ones, naming them
-   by hand is the part that will not scale, and the widget has no way to ask what is linked. The
-   pieces to build with are there: `x2rock accounts --json` lists what this machine holds a token
-   for, and `x2rock search`/`browse` with no argument list what is reachable. What is undecided is
-   whether the picker should discover services itself or keep the configured-by-hand bargain.
+1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
+   "which services the picker should offer" — the picker half is decided, see "The picker discovers
+   linked services" above).
 
    Two loose ends that block nothing. **`match`** has never succeeded — see "`match`, and why
    nothing needs it yet". **Bandcamp** stays deferred until there is something in the collection.
@@ -3331,6 +3356,12 @@ the earlier session's (`13012528881`).
    cost time are written up above rather than left to be rediscovered.
 
 ## Resolved since the original draft
+
+- ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ —
+  **decided 2026-08-31: discover what was linked, hand-configure what was not.** Linking is itself
+  configuration, so the picker reads `x2rock accounts --json` on open; the anonymous services stay
+  behind `searchService`/`browseServices`, and an explicit `browseServices` overrides everything.
+  See "The picker discovers linked services (decided 2026-08-31)".
 
 - ~~Music search is out of scope~~ — **decided 2026-08-29, reversed 2026-08-31.** The 08-29 entry
   gave two reasons. The first, that search "needs SMAPI, with per-service endpoints and
