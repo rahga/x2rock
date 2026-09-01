@@ -887,13 +887,15 @@ Two consequences beyond this feature:
   back out of the history meant hand-editing `bookmarks.json` — which is a poor answer for a file
   that fills itself with whatever anyone in the house plays.
 
-The design question this raises, unanswered on purpose: **should a bookmark store the serial at
-all?** The enqueue path already omits it and lets the player resolve the household's current
-account (see "The two playback paths use two different identities"), which is exactly the
-resilience a stored serial gives up. Storing it pins a bookmark to an account that may be gone;
-omitting it pins the bookmark to whichever account the household currently defaults to, which is
-not necessarily the one it was kept from. Neither is obviously right, and the choice deserves more
-than being settled by whichever was easier to write.
+~~The design question this raises, unanswered on purpose: **should a bookmark store the serial at
+all?**~~ **Closed 2026-08-31, and the choice turned out to be illusory.** The trade-off as written
+assumed storing a serial could *pin* a bookmark to the account it was kept from. It cannot: the
+player ignores whatever serial the enqueue path carries (sid 284 with `sn=9`, never registered,
+played) and resolves the household's current registration for the sid — demonstrated end to end
+when the Espresso entry, recorded under `sn_16`, refused with no registration and then played as
+`sn_20`, the same YouTube Premium subscription re-registered. A stored serial is provenance at
+most; it cannot select an account, so there was never a resilience to give up. See "Re-added the
+same day: `sn_20`, and the bookmark resurrected".
 
 ### In the widget (2026-08-31)
 
@@ -3275,7 +3277,9 @@ reference confirms it" in the harvest section.
   higher serial, but that is confounded with "the one most recently set up". Separating them needs a
   household whose *older* account is active.
 - **Whether a bookmark should store the serial at all** — see "The stored serial goes stale". A
-  trade-off, not an oversight, and deliberately left open.
+  trade-off, not an oversight, and deliberately left open. *(Closed 2026-08-31 by the inheriting
+  session: the choice was illusory — the player never consults the serial on the enqueue path, so
+  a bookmark cannot pin an account even deliberately. See "Re-added the same day: `sn_20`".)*
 - **`RemoveAccount` is declared but not demonstrably functional**, and 806 cannot distinguish a bad
   `AccountID` from a dead action. Removal was done from the phone instead.
 
@@ -3358,6 +3362,35 @@ observed the same day, from Kitchen (idle, empty queue, volume 3):
 Kitchen was paused and its queue cleared afterwards; the household is as this found it, minus the
 account its owner removed.
 
+### Re-added the same day: `sn_20`, and the bookmark resurrected (2026-08-31)
+
+The owner then re-added YouTube Music from the phone and played Coheed and Cambria into Living
+Room. Two predictions were on the table, and both held:
+
+- **The new registration is `sn_20`** — read live from `getMetadataStatus` on Living Room. Called
+  in advance from the monotonic-counter model (`sn_19` was the high-water mark; `sn_18` stayed
+  dead). That is the **second serial predicted before it existed**, after `sn_18`, and this one on
+  a service that has now held `sn_2`/`sn_3`, `sn_16` and `sn_20` on one household. Per the owner it
+  is the **same YouTube Premium subscription** each time — so this run is cleaner than the
+  `sn_3`→`sn_16` plan switch: an identical service-side account, removed and re-added, minted a new
+  serial. A serial belongs to a registration *event*, not to the service and not even to the
+  account behind it.
+- **The dead bookmark came back to life.** The same `x2rock bookmark Espresso` that answered 800
+  yesterday enqueued and **played** in Kitchen — resolved to **`sn_20`**, a registration that did
+  not exist when the item was recorded (its art URL still says `sn=16`). The enqueue-time check is
+  live in both directions: the same id flipped from playing to refused to playing again within a
+  day, tracking nothing but whether the household held *an* account for sid 284.
+
+**This closes the design question "should a bookmark store the serial at all".** It cannot matter.
+The player ignores whatever serial the enqueue path sends (`sn=9`, never registered, played) and
+resolves the household's *current* registration for the sid (`sn_16` at record time, `sn_20` at
+replay). A stored serial can neither pin a bookmark to the account it was kept from nor break the
+replay when that account dies — the player never consults it. It is provenance at most, and the
+resilience the serial-free path was credited with under "The stored serial goes stale" is now
+demonstrated end to end rather than argued.
+
+Kitchen paused and cleared again afterwards. Living Room was read, never touched.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -3371,13 +3404,15 @@ account its owner removed.
    this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
    `loadStreamUrl` cannot carry" was true and is no longer the whole story: the enqueue path does not
    resolve the stream at all, so the player supplies its own credential and protected content plays.
-   A kept YouTube Music track demonstrated it — until the household's account was disconnected
-   (2026-08-31, same day) and the same id started refusing at enqueue with UPnP 800. See "The
-   YouTube Music account was disconnected". So the mechanism is real but **conditional on the
-   household holding an account for the service**, which x2rock can neither create nor detect.
+   A kept YouTube Music track demonstrates it — and the same day showed the condition it rests on,
+   in both directions: the household's account was disconnected and the same id refused at enqueue
+   with UPnP 800, then the account was re-added and the id played again, under the new serial. See
+   "The YouTube Music account was disconnected" and the resurrection section after it. The
+   mechanism is real but **conditional on the household holding an account for the service**,
+   which x2rock can neither create nor detect in advance.
 
-   So for YouTube Music specifically, **playback was solved exactly as long as the household held
-   the account, and today it holds none** — discovery and playback are both missing again. What
+   So for YouTube Music specifically, **playback is exactly as solved as the household's
+   registration is present — only discovery is missing on x2rock's side.** What
    stands between here and a search is a single decision, not a puzzle: `getAppLink` answers 403
    asking for an API key, and YouTube Music's manifest — fetched anonymously from Sonos's CDN —
    still carries one (`apiKey: {cr, zp}`, re-confirmed 2026-08-31). Presenting a key Sonos
@@ -3406,6 +3441,13 @@ account its owner removed.
    cost time are written up above rather than left to be rediscovered.
 
 ## Resolved since the original draft
+
+- ~~Should a bookmark store the account serial?~~ — **closed 2026-08-31: the question dissolved.**
+  The player ignores the serial on the enqueue path and resolves the household's current
+  registration for the sid, so storing one can neither pin nor break anything — proven when the
+  same bookmark played as `sn_16`'s successor `sn_20` after a remove-and-re-add of the same
+  YouTube Premium subscription. Provenance at most. See "Re-added the same day: `sn_20`, and the
+  bookmark resurrected".
 
 - ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ —
   **decided 2026-08-31: discover what was linked, hand-configure what was not.** Linking is itself
