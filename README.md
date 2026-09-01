@@ -313,18 +313,26 @@ the queue alone, while anything on-demand is added to the queue, because that is
 player will resolve a service's own media. See "Browsing a service" for why both exist.
 
 The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
-can drive — see below. The remaining sixty-two nominally authenticate by handing off to the
-service's own mobile app, which a Linux desktop cannot do — but that tier is not uniformly closed:
-`x2rock link` will ask any of them for a browser page and let the service answer, and **Plex** is
-linked through its own PIN flow and then searched and browsed like anything else. For one that
-never answers, x2rock says so plainly rather than half-working:
+can drive — see below. The remaining sixty-two link through the service's own app rather than a
+code — but that tier is not uniformly closed, because the hand-off is the controller's business
+and not every service insists on it. `x2rock link` will ask any of them for a browser page and let
+the service answer; **Plex** is linked through its own PIN flow and then searched and browsed like
+anything else. For one that never answers, x2rock says so plainly rather than half-working:
 
 ```
 $ x2rock search -s "YouTube Music" jazz
-Error: YouTube Music needs a linked account. It authenticates by handing off to its own
-app, but some such services offer a browser page too: `x2rock link YouTube Music` asks,
-and a refusal costs nothing.
+Error: YouTube Music needs a linked account, and links through its own app rather than a
+code. Some such services offer a browser page too: `x2rock link YouTube Music` asks, and
+a refusal costs nothing.
 ```
+
+YouTube Music is the closed case worth naming, because it is closed for a reason no amount of
+work here will move: it wants an API key before it will discuss accounts at all, and the key Sonos
+ships to its own clients is encrypted, openable only by the Sonos app and the player firmware.
+There is no key to present — see *The YouTube Music `apiKey` is sealed* in
+[docs/architecture.md](docs/architecture.md) for the bytes. Playing a YouTube Music track you
+already know about is a different matter and works fine; see [Keeping things you cannot search
+for](#keeping-things-you-cannot-search-for).
 
 In the bar widget, the favorites picker searches too: type a term and a **Search TuneIn** row
 appears under the filtered favorites; choosing it runs the query and the hits join the same list.
@@ -417,9 +425,10 @@ copy; revoking it properly is done from that service's own account page.
 ## Keeping things you cannot search for
 
 Most app-link services stay unsearchable — YouTube Music, Spotify and Apple Music among them
-(Plex used to be on this list, and is not any more; see "Linking an account"). But *replaying* something needs no credential at
-all: the id is enough, and the player resolves the account it already holds. Discovery and
-repetition are separate problems, and this closes the second one for every service, linked or not:
+(Plex used to be on this list, and is not any more; see "Linking an account"). But *replaying*
+something needs no credential at all: the id is enough, and the player resolves the account it
+already holds. Discovery and repetition are separate problems, and this closes the second one for
+every service, linked or not:
 
 ```sh
 x2rock keep                  # remember what is playing

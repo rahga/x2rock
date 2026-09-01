@@ -54,7 +54,8 @@ pub enum Auth {
     Anonymous,
     /// A code typed into, or embedded in, a web page. `x2rock link` drives it.
     DeviceLink,
-    /// Hands off to the service's own app. Not drivable from a Linux desktop.
+    /// Links through the service's own app. Often, but not always, a dead end
+    /// here: the reply can still carry a browser page. Asking is how you know.
     AppLink,
 }
 
@@ -145,6 +146,34 @@ impl Service {
     pub fn cdudn(&self) -> Option<String> {
         let t = self.service_type?;
         Some(format!("SA_RINCON{t}_X_#Svc{t}-0-Token"))
+    }
+
+    /// What to say when this service is asked for without a stored token.
+    ///
+    /// One sentence of what the service wants, one of what to do about it.
+    /// Shared so the search path and the SOAP path cannot drift apart, which
+    /// they had: two wordings of the same advice, in two files.
+    ///
+    /// App-link is deliberately not described as a phone-only flow. The
+    /// hand-off target is the *controller's* choice - Sonos's own desktop
+    /// controller does app-link without a mobile app anywhere - so the reply
+    /// nests a browser page often enough to be worth asking for. Which
+    /// services populate it is learned by asking; see `app_link_code`.
+    pub fn needs_link(&self) -> String {
+        match self.auth {
+            Auth::Anonymous => format!("{} needs no account.", self.name),
+            Auth::DeviceLink => format!(
+                "{} needs a linked account. Run `x2rock link {}` once and it \
+                 will work from then on.",
+                self.name, self.name
+            ),
+            Auth::AppLink => format!(
+                "{} needs a linked account, and links through its own app \
+                 rather than a code. Some such services offer a browser page \
+                 too: `x2rock link {}` asks, and a refusal costs nothing.",
+                self.name, self.name
+            ),
+        }
     }
 }
 
@@ -433,13 +462,15 @@ pub async fn device_link_code(service: &Service, household: &str) -> Result<Link
 
 /// Ask an app-link service where to send the person.
 ///
-/// `getAppLink` is the newer flow, designed for a phone handing off to the
-/// service's own mobile app - which a Linux desktop cannot do. But its reply
-/// nests a `deviceLink` (the same `regUrl`/`linkCode` pair) for controllers
-/// with nothing to hand off to, and some services populate it with a real
-/// browser page. Whether a given service does is learned by asking: Plex
-/// answers, YouTube Music refuses the call outright wanting an API key. A
-/// refusal costs nothing, so the CLI asks rather than presuming.
+/// `getAppLink` is the newer flow, named for handing off to the service's own
+/// app - but that is the controller's choice, not a requirement of the tier.
+/// Sonos's own desktop controller does app-link with no mobile app anywhere,
+/// so the reply nests a `deviceLink` (the same `regUrl`/`linkCode` pair) for
+/// controllers with nothing to hand off to, and some services populate it
+/// with a real browser page. Whether a given service does is learned by
+/// asking: Plex answers, YouTube Music refuses the call outright wanting an
+/// API key it seals beyond reach. A refusal costs nothing, so the CLI asks
+/// rather than presuming.
 pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCode> {
     ensure!(
         service.auth == Auth::AppLink,
@@ -750,20 +781,7 @@ async fn call(
     params: &str,
 ) -> Result<String> {
     if service.auth != Auth::Anonymous && token.is_none() {
-        match service.auth {
-            Auth::DeviceLink => bail!(
-                "{} needs a linked account. Run `x2rock link {}` once and it will work from then on.",
-                service.name,
-                service.name
-            ),
-            _ => bail!(
-                "{} needs a linked account. It authenticates by handing off to \
-                 its own app, but some such services offer a browser page too: \
-                 `x2rock link {}` asks, and a refusal costs nothing.",
-                service.name,
-                service.name
-            ),
-        }
+        bail!("{}", service.needs_link());
     }
     match call_soap(service, token, action, params).await? {
         Ok(body) => Ok(body),
@@ -797,6 +815,42 @@ mod tests {
         </Service>
         <Service Id="999" Name="Broken"/>
       </Services>"#;
+
+    #[test]
+    fn each_auth_tier_gets_the_advice_that_fits_it() {
+        let services = parse_services(DESCRIPTORS, "").unwrap();
+        let by_name = |n: &str| {
+            services
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap_or_else(|| panic!("{n} missing from DESCRIPTORS"))
+                .needs_link()
+        };
+
+        // Device link is a promise: x2rock can finish this one unaided.
+        let bandcamp = by_name("Bandcamp");
+        assert!(bandcamp.contains("`x2rock link Bandcamp`"));
+        assert!(bandcamp.contains("will work from then on"));
+
+        // App link is an invitation, not a promise - the service decides, and
+        // the wording must not claim more than asking can deliver.
+        let ytm = by_name("YouTube Music");
+        assert!(ytm.contains("`x2rock link YouTube Music`"));
+        assert!(ytm.contains("a refusal costs nothing"));
+        assert!(
+            !ytm.contains("will work"),
+            "app-link advice must not promise a link it cannot make: {ytm}"
+        );
+
+        // Every tier that needs an account says so and names the one command
+        // that might supply it; the anonymous tier says neither.
+        for name in ["Bandcamp", "YouTube Music"] {
+            assert!(by_name(name).contains("needs a linked account"));
+        }
+        let tunein = by_name("TuneIn");
+        assert!(!tunein.contains("needs a linked account"));
+        assert!(!tunein.contains("x2rock link"));
+    }
 
     #[test]
     fn a_cdudn_is_derived_from_the_service_type_list() {

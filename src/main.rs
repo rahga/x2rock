@@ -1559,7 +1559,10 @@ async fn run_search(
 
     // Naming a real service that simply needs an account is a different
     // mistake from naming one that does not exist, and the difference is
-    // worth the extra lookup.
+    // worth the extra lookup. Only for a service that needs one: an anonymous
+    // service is always searchable, so if `find` still refused it the refusal
+    // is about the query - ambiguity - and saying anything about accounts
+    // would answer a question nobody asked.
     let chosen = catalogue::Catalogue::find(&usable, query)
         .map_err(|e| {
             match catalogue
@@ -1567,20 +1570,10 @@ async fn run_search(
                 .iter()
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
-                Some(s) if s.auth == sonos::smapi::Auth::DeviceLink => anyhow!(
-                    "{} needs a linked account. Run `x2rock link {}` once, \
-                     then search it like any other.",
-                    s.name,
-                    s.name
-                ),
-                Some(s) => anyhow!(
-                    "{} needs a linked account. It hands off to its own app, \
-                     but some such services offer a browser page too: try \
-                     `x2rock link {}` once - a refusal costs nothing.",
-                    s.name,
-                    s.name
-                ),
-                None => e,
+                Some(s) if s.auth != sonos::smapi::Auth::Anonymous => {
+                    anyhow!("{}", s.needs_link())
+                }
+                _ => e,
             }
         })?
         .clone();

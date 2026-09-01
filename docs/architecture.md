@@ -999,8 +999,11 @@ above may well be right — but this error is not evidence for it.
 ### Where this leaves YouTube Music
 
 Search stays closed — `music.googleapis.com` answers 403 without Sonos's own encrypted API key, and
-that key is not something to go after. But the ids are readable and a track will enqueue, so the
-shape of a feature x2rock *could* have is: **remember what played and start it again**, referencing
+that key is not something to go after. (That instinct held up: the key turned out to be sealed in
+an RSA/AES envelope opened only by the controller app and player firmware. See "The YouTube Music
+`apiKey` is sealed, and that closes the question".) But the ids are readable and a track will
+enqueue, so the shape of a feature x2rock *could* have is: **remember what played and start it
+again**, referencing
 content by `objectId` and letting the player resolve the credential it already holds. Discovery
 stays with the Sonos app; repetition moves to the bar.
 
@@ -1121,17 +1124,24 @@ per-service detail to work out.
              Please use API Key or other form of API consumer identity to call this API."}}
 ```
 
-Two things follow. App-link services expect the Sonos app to *launch the service's mobile app* —
-there is no YouTube Music desktop app to hand off to, so Linux would be on the browser fallback,
-which a service need not offer. And Google gates the endpoint on an API key before the question of
-user auth even arises.
+Google gates the endpoint on an API key before the question of user auth even arises. Note the
+error text is generic Google API-gateway boilerplate, not a Sonos-specific check — the same refusal
+any Google endpoint gives with key enforcement on.
 
-Notably the key is not secret from us: YouTube Music's **manifest**, fetched anonymously from
-Sonos's CDN, carries an `apiKey` object with `cr` and `zp` values. So the 403 is probably
-answerable. Whether x2rock *should* present a key Sonos distributes for its own clients is a
-judgement call and not a technical one — it is a different act from completing a link flow a
-service publishes for whoever asks, and it should be made deliberately rather than because the
-bytes happened to be reachable.
+**Two claims that stood here have since been corrected — both amended 2026-09-01.**
+
+*On the handoff.* This said app-link services expect the Sonos app to launch the *service's* mobile
+app, so Linux would be stuck on a browser fallback a service need not offer. Wrong, or at least
+unsupported: **the Sonos PC controller completes app-link too**, so any service that links on a
+desktop Sonos client must serve a non-mobile flow. The browser path is load-bearing for a shipping
+Sonos client, not a courtesy. That removes a wall this document claimed for two sessions.
+
+*On the key.* This said the key "is not secret from us" because the manifest carries an `apiKey`
+object with `cr` and `zp` values, making the 403 "probably answerable" and the rest a judgement
+call. **The manifest carries no key.** It carries two encrypted envelopes — RSA-1024-wrapped,
+AES payload, tagged with the fingerprint of a private key held in the controller app and the player
+firmware. There is no string to decide about presenting. See "The YouTube Music `apiKey` is sealed"
+below for the bytes, the entropy controls, and the decision that closes it.
 
 ### Auth is not the last wall
 
@@ -3517,6 +3527,227 @@ default rule (which would silently move iHeartRadio from stations to tracks):
 - The widget grew `searchCategory` in `shell.json`, passed to the CLI as `-c`. A picker pointed at
   Plex wants `"tracks"`; empty keeps the CLI default and every existing config keeps its behaviour.
 
+## The YouTube Music `apiKey` is sealed, and that closes the question (2026-09-01)
+
+Open question 1 carried "decide about the API key" from the first session onward, on a premise
+recorded in "But it is per-service, and YouTube Music is not one of them": the manifest carries an
+`apiKey`, so the 403 is *probably answerable*, and the only thing in the way is a judgement call
+about presenting a key Sonos distributes for its own clients.
+
+**The premise was wrong.** The manifest does not carry a key. It carries a key sealed in an
+encrypted envelope, and the envelope is opened by something compiled into the Sonos controller app
+and the player firmware. There is no key to decide about presenting. This section records the
+bytes, because the decision only holds as long as the evidence for it is checkable.
+
+### Provenance, and how to re-fetch
+
+The descriptor entry, from the cached `ListAvailableServices` in `services.json`:
+
+```json
+{"id": "284", "name": "YouTube Music",
+ "uri": "https://music.googleapis.com/v1:sendRequest",
+ "auth": "AppLink",
+ "manifest_uri": "https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432",
+ "service_type": 72711}
+```
+
+Both documents are anonymous GETs on Sonos's CDN — no household, no token, no player involved.
+This is the same read `smapi.rs:246` already does for every service:
+
+```sh
+curl -s https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432   # manifest
+curl -s https://cf.ws.sonos.com/p/p/a3fd2ecc-6039-47fe-8ced-1939e070c432   # presentation map
+```
+
+The manifest is small. Whole thing, minus the two base64 blobs:
+
+```json
+{"schemaVersion": "1.0",
+ "presentationMap": {"uri": ".../p/p/a3fd2ecc-...", "version": 278},
+ "strings":         {"uri": ".../p/s/a3fd2ecc-...", "version": 278},
+ "apiKey": {"cr": "iGSZygAAALoAAQAAAAAAAAEAAAAUA444pCPrP+ks…",
+            "zp": "iGSZygAAALoAAQAAAAAAAAEAAAAUA3ngEn8egjxX…"},
+ "search-catalogs": [],
+ "endpoints": [{"type": "reporting",
+                "uri": "https://music.googleapis.com/v1/v2.3/report/", "version": "1"}]}
+```
+
+### The envelope, byte by byte
+
+Each value is 356 base64 characters decoding to **266 bytes**. The first 21 bytes are
+byte-for-byte identical between `cr` and `zp` (`iGSZygAAALoAAQAAAAAAAAEAAAAU` in base64, a clean
+28-character boundary because 21 divides by 3). Every declared length matches the bytes that
+follow it, and the fields account for all 266 bytes with nothing left over:
+
+| Offset | Len | Content | `cr` | `zp` |
+|---|---|---|---|---|
+| `[0:4]`     | 4   | magic                       | `886499ca` | `886499ca` |
+| `[4:8]`     | 4   | u32 = 186                   | — | — |
+| `[8:13]`    | 5   | header `0001000000`         | — | — |
+| `[13:17]`   | 4   | count = 1                   | — | — |
+| `[17:21]`   | 4   | **len = 20**                | — | — |
+| `[21:41]`   | 20  | **key identifier**          | `038e38a423eb3fe92ccd9361d5350f75a51aa427` | `0379e0127f1e823c579ff956ee600c9aa3c442c8` |
+| `[41]`      | 1   | tag                         | `0xc1` | `0xb8` |
+| `[42:46]`   | 4   | count = 1                   | — | — |
+| `[46:50]`   | 4   | **len = 128**               | — | — |
+| `[50:178]`  | 128 | **RSA-1024 wrapped key**    | `64fa8be554a30ac260f58b1b…` | `8d7326356bdac23a8c4f244b…` |
+| `[178:182]` | 4   | count = 1                   | — | — |
+| `[182:186]` | 4   | **len = 80**                | — | — |
+| `[186:266]` | 80  | **AES payload**, 5 × 16B    | ciphertext | ciphertext |
+
+A hybrid crypto envelope in the textbook shape: a symmetric key wrapped under RSA, a payload under
+that symmetric key, tagged with a 20-byte (SHA-1-sized) identifier saying *which private key opens
+it*. 128 bytes is exactly RSA-1024. 80 bytes is exactly five AES blocks. Neither number is a
+coincidence and neither is a length that plaintext would land on.
+
+### Why "it might just be obfuscation" does not survive
+
+Shannon entropy of the two ciphertext regions, against controls of true random bytes at the same
+lengths (200 samples each, because entropy at short lengths is well below 8.0 by chance and a naive
+"6.9 is not 8.0, so it is not random" reading gets this backwards):
+
+| Region | Length | `cr` | `zp` | random control |
+|---|---|---|---|---|
+| RSA block | 128B | 6.50 | 6.65 | **~6.55** |
+| AES payload | 80B | 6.06 | 6.04 | **~6.03** |
+
+The control column is a sampled mean over 200 draws, so it wobbles by a few hundredths between
+runs (6.54 and 6.55 are the same number here); the `cr`/`zp` figures are exact and deterministic —
+6.4979, 6.6542, 6.0625, 6.0375. Both regions sit inside the control range, and there is no
+structure to find: no ASCII runs beyond incidental 4-character noise, no repeated blocks, no
+padding pattern. Whole-buffer entropy is
+*lower* (6.90 / 6.93 against a 266-byte control of 7.21) precisely because the header and length
+fields are full of zero bytes — which is itself confirmation that the parse above is separating
+structure from ciphertext correctly.
+
+Reproduce:
+
+```python
+import json, base64, struct, os, math, collections, urllib.request
+m = json.load(urllib.request.urlopen("https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432"))
+ent = lambda b: -sum(n/len(b)*math.log2(n/len(b)) for n in collections.Counter(b).values())
+for k, v in m["apiKey"].items():
+    b = base64.b64decode(v)
+    assert struct.unpack(">I", b[17:21])[0] == 20 and struct.unpack(">I", b[46:50])[0] == 128 \
+       and struct.unpack(">I", b[182:186])[0] == 80 and len(b) == 266
+    print(k, "keyid", b[21:41].hex(), "rsa-ent %.2f" % ent(b[50:178]), "aes-ent %.2f" % ent(b[186:]))
+print("control 128B %.2f" % (sum(ent(os.urandom(128)) for _ in range(200))/200))
+```
+
+### `cr` and `zp` — inference, not proof
+
+The two key identifiers differ, so the two envelopes are sealed to two different keys. The names
+are almost certainly Sonos's own vocabulary: **`cr` = Controller** (the CR100 and CR200 were
+Sonos's handheld controllers) and **`zp` = ZonePlayer** (every player model is ZP80/ZP90/ZP100/
+ZP120, and the UPnP device type is `ZonePlayer`). That reading fits the structure exactly — one
+envelope the controller app can open, one the speaker firmware can open, same plaintext key inside.
+
+Flagged as inference because nothing was decrypted to confirm it. What *is* proven is the part that
+matters: **two distinct private keys exist, and neither is in the manifest.**
+
+### What this makes the act
+
+Before this section, using the key looked like presenting a string anyone can fetch — bad manners
+toward Sonos at worst, and arguably not even that, since a Google API key is a project identifier
+for quota and billing rather than an authentication credential (Google's own documentation says so,
+and API keys ship in client bundles routinely). That framing was fair and it is now beside the
+point, because **we do not have the key.** Obtaining it means extracting an RSA private key from
+Sonos player firmware or the official controller binary.
+
+That is defeating a technological protection measure, not reading a public document, and it is a
+different category of act from everything else in this project. **Decided: no.** Not on
+etiquette, and not as a close call.
+
+The distinction that governs the rest of the project is unchanged and worth restating, because it
+is the line every future service decision should be tested against:
+
+- **Anonymous services** — the endpoint answers whoever asks.
+- **Device link** (Bandcamp, iHeartRadio, Mixcloud) — the service publishes a flow *for third-party
+  clients* and mints a token for you. You are yourself.
+- **Plex** — the same, via Plex's own PIN flow, and the token lands on your device list as
+  `x2rock-<hostname>` where you can revoke it. You are yourself, and you are visible.
+- **The sealed key** — you are not yourself, nothing was minted for you, nothing can be revoked
+  without breaking every Sonos player on earth, and getting it requires prying a private key out of
+  a binary.
+
+Every credential x2rock holds today was issued to x2rock or to its user. This one would be the
+first that was not, and it is also the first that could not be obtained without circumvention.
+
+### The registered-key proxy: right pattern, wrong door
+
+Proposed 2026-09-01 and worth recording, because it answers the objection that the sealed key
+cannot: run a small service holding a **registered** Google key, so traffic reads as *this project*
+rather than as Sonos. That fixes attribution completely — Google gets a named party to rate-limit,
+quota or revoke, and Sonos is out of the blast radius. If the barrier were only "whose quota is
+this spending", this would be the answer.
+
+It does not open this door, for two independent reasons:
+
+1. **There is nothing to register for.** `music.googleapis.com/v1:sendRequest` is a partner
+   endpoint provisioned to Sonos. There is no product to enable in Google Cloud Console and no key
+   obtainable through self-service that would be authorised on it. A registered key is valid for
+   APIs that are not this one.
+2. **The public API returns the wrong identifiers.** YouTube Data API v3 is registerable, quota'd
+   and entirely above board — and it answers with YouTube video ids. The Sonos object id is 48
+   opaque characters (`ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H`), not a video id and not
+   derivable from one. Search results nothing can play are not search.
+
+Keep the pattern. It is the correct architecture for any future service where a registerable key
+exists, and it is a better answer than "decide carefully" for the class of problem it fits.
+
+### The wall really is only the key
+
+Worth knowing, so nobody re-opens this hoping the SMAPI side is also missing: the presentation map
+specifies YouTube Music search **fully**, in nine categories across two groups.
+
+```xml
+<PresentationMap type="Search">
+  <SearchCategories stringId="YouTube Music">
+    <Category id="artists" mappedId="ARTISTS"/>     <Category id="playlists" mappedId="PLAYLISTS"/>
+    <Category id="tracks"  mappedId="SONGS"/>       <Category id="albums"    mappedId="ALBUMS"/>
+    <Category id="all"     mappedId="ALL"/>
+  </SearchCategories>
+  <SearchCategories stringId="Library">
+    <Category id="playlists" mappedId="LIBRARY_PLAYLISTS"/>  <Category id="tracks" mappedId="UPLOADED_SONGS"/>
+    <Category id="albums"    mappedId="UPLOADED_ALBUMS"/>    <Category id="artists" mappedId="UPLOADED_ARTISTS"/>
+  </SearchCategories>
+</PresentationMap>
+```
+
+So the search interface is defined and waiting; the 403 is the whole of what stands in front of it.
+The manifest's `search-catalogs` is `[]` and its only endpoint is `reporting`, which is consistent
+with search living on the service `uri` rather than a custom endpoint — the classic shape.
+
+### Objections this section already answers
+
+Collected so they do not each cost a session:
+
+- *"The key is public, so nothing is being taken."* The **container** is public. The plaintext is
+  not, and the private key that reaches it is not.
+- *"Maybe it is obfuscation, not encryption."* See the entropy table and the exact RSA-1024 and
+  5-AES-block lengths. Obfuscation does not land on those numbers or those entropy values.
+- *"Google API keys are not credentials anyway."* Correct, and no longer relevant. The barrier
+  stopped being *what the key is* the moment it turned out we do not have it.
+- *"RSA-1024 is weak."* Not weak enough to factor here, and succeeding would be the same act by a
+  longer route.
+- *"The Sonos PC app does app-link too, so a desktop path exists."* True — and it was a genuine
+  correction to the older claim that app-link means handing off to the *service's* mobile app (see
+  the amended paragraph in "But it is per-service"). It does not help: the desktop controller opens
+  the same envelope with the same embedded key.
+- *"Check another service's manifest — maybe one ships a plain key."* Possibly, and it would say
+  something interesting about how uniformly Sonos seals these. It would not produce YouTube Music's.
+- *"What would re-open this?"* Sonos publishing an API for third-party controllers, Google exposing
+  a registerable endpoint that accepts Sonos object ids, or YouTube Music appearing among the
+  device-link services. None are things to wait for.
+
+### What still works, and is enough
+
+Playback was never blocked by any of this. `x2rock keep` stores the object id, the player resolves
+the household's own credential at enqueue, and the track plays — demonstrated in both directions on
+2026-08-31 when the household's account was disconnected (UPnP 800 at the door) and re-added
+(`sn_20`, same id, playing again). Discovery stays in the Sonos app; repetition lives on the bar.
+That is the honest shape of this feature and it is not a consolation prize.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -3541,15 +3772,30 @@ default rule (which would silently move iHeartRadio from stations to tracks):
    which x2rock can neither create nor detect in advance.
 
    So for YouTube Music specifically, **playback is exactly as solved as the household's
-   registration is present — only discovery is missing on x2rock's side.** What
-   stands between here and a search is a single decision, not a puzzle: `getAppLink` answers 403
-   asking for an API key, and YouTube Music's manifest — fetched anonymously from Sonos's CDN —
-   still carries one (`apiKey: {cr, zp}`, re-confirmed 2026-08-31). Presenting a key Sonos
-   distributes for its own clients is a different act from completing a link flow a service
-   publishes for whoever asks, and it should be decided deliberately rather than because the bytes
-   are reachable. Two things stay unknown even if it were decided: app-link expects a hand-off to
-   the service's own mobile app, which a Linux desktop cannot do, and whether Google serves the
-   browser fallback at all.
+   registration is present — only discovery is missing on x2rock's side.**
+
+   **The discovery half is closed, 2026-09-01 — not decided, answered.** This entry used to say a
+   single judgement call stood between here and a search: the manifest carries an `apiKey`, so
+   present it or do not. That premise was false. The manifest carries two **encrypted envelopes**
+   (RSA-1024-wrapped key, AES payload, tagged with the fingerprint of a private key held in the
+   Sonos controller app and the player firmware) — so there is no key to present, and obtaining one
+   means extracting a private key from a binary. That is circumvention rather than reading, and it
+   is out of scope for this project. Full evidence, entropy controls, a reproduction script and the
+   objections it pre-answers are in "The YouTube Music `apiKey` is sealed, and that closes the
+   question". The **registered-key proxy** proposed alongside it — run a service holding a key
+   registered to this project, so traffic is attributable to somebody — is the right pattern and is
+   recorded there for future services; it does not open this door, because
+   `music.googleapis.com/v1:sendRequest` is a partner endpoint nobody can self-register for, and
+   the public YouTube Data API answers with video ids the player will not accept.
+
+   Also corrected there: **the Sonos PC controller completes app-link**, so the "hand-off needs the
+   service's mobile app, which Linux cannot do" wall this entry used to claim was never real. The
+   presentation map specifies YouTube Music search in full, nine categories across two groups — the
+   interface is defined and waiting, and the sealed key is the whole of what stands in front of it.
+
+   What remains open under this heading is only the *rest* of the app-link tier: some services may
+   answer `getAppLink` with a browser page the way Plex answered its own PIN flow, and asking costs
+   nothing. YouTube Music is not one of them.
 
    Worth noting what is *not* a route, so it is not re-tried: the Control API has no content
    discovery anywhere in its 53 paths, UPnP `Search` reports empty `SearchCaps`,
@@ -3577,6 +3823,15 @@ default rule (which would silently move iHeartRadio from stations to tracks):
   same bookmark played as `sn_16`'s successor `sn_20` after a remove-and-re-add of the same
   YouTube Premium subscription. Provenance at most. See "Re-added the same day: `sn_20`, and the
   bookmark resurrected".
+
+- ~~Should x2rock present Sonos's API key to unlock YouTube Music search?~~ — **closed
+  2026-09-01: the question dissolved, like the bookmark-serial one before it.** There is no key in
+  the manifest to present — only two encrypted envelopes whose private keys live in the controller
+  app and the player firmware, so the act was never "send a public string" and always "extract a
+  key from a binary". Recorded with the byte layout, entropy controls against random baselines, a
+  reproduction script, and the objections it pre-answers, in "The YouTube Music `apiKey` is sealed,
+  and that closes the question". Two older claims died with it: the manifest does not carry a
+  usable key, and app-link does not require a mobile hand-off — the Sonos PC controller does it too.
 
 - ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ —
   **decided 2026-08-31: discover what was linked, hand-configure what was not.** Linking is itself
