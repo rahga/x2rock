@@ -3786,6 +3786,40 @@ It goes out as `x2rock:isLiveStream`, the same namespaced-metadata route as `x2r
 end on D-Bus: `b false` on a YouTube Music track, `b true` with `xesam:title "Jazz Club"` while
 TuneIn played, and `false` again once the room was back on its queue.
 
+### The picker asks a different question, and one answer is unverified
+
+A picker row is a thing that is *not* playing, so it cannot read the daemon's flag. `isStreamRow`
+reads the row's own `type` instead, and the three sources that feed the picker share field names
+without sharing vocabularies - each passes through whatever its origin called the item:
+
+| Source | A station reads | Status |
+|---|---|---|
+| `search`, `browse` | `stream` (SMAPI's `itemType`) | **verified** - a TuneIn jazz search answers 19, and browsing into Trending answers 50, all `container: false` |
+| `favorites` | `object.item.audioItem.audioBroadcast` (DIDL-Lite `upnp:class`) | **reasoned, not verified** |
+| `bookmarks` | `stream`, being what x2rock stored | covered by the same check |
+
+Unknown reads as "no" - an unmarked station is a smaller wrong than a marked album, and an older
+CLI sending no `type` must not mark the whole list.
+
+### How to test the favorites half
+
+Not done, because this household has **no favorites at all** (`x2rock favorites` says so) and
+`audioBroadcast` appears nowhere in anything captured so far. The class is the DIDL-Lite standard
+for a broadcast, which is a good reason to expect it and not the same as having seen it.
+
+1. In the Sonos app, save a **radio station** as a Sonos favorite - a TuneIn one is enough, and
+   "Jazz Club" is the station every other capture here used.
+2. `x2rock favorites --json` and read the `type` field on that row. It comes from
+   `BrowseItem::kind()`, which returns the `<upnp:class>` out of the favorite's own metadata.
+3. If it contains `audioBroadcast` in any casing, the predicate is right and this section becomes
+   verified. If it says something else, `isStreamRow` in `BarWidget.qml` is the one line to widen -
+   the comment above it names this as the branch that would be wrong.
+4. Either way the mark should appear beside that favorite in the picker. That is the actual
+   check; step 3 only explains a failure.
+
+Worth doing while a favorite exists anyway, since the household has none and several other
+questions here are blocked on the same absence.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
