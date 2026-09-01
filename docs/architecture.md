@@ -1905,6 +1905,21 @@ correct and now has evidence behind it.
 The serials are a household-wide counter incrementing per account added, which is why a Mixcloud
 account added from the phone during this session landed at 17 rather than at 1.
 
+**Confirmed by prediction rather than by hindsight (2026-08-31).** With the highest serial standing
+at 17, the next account added from the phone — TIDAL, `sid 174` — was predicted to be `sn_18` before
+it was added. It is: `getMetadataStatus` reported `accountId: "sn_18"` on the first track played
+from it. A household-wide monotonic counter, not a per-service one, and not recycled.
+
+TIDAL had been in x2rock's "14 services can be linked" list all day while the household held no
+TIDAL account, which is the offerable catalogue and the registry being independent, once more.
+
+**And the same test showed the harvest is volatile, not merely incomplete.** Re-running it after
+the TIDAL track started, `sn_17` was *gone* — Mixcloud's account still exists, nothing removed it,
+but the queue entry that was the only URI naming it had been replaced. So the visible set changes
+with whatever happens to be playing. An enumeration built on this cannot be cached and cannot be
+trusted to be stable between two reads a minute apart, which is a sharper limit than "only accounts
+with saved content appear".
+
 `sid 151` is an account for a service that `ListAvailableServices` does not list. The 108-service
 catalogue is what a household may *add*, not what it has, and it is not a superset of what it has.
 
