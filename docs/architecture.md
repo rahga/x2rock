@@ -3997,6 +3997,50 @@ for a broadcast, which is a good reason to expect it and not the same as having 
 Worth doing while a favorite exists anyway, since the household has none and several other
 questions here are blocked on the same absence.
 
+## `queueVersion` does not exist, and the queue view was stale because of it (2026-09-01)
+
+Reported as "it got weird when I added a favorite twice then tried to remove it from a queue", and
+the report was exactly right.
+
+**The field the daemon reads is not sent.** `RoomState::queue_version` comes from
+`playbackStatus.queueVersion`, and firmware 95.0-77060 does not send it. `getPlaybackStatus`
+answers with `playbackState`, `positionMillis`, `itemId`, `playModes`, `availablePlaybackActions`,
+`isDucking`, `previousItemId`, `previousPositionMillis` - and nothing else. Nor does it arrive in an
+event: forcing a real pause and a real play left `x2rock:queueVersion` an empty string through both,
+so it is absent from the event body too rather than merely from the polled response.
+
+**So the widget's refresh never fired.** `onQueueVersionChanged: if (queueFor !== "") loadQueue()`
+has never run. Queue edits were fire-and-forget on the strength of it, which left the panel showing
+the list from before the edit.
+
+**That is a correctness bug, not a cosmetic one.** Queue rows carry *positions*. Acting on a stale
+list removes or moves a different track than the one on screen - which is what happened: two adds
+while the panel was open, then a remove that took the wrong entry.
+
+**Fixed the proportionate way.** Every edit the widget makes now re-reads the list when the process
+exits - `queueEditProc` for remove/move, `queueItemProc` for the `+`. An edit made *elsewhere*
+still goes unnoticed until the view is reopened, and the comment that promised otherwise ("including
+from the Sonos app, which is what keeps this honest when someone else edits") is gone rather than
+left to mislead.
+
+**The real fix, not taken.** The queue's true version is already read over UPnP as `UpdateID`, in
+`Upnp::update_id`, before every mutation. Publishing that as `x2rock:queueVersion` would make the
+original design work, including for edits from the Sonos app. It needs a UPnP call on some trigger,
+which is why a daemon that deliberately never polls has not grown one - and the queue is a
+peripheral feature here, per the owner: playback is usually a stream or a podcast, running alongside
+the queue rather than through it.
+
+The constant is kept rather than deleted. It costs one map entry, it is what a player *would* send,
+and it names the thing to publish if this ever matters more.
+
+### What first-party Sonos does, for whenever this is picked up
+
+Per the owner, and matching the split x2rock already implements: **playing to a device does not
+change the queue** - a station or a podcast episode runs alongside it - **but playing an album adds
+all of its tracks to the queue and plays them.** x2rock has the first half and not the second: a
+container is somewhere to browse into, and there is no "play this album" that fills the queue with
+its contents. `queue-item` adds one row at a time. That is the gap to close if queue work resumes.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

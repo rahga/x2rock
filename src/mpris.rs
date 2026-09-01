@@ -78,9 +78,28 @@ const CAN_SHUFFLE: &str = "x2rock:canShuffle";
 /// that player is really several speakers - but a bar widget wants to show it,
 /// and needs it to tell "everything is grouped" from "there is only one room".
 const MEMBERS: &str = "x2rock:members";
-/// Bumps whenever the queue changes, however it changed - including from the
-/// Sonos app. A client showing the queue re-reads it when this moves, which is
-/// what keeps a queue view correct without anything polling for it.
+/// The queue's version, when a player sends one.
+///
+/// **Observed empty on every player here, always** (2026-09-01). It is taken
+/// from `playbackStatus.queueVersion`, and this household's firmware
+/// (95.0-77060) does not send that field: `getPlaybackStatus` answers with
+/// `playbackState`, `positionMillis`, `itemId`, `playModes`,
+/// `availablePlaybackActions`, `isDucking` and the two `previous*` fields, and
+/// nothing else. Forcing real events - a pause and a play - did not produce it
+/// either, so it is absent from the event body too and not merely from the
+/// polled response.
+///
+/// The intent was that a client showing the queue re-reads it when this moves,
+/// which would keep a queue view correct without polling and would catch edits
+/// made from the Sonos app. **None of that has ever happened.** The bar widget
+/// now re-reads after each edit it makes itself instead; an edit from anywhere
+/// else still goes unnoticed until the view is reopened.
+///
+/// Kept rather than removed: it costs one map entry, it is what a player *would*
+/// send, and the real queue version is already read over UPnP as `UpdateID`
+/// (`Upnp::update_id`) before every mutation - so publishing that instead is the
+/// fix if this ever matters enough. It would mean a UPnP call on some trigger,
+/// which is why a daemon that deliberately never polls has not grown one.
 const QUEUE_VERSION: &str = "x2rock:queueVersion";
 /// Each member's own volume, aligned with [`MEMBERS`].
 ///
