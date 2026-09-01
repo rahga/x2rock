@@ -157,6 +157,26 @@ enum Command {
         #[arg(long)]
         kind: Option<String>,
     },
+    /// Put one search result in the queue without playing it.
+    ///
+    /// `play-item`'s sibling, and the same enqueue underneath - it simply stops
+    /// before making the queue current, seeking to the new track and pressing
+    /// play. What the bar widget's `+` uses.
+    ///
+    /// A live stream is refused rather than half-worked: it has no queue form,
+    /// which is why `play-item` streams one instead of queueing it.
+    QueueItem {
+        #[arg(long, short = 's')]
+        service: String,
+        id: String,
+        /// What the queue should show. Defaults to the id.
+        #[arg(long)]
+        title: Option<String>,
+        /// The item's own kind, as `search`/`browse --json` report it in `type`.
+        /// `stream` is refused; anything else is queued.
+        #[arg(long)]
+        kind: Option<String>,
+    },
     /// Link a music service account, so its catalogue can be searched.
     ///
     /// Opens the service's own login page in whatever browser is already
@@ -858,7 +878,7 @@ async fn play_item(
     // player's list has no cdudn to build - `SA_RINCONNone` is not an account.
     let streamish = kind.is_some_and(|k| k.eq_ignore_ascii_case("stream"));
     if let (false, Some(cdudn)) = (streamish, service.cdudn()) {
-        match enqueue_item(session, room, service, &cdudn, id, title).await {
+        match enqueue_item(session, room, service, &cdudn, id, title, true).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 eprintln!("x2rock: {title:?} would not go in the queue ({e:#}); streaming it")
@@ -868,10 +888,14 @@ async fn play_item(
     stream_item(session, room, service, token, id, title).await
 }
 
-/// Put a service item in the room's queue and jump to it.
+/// Put a service item in the room's queue, and optionally jump to it.
 ///
-/// Deliberately the same sequence `bookmark` uses, down to making the queue the
-/// current source first: after a station it is not, and `Seek` fails with 701.
+/// Playing is deliberately the same sequence `bookmark` uses, down to making the
+/// queue the current source first: after a station it is not, and `Seek` fails
+/// with 701. With `play` false none of that happens - the track is added to the
+/// end and whatever is playing keeps playing, which is the whole point of the
+/// distinction.
+#[allow(clippy::too_many_arguments)]
 async fn enqueue_item(
     session: &session::Session,
     room: Option<&str>,
@@ -879,6 +903,7 @@ async fn enqueue_item(
     cdudn: &str,
     id: &str,
     title: &str,
+    play: bool,
 ) -> Result<()> {
     let target = session::target(&session.groups, room)?;
     let upnp = Upnp::new(
@@ -892,6 +917,10 @@ async fn enqueue_item(
     let length = upnp
         .add_to_queue(&uri, &bookmarks::service_didl(id, title, cdudn), false)
         .await?;
+    if !play {
+        println!("{} — queued {title} at {length}", target.name);
+        return Ok(());
+    }
     if !upnp.playing_from_queue().await? {
         upnp.use_queue(&target.coordinator_id).await?;
     }
@@ -987,6 +1016,65 @@ async fn run_play_item(
         title.map(String::as_str).unwrap_or(id),
     )
     .await
+}
+
+/// `queue-item`: the same lookup `run_play_item` does, then enqueue without
+/// playing.
+async fn run_queue_item(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    service: &str,
+    kind: Option<&str>,
+    id: &str,
+    title: Option<&String>,
+) -> Result<()> {
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state).await?;
+    let mut catalogue = catalogue::Catalogue::load();
+    catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await?;
+    let linked = credentials::Credentials::load()?;
+    let usable = catalogue.searchable(&linked);
+    let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
+    let title = title.map(String::as_str).unwrap_or(id);
+
+    // Refused rather than half-worked. `play-item` answers a stream by streaming
+    // it, which is a different thing from queueing and cannot be what someone
+    // pressing "add to queue" meant.
+    if kind.is_some_and(|k| k.eq_ignore_ascii_case("stream")) {
+        bail!(
+            "{title:?} is a live stream, which has no queue form. \
+             Play it with `x2rock play-item` instead."
+        );
+    }
+    // Without a service type there is no cdudn, and `SA_RINCONNone` is not an
+    // account - the enqueue would be refused by the player with less to say.
+    let Some(cdudn) = chosen.cdudn() else {
+        bail!(
+            "{} is not in the player's service-type list, so nothing can be \
+             built to name the account that owns {title:?}.",
+            chosen.name
+        );
+    };
+    enqueue_item(&session, room, &chosen, &cdudn, id, title, false).await
+}
+
+/// Whether a row can be put in a queue, which is not the same as playable.
+///
+/// Two ways it cannot. A **live stream** has no queue form at all - `play-item`
+/// answers one by streaming it alongside the queue. And a service missing from
+/// the player's `AvailableServiceTypeList` has no `cdudn` to build, so nothing
+/// can name the account that owns the item; on this household that is exactly
+/// one service of 108, the anonymous TuneIn, which is also the widget's default.
+///
+/// A container is excluded too. A service may mark one playable and still refuse
+/// its id with a grammar error - see `browse` - so it is somewhere to go rather
+/// than something to add.
+fn queueable(item: &sonos::smapi::Item, service: &sonos::smapi::Service) -> bool {
+    !item.container
+        && !item.item_type.eq_ignore_ascii_case("stream")
+        && service.cdudn().is_some()
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -1442,6 +1530,7 @@ async fn run_browse(
                     "service": chosen.name,
                     "art_url": i.art_url,
                     "container": i.container,
+                    "queueable": queueable(i, &chosen),
                 })
             })
             .collect();
@@ -1668,6 +1757,7 @@ async fn run_search(
                     // tags and answers with collections, so a caller that
                     // assumed otherwise would hand a container to `play-item`.
                     "container": i.container,
+                    "queueable": queueable(i, chosen),
                 })
             })
             .collect();
@@ -1729,6 +1819,22 @@ async fn main() -> Result<()> {
             ref kind,
         } => {
             return run_play_item(
+                cli.ip,
+                cli.room.as_deref(),
+                service,
+                kind.as_deref(),
+                id,
+                title.as_ref(),
+            )
+            .await;
+        }
+        Command::QueueItem {
+            ref service,
+            ref id,
+            ref title,
+            ref kind,
+        } => {
+            return run_queue_item(
                 cli.ip,
                 cli.room.as_deref(),
                 service,
@@ -2748,6 +2854,7 @@ async fn main() -> Result<()> {
         | Command::Bookmarks { .. }
         | Command::Search { .. }
         | Command::PlayItem { .. }
+        | Command::QueueItem { .. }
         | Command::Browse { .. }
         | Command::Link { .. }
         | Command::Unlink { .. }
