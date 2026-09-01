@@ -2048,6 +2048,25 @@ not tell you which accounts exist.**
 
 So the harvest above is not a stopgap until the real call is found. It is the only route.
 
+#### The published reference confirms it (checked 2026-08-31)
+
+The handoff note flagged the Control API row of the table above as the weak half of this result:
+eight guessed command names, with no Sonos documentation read in that session. Checked against the
+current published reference at `docs.sonos.com` (the `llms.txt` index enumerates every reference
+page; the `match` page embeds the live Control API OpenAPI spec, `v1.55.0-alpha.16-production-cloud`,
+updated 2026-06): the `musicServiceAccounts` namespace documents **exactly one command, `match`**,
+plus the `MusicServiceAccount` object it returns. The only path under the namespace in the spec is
+`/households/{householdId}/musicServiceAccounts/match`.
+
+That agrees with the 53-path `OAS_production.json` from Sonos's sample app, which an earlier
+session had already read (see "What Sonos's own sample app settles") — the negative result is now
+confirmed against both the shipped spec and the live one. And SMAPI offers no way around it: its
+published verb list (`docs.sonos.com/docs/smapi`) is the *service-side* interface — auth, browse,
+playlists, reporting, `getMediaURI` — and nothing in it lists a household's accounts either.
+
+There is no listing verb left to be guessed at. This section stops being provisional, and
+`accounts --household` rests on a sound premise.
+
 #### But the household does say *when* accounts change
 
 `musicServiceAccounts:1 subscribe` succeeds — an empty reply, then an event:
@@ -3237,6 +3256,13 @@ listing anywhere" into two halves of very different strength:
 **Checking that against Sonos's published API reference is the first thing worth doing.** If a
 listing command exists, `accounts --household` should use it and the harvest sections need
 rewriting; if it does not, the section stops being provisional.
+
+**Resolved 2026-08-31, by the inheriting session.** The published reference documents exactly one
+command in `musicServiceAccounts` — `match` — and the live OpenAPI spec embedded in its reference
+page carries a single path under the namespace. No listing verb exists in the published Control
+API, and the SMAPI verb list is service-side and lists nothing either. "There is no listing
+anywhere" stands in full, and with it `accounts --household`. Details under "The published
+reference confirms it" in the harvest section.
 
 ### Also unfinished
 
