@@ -95,6 +95,13 @@ const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
 const INPUT_FORMAT: &str = "x2rock:inputFormat";
 const ON_TV_INPUT: &str = "x2rock:onTvInput";
 const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
+/// Whether what is playing is a live stream rather than something on demand.
+///
+/// MPRIS has no way to say it. `mpris:length` being absent is the closest
+/// signal and it is not the same question - a track whose duration the service
+/// simply did not send looks identical, and a client that dropped the icon on
+/// that would be wrong about the source rather than about the metadata.
+const LIVE_STREAM: &str = "x2rock:isLiveStream";
 
 impl RoomState {
     fn loop_status(&self) -> LoopStatus {
@@ -319,7 +326,32 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     if let Some(ms) = track.and_then(|t| t.duration_millis) {
         builder = builder.length(Time::from_millis(ms as i64));
     }
-    builder.build()
+    let mut metadata = builder.build();
+    metadata.set(LIVE_STREAM, Some(is_live_stream(meta)));
+    metadata
+}
+
+/// Whether a `metadataStatus` describes a live stream - internet radio, and
+/// anything else the player resolves continuously rather than as an item.
+///
+/// The container type is what says so. Verified on the Media Room 2026-09-01:
+/// an on-demand YouTube Music track reports `container.type "track"` with a
+/// `currentItem` carrying `durationMillis`, while TuneIn's "Jazz Club" reports
+/// `container.type "station"`, `objectId "-1"`, and **no `currentItem` at all**.
+///
+/// One honest caveat, recorded rather than hidden: that station was started by
+/// x2rock, which sends `"type": "station"` in its own `stationMetadata`, so the
+/// capture cannot rule out the player echoing back what it was handed. The
+/// corroborating signals in the same response are the player's own - it invents
+/// `objectId "-1"` and it omits `currentItem` - and a station started from the
+/// Sonos app is the control that would settle it. Should that control ever show
+/// a different container type, widen this rather than reaching for the absent
+/// duration, which asks a different question (see [`LIVE_STREAM`]).
+fn is_live_stream(meta: &MetadataStatus) -> bool {
+    meta.container
+        .as_ref()
+        .and_then(|c| c.kind.as_deref())
+        .is_some_and(|kind| kind == "station")
 }
 
 /// MPRIS wants an object path per track. Sonos ids are not valid path segments,
@@ -513,6 +545,59 @@ mod tests {
         assert_eq!(bus_suffix("Kitchen"), "x2rock-kitchen");
         assert_eq!(bus_suffix("Björn's Den!!"), "x2rock-bj-rn-s-den");
         assert_eq!(bus_suffix("  "), "x2rock");
+    }
+
+    /// Both shapes are trimmed from real `getMetadataStatus` responses off the
+    /// Media Room, 2026-09-01 - the capture the detector was written against.
+    fn status(json: &str) -> MetadataStatus {
+        serde_json::from_str(json).expect("fixture parses as metadataStatus")
+    }
+
+    /// Read the published flag back out the way a client would.
+    fn live_flag(md: &Metadata) -> Option<bool> {
+        md.get::<bool>(LIVE_STREAM)?.ok().copied()
+    }
+
+    #[test]
+    fn a_station_is_a_live_stream_and_a_track_is_not() {
+        // TuneIn "Jazz Club": no currentItem at all, and the player's own
+        // objectId "-1" for a container it has nothing to say about.
+        let station = status(
+            r#"{"container":{"id":{"objectId":"-1"},"name":"Jazz Club",
+                 "type":"station","service":{"id":"254","name":"TuneIn"}}}"#,
+        );
+        assert!(is_live_stream(&station));
+
+        // YouTube Music "Bodies": a real object id, and a duration to go with it.
+        let track = status(
+            r#"{"container":{"id":{"objectId":"ALkSOiGTPQu20Hqb","accountId":"sn_2",
+                 "serviceId":"284"},"name":"Bodies","type":"track"},
+                "currentItem":{"track":{"name":"Bodies","durationMillis":179000}}}"#,
+        );
+        assert!(!is_live_stream(&track));
+    }
+
+    #[test]
+    fn nothing_playing_is_not_a_live_stream() {
+        // An empty status and a container that names no type both mean "no
+        // reason to think so", which must not read as a station.
+        assert!(!is_live_stream(&status("{}")));
+        assert!(!is_live_stream(&status(
+            r#"{"container":{"name":"Something"}}"#
+        )));
+    }
+
+    #[test]
+    fn the_live_stream_flag_reaches_the_published_metadata() {
+        // The point of the detector is the key a client reads, so assert on
+        // that rather than on the function behind it.
+        let station = status(r#"{"container":{"name":"Jazz Club","type":"station"}}"#);
+        let md = to_metadata("RINCON_48A6:836412709", &station);
+        assert_eq!(live_flag(&md), Some(true));
+
+        let track = status(r#"{"container":{"name":"Bodies","type":"track"}}"#);
+        let md = to_metadata("RINCON_48A6:836412709", &track);
+        assert_eq!(live_flag(&md), Some(false));
     }
 
     #[test]

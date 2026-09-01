@@ -3748,6 +3748,44 @@ the household's own credential at enqueue, and the track plays — demonstrated 
 (`sn_20`, same id, playing again). Discovery stays in the Sonos app; repetition lives on the bar.
 That is the honest shape of this feature and it is not a consolation prize.
 
+## Telling a live stream from an item, and the mark it earns (2026-09-01)
+
+The widget showed a station exactly as it showed a track: a name, and nothing to say whether it
+ends. That difference decides whether seeking, a duration or a queue position mean anything, so it
+is worth a glyph.
+
+**What says so is `container.type`.** Both shapes captured off the Media Room the same day:
+
+| | on demand | live stream |
+|---|---|---|
+| `container.type` | `track` | **`station`** |
+| `container.id.objectId` | `ALkSOiGTPQu20Hqb…` | `-1` |
+| `currentItem` | present, with `durationMillis` | **absent entirely** |
+| `now --json` | title, artist, album, art, duration | title and service only |
+
+`objectId: "-1"` is the marker `MusicObjectId::is_real` already knows - a container the player has
+nothing to say about. The absent `currentItem` is the same fact from the other side: a stream has
+no item because the player resolves it continuously.
+
+**The honest caveat.** The station under test was started by x2rock, which sends `"type":
+"station"` in its own `stationMetadata`, so the capture cannot rule out the player echoing back
+what it was handed. Two things in the same response are the player's own invention rather than an
+echo - `objectId "-1"` and the missing `currentItem` - which is why the detector is believed rather
+than merely observed. **The control that would settle it is a station started from the Sonos app**,
+and it has not been run. If it ever reports a different container type, widen `is_live_stream`.
+
+**What was deliberately not used: the absent duration.** `mpris:length` missing is the closest
+thing MPRIS has, and it answers a different question. A track whose service simply did not send a
+duration looks identical, and a client marking that one a station would be wrong about the source
+rather than about the metadata. The flag says what x2rock knows, and the widget reads it strictly
+(`=== true`), so an older daemon that sends no such key leaves every room unmarked rather than
+marking them all.
+
+It goes out as `x2rock:isLiveStream`, the same namespaced-metadata route as `x2rock:members` and
+`x2rock:onTvInput` - MPRIS has no field for it and no way to add one except this. Verified end to
+end on D-Bus: `b false` on a YouTube Music track, `b true` with `xesam:title "Jazz Club"` while
+TuneIn played, and `false` again once the room was back on its queue.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
