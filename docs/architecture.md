@@ -3791,6 +3791,28 @@ It goes out as `x2rock:isLiveStream`, the same namespaced-metadata route as `x2r
 end on D-Bus: `b false` on a YouTube Music track, `b true` with `xesam:title "Jazz Club"` while
 TuneIn played, and `false` again once the room was back on its queue.
 
+### A live stream can have changing artwork, and Sonos Radio does
+
+Noticed while the control was still playing, and worth writing down because the
+naive expectation is the opposite - a stream has one logo and keeps it. Sonos Radio sends art per
+*track*, and `to_metadata` already prefers `track.image_url` over the container's, so it updates on
+its own as the stream advances.
+
+How, from two captures on the same station:
+
+```
+…/fe9cd0a0bbfca70dd863c43e88e65ffa_bg_09.png ?…&mark=…dzcdn.net/…/a1c3d91c…/1000x1000….jpg
+…/fe9cd0a0bbfca70dd863c43e88e65ffa_bg_09.png ?…&mark=…dzcdn.net/…/87d89262…/1000x1000….jpg
+```
+
+Same base image, different `mark`. The station supplies one constant background and `imgix`
+composites the track's own cover onto it server-side, the cover itself coming from Deezer's CDN. So
+the URL changes on every track and the widget refetches without being told to.
+
+TuneIn, again the opposite shape: `art_url` is `null` outright. Three per-track fields separate the
+two services - name, artist and art - and none of them says anything about whether the source is
+live. Only `container.type` does.
+
 ### Sonos Radio names the track, so the station needs saying
 
 `to_metadata` prefers `track.name` over `container.name`, which is right - the track is the more
