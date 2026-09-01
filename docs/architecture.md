@@ -1908,7 +1908,13 @@ account added from the phone during this session landed at 17 rather than at 1.
 **Confirmed by prediction rather than by hindsight (2026-08-31).** With the highest serial standing
 at 17, the next account added from the phone — TIDAL, `sid 174` — was predicted to be `sn_18` before
 it was added. It is: `getMetadataStatus` reported `accountId: "sn_18"` on the first track played
-from it. A household-wide monotonic counter, not a per-service one, and not recycled.
+from it. A household-wide monotonic counter, not a per-service one.
+
+**"Not recycled" was claimed here and is withdrawn.** 17 → 18 was observed with no account deleted
+in between, so it shows the counter increments; it says nothing about whether a *freed* number
+comes back. Whether a stale serial can later resolve to a different account is therefore still
+open, and it is the difference between the staleness hazard being a dead pointer and being a
+silently wrong one. Testing it needs an account removed and another added afterwards.
 
 TIDAL had been in x2rock's "14 services can be linked" list all day while the household held no
 TIDAL account, which is the offerable catalogue and the registry being independent, once more.
