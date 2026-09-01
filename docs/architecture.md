@@ -3609,7 +3609,13 @@ default rule (which would silently move iHeartRadio from stations to tracks):
 - The widget grew `searchCategory` in `shell.json`, passed to the CLI as `-c`. A picker pointed at
   Plex wants `"tracks"`; empty keeps the CLI default and every existing config keeps its behaviour.
 
-## The YouTube Music `apiKey` is sealed, and that closes the question (2026-09-01)
+## The YouTube Music `apiKey` is sealed, and that closes the ~~question~~ *key* (2026-09-01)
+
+> **Header amended 2026-09-01.** This section closed the *sealed-key* question — that path is a
+> dead end and stays one. It did **not** close the *YouTube Music* question, because it assumed the
+> key was the only way past the 403. It is not: the endpoint accepts OAuth. The still-open task is
+> "TASK: the OAuth identity probe", near the end of this section.
+
 
 Open question 1 carried "decide about the API key" from the first session onward, on a premise
 recorded in "But it is per-service, and YouTube Music is not one of them": the manifest carries an
@@ -3800,6 +3806,75 @@ So the search interface is defined and waiting; the 403 is the whole of what sta
 The manifest's `search-catalogs` is `[]` and its only endpoint is `reporting`, which is consistent
 with search living on the service `uri` rather than a custom endpoint — the classic shape.
 
+> **Superseded 2026-09-01 — the wall is not the key.** "The 403 is the whole of what stands in
+> front of it" was right; "and the 403 needs the sealed key" was the unstated and wrong half. The
+> endpoint accepts OAuth as an alternative identity, so the sealed key is one door, not the door.
+> See "TASK: the OAuth identity probe" immediately below. The section above stands as the analysis
+> of the *key*; it no longer stands as the analysis of the *wall*.
+
+### TASK: the OAuth identity probe (open, needs a Google Cloud OAuth client — 2026-09-01)
+
+Prompted by the observation that a Sonos app linking YouTube Music shows a ~9-character code and
+hands it to **Google**, which authenticates the account and approves the connection. That is the
+**OAuth 2.0 Device Authorization Grant** (RFC 8628), and it is Google's flow, not Sonos's — Sonos
+is a registered partner operating inside Google's terms. Which reframes both the 403 and the sealed
+key: the key is Google's *project*-identity requirement (a partner key Google requires be
+protected, hence sealed in firmware), and the ~9-char code is Google's *user*-identity flow.
+
+**Probed 2026-09-01, and it overturns "the wall really is only the key".** Three requests to
+`https://music.googleapis.com/v1:sendRequest`:
+
+| sent | answer |
+|---|---|
+| no identity | **403** `PERMISSION_DENIED` — "unregistered callers … use API Key **or other form of API consumer identity**" |
+| `Authorization: Bearer <malformed>` | **401** `UNAUTHENTICATED` — "Expected **OAuth 2 access token, login cookie** or other valid authentication credential" |
+| Bearer + dummy `?key=` | **401**, as above — the Bearer takes precedence |
+
+The moment a Bearer is present the complaint changes from *no identity* to *this OAuth token is
+invalid*. **So the endpoint evaluates OAuth as a first-class identity; the sealed API key is not
+mandatory.** It also names "login cookie" — the SAPISID cookie `music.youtube.com`'s own web client
+uses — confirming this is the YTM backend accepting the same auth its own clients do.
+
+**What that leaves as the real, single unknown:** whether a token minted by a *self-service* Cloud
+OAuth client is accepted, or whether the endpoint is pinned to Sonos's registered `client_id`
+(and/or requires the calling project to have this partner API enabled, which self-service cannot
+do — it is absent from Google's 528-entry public API discovery directory). Google can allowlist an
+API to specific OAuth clients, and a partner endpoint very likely is.
+
+**The experiment, one request decides it.** Clean — the user's own account, Google's own flow, no
+circumvention, nothing built into the repo:
+
+1. *(User action, cannot be automated.)* Create a Google Cloud project and an OAuth client of type
+   "TVs and Limited Input Devices", with a YouTube scope (`…/auth/youtube` or `youtube.readonly`).
+2. Device-grant harness (to build, kept **out of the repo** as a scratch script): request a
+   `device_code`/`user_code` at `https://oauth2.googleapis.com/device/code`, print the ~9-char
+   code and `verification_url`, poll `https://oauth2.googleapis.com/token` until the person
+   finishes — the same shape as `smapi::device_auth_token`'s poll loop.
+3. Fire one `getMetadata`/`getAppLink` SOAP body at the endpoint with `Authorization: Bearer
+   <token>`.
+4. Read the status:
+   - **200** → the wall was only the client allowlist and a self-owned account clears it. YTM
+     search becomes a normal SMAPI feature, no sealed key ever touched. Then, and only then, the
+     *second* wall matters (below).
+   - **403 `PERMISSION_DENIED`** → pinned to Sonos's `client_id`; closed, but for a nameable reason
+     rather than the sealed key, and revisitable only if Google ever opens the client set.
+   - **401 / scope error** → wrong scope; retry with another before concluding anything.
+
+**The second wall, only reached if the first opens: the id namespace.** Even a 200 gives results in
+whatever id space `sendRequest` returns; the Sonos player enqueues only its **36-byte opaque
+object id** (`x2rock keep` harvests one: `00b9123a…`, which is not a videoId, not an `MPRE…` browse
+id, and not a protobuf — `0x00` is not a legal protobuf field tag, so it is a wrapped/opaque Sonos
+handle). If `sendRequest`'s own search returns those object ids directly, discovery feeds the
+existing enqueue path and the feature is done. If it returns videoIds, the `videoId → objectId`
+mapping is the next question, and the bytes look encrypted rather than encoded. **Do not spend the
+id question until step 4 returns 200; a 403 makes it moot.**
+
+Related, non-Cloud discovery path worth noting so it is not confused with this one: `ytmusicapi`'s
+OAuth mode is itself a Cloud "Limited Input Device" client against InnerTube
+(`music.youtube.com/youtubei`). It reaches the real YTM catalogue as the user, but returns videoIds
+— so it runs into the same second wall, and it does not test the *Sonos* endpoint at all. The probe
+above is the one that answers "does a Google Cloud account open YTM **on Sonos**".
+
 ### Objections this section already answers
 
 Collected so they do not each cost a session:
@@ -3820,7 +3895,11 @@ Collected so they do not each cost a session:
   something interesting about how uniformly Sonos seals these. It would not produce YouTube Music's.
 - *"What would re-open this?"* Sonos publishing an API for third-party controllers, Google exposing
   a registerable endpoint that accepts Sonos object ids, or YouTube Music appearing among the
-  device-link services. None are things to wait for.
+  device-link services. None are things to wait for. **But one thing did re-open it the same day**,
+  and from inside rather than from Google or Sonos changing anything: the endpoint accepts OAuth,
+  so the sealed key is not the only identity. See "TASK: the OAuth identity probe" above — the
+  question is no longer *the key* but *the client allowlist*, and that is testable with a
+  self-service account.
 
 ### What still works, and is enough
 
@@ -4094,24 +4173,27 @@ its contents. `queue-item` adds one row at a time. That is the gap to close if q
    So for YouTube Music specifically, **playback is exactly as solved as the household's
    registration is present — only discovery is missing on x2rock's side.**
 
-   **The discovery half is closed, 2026-09-01 — not decided, answered.** This entry used to say a
-   single judgement call stood between here and a search: the manifest carries an `apiKey`, so
-   present it or do not. That premise was false. The manifest carries two **encrypted envelopes**
-   (RSA-1024-wrapped key, AES payload, tagged with the fingerprint of a private key held in the
-   Sonos controller app and the player firmware) — so there is no key to present, and obtaining one
-   means extracting a private key from a binary. That is circumvention rather than reading, and it
-   is out of scope for this project. Full evidence, entropy controls, a reproduction script and the
-   objections it pre-answers are in "The YouTube Music `apiKey` is sealed, and that closes the
-   question". The **registered-key proxy** proposed alongside it — run a service holding a key
-   registered to this project, so traffic is attributable to somebody — is the right pattern and is
-   recorded there for future services; it does not open this door, because
-   `music.googleapis.com/v1:sendRequest` is a partner endpoint nobody can self-register for, and
-   the public YouTube Data API answers with video ids the player will not accept.
+   **The discovery half: the sealed-key path is closed, but discovery is not — re-opened
+   2026-09-01.** This entry first said one judgement call stood between here and a search (present
+   the manifest `apiKey` or not); that was false, because the `apiKey` is two **encrypted
+   envelopes** (RSA-1024-wrapped key, AES payload, tagged with the fingerprint of a private key in
+   the Sonos app and player firmware), so there is no key to present and getting one means
+   extracting a private key from a binary — circumvention, out of scope. Then the *same day* the
+   endpoint itself corrected the framing: `music.googleapis.com/v1:sendRequest` returns **401
+   "Expected OAuth 2 access token"** the instant a Bearer is presented, so it accepts OAuth as an
+   alternative identity and **the sealed key is one door, not the door.** The live task is now
+   narrow and testable — does a self-service Cloud OAuth client's token clear the endpoint, or is
+   it pinned to Sonos's `client_id`? — and it needs the user to create the OAuth client. Full
+   probe, decision tree and the second wall (id namespace) are in **"TASK: the OAuth identity
+   probe"** inside "The YouTube Music `apiKey` is sealed". The **registered-key proxy** recorded
+   there stays the right pattern for a future service with a registerable endpoint; it does not fit
+   this one.
 
    Also corrected there: **the Sonos PC controller completes app-link**, so the "hand-off needs the
    service's mobile app, which Linux cannot do" wall this entry used to claim was never real. The
    presentation map specifies YouTube Music search in full, nine categories across two groups — the
-   interface is defined and waiting, and the sealed key is the whole of what stands in front of it.
+   interface is defined and waiting, and an accepted identity for `sendRequest` is the whole of
+   what stands in front of it.
 
    What remains open under this heading is only the *rest* of the app-link tier: some services may
    answer `getAppLink` with a browser page the way Plex answered its own PIN flow, and asking costs
