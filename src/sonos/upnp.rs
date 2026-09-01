@@ -9,6 +9,7 @@
 //! implementation, which answers with `Transfer-Encoding: chunked` and
 //! `Connection: close` (verified), so it dechunks and reads to end of stream.
 
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -761,6 +762,47 @@ fn escape(value: &str) -> String {
 }
 
 /// `H:MM:SS` or `H:MM:SS.mmm`, as UPnP reports durations.
+/// Every `(service id, account serial)` a list of items names in its URIs.
+///
+/// The household will not enumerate its accounts - `musicServiceAccounts:1` has
+/// no read command and neither UPnP service offers one - so the serials have to
+/// be read off content that happens to mention them. `FV:2` and `Q:0` are where
+/// they turn up.
+///
+/// **This is not the household's account list, and must never be presented as
+/// one.** A serial stays visible after its account is deleted, because deleting
+/// an account does not rewrite a queue that names it; and an account that has
+/// only ever played a station is absent, because a station never enters a
+/// queue. Both were observed on one household within an hour. See "The harvest
+/// showed a deleted account and hid a live one" in docs/architecture.md.
+pub fn serials_in(items: &[BrowseItem]) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
+    for item in items {
+        for text in [item.uri.as_deref(), item.art_url.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            // Art URLs carry the same query percent-encoded, as the `u=`
+            // parameter of `/getaa`, so one decode serves both shapes.
+            let flat = text.replace("%3d", "=").replace("%3D", "=").replace("%26", "&");
+            if let (Some(sid), Some(sn)) = (digits_after(&flat, "sid="), digits_after(&flat, "sn=")) {
+                out.insert((sid.to_string(), sn.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The run of digits immediately after `key`, if there is one.
+fn digits_after<'a>(hay: &'a str, key: &str) -> Option<&'a str> {
+    let start = hay.find(key)? + key.len();
+    let rest = &hay[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
 pub fn parse_hms(text: &str) -> Option<Duration> {
     let mut parts = text.split(':');
     let h: u64 = parts.next()?.parse().ok()?;
@@ -857,5 +899,54 @@ mod tests {
     #[test]
     fn soap_arguments_are_escaped() {
         assert_eq!(escape(r#"a&b<c>"d""#), "a&amp;b&lt;c&gt;&quot;d&quot;");
+    }
+
+    fn item(uri: Option<&str>, art: Option<&str>) -> BrowseItem {
+        BrowseItem {
+            id: "Q:0/1".into(),
+            title: "t".into(),
+            uri: uri.map(str::to_string),
+            metadata: String::new(),
+            art_url: art.map(str::to_string),
+            shortcut: false,
+        }
+    }
+
+    #[test]
+    fn serials_come_off_plain_and_percent_encoded_urls() {
+        // A queue item's own URI, and the art URL that wraps the same query
+        // percent-encoded - both seen on this household.
+        let items = [
+            item(Some("x-sonos-http:podcast.mp3?sid=6&flags=8&sn=15"), None),
+            item(
+                None,
+                Some("/getaa?s=1&u=x-sonosapi-hls-static%3acloudcast%3fsid%3d181%26flags%3d8232%26sn%3d17"),
+            ),
+        ];
+        let got = serials_in(&items);
+        assert!(got.contains(&("6".to_string(), "15".to_string())));
+        assert!(got.contains(&("181".to_string(), "17".to_string())));
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn one_service_can_hold_several_serials() {
+        // sid 6 held sn_5 and sn_15 at once, which is the whole reason this
+        // returns pairs rather than a map keyed by service.
+        let items = [
+            item(Some("x:a?sid=6&sn=5"), None),
+            item(Some("x:b?sid=6&sn=15"), None),
+        ];
+        assert_eq!(serials_in(&items).len(), 2);
+    }
+
+    #[test]
+    fn items_naming_no_account_are_skipped() {
+        let items = [
+            item(Some("x-rincon-queue:RINCON_1#0"), None),
+            item(Some("x:c?sid=333"), None),
+            item(None, None),
+        ];
+        assert!(serials_in(&items).is_empty());
     }
 }

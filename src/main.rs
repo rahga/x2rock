@@ -186,6 +186,10 @@ enum Command {
     },
     /// List the accounts this machine holds a token for.
     Accounts {
+        /// Also show the account serials this household's favorites and queues
+        /// name. Needs a player; the rest of this command does not.
+        #[arg(long)]
+        household: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1641,8 +1645,43 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Command::Accounts { json } => {
+        Command::Accounts { household, json } => {
             let linked = credentials::Credentials::load()?;
+            // Only `--household` reaches the network, so the default keeps the
+            // promise made above: this command reads a file on this machine.
+            let serials = if household {
+                let mut state = State::load()?;
+                let session = session::connect(cli.ip, &mut state).await?;
+                // Favorites are household-wide, so any player answers for the
+                // half that matters, and demanding --room to read them would be
+                // a question with no bearing on the answer. A room is honoured
+                // when given - it picks whose queue is read - and otherwise the
+                // first reachable player serves.
+                let ip = match cli.room.as_deref() {
+                    Some(_) => {
+                        let target = session::target(&session.groups, cli.room.as_deref())?;
+                        target
+                            .coordinator_ip
+                            .ok_or_else(|| anyhow!("no address for {}", target.name))?
+                    }
+                    None => session
+                        .groups
+                        .players
+                        .iter()
+                        .find_map(Player::ip)
+                        .ok_or_else(|| anyhow!("no player with a known address"))?,
+                };
+                let upnp = Upnp::new(ip);
+                let mut found = std::collections::BTreeSet::new();
+                // Favorites are household-wide; the queue is this coordinator's.
+                // Neither is the account list - see `serials_in`.
+                for object in ["FV:2", "Q:0"] {
+                    found.extend(upnp::serials_in(&upnp.browse_content(object).await?));
+                }
+                Some(found)
+            } else {
+                None
+            };
             if json {
                 let rows: Vec<_> = linked
                     .services
@@ -1661,20 +1700,69 @@ async fn main() -> Result<()> {
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&rows)?);
-            } else if linked.services.is_empty() {
-                println!("No accounts linked. Run `x2rock link` to see what can be.");
+                let out = match &serials {
+                    Some(found) => json!({
+                        "linked": rows,
+                        // Named exactly what it is. A consumer that reads this
+                        // as the household's accounts will be wrong in both
+                        // directions - see `upnp::serials_in`.
+                        "serials_named_by_content": found
+                            .iter()
+                            .map(|(sid, sn)| json!({ "service_id": sid, "account": sn }))
+                            .collect::<Vec<_>>(),
+                    }),
+                    None => json!(rows),
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
-                for (id, a) in &linked.services {
-                    let registered = match &a.account_id {
-                        Some(account) => format!("household account {account}"),
-                        None => "not registered on the household".to_string(),
-                    };
+                if linked.services.is_empty() {
+                    println!("No accounts linked. Run `x2rock link` to see what can be.");
+                } else {
+                    for (id, a) in &linked.services {
+                        // `account_id` is set only when *this machine's* `match`
+                        // succeeded, which has never happened. Saying "not
+                        // registered on the household" read as a fact about the
+                        // household, which this file cannot know: the household
+                        // may hold several accounts for the service already.
+                        let registered = match &a.account_id {
+                            Some(account) => format!("registered from here as {account}"),
+                            None => "no registration from this machine".to_string(),
+                        };
+                        println!(
+                            "{:<20} {:<10} {:<12} {registered}",
+                            a.service_name,
+                            id,
+                            ago(a.linked)
+                        );
+                    }
+                }
+                if let Some(found) = &serials {
+                    let catalogue = catalogue::Catalogue::load();
+                    println!();
+                    if found.is_empty() {
+                        println!("No serials named by this household's favorites or queue.");
+                    } else {
+                        println!("Serials named by this household's favorites and queue:");
+                        // By serial, which is the order they were created in.
+                        // Sorting by service id puts "6" after "333".
+                        let mut rows: Vec<_> = found.iter().collect();
+                        rows.sort_by_key(|(_, sn)| sn.parse::<u64>().unwrap_or(u64::MAX));
+                        for (sid, sn) in rows {
+                            let name = catalogue
+                                .services()
+                                .iter()
+                                .find(|s| &s.id == sid)
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| "not in the catalogue".to_string());
+                            println!("  sn_{sn:<4} {name:<24} sid {sid}");
+                        }
+                    }
+                    println!();
                     println!(
-                        "{:<20} {:<10} {:<12} {registered}",
-                        a.service_name,
-                        id,
-                        ago(a.linked)
+                        "Not the household's account list. A serial stays here after its account"
+                    );
+                    println!(
+                        "is removed, and an account that has only played a station never appears."
                     );
                 }
             }
