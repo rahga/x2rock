@@ -102,6 +102,14 @@ const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
 /// simply did not send looks identical, and a client that dropped the icon on
 /// that would be wrong about the source rather than about the metadata.
 const LIVE_STREAM: &str = "x2rock:isLiveStream";
+/// The station behind a live stream, when it is not already the title.
+///
+/// Sonos Radio names the *track* in `currentItem` and the station only in the
+/// container, so a client that shows the title alone says "Intervallo (from
+/// "Veruschka") (II)" and never says where it came from. TuneIn has no track at
+/// all and the title already *is* the station, which is why this is sent only
+/// when it would add something rather than repeat the line above it.
+const STATION_NAME: &str = "x2rock:stationName";
 
 impl RoomState {
     fn loop_status(&self) -> LoopStatus {
@@ -328,30 +336,54 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     }
     let mut metadata = builder.build();
     metadata.set(LIVE_STREAM, Some(is_live_stream(meta)));
+    metadata.set(
+        STATION_NAME,
+        Some(station_name(meta, title).unwrap_or_default().to_owned()),
+    );
     metadata
 }
 
 /// Whether a `metadataStatus` describes a live stream - internet radio, and
 /// anything else the player resolves continuously rather than as an item.
 ///
-/// The container type is what says so. Verified on the Media Room 2026-09-01:
-/// an on-demand YouTube Music track reports `container.type "track"` with a
-/// `currentItem` carrying `durationMillis`, while TuneIn's "Jazz Club" reports
-/// `container.type "station"`, `objectId "-1"`, and **no `currentItem` at all**.
+/// **`container.type` is the whole of it, and it is verified.** Three captures
+/// off the Media Room, 2026-09-01:
 ///
-/// One honest caveat, recorded rather than hidden: that station was started by
-/// x2rock, which sends `"type": "station"` in its own `stationMetadata`, so the
-/// capture cannot rule out the player echoing back what it was handed. The
-/// corroborating signals in the same response are the player's own - it invents
-/// `objectId "-1"` and it omits `currentItem` - and a station started from the
-/// Sonos app is the control that would settle it. Should that control ever show
-/// a different container type, widen this rather than reaching for the absent
-/// duration, which asks a different question (see [`LIVE_STREAM`]).
+/// | | `container.type` | `currentItem` | `objectId` |
+/// |---|---|---|---|
+/// | YouTube Music track | `track` | present, with `durationMillis` | real |
+/// | TuneIn "Jazz Club" | `station` | absent | `-1` |
+/// | Sonos Radio "Sound System" | `station` | **present, with name and artist** | **`97034`** |
+///
+/// The third is the control, and it settled two things at once. It was started
+/// from the Sonos app, so nothing x2rock sent was in the loop - which rules out
+/// the player merely echoing back the `"type": "station"` that `loadStreamUrl`
+/// puts in its own `stationMetadata`. The container type is the player's own
+/// vocabulary.
+///
+/// It also killed two signals an earlier version of this comment leaned on. A
+/// missing `currentItem` and `objectId "-1"` are **TuneIn's** shape, not a live
+/// stream's: Sonos Radio streams a named track by a named artist and still has
+/// no duration and no end. Only the container type and the absent duration
+/// survive all three, and the duration is not the question anyway (see
+/// [`LIVE_STREAM`]).
 fn is_live_stream(meta: &MetadataStatus) -> bool {
     meta.container
         .as_ref()
         .and_then(|c| c.kind.as_deref())
         .is_some_and(|kind| kind == "station")
+}
+
+/// The station name, when a client showing the title would not already have it.
+///
+/// Only for a live stream, and only when the container names something the
+/// title does not already say - see [`STATION_NAME`].
+fn station_name<'a>(meta: &'a MetadataStatus, title: Option<&str>) -> Option<&'a str> {
+    if !is_live_stream(meta) {
+        return None;
+    }
+    let name = meta.container.as_ref()?.name.as_deref()?.trim();
+    (!name.is_empty() && Some(name) != title).then_some(name)
 }
 
 /// MPRIS wants an object path per track. Sonos ids are not valid path segments,
@@ -575,6 +607,40 @@ mod tests {
                 "currentItem":{"track":{"name":"Bodies","durationMillis":179000}}}"#,
         );
         assert!(!is_live_stream(&track));
+    }
+
+    #[test]
+    fn sonos_radio_is_a_stream_even_though_it_names_a_track() {
+        // The control, started from the Sonos app on 2026-09-01 - nothing
+        // x2rock sent was in the loop, which is what makes container.type the
+        // player's own word rather than an echo of our stationMetadata. It also
+        // has a real objectId and a currentItem, both of which an earlier
+        // version of this detector wrongly treated as signs of on-demand.
+        let radio = status(
+            r#"{"container":{"id":{"objectId":"97034","accountId":"sn_1","serviceId":"303"},
+                 "name":"Sound System","type":"station",
+                 "service":{"id":"303","name":"Sonos Radio"}},
+                "currentItem":{"track":{"name":"Intervallo (from \"Veruschka\") (II)",
+                 "artist":{"name":"Ennio Morricone"}}}}"#,
+        );
+        assert!(is_live_stream(&radio));
+        // The title is the track, so the station would otherwise go unsaid.
+        assert_eq!(
+            station_name(&radio, Some("Intervallo (from \"Veruschka\") (II)")),
+            Some("Sound System")
+        );
+    }
+
+    #[test]
+    fn a_station_that_is_already_the_title_is_not_repeated() {
+        // TuneIn has no track, so to_metadata falls back to the container name
+        // and the title already is the station. Saying it twice is noise.
+        let tunein = status(r#"{"container":{"name":"Jazz Club","type":"station"}}"#);
+        assert_eq!(station_name(&tunein, Some("Jazz Club")), None);
+        // And an on-demand album never names a station, whatever it is called.
+        let track = status(r#"{"container":{"name":"Bodies","type":"track"}}"#);
+        assert_eq!(station_name(&track, Some("Bodies")), None);
+        assert_eq!(station_name(&track, Some("Something else")), None);
     }
 
     #[test]

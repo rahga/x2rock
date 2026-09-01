@@ -3754,25 +3754,30 @@ The widget showed a station exactly as it showed a track: a name, and nothing to
 ends. That difference decides whether seeking, a duration or a queue position mean anything, so it
 is worth a glyph.
 
-**What says so is `container.type`.** Both shapes captured off the Media Room the same day:
+**What says so is `container.type`, and nothing else does.** Three captures off the Media Room the
+same day, the third of which is the control:
 
-| | on demand | live stream |
-|---|---|---|
-| `container.type` | `track` | **`station`** |
-| `container.id.objectId` | `ALkSOiGTPQu20Hqb…` | `-1` |
-| `currentItem` | present, with `durationMillis` | **absent entirely** |
-| `now --json` | title, artist, album, art, duration | title and service only |
+| | YouTube Music track | TuneIn "Jazz Club" | Sonos Radio "Sound System" |
+|---|---|---|---|
+| how it started | queue | x2rock `loadStreamUrl` | **the Sonos app** |
+| `container.type` | `track` | **`station`** | **`station`** |
+| `container.id.objectId` | real | `-1` | **`97034`** (real, `sn_1`) |
+| `currentItem` | present, with `durationMillis` | absent | **present, name + artist** |
+| `durationMillis` | 179000 | — | **absent** |
+| `playbackSession` | — | x2rock's `directControl` | **none** |
 
-`objectId: "-1"` is the marker `MusicObjectId::is_real` already knows - a container the player has
-nothing to say about. The absent `currentItem` is the same fact from the other side: a stream has
-no item because the player resolves it continuously.
+**The control settled it.** An earlier version of this section flagged that TuneIn station as
+started *by x2rock*, which sends `"type": "station"` in its own `stationMetadata` - so the capture
+could not rule out the player echoing back what it was handed. Sonos Radio's "Sound System",
+started from the Sonos app, carries no `playbackSession` and a real object id: nothing x2rock sent
+was in the loop, and the container type still reads `station`. **It is the player's own vocabulary.**
 
-**The honest caveat.** The station under test was started by x2rock, which sends `"type":
-"station"` in its own `stationMetadata`, so the capture cannot rule out the player echoing back
-what it was handed. Two things in the same response are the player's own invention rather than an
-echo - `objectId "-1"` and the missing `currentItem` - which is why the detector is believed rather
-than merely observed. **The control that would settle it is a station started from the Sonos app**,
-and it has not been run. If it ever reports a different container type, widen `is_live_stream`.
+**It also killed two signals this section used to lean on.** A missing `currentItem` and
+`objectId "-1"` were offered here as corroboration - the player's own invention rather than an
+echo. They are **TuneIn's shape, not a live stream's**: Sonos Radio streams a named track by a
+named artist, with a real id, and still has no duration and no end. Generalising from one service
+was the mistake, and one capture from a second service was enough to catch it. Only
+`container.type` and the absent duration survive all three, and the duration was never the question.
 
 **What was deliberately not used: the absent duration.** `mpris:length` missing is the closest
 thing MPRIS has, and it answers a different question. A track whose service simply did not send a
@@ -3785,6 +3790,17 @@ It goes out as `x2rock:isLiveStream`, the same namespaced-metadata route as `x2r
 `x2rock:onTvInput` - MPRIS has no field for it and no way to add one except this. Verified end to
 end on D-Bus: `b false` on a YouTube Music track, `b true` with `xesam:title "Jazz Club"` while
 TuneIn played, and `false` again once the room was back on its queue.
+
+### Sonos Radio names the track, so the station needs saying
+
+`to_metadata` prefers `track.name` over `container.name`, which is right - the track is the more
+interesting fact - but on Sonos Radio it means the row reads `Intervallo (from "Veruschka") (II) —
+Ennio Morricone` and never says what it is playing *on*. TuneIn has the opposite shape: no track at
+all, so the title already **is** the station and saying it twice is noise.
+
+So the daemon decides rather than the widget: `x2rock:stationName` carries the container name only
+when the stream is live *and* the name is not already the title. Empty otherwise, and the row's
+extra line appears only when there is something in it.
 
 ### The picker asks a different question, and one answer is unverified
 
