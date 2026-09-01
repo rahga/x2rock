@@ -321,9 +321,9 @@ anything else. For one that never answers, x2rock says so plainly rather than ha
 
 ```
 $ x2rock search -s "YouTube Music" jazz
-Error: YouTube Music needs a linked account, and links through its own app rather than a
-code. Some such services offer a browser page too: `x2rock link YouTube Music` asks, and
-a refusal costs nothing.
+Error: YouTube Music needs a linked account, and offers no code flow x2rock can drive.
+Some services in this tier answer with a browser page anyway: `x2rock link YouTube Music`
+asks, and a refusal costs nothing.
 ```
 
 YouTube Music is the closed case worth naming, because it is closed for a reason no amount of

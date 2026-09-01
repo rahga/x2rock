@@ -159,6 +159,17 @@ impl Service {
     /// controller does app-link without a mobile app anywhere - so the reply
     /// nests a browser page often enough to be worth asking for. Which
     /// services populate it is learned by asking; see `app_link_code`.
+    ///
+    /// Nor does it claim the service *said* app-link. `parse_services` sends
+    /// every unrecognised or missing `Policy Auth` to `AppLink` on purpose,
+    /// so this arm also covers a tier nobody here has seen - SMAPI's own
+    /// username/password one among them. It says what x2rock knows (no code
+    /// flow it can drive) rather than a mechanism it would be guessing at.
+    ///
+    /// Callers guard on `auth != Anonymous` before asking, because an
+    /// anonymous service needs nothing and this is phrased as a refusal. The
+    /// arm exists to keep the match total; a caller that reaches it has
+    /// already asked the wrong question.
     pub fn needs_link(&self) -> String {
         match self.auth {
             Auth::Anonymous => format!("{} needs no account.", self.name),
@@ -168,9 +179,10 @@ impl Service {
                 self.name, self.name
             ),
             Auth::AppLink => format!(
-                "{} needs a linked account, and links through its own app \
-                 rather than a code. Some such services offer a browser page \
-                 too: `x2rock link {}` asks, and a refusal costs nothing.",
+                "{} needs a linked account, and offers no code flow x2rock \
+                 can drive. Some services in this tier answer with a browser \
+                 page anyway: `x2rock link {}` asks, and a refusal costs \
+                 nothing.",
                 self.name, self.name
             ),
         }
@@ -850,6 +862,30 @@ mod tests {
         let tunein = by_name("TuneIn");
         assert!(!tunein.contains("needs a linked account"));
         assert!(!tunein.contains("x2rock link"));
+    }
+
+    #[test]
+    fn an_unrecognised_tier_is_not_told_it_links_through_an_app() {
+        // parse_services sends anything it does not recognise to AppLink on
+        // purpose. SMAPI's username/password tier lands there without ever
+        // having claimed to be an app-link service, so the advice must not
+        // describe a mechanism the descriptor never named.
+        let services = parse_services(
+            r#"<Services><Service Id="777" Name="Legacy" Uri="https://legacy/smapi">
+                 <Policy Auth="UserId"/></Service></Services>"#,
+            "",
+        )
+        .unwrap();
+        let legacy = &services[0];
+        assert_eq!(legacy.auth, Auth::AppLink, "the conservative fallback");
+
+        let advice = legacy.needs_link();
+        assert!(advice.contains("needs a linked account"));
+        assert!(advice.contains("`x2rock link Legacy`"));
+        assert!(
+            !advice.contains("its own app"),
+            "must not assert a mechanism the service never declared: {advice}"
+        );
     }
 
     #[test]

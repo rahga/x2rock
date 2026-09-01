@@ -1199,11 +1199,14 @@ async fn run_link(
         };
         (auth, None)
     } else {
-        // Two flavours of the same browser flow. App link was designed for a
-        // phone handing off to the service's own app, but the reply nests the
+        // Two flavours of the same browser flow. App link is named for handing
+        // off to the service's own app, but that is the controller's choice -
+        // Sonos's desktop controller links without one - so the reply nests the
         // identical regUrl/linkCode pair, and a service may fill it in with a
         // real page. Asking is the only way to know, and a refusal arrives
-        // immediately with the service's own words in it.
+        // immediately with the service's own words in it. The catch-all arm
+        // also takes whatever parse_services could not classify, which is why
+        // the advice it prints does not name a mechanism.
         let code = match chosen.auth {
             sonos::smapi::Auth::DeviceLink => {
                 sonos::smapi::device_link_code(&chosen, &household).await?
