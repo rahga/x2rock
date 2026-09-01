@@ -313,13 +313,17 @@ the queue alone, while anything on-demand is added to the queue, because that is
 player will resolve a service's own media. See "Browsing a service" for why both exist.
 
 The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
-can drive — see below. The remaining sixty-two authenticate by handing off to the service's own
-mobile app, which a Linux desktop cannot do, and x2rock says so plainly rather than half-working:
+can drive — see below. The remaining sixty-two nominally authenticate by handing off to the
+service's own mobile app, which a Linux desktop cannot do — but that tier is not uniformly closed:
+`x2rock link` will ask any of them for a browser page and let the service answer, and **Plex** is
+linked through its own PIN flow and then searched and browsed like anything else. For one that
+never answers, x2rock says so plainly rather than half-working:
 
 ```
 $ x2rock search -s "YouTube Music" jazz
-Error: YouTube Music authenticates by handing off to its own app, which a Linux desktop
-cannot do. Run `x2rock search` for the ones that can be searched.
+Error: YouTube Music needs a linked account. It authenticates by handing off to its own
+app, but some such services offer a browser page too: `x2rock link YouTube Music` asks,
+and a refusal costs nothing.
 ```
 
 In the bar widget, the favorites picker searches too: type a term and a **Search TuneIn** row
@@ -349,7 +353,7 @@ service no search term can name. "Play something from my playlists" is not a
 search, and this is what answers it. Every service starts at `root`; a trailing
 `/` marks a row you can open, and everything else is a row you can play.
 
-It needs exactly what searching needs, so the same 34 services are reachable: the
+It needs exactly what searching needs, so the same services are reachable: the
 32 anonymous ones plus whatever is linked. `--json` adds one field to the shape
 `favorites`, `search` and `bookmarks` already share — `container`, saying whether
 a row is a place or a thing.
@@ -383,6 +387,17 @@ service's own login page in whatever browser you already use, waits for you to f
 the token the service mints. No Sonos account, no partner registration, no embedded browser, and
 nothing to bundle. Over ssh, `--no-open` prints the URL instead.
 
+**Plex is the fifteenth**, and it earns a special case: its Sonos-side link calls are dead on the
+server, but its search endpoint honours a plain Plex account token, and Plex publishes a PIN flow
+that mints one for any client — the same flow every third-party Plex app uses. `x2rock link plex`
+drives it; the login page carries the code, so signing in is the whole interaction. The token lands
+on your Plex account's device list (as `x2rock-<hostname>`), where it can be revoked. One caveat on
+a Plex server without Remote Access: that token searches and plays but cannot open Plex's *root* —
+`x2rock link plex --from-player` stores the household integration's own token instead, read from
+the art URLs your players already broadcast, which browses everything but dies whenever Plex is
+relinked to Sonos. An app-link service other than Plex can also be *tried* — `x2rock link <name>`
+asks it for a browser page, some services answer, and a refusal costs nothing.
+
 The token is x2rock's own, not the household's — minted for this machine. `x2rock link` also
 registers the account with your household so the speakers know about it, where the service hands
 over the identifier that needs (`--no-match` skips it; Bandcamp does not send one).
@@ -390,8 +405,8 @@ over the identifier that needs (`--no-match` skips it; Bandcamp does not send on
 **A caution learned the hard way.** Linking a service does not necessarily give you a catalogue to
 search. Bandcamp's Sonos interface is *your own collection* — purchases, wishlist, followed
 artists — so on a fresh account `x2rock search -s Bandcamp` correctly finds nothing, and looks
-broken while working perfectly. Browsing a linked collection is not built yet. Check what a service
-actually exposes before assuming a link makes it searchable.
+broken while working perfectly. Browsing a linked collection is what `x2rock browse` is for. Check
+what a service actually exposes before assuming a link makes it searchable.
 
 The token is stored in `~/.local/state/x2rock/credentials.json` at mode **0600** — its own file,
 not mixed into anything else. It is deliberately not put in a keyring: that would encrypt it at
@@ -401,8 +416,8 @@ copy; revoking it properly is done from that service's own account page.
 
 ## Keeping things you cannot search for
 
-Sixty-two services authenticate by handing off to their own app, so x2rock cannot search them —
-YouTube Music, Spotify and Apple Music among them. But *replaying* something needs no credential at
+Most app-link services stay unsearchable — YouTube Music, Spotify and Apple Music among them
+(Plex used to be on this list, and is not any more; see "Linking an account"). But *replaying* something needs no credential at
 all: the id is enough, and the player resolves the account it already holds. Discovery and
 repetition are separate problems, and this closes the second one for every service, linked or not:
 

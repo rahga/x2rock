@@ -176,6 +176,14 @@ enum Command {
         /// Search works either way; only playback needs the household to know.
         #[arg(long)]
         no_match: bool,
+        /// Plex only: no browser at all - store the token the household's own
+        /// Plex integration exposes, read from the players' Plex art URLs.
+        /// Needs Plex playing (or paused) in some room. That token can browse
+        /// the service's root where a fresh account token sometimes cannot
+        /// (a server without Remote Access), and it dies whenever Plex is
+        /// relinked to Sonos - the browser flow's token is the durable one.
+        #[arg(long)]
+        from_player: bool,
     },
     /// Forget a linked account's stored token.
     ///
@@ -1021,6 +1029,21 @@ fn open_in_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Put a link page in front of the person, or print it when asked to.
+///
+/// A failure to open is not a failure to link: the URL is right there, and
+/// printing it is the one path that matters over ssh.
+fn announce_link_page(name: &str, url: &str, no_open: bool) {
+    if no_open {
+        println!("Open this and log in to {name}:\n\n  {url}\n");
+        return;
+    }
+    match open_in_browser(url) {
+        Ok(()) => println!("Opened {name} in your browser."),
+        Err(e) => println!("Could not open a browser ({e:#}). Open this yourself:\n\n  {url}\n"),
+    }
+}
+
 /// `x2rock link`: the device-link flow, end to end.
 ///
 /// A player is required, unlike search: the link is minted *for a household*,
@@ -1033,6 +1056,7 @@ async fn run_link(
     no_open: bool,
     nickname: Option<&String>,
     no_match: bool,
+    from_player: bool,
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
@@ -1056,75 +1080,177 @@ async fn run_link(
             println!("  {}{mark}", s.name);
         }
         println!("\nLink one with: x2rock link <service>");
+        println!(
+            "App-link services are not listed, but naming one still asks it \
+             for a browser page - some hand one over, and a refusal costs \
+             nothing."
+        );
         return Ok(());
     };
 
     let chosen = catalogue.find_any(query)?.clone();
     ensure!(
-        chosen.auth == sonos::smapi::Auth::DeviceLink,
-        "{} does not use device linking. {}",
-        chosen.name,
-        match chosen.auth {
-            sonos::smapi::Auth::Anonymous =>
-                "It needs no account at all - search it as it is.".to_string(),
-            _ => format!(
-                "It hands off to its own app, which a Linux desktop cannot do, \
-                 so x2rock cannot link it. Run `x2rock link` for the {} that work.",
-                catalogue.linkable().len()
-            ),
-        }
+        chosen.auth != sonos::smapi::Auth::Anonymous,
+        "{} needs no account at all - search it as it is.",
+        chosen.name
     );
 
     let household = session.connection.household_id().await?;
-    let code = sonos::smapi::device_link_code(&chosen, &household).await?;
 
-    if no_open {
-        println!(
-            "Open this and log in to {}:\n\n  {}\n",
-            chosen.name, code.reg_url
+    // Plex first: its SMAPI link half is dead in both flavours - `getAppLink`
+    // answers `Server.ServiceUnknownError` and `getDeviceLinkCode` answers
+    // `Client.AuthTokenExpired`, whatever the credentials header carries - and
+    // the token its content half wants is a plain Plex account token, which
+    // Plex's own published PIN flow mints for any client. See sonos/plex.rs.
+    // From out here it is the same flow as every other link: open a page,
+    // wait, store.
+    let (auth, link_code) = if from_player {
+        ensure!(
+            chosen.id == sonos::plex::SERVICE_ID,
+            "--from-player is a Plex-only path: only Plex puts a usable token \
+             in the players' art URLs"
         );
-    } else {
-        // A failure to open is not a failure to link: the URL is right there,
-        // and this is the one path that matters over ssh.
-        match open_in_browser(&code.reg_url) {
-            Ok(()) => println!("Opened {} in your browser.", chosen.name),
-            Err(e) => println!(
-                "Could not open a browser ({e:#}). Open this yourself:\n\n  {}\n",
-                code.reg_url
-            ),
+        // The same move as `keep`: read what the player itself built. Every
+        // Plex art URL a player hands out carries the household integration's
+        // token, so any room currently on Plex is a source. Metadata is
+        // group-scoped, so each group is asked through its own coordinator -
+        // the session's socket only answers for the group it coordinates.
+        let mut token = None;
+        for group in &session.groups.groups {
+            let target = session::Target {
+                group_id: group.id.clone(),
+                name: group.name.clone(),
+                coordinator_id: group.coordinator_id.clone(),
+                coordinator_ip: session
+                    .groups
+                    .player(&group.coordinator_id)
+                    .and_then(|p| p.ip()),
+            };
+            let Ok(connection) = session::coordinator(&session, &target).await else {
+                continue;
+            };
+            let Ok(status) = connection.metadata(&group.id).await else {
+                continue;
+            };
+            let urls = [
+                status.container.as_ref().and_then(|c| c.image_url.as_deref()),
+                status
+                    .current_item
+                    .as_ref()
+                    .and_then(|i| i.track.as_ref())
+                    .and_then(|t| t.image_url.as_deref()),
+            ];
+            token = urls
+                .into_iter()
+                .flatten()
+                .find_map(sonos::plex::token_in);
+            if token.is_some() {
+                break;
+            }
         }
-    }
-    if code.show_link_code {
-        println!("Enter this code when asked:\n\n  {}\n", code.link_code);
-    }
-
-    let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
-    eprint!("Waiting for you to finish");
-    let auth = loop {
-        match sonos::smapi::device_auth_token(&chosen, &household, &code.link_code).await {
-            Ok(Some(auth)) => {
-                eprintln!();
-                break auth;
-            }
-            Ok(None) => {
-                use std::io::Write;
-                eprint!(".");
-                let _ = std::io::stderr().flush();
-            }
-            Err(e) => {
-                eprintln!();
-                return Err(e);
-            }
-        }
-        if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
-            eprintln!();
+        let Some(token) = token else {
             bail!(
-                "{} never confirmed the link. Run `x2rock link {}` again to start over.",
-                chosen.name,
-                chosen.name
+                "no room is showing Plex art right now, so there is no token \
+                 to read. Play something from Plex in any room, then run this \
+                 again - or use `x2rock link plex` for the browser flow."
             );
+        };
+        let auth = sonos::smapi::DeviceAuth {
+            auth_token: token,
+            private_key: String::new(),
+            user_id_hash_code: None,
+        };
+        (auth, None)
+    } else if chosen.id == sonos::plex::SERVICE_ID {
+        let (pin, url) = sonos::plex::pin().await?;
+        announce_link_page(&chosen.name, &url, no_open);
+        let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
+        eprint!("Waiting for you to finish");
+        let token = loop {
+            match sonos::plex::poll(&pin).await {
+                Ok(Some(token)) => {
+                    eprintln!();
+                    break token;
+                }
+                Ok(None) => {
+                    use std::io::Write;
+                    eprint!(".");
+                    let _ = std::io::stderr().flush();
+                }
+                Err(e) => {
+                    eprintln!();
+                    return Err(e);
+                }
+            }
+            if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
+                eprintln!();
+                bail!(
+                    "{} never confirmed the link. Run `x2rock link {}` again to start over.",
+                    chosen.name,
+                    chosen.name
+                );
+            }
+            tokio::time::sleep(sonos::smapi::LINK_POLL).await;
+        };
+        let auth = sonos::smapi::DeviceAuth {
+            auth_token: token,
+            private_key: String::new(),
+            user_id_hash_code: None,
+        };
+        (auth, None)
+    } else {
+        // Two flavours of the same browser flow. App link was designed for a
+        // phone handing off to the service's own app, but the reply nests the
+        // identical regUrl/linkCode pair, and a service may fill it in with a
+        // real page. Asking is the only way to know, and a refusal arrives
+        // immediately with the service's own words in it.
+        let code = match chosen.auth {
+            sonos::smapi::Auth::DeviceLink => {
+                sonos::smapi::device_link_code(&chosen, &household).await?
+            }
+            _ => sonos::smapi::app_link_code(&chosen, &household).await?,
+        };
+        announce_link_page(&chosen.name, &code.reg_url, no_open);
+        if code.show_link_code {
+            println!("Enter this code when asked:\n\n  {}\n", code.link_code);
         }
-        tokio::time::sleep(sonos::smapi::LINK_POLL).await;
+
+        let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
+        eprint!("Waiting for you to finish");
+        let auth = loop {
+            match sonos::smapi::device_auth_token(
+                &chosen,
+                &household,
+                &code.link_code,
+                code.link_device_id.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(auth)) => {
+                    eprintln!();
+                    break auth;
+                }
+                Ok(None) => {
+                    use std::io::Write;
+                    eprint!(".");
+                    let _ = std::io::stderr().flush();
+                }
+                Err(e) => {
+                    eprintln!();
+                    return Err(e);
+                }
+            }
+            if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
+                eprintln!();
+                bail!(
+                    "{} never confirmed the link. Run `x2rock link {}` again to start over.",
+                    chosen.name,
+                    chosen.name
+                );
+            }
+            tokio::time::sleep(sonos::smapi::LINK_POLL).await;
+        };
+        (auth, Some(code.link_code))
     };
 
     let nickname = nickname.cloned().unwrap_or_else(default_nickname);
@@ -1150,11 +1276,16 @@ async fn run_link(
         return Ok(());
     }
     let Some(hash) = hash else {
-        println!(
-            "{} sent no userIdHashCode, so the household cannot be told about \
-             the account. Search works; playback through the household may not.",
-            chosen.name
-        );
+        // Quiet when there is no link code either (Plex): registering on the
+        // household was never part of that flow, and the household's own
+        // registration - made from the Sonos app - is what playback rides on.
+        if link_code.is_some() {
+            println!(
+                "{} sent no userIdHashCode, so the household cannot be told about \
+                 the account. Search works; playback through the household may not.",
+                chosen.name
+            );
+        }
         return Ok(());
     };
     match session
@@ -1164,7 +1295,7 @@ async fn run_link(
             &chosen.id,
             &hash,
             &nickname,
-            Some(&code.link_code),
+            link_code.as_deref(),
         )
         .await
     {
@@ -1395,7 +1526,13 @@ async fn run_search(
         if json {
             println!("{}", serde_json::to_string_pretty(&names)?);
         } else {
-            let linkable = catalogue.linkable().len();
+            // "More" means it: what could be linked and is not yet, so the
+            // count stays honest once some of the linkable set is searchable.
+            let linkable = catalogue
+                .linkable()
+                .iter()
+                .filter(|s| linked.get(&s.id).is_none())
+                .count();
             println!(
                 "{} of {} services can be searched:",
                 usable.len(),
@@ -1437,9 +1574,10 @@ async fn run_search(
                     s.name
                 ),
                 Some(s) => anyhow!(
-                    "{} authenticates by handing off to its own app, which a \
-                     Linux desktop cannot do. Run `x2rock search` for the ones \
-                     that can be searched.",
+                    "{} needs a linked account. It hands off to its own app, \
+                     but some such services offer a browser page too: try \
+                     `x2rock link {}` once - a refusal costs nothing.",
+                    s.name,
                     s.name
                 ),
                 None => e,
@@ -1541,7 +1679,24 @@ async fn run_search(
         return Ok(());
     }
     if items.is_empty() {
-        println!("Nothing on {} for {term:?}.", chosen.name);
+        // Name the category that was searched: a service with no `all` was
+        // searched in one category only (Plex defaults to artists), and
+        // "nothing" without that context reads as "the service has it not"
+        // when the truth may be "you searched the wrong shelf".
+        let others: Vec<_> = categories
+            .iter()
+            .map(|c| c.id.as_str())
+            .filter(|id| *id != picked.id)
+            .collect();
+        match others.is_empty() {
+            true => println!("Nothing on {} for {term:?}.", chosen.name),
+            false => println!(
+                "Nothing on {} for {term:?} in {}. Also searchable: {}.",
+                chosen.name,
+                picked.id,
+                others.join(", ")
+            ),
+        }
         return Ok(());
     }
     for item in &items {
@@ -1612,6 +1767,7 @@ async fn main() -> Result<()> {
             no_open,
             ref nickname,
             no_match,
+            from_player,
         } => {
             return run_link(
                 cli.ip,
@@ -1619,6 +1775,7 @@ async fn main() -> Result<()> {
                 no_open,
                 nickname.as_ref(),
                 no_match,
+                from_player,
             )
             .await;
         }

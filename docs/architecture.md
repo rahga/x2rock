@@ -3391,6 +3391,132 @@ demonstrated end to end rather than argued.
 
 Kitchen paused and cleared again afterwards. Living Room was read, never touched.
 
+## Plex: the first app-link service to fall (2026-08-31)
+
+Asked for by name — "Señorita" was playing from Plex in the Dining Room, and search for Plex was
+the request. Delivered the same day, and the route was nothing this document predicted.
+
+Plex in the catalogue: `sid 212`, endpoint `https://sonos.plex.tv/v2.2/soap`, `Auth="AppLink"`,
+`service_type 54279`. Its presentation map declares real search categories — `artists`, `albums`,
+`tracks`, `playlists`, `podcasts` (plus a `CustomCategory` for episodes, which `categories()`
+ignores for having no `id`) — and its manifest has no custom endpoints, so search is the classic
+SOAP `search` this project already speaks. Only the credential was missing.
+
+### Plex's SMAPI link half is dead — both flavours, whatever is sent
+
+`x2rock link` grew the generic app-link attempt first: `getAppLink`, whose reply nests the same
+`regUrl`/`linkCode` pair a device link uses (plus a `linkDeviceId`, now parsed and echoed into
+`getDeviceAuthToken`). Worth having — it is how any of the 62 will be reached if it answers — but
+Plex does not answer it:
+
+| call | answer | varied |
+|---|---|---|
+| `getAppLink` | `Server.ServiceUnknownError`, always | household alone; + WSDL's `hardware`/`osVersion`/`sonosAppName`/`callbackPath`; + empty `loginToken`; + `deviceId` |
+| `getDeviceLinkCode` | `Client.AuthTokenExpired`, always | bare; + empty `loginToken`; + `deviceId` = the player's `R_TrialZPSerial` (`34-7E-5C-31-AF-74:7`, read over UPnP `SystemProperties GetString`) |
+
+The two *different* errors say `getAppLink` is unrouted on Plex's server while `getDeviceLinkCode`
+reaches a handler that wants a token — for a call whose whole point is that there is no token yet.
+Dead end, not a parameter puzzle.
+
+### The actual door: Plex's SMAPI honours a plain Plex account token
+
+The unlock came from prior art (python-plexapi's `sonos` module talks to `sonos.plex.tv` with the
+user's own `X-Plex-Token`) plus a leak this household was already broadcasting: the player's art
+URLs carry the Sonos integration's Plex token in the clear —
+`getMetadataStatus.container.imageUrl` ends in `...&X-Plex-Token=<token>`. That token, stored as a
+normal `credentials.json` entry for service 212 with an **empty key**, made everything downstream
+work unmodified:
+
+- `search -s plex -c tracks senorita` returned the very track the room was playing, id
+  `c69ee188…::68163:track` — byte-identical to what `getMetadataStatus` reports.
+- `browse -s plex` walks the household's own server (`Prime / Music`): playlists, artists, albums,
+  hubs, `Other Sources`.
+- `search … --play 1 -r "Dining Room"` played it, through the existing enqueue path
+  (`SA_RINCON54279…` cdudn, household resolves its own `sn_13`). **The whole chain verified.**
+
+So `loginToken/token` = any valid Plex account token, and the key is unused. Which means the link
+flow does not need Sonos at all — and Plex publishes exactly the flow needed.
+
+### `x2rock link plex`: the PIN flow, the first service-specific auth path
+
+`src/sonos/plex.rs`. `POST plex.tv/api/v2/pins?strong=true` mints a pin; the person is sent to
+`app.plex.tv/auth#?clientID=…&code=…` — code in the URL, so logging in is the whole interaction —
+and the pin is polled until it carries `authToken`. From `run_link`'s point of view it is the same
+shape as every other link (open a page, poll, store), dispatched by `chosen.id == "212"`, stored
+through the same `from_device_auth` with no key and no hash. The `match` step is skipped silently
+rather than with the no-hash warning: the household's own registration is what playback rides on,
+and it already exists.
+
+Decisions worth keeping:
+
+- **The client identifier is stable**: `x2rock-<hostname>`. Plex files the token under it on the
+  account's device list, so re-linking replaces a device instead of growing one per attempt, and
+  revocation has a name to find.
+- **plex.tv is spoken in its XML default**, one `<pin>` element with everything in attributes —
+  `roxmltree` was already here and JSON would have bought nothing. An empty `authToken` attribute
+  is *pending*, exactly parallel to `NOT_LINKED_RETRY`.
+- **It earns the service-specific exception by being Plex's own published flow** — the one every
+  third-party Plex client uses — not a scraped Sonos key. The YouTube Music `apiKey` question
+  ("Open questions" below) is unchanged by this: presenting Sonos's key is still a different act.
+
+### Two tokens, one asymmetry: root browse (settled 2026-09-01)
+
+The first completed `x2rock link plex` run answered the caveat this section carried overnight. A
+PIN-minted token **is** honoured by `sonos.plex.tv` — `search` works and browsing any *concrete*
+container works — with exactly one exception: **`getMetadata root` answers
+`Server.ServiceUnknownError`** (after one 6s timeout on first touch), on a request byte-identical
+to one that succeeds under the household integration's own token. Omitting the `householdId` from
+the loginToken changes nothing, so the difference is the token itself: the integration token
+carries a server association Plex's bridge made when the owner linked Plex to Sonos, and root — the
+"which server, which library" enumeration — is the one call that needs it. Relevant context for
+this household: **the Plex server has Remote Access off**, so a fresh client's server discovery has
+nothing advertised to find; whether root works for a PIN token on a published server is untested
+here.
+
+So the two tokens split like this, verified side by side on 2026-09-01:
+
+| | PIN token (`x2rock link plex`) | integration token (`--from-player`) |
+|---|---|---|
+| search | works | works |
+| browse a container by id | works | works |
+| browse `root` (CLI default, widget's Browse row) | **refused** | works |
+| play a hit | works — the enqueue path never needed a token | works |
+| provenance | x2rock's own; revocable at plex.tv as `x2rock-<hostname>` | the household's Plex↔Sonos link; dies on relink |
+
+**`x2rock link plex --from-player`, built for the second column.** The same move as `keep`: read
+what the player itself built. Every Plex art URL a player hands out carries the integration's token
+(`…%26X-Plex-Token%3D<token>&width=300` in `getMetadataStatus` image URLs), readable by any LAN
+controller unauthenticated, so storing it deliberately — with the trade written down in `--help` —
+beats the hand-edit it replaces. It needs Plex on-screen in some room, and it taught one bug worth
+keeping: the first version asked `metadata()` for every group over the session's one socket and got
+nothing, because **group-scoped commands answer only on the group's coordinator** — the same rule
+`raw --scope group` learned, resurfacing in a new caller. Each group is now asked through
+`session::coordinator`.
+
+On a household like this one (Remote Access off), `--from-player` is the token that keeps the
+widget's Browse row working; the PIN token is the durable, self-owned one and covers search and
+play in full. Whichever ran last is what is stored.
+
+### Plex wraps playable tracks in `mediaCollection`, and the container rule bent
+
+A *tracks* search comes back as `mediaCollection` elements with `itemType: track` — and the id
+inside is playable (it is what the household's own playback reports). The rule "the element
+decides" — learned from Mixcloud, where `canPlay` lies — would have offered every Plex track as a
+place to open. Amended: **a declared leaf type outranks the wrapping**, for `track` and `stream`
+only. `canPlay` stays untrusted. Pinned by a test with the verbatim Plex shape; an `album` in the
+same reply stays a container.
+
+### The default category, and the widget's new `searchCategory`
+
+Plex has no `all`, so `search -s plex <term>` defaults to its first category — `artists` — and a
+song title searched there finds nothing. Two mitigations, deliberately short of changing the
+default rule (which would silently move iHeartRadio from stations to tracks):
+
+- An empty result now names the shelf: `Nothing on Plex for "senorita" in artists. Also
+  searchable: albums, tracks, playlists, podcasts.`
+- The widget grew `searchCategory` in `shell.json`, passed to the CLI as `-c`. A picker pointed at
+  Plex wants `"tracks"`; empty keeps the CLI default and every existing config keeps its behaviour.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -3400,8 +3526,11 @@ Kitchen paused and cleared again afterwards. Living Room was read, never touched
    Two loose ends that block nothing. **`match`** has never succeeded — see "`match`, and why
    nothing needs it yet". **Bandcamp** stays deferred until there is something in the collection.
 
-   The 62 app-link services remain a separate call, but **the barrier is now one wall shorter than
-   this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
+   The 62 app-link services remain a separate call — though no longer a uniform one: **Plex fell
+   outright** (searched, browsed and played the same day it was asked for; see "Plex: the first
+   app-link service to fall"), and `x2rock link` now asks any app-link service for a browser page
+   via `getAppLink` rather than refusing on the tier alone. And **the barrier is now one wall
+   shorter than this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
    `loadStreamUrl` cannot carry" was true and is no longer the whole story: the enqueue path does not
    resolve the stream at all, so the player supplies its own credential and protected content plays.
    A kept YouTube Music track demonstrates it — and the same day showed the condition it rests on,

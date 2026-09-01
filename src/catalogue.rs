@@ -148,12 +148,16 @@ impl Catalogue {
             .collect()
     }
 
-    /// The services `x2rock link` could get a credential for, whether or not it
-    /// already has one. `AppLink` is excluded because nothing can drive it.
+    /// The services `x2rock link` can *reliably* get a credential for, whether
+    /// or not it already has one: the device-link tier, plus Plex, whose own
+    /// PIN flow stands in for its dead SMAPI link half (see sonos/plex.rs).
+    /// Other app-link services are not listed - `link` will still ask one for
+    /// a browser page by name, but whether it answers is the service's call,
+    /// and a list is a promise.
     pub fn linkable(&self) -> Vec<&Service> {
         self.services
             .iter()
-            .filter(|s| s.auth == smapi::Auth::DeviceLink)
+            .filter(|s| s.auth == smapi::Auth::DeviceLink || s.id == crate::sonos::plex::SERVICE_ID)
             .collect()
     }
 

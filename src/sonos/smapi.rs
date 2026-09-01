@@ -17,10 +17,13 @@
 //! are the device-link flow, driven by the controller, with the browser step
 //! handed to whatever browser the person already uses.
 //!
-//! `AppLink` is the tier that stays out of reach. It expects the Sonos app to
-//! launch the service's own mobile app, there is no desktop app to hand off to,
-//! and at least one of them (YouTube Music) gates the endpoint on an API key
-//! before user auth is even reached.
+//! `AppLink` is the tier that mostly stays out of reach. It expects the Sonos
+//! app to launch the service's own mobile app, and there is no desktop app to
+//! hand off to - but `getAppLink` nests the same browser link a device link
+//! uses, so `x2rock link` asks anyway and lets the service answer. Some never
+//! will: YouTube Music gates the endpoint on an API key before user auth is
+//! even reached, and Plex's SMAPI link half is dead - Plex links through its
+//! own published PIN flow instead, in [`super::plex`].
 
 use std::time::Duration;
 
@@ -68,7 +71,8 @@ pub struct Token {
     pub household: Option<String>,
 }
 
-/// What `getDeviceLinkCode` returns: where to send the person, and the code.
+/// What `getDeviceLinkCode` or `getAppLink` returns: where to send the person,
+/// and the code.
 #[derive(Debug, Clone)]
 pub struct LinkCode {
     /// The page to open. On Linux that is `xdg-open` and nothing else.
@@ -78,6 +82,9 @@ pub struct LinkCode {
     /// query parameter of `reg_url`, which is the graceful case: open a link,
     /// log in, done.
     pub show_link_code: bool,
+    /// Sent back verbatim in `getDeviceAuthToken` when the service handed one
+    /// out. Only app-link replies have been seen to carry it.
+    pub link_device_id: Option<String>,
 }
 
 /// What `getDeviceAuthToken` returns once the browser half is finished.
@@ -350,10 +357,20 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
                     .and_then(|g| g.text())
                     .map(str::to_string)
             };
+            let item_type = child("itemType").unwrap_or_default();
+            // The element decides - except when the declared type is itself a
+            // playable leaf. Plex answers a *tracks* search with
+            // `mediaCollection` elements whose `itemType` is `track`, and the
+            // very id inside plays through the enqueue path (it is what the
+            // household's own Plex playback reports as its object id). A type
+            // that names a leaf outranks the wrapping, and only those two do:
+            // `canPlay` stays untrusted for the reasons documented on `Item`.
+            let container = n.has_tag_name("mediaCollection")
+                && !matches!(item_type.as_str(), "track" | "stream");
             Some(Item {
                 id: child("id")?,
                 title: child("title").unwrap_or_default(),
-                item_type: child("itemType").unwrap_or_default(),
+                item_type,
                 // Whatever the service offers as a second line; services differ
                 // on which of these they populate, and most populate one.
                 summary: child("summary")
@@ -361,7 +378,7 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
                     .or_else(|| child("genre"))
                     .or_else(|| child("country")),
                 art_url: child("albumArtURI").or_else(|| nested("streamMetadata", "logo")),
-                container: n.has_tag_name("mediaCollection"),
+                container,
             })
         })
         .collect();
@@ -411,7 +428,54 @@ pub async fn device_link_code(service: &Service, household: &str) -> Result<Link
             fault.message
         ),
     };
-    let doc = Document::parse(&body).context("parsing getDeviceLinkCode response")?;
+    parse_link_code(&service.name, "getDeviceLinkCode", &body)
+}
+
+/// Ask an app-link service where to send the person.
+///
+/// `getAppLink` is the newer flow, designed for a phone handing off to the
+/// service's own mobile app - which a Linux desktop cannot do. But its reply
+/// nests a `deviceLink` (the same `regUrl`/`linkCode` pair) for controllers
+/// with nothing to hand off to, and some services populate it with a real
+/// browser page. Whether a given service does is learned by asking: Plex
+/// answers, YouTube Music refuses the call outright wanting an API key. A
+/// refusal costs nothing, so the CLI asks rather than presuming.
+pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCode> {
+    ensure!(
+        service.auth == Auth::AppLink,
+        "{} does not use app linking ({:?}), so there is no app link to ask for",
+        service.name,
+        service.auth
+    );
+    // Unlike `getDeviceLinkCode`, this call wants a `loginToken` in the
+    // credentials header even though there is no token yet: an *empty* token
+    // and key alongside the household id. Leaving the block out entirely reads
+    // to Plex as an expired credential (`Client.AuthTokenExpired`) rather than
+    // a missing one.
+    let empty = Token {
+        token: String::new(),
+        key: String::new(),
+        household: Some(household.to_string()),
+    };
+    let body = match call_soap(
+        service,
+        Some(&empty),
+        "getAppLink",
+        &format!("<householdId>{}</householdId>", escape(household)),
+    )
+    .await?
+    {
+        Ok(body) => body,
+        Err(fault) => bail!("{} refused getAppLink: {}", service.name, fault.message),
+    };
+    parse_link_code(&service.name, "getAppLink", &body)
+}
+
+/// The two link-code replies differ only in nesting - `getAppLink` wraps the
+/// same fields in `authorizeAccount/deviceLink` - so one descendant scan reads
+/// both.
+fn parse_link_code(service_name: &str, action: &str, body: &str) -> Result<LinkCode> {
+    let doc = Document::parse(body).with_context(|| format!("parsing {action} response"))?;
     let field = |tag: &str| {
         doc.descendants()
             .find(|n| n.has_tag_name(tag))
@@ -419,15 +483,16 @@ pub async fn device_link_code(service: &Service, household: &str) -> Result<Link
             .map(str::to_string)
     };
     let link_code =
-        field("linkCode").ok_or_else(|| anyhow!("{} returned no linkCode", service.name))?;
+        field("linkCode").ok_or_else(|| anyhow!("{service_name} returned no linkCode"))?;
     Ok(LinkCode {
         reg_url: field("regUrl")
-            .ok_or_else(|| anyhow!("{} returned no regUrl to open", service.name))?,
+            .ok_or_else(|| anyhow!("{service_name} returned no regUrl to open"))?,
         link_code,
         // Absent means the code is not needed on screen. Defaulting to false
         // rather than true because the failure it causes is cosmetic, whereas
         // printing a code the person cannot use is confusing.
         show_link_code: field("showLinkCode").is_some_and(|v| v.trim() == "true"),
+        link_device_id: field("linkDeviceId"),
     })
 }
 
@@ -441,13 +506,20 @@ pub async fn device_auth_token(
     service: &Service,
     household: &str,
     link_code: &str,
+    link_device_id: Option<&str>,
 ) -> Result<Option<DeviceAuth>> {
+    // `linkDeviceId` is echoed back only when the link-code reply carried one;
+    // nothing device-linked so far has, and sending an empty element to a
+    // service that never asked is a way to find new failure modes.
+    let device = link_device_id
+        .map(|d| format!("<linkDeviceId>{}</linkDeviceId>", escape(d)))
+        .unwrap_or_default();
     let body = match call_soap(
         service,
         None,
         "getDeviceAuthToken",
         &format!(
-            "<householdId>{}</householdId><linkCode>{}</linkCode>",
+            "<householdId>{}</householdId><linkCode>{}</linkCode>{device}",
             escape(household),
             escape(link_code)
         ),
@@ -685,8 +757,10 @@ async fn call(
                 service.name
             ),
             _ => bail!(
-                "{} authenticates by handing off to its own app, which a Linux \
-                 desktop cannot do. x2rock cannot link it.",
+                "{} needs a linked account. It authenticates by handing off to \
+                 its own app, but some such services offer a browser page too: \
+                 `x2rock link {}` asks, and a refusal costs nothing.",
+                service.name,
                 service.name
             ),
         }
@@ -793,14 +867,15 @@ mod tests {
             .to_string();
         assert!(err.contains("x2rock link Bandcamp"), "{err}");
 
-        // An app-link service is refused with no such promise, because there is
-        // nothing to run.
+        // An app-link service is refused with the same suggestion, hedged:
+        // `x2rock link` now asks such a service for a browser page, and whether
+        // one comes back is the service's answer to give.
         let err = search(&services[1], None, "all", "jazz", 0, 5)
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cannot link"), "{err}");
-        assert!(!err.contains("x2rock link"), "{err}");
+        assert!(err.contains("x2rock link"), "{err}");
+        assert!(err.contains("refusal costs nothing"), "{err}");
     }
 
     #[tokio::test]
@@ -813,6 +888,81 @@ mod tests {
                 .to_string();
             assert!(err.contains("does not use device linking"), "{err}");
         }
+    }
+
+    #[tokio::test]
+    async fn only_an_app_link_service_has_an_app_link_to_ask_for() {
+        let services = parse_services(DESCRIPTORS, "").unwrap();
+        for unlinkable in [&services[0], &services[2]] {
+            let err = app_link_code(unlinkable, "Sonos_house")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("does not use app linking"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_app_link_reply_is_read_through_its_nesting() {
+        // The shape `getAppLink` documents: the same fields as a device link,
+        // wrapped in `authorizeAccount/deviceLink`, plus a `linkDeviceId` that
+        // must ride along into `getDeviceAuthToken`.
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>
+            <getAppLinkResponse xmlns="http://www.sonos.com/Services/1.1">
+              <getAppLinkResult><authorizeAccount>
+                <appUrlStringId>PLEX_LINK</appUrlStringId>
+                <deviceLink>
+                  <regUrl>https://plex.tv/link?code=ABCD</regUrl>
+                  <linkCode>ABCD</linkCode>
+                  <showLinkCode>false</showLinkCode>
+                  <linkDeviceId>dev-1</linkDeviceId>
+                </deviceLink>
+              </authorizeAccount></getAppLinkResult>
+            </getAppLinkResponse></s:Body></s:Envelope>"#;
+        let code = parse_link_code("Plex", "getAppLink", body).unwrap();
+        assert_eq!(code.reg_url, "https://plex.tv/link?code=ABCD");
+        assert_eq!(code.link_code, "ABCD");
+        assert!(!code.show_link_code);
+        assert_eq!(code.link_device_id.as_deref(), Some("dev-1"));
+    }
+
+    #[test]
+    fn a_collection_declaring_itself_a_track_is_not_a_container() {
+        // Verbatim shape from Plex, 2026-08-31: a *tracks* search answered in
+        // `mediaCollection` elements whose `itemType` is `track`. The id inside
+        // is playable - it is what the household's own Plex playback reports -
+        // so the element wrapping must not outrank the declared leaf type.
+        let body = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>
+            <searchResponse><searchResult><index>0</index><count>2</count><total>2</total>
+              <mediaCollection>
+                <id>c69ee188::68163:track</id><itemType>track</itemType>
+                <title>Señorita</title><summary>Various Artists on Prime</summary>
+                <canPlay>true</canPlay>
+              </mediaCollection>
+              <mediaCollection>
+                <id>c69ee188::68162:album</id><itemType>album</itemType>
+                <title>Now 103</title><canPlay>true</canPlay>
+              </mediaCollection>
+            </searchResult></searchResponse></soap:Body></soap:Envelope>"#;
+        let (items, total) = parse_items(body, "search").unwrap();
+        assert_eq!(total, 2);
+        assert!(!items[0].container, "a track hit must be playable");
+        assert!(items[1].container, "an album stays a place to open");
+    }
+
+    #[test]
+    fn a_device_link_reply_still_parses_flat() {
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>
+            <getDeviceLinkCodeResponse xmlns="http://www.sonos.com/Services/1.1">
+              <getDeviceLinkCodeResult>
+                <regUrl>https://bandcamp.com/login?sonos_link_code=7083</regUrl>
+                <linkCode>7083</linkCode>
+                <showLinkCode>false</showLinkCode>
+              </getDeviceLinkCodeResult>
+            </getDeviceLinkCodeResponse></s:Body></s:Envelope>"#;
+        let code = parse_link_code("Bandcamp", "getDeviceLinkCode", body).unwrap();
+        assert_eq!(code.link_code, "7083");
+        assert_eq!(code.link_device_id, None);
     }
 
     #[test]
