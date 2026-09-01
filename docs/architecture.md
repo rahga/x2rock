@@ -1894,6 +1894,46 @@ one, which is not worth manufacturing.
 This matters more than the taxonomy does. Knowing the household holds an account for a service is
 not enough to use it — with several present, choosing wrong plays from the wrong account.
 
+### The two playback paths use two different identities (verified 2026-08-31)
+
+Worse than "choosing wrong" — x2rock does not choose at all, and the two paths in the table under
+"The design consequence, built" end up on *different accounts*.
+
+`main.rs:865` passes `None` as the serial, so the enqueue path names no account. The player fills
+one in. Enqueuing an iHeartRadio podcast episode and reading `Q:0` back:
+
+```
+podcast_show.96972136.101839702.mp3?sid=6&flags=8&sn=15
+```
+
+**`sn_15`** — the household's default for that service, and the same account the Sonos app played
+from. Meanwhile `loadStreamUrl` carries x2rock's own token, whose `userIdHashCode` is
+`13012528881`; iHeartRadio's browse tree names it outright in a container id,
+`my_playlists_13012528881`. So:
+
+| path | content | plays as |
+|---|---|---|
+| `loadStreamUrl` | stations | x2rock's linked token |
+| enqueue + cdudn | on-demand | the household's default serial |
+
+Which identity a request runs as is therefore decided by **the content type**, which is not a
+property anyone would expect to select an account. On a household where the accounts belong to
+different people — two here, the household's default being someone other than whoever linked
+x2rock on this machine — listening history lands on whichever person the content type happened to
+pick.
+
+The earlier note that "a wrong `sn` and no `sn` were each accepted and each played" is still true
+and was read too comfortably: the player accepting an omitted serial does not mean the serial does
+not matter. It means the player substitutes one, silently, and that substitution has an owner.
+
+Not a bug with an obvious fix — naming x2rock's own account on the enqueue path requires a serial
+this tool cannot mint, since `match` has never succeeded, and the household's registry maps
+services to serials but nothing maps a serial back to an identity from the controller side. Worth
+recording before anything is built on the enqueue path.
+
+YouTube Music also holds two accounts: `sn_2` in `FV:2`, `sn_16` on a queue item. Several accounts
+per service is not an iHeartRadio quirk.
+
 ### Four hypotheses this killed, three of them this document's
 
 - ~~`match` refuses because the service is not installed on the household~~. The "guest account"
