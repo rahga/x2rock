@@ -849,6 +849,43 @@ Two things it taught, both worth more than the feature:
 reports for a live stream's notional container), a missing `serviceId`, a missing `accountId` —
 each with its own reason, because each means something different went wrong.
 
+#### The stored serial goes stale, and a bookmark cannot tell (found 2026-08-31)
+
+A bookmark stores the account serial, and **a serial belongs to a registration, not to a service.**
+Re-register and the number moves.
+
+Observed within one day on this household: YouTube Music was `sn_3` in live playback, recorded in
+the section above and hardcoded into `bookmarks.rs` tests. It is `sn_16` now. The household owner
+had switched that subscription — the same person, a different plan — and the switch minted a new
+registration with a new serial.
+
+So a bookmark kept *before* an account switch names a serial that no longer exists, and nothing in
+`from_id`'s refusals catches it: the id was well-formed when stored, and it stays well-formed after
+the account it points at is gone. `from_id` guards the shape, and this is not a shape problem.
+
+Nothing is broken today only by luck — every entry in `bookmarks.json` postdates the switch
+(serials 15, 16 and 17). The failure mode is untested, because testing it means replaying a
+bookmark built on a dead serial, and no such bookmark exists to try.
+
+Two consequences beyond this feature:
+
+- **`FV:2` serials are not all live.** A favorite embeds the serial current when it was *saved*, so
+  the harvest described under "Where the registry can be read" mixes registrations with fossils.
+  `sn_2` for YouTube Music is most likely one: a serial from before the switch, preserved in an old
+  favorite. That makes the harvest a weaker enumeration source than that section credits — it is a
+  lower bound on accounts that ever existed, not on accounts that exist.
+- **The daemon records what plays regardless of whose account it came from.** Seven of the entries
+  in this household's file are from an iHeartRadio session on `sn_15`, the household default,
+  played from the Sonos app by someone other than whoever linked x2rock here.
+
+The design question this raises, unanswered on purpose: **should a bookmark store the serial at
+all?** The enqueue path already omits it and lets the player resolve the household's current
+account (see "The two playback paths use two different identities"), which is exactly the
+resilience a stored serial gives up. Storing it pins a bookmark to an account that may be gone;
+omitting it pins the bookmark to whichever account the household currently defaults to, which is
+not necessarily the one it was kept from. Neither is obviously right, and the choice deserves more
+than being settled by whichever was easier to write.
+
 ### In the widget (2026-08-31)
 
 Kept items join the picker beneath the household's favorites — a flat list, since both answer "what
@@ -1882,6 +1919,9 @@ Two limits, both load-bearing for anything built on this:
   An account nothing has saved from is invisible.
 - **It cannot distinguish live entries from dead ones.** `sn_5` is an iHeartRadio account the
   household still lists and nothing plays from.
+- **Some of them are fossils, not accounts.** A favorite embeds the serial current when it was
+  saved, so a serial can outlive the registration it named. See "The stored serial goes stale, and
+  a bookmark cannot tell" — on this household `sn_2` for YouTube Music is most likely one.
 
 ### Choosing between several accounts is an open question
 
