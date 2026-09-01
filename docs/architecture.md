@@ -3941,6 +3941,12 @@ without sharing vocabularies - each passes through whatever its origin called th
 |---|---|---|
 | `search`, `browse` | `stream` (SMAPI's `itemType`) | **verified** - a TuneIn jazz search answers 19, and browsing into Trending answers 50, all `container: false` |
 | `favorites` | an **upper-case enum**: `STREAM`, `AUDIOBOOK` | **verified 2026-09-01** - and the prediction was wrong, see below |
+
+Three marks now come out of one `markFor`, all verified against live CLI output rather than reasoned:
+`stream`/`STREAM` and the untested `audiobroadcast` take the radio antenna, `show` takes a
+microphone, and anything containing `audiobook` takes an open book - a substring because a favorite
+says `AUDIOBOOK` while a playing Audible track says `chapter.audiobook`. Everything else, `track`
+and `container` included, takes nothing.
 | `bookmarks` | `stream`, being what x2rock stored | covered by the same check |
 
 Unknown reads as "no" - an unmarked station is a smaller wrong than a marked album, and an older
