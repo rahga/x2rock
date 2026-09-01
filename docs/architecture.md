@@ -1940,6 +1940,26 @@ retired rather than re-litigated.** The history is the point, so it is left stan
 3. **Broken 2026-09-01.** The owner connected "TuneIn (New)" from the phone, and the station it
    played reported `accountId: "sn_5"` live, from `getMetadataStatus` on the container. Under
    high-water-plus-one a registration made that day should have been `sn_21` or above.
+4. **And a second reading the same hour made it a pattern rather than an anomaly.** Virgin Radio UK
+   (`sid 336`) was added next and came back **`sn_6`** - immediately after `sn_5`, from a
+   high-water mark that stood at 20 the day before. Two consecutive low serials, issued in order.
+
+**What that points at, offered as a model and not as a finding, given the history above.** The
+counter is not monotonic; it looks like it **fills the lowest free slot**. `sn_5` and `sn_6` were
+freed when services were removed from the household - iHeartRadio and the older TuneIn among them,
+both since gone from Connected Services - and the next two registrations took them in order. That
+also rescues the `sn_18` prediction, which needed 1-17 to be *occupied* rather than merely visible:
+the harvest's gaps at 1, 3, 4, 8, 9, 11-13 and 16 are gaps in what favorites remember, not in the
+registry.
+
+The one observation it does not explain is the deletion test: `sn_18` removed, `sn_19` issued,
+where lowest-free wanted 18 back. That is one reading, taken minutes apart, and a slot that has not
+been released yet would account for it.
+
+**The test that would settle it:** remove Virgin Radio UK (`sn_6`, currently the highest live
+serial) and add anything. `sn_6` back means lowest-free and the deletion test needed more patience;
+`sn_7` means something else again. Until then, allocation stays unknown - which is the whole point
+of the retirement above.
 
 **Why step 2 was weaker than it looked.** Removing the highest serial and getting highest-plus-one
 is exactly what "next = high-water + 1" predicts, so it never distinguished "freed serials are
@@ -3897,11 +3917,27 @@ without sharing vocabularies - each passes through whatever its origin called th
 | Source | A station reads | Status |
 |---|---|---|
 | `search`, `browse` | `stream` (SMAPI's `itemType`) | **verified** - a TuneIn jazz search answers 19, and browsing into Trending answers 50, all `container: false` |
-| `favorites` | `object.item.audioItem.audioBroadcast` (DIDL-Lite `upnp:class`) | **reasoned, not verified** |
+| `favorites` | **`STREAM`**, in capitals | **verified 2026-09-01** - and the prediction was wrong, see below |
 | `bookmarks` | `stream`, being what x2rock stored | covered by the same check |
 
 Unknown reads as "no" - an unmarked station is a smaller wrong than a marked album, and an older
 CLI sending no `type` must not mark the whole list.
+
+### The favorites half, tested - and the prediction was wrong
+
+Run 2026-09-01 with the first favorite this household has ever had: "Virgin Radio Chilled UK",
+saved from the Sonos app. `favorites --json` reports **`"type": "STREAM"`**, in capitals - not the
+DIDL-Lite `object.item.audioItem.audioBroadcast` this document expected, and not lowercase either.
+
+The mark appears correctly regardless, because `isStreamRow` lowercases before comparing and
+`STREAM` falls through to the same `=== "stream"` branch the search and browse rows use. So the
+feature was right by construction rather than by the reasoning written down beside it - which is
+worth saying plainly, because the reasoning is what a later reader would trust.
+
+The `audiobroadcast` clause is therefore **untested, not reasoned**. It is kept in case another
+service answers that way, but nothing on this household has ever produced it.
+
+The older recipe follows, still valid for re-running the check on another service.
 
 ### How to test the favorites half
 
