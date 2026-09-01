@@ -1944,22 +1944,44 @@ retired rather than re-litigated.** The history is the point, so it is left stan
    (`sid 336`) was added next and came back **`sn_6`** - immediately after `sn_5`, from a
    high-water mark that stood at 20 the day before. Two consecutive low serials, issued in order.
 
-**What that points at, offered as a model and not as a finding, given the history above.** The
-counter is not monotonic; it looks like it **fills the lowest free slot**. `sn_5` and `sn_6` were
-freed when services were removed from the household - iHeartRadio and the older TuneIn among them,
-both since gone from Connected Services - and the next two registrations took them in order. That
-also rescues the `sn_18` prediction, which needed 1-17 to be *occupied* rather than merely visible:
-the harvest's gaps at 1, 3, 4, 8, 9, 11-13 and 16 are gaps in what favorites remember, not in the
-registry.
+5. **The discriminating test ran, 2026-09-01, and it was decisive.** Virgin Radio UK (`sn_6`) was
+   removed from the phone while CBC Radio & Music held `sn_7`. Audible was then added and came back
+   **`sn_8`** - stepping over the free `sn_6` rather than filling it.
 
-The one observation it does not explain is the deletion test: `sn_18` removed, `sn_19` issued,
-where lowest-free wanted 18 back. That is one reading, taken minutes apart, and a slot that has not
-been released yet would account for it.
+**One model fits every live reading: `next = highest currently-live serial + 1`.** Not a persisted
+counter, and not a free-slot scan. Derived each time from the maximum serial the household is
+actually holding:
 
-**The test that would settle it:** remove Virgin Radio UK (`sn_6`, currently the highest live
-serial) and add anything. `sn_6` back means lowest-free and the deletion test needed more patience;
-`sn_7` means something else again. Until then, allocation stays unknown - which is the whole point
-of the retirement above.
+| highest live before | added | serial | fits |
+|---|---|---|---|
+| 17 | TIDAL | `sn_18` | yes - the prediction that started this |
+| 19 | YouTube Music, re-added | `sn_20` | yes |
+| 4 | TuneIn (New) | `sn_5` | yes |
+| 5 | Virgin Radio UK | `sn_6` | yes |
+| 6 | CBC Radio & Music | `sn_7` | yes |
+| 7 *(`sn_6` freed, `sn_7` still live)* | Audible | **`sn_8`** | **yes - and lowest-free predicted 6** |
+
+**This reconciles the whole argument, and shows which half of the old claim was wrong.**
+
+- **"Not recycled" was right.** `sn_6` was free, known to be free, and skipped. That is a stronger
+  result than the deletion test that first earned the claim, because the freed slot was *low* and
+  the gap was unambiguous.
+- **"Monotonic" was wrong**, and it is the half nobody tested. The counter is not persisted, so it
+  **goes down** when the highest accounts are removed. That is the whole of the `sn_20` to `sn_5`
+  drop between 08-31 and 09-01: services were cleared from the household in between, the highest
+  live serial fell to 4, and the next registration took 5. No recycling was involved.
+
+So a serial is unique among *live* registrations and says nothing across time. `sn_5` yesterday and
+`sn_5` today can be different accounts on different services, and that is exactly what happened -
+the 08-31 harvest attributed `sn_5` to iHeartRadio.
+
+**The one observation that does not fit**, kept rather than filed away: TIDAL at `sn_18` was
+removed and the next account was `sn_19`, where this model wants 18. The two happened minutes
+apart, so a removal that had not yet settled would account for it - but that is an explanation, not
+a measurement, and re-running it deliberately with a pause is what would close it.
+
+**What would falsify the model:** add a service while the highest live serial is `N` and get
+anything other than `N+1`.
 
 **Why step 2 was weaker than it looked.** Removing the highest serial and getting highest-plus-one
 is exactly what "next = high-water + 1" predicts, so it never distinguished "freed serials are
@@ -3300,13 +3322,14 @@ this repository.
   `account_id` was `none`.
 - **Household registration is per account**, and one service may hold several: `sid 6` held `sn_5`
   and `sn_15` simultaneously, TuneIn now holds `sn_14` and `sn_19`.
-- ~~**Serials are a household-wide monotonic counter, not recycled.**~~ **Withdrawn 2026-09-01**,
-  the third turn on this claim, and now retired rather than re-litigated: a TuneIn (New) account
-  connected that day reported `sn_5` live, where high-water-plus-one required `sn_21` or above. The
-  deletion test that earned it removed the *highest* serial, which never distinguished the two
-  models. Serial allocation is unknown; read an account live rather than inferring it. The
-  consequence this was carrying is moot anyway - the enqueue path ignores the serial. See
-  "Household registration is per *account*".
+- **Serials are `highest currently-live serial + 1`** - settled 2026-09-01 after three sessions of
+  argument. **"Not recycled" was right**: `sn_6` was freed by removing Virgin Radio UK and the next
+  account, Audible, took `sn_8` rather than filling it. **"Monotonic" was wrong**: the counter is
+  derived, not persisted, so it *falls* when the highest accounts are removed - which is the whole
+  of the `sn_20` (08-31) to `sn_5` (09-01) drop that looked like recycling. A serial is unique
+  among live registrations and means nothing across time. Read an account live rather than
+  inferring it from a favorite, which may be a fossil. See "Household registration is per
+  *account*".
 - **The two playback paths run as different identities.** `loadStreamUrl` uses this machine's token,
   the enqueue path lets the player substitute the household default. Content type selects the
   account, which is nobody's intent.
@@ -3917,7 +3940,7 @@ without sharing vocabularies - each passes through whatever its origin called th
 | Source | A station reads | Status |
 |---|---|---|
 | `search`, `browse` | `stream` (SMAPI's `itemType`) | **verified** - a TuneIn jazz search answers 19, and browsing into Trending answers 50, all `container: false` |
-| `favorites` | **`STREAM`**, in capitals | **verified 2026-09-01** - and the prediction was wrong, see below |
+| `favorites` | an **upper-case enum**: `STREAM`, `AUDIOBOOK` | **verified 2026-09-01** - and the prediction was wrong, see below |
 | `bookmarks` | `stream`, being what x2rock stored | covered by the same check |
 
 Unknown reads as "no" - an unmarked station is a smaller wrong than a marked album, and an older
@@ -3934,8 +3957,18 @@ The mark appears correctly regardless, because `isStreamRow` lowercases before c
 feature was right by construction rather than by the reasoning written down beside it - which is
 worth saying plainly, because the reasoning is what a later reader would trust.
 
-The `audiobroadcast` clause is therefore **untested, not reasoned**. It is kept in case another
-service answers that way, but nothing on this household has ever produced it.
+A second favorite the same day settles the shape: an Audible audiobook reports **`AUDIOBOOK`**. So
+the field is an upper-case enum of its own - `STREAM`, `AUDIOBOOK` - and not a DIDL-Lite class at
+all. The `audiobroadcast` clause is therefore **untested, not reasoned**. It is kept in case some
+service answers that way, but nothing on this household has produced it and the vocabulary now
+looks like the wrong family entirely.
+
+**A third shape, and the detector holds.** Audible's *playback* metadata reports
+`container.type: "audiobook"` with `track.type: "chapter.audiobook"` and a real `durationMillis`
+(58000 on "Book One: Dune"). Not `station`, so `is_live_stream` correctly leaves it unmarked - an
+on-demand item with a duration and an end, which is the thing the radio glyph exists to distinguish
+from. Four services have now been read live: `track`, `station` (twice, two very different shapes),
+and `audiobook`.
 
 The older recipe follows, still valid for re-running the check on another service.
 
