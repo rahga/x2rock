@@ -3199,6 +3199,63 @@ rediscover these the hard way:
   framing, command/subscribe) was written during this investigation and is a direct model for the
   Rust port.
 
+## Where this stopped (2026-08-31, end of session)
+
+A handoff note, written because the next session is on a different account and inherits nothing but
+this repository.
+
+### Settled today, and where it is written up
+
+- **A service token is scoped to the service**, per machine. `credentials.json` holds one entry per
+  service id. Search never consults the household — iHeartRadio returned 51 results while its
+  `account_id` was `none`.
+- **Household registration is per account**, and one service may hold several: `sid 6` held `sn_5`
+  and `sn_15` simultaneously, TuneIn now holds `sn_14` and `sn_19`.
+- **Serials are a household-wide monotonic counter, not recycled.** Predicted `sn_18` before TIDAL
+  was added and got it; removed TIDAL and the next account was `sn_19`, not a reuse of 18. So a
+  bookmark holding a dead serial is a dead pointer, never a silently wrong one.
+- **The two playback paths run as different identities.** `loadStreamUrl` uses this machine's token,
+  the enqueue path lets the player substitute the household default. Content type selects the
+  account, which is nobody's intent.
+- **`match` has still never succeeded**, and is beside the point: the Sonos app performed four
+  registrations today in seconds each.
+
+All of it is in "The household's account registry, read at last" and the sections after it.
+
+### The one thing that could undo a chunk of the above
+
+**No Sonos or SMAPI documentation was consulted in this session.** Everything came from this repo,
+live probing, and recollection. That splits the negative result in "Searched properly: there is no
+listing anywhere" into two halves of very different strength:
+
+- The **UPnP half is authoritative** — `/xml/MusicServices1.xml` and `/xml/SystemProperties1.xml`
+  were read directly, and they enumerate every action the player implements.
+- The **Control API half is guesswork** — eight command names on `musicServiceAccounts:1` that
+  seemed plausible. If the real listing verb is one nobody thought of, "there is no listing" is
+  wrong, and both that section and `accounts --household` rest on a false premise.
+
+**Checking that against Sonos's published API reference is the first thing worth doing.** If a
+listing command exists, `accounts --household` should use it and the harvest sections need
+rewriting; if it does not, the section stops being provisional.
+
+### Also unfinished
+
+- **Account selection when a service has several is unresolved.** Both observed cases used the
+  higher serial, but that is confounded with "the one most recently set up". Separating them needs a
+  household whose *older* account is active.
+- **Whether a bookmark should store the serial at all** — see "The stored serial goes stale". A
+  trade-off, not an oversight, and deliberately left open.
+- **`RemoveAccount` is declared but not demonstrably functional**, and 806 cannot distinguish a bad
+  `AccountID` from a dead action. Removal was done from the phone instead.
+
+### Live state changed on the household today
+
+So the next session is not confused by it: TIDAL was added and then removed (`sn_18`, gone), Mixcloud
+was added and left in place (`sn_17`), TuneIn was added (`sn_19`), Kitchen's queue was cleared of 25
+TIDAL tracks that were unplayable anyway, and one podcast episode was enqueued to Living Room and
+removed again. The iHeartRadio token this machine holds was linked today and is the same account as
+the earlier session's (`13012528881`).
+
 ## Open questions
 
 1. **Which services the picker should offer, once there are more than one** (opened 2026-08-31,
