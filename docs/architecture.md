@@ -864,8 +864,13 @@ So a bookmark kept *before* an account switch names a serial that no longer exis
 the account it points at is gone. `from_id` guards the shape, and this is not a shape problem.
 
 Nothing is broken today only by luck — every entry in `bookmarks.json` postdates the switch
-(serials 15, 16 and 17). The failure mode is untested, because testing it means replaying a
-bookmark built on a dead serial, and no such bookmark exists to try.
+(serials 15, 16 and 17). ~~The failure mode is untested, because testing it means replaying a
+bookmark built on a dead serial, and no such bookmark exists to try.~~ **Tested 2026-08-31, in a
+stronger form than this imagined**: the YouTube Music *registration itself* was removed, and the
+entry died at `AddURIToQueue` with UPnP 800 — and the stored serial had nothing to do with it,
+because the enqueue path sends none. What goes stale is the household's registration for the
+service, not the number the bookmark remembers. See "The YouTube Music account was disconnected,
+and the bookmark died at the door".
 
 Two consequences beyond this feature:
 
@@ -3312,6 +3317,47 @@ discovery is the picker as it was. And a linked account whose token has gone sta
 row: the failure surfaces only when the row is opened, confined to `browseProc`, which is "one
 failing container must not fail the listing" again at the level of services.
 
+## The YouTube Music account was disconnected, and the bookmark died at the door (2026-08-31)
+
+The household owner disconnected YouTube Music from the Sonos app on a phone. What that did,
+observed the same day, from Kitchen (idle, empty queue, volume 3):
+
+| enqueue attempt | household's account for that service | result |
+|---|---|---|
+| Espresso, YouTube Music (sid 284) — the id that enqueued and played yesterday | removed today | `AddURIToQueue` **UPnP 800** |
+| Jolene, TIDAL (sid 174) | removed yesterday (`sn_18`) | `AddURIToQueue` **UPnP 800** |
+| L-O-V-E, iHeartRadio (sid 6) — the control | still registered | enqueued and **played** |
+
+- **The player validates the URI's service against the household's registrations at enqueue
+  time.** Yesterday's DIDL experiment showed the serial is *not* checked — sid 284 with `sn=9`, a
+  serial the household never had, played. Today shows what *is* checked: the same sid with its own
+  valid id and no registration behind it is refused at the door. Together: **sid registration is
+  necessary, sn is irrelevant**, and the check runs at insertion, not retention — yesterday's 25
+  TIDAL queue entries sat in Kitchen's queue after their account died and had to be cleared by
+  hand, while today the same tracks cannot get back in.
+- **The failure mode "The stored serial goes stale" called untested is now tested**, in a stronger
+  form than that section imagined: not a dead serial but a dead *registration*, and the stored
+  serial turns out to have nothing to do with the failure — the enqueue path sends none
+  (`main.rs:865` passes `None`). What a bookmark actually depends on is the household still holding
+  *any* account for the service, and nothing in the bookmark can say whether it does.
+- **800 is not specifically "no account".** Test E yesterday drew the same 800 for a foreign id
+  under a *live* service (a YouTube Music id under Mixcloud's sid). So 800 at `AddURIToQueue` reads
+  as "the player refuses to resolve this URI", covering at least an unregistered service and a
+  foreign id — the CLI's "no reason given" is accurate and cannot be improved from this side.
+- Serial bookkeeping: `sn_16` is confirmed as YouTube Music's last registration — named in the
+  history entry's art URL. Yesterday it showed in the harvest on a queue item; today that queue
+  entry is gone and the harvest names only `sn_2`, the pre-switch fossil in `FV:2`. So within two
+  days the harvest went from naming the wrong serial *and* the right one to naming only the wrong
+  one — the registration's death is invisible to it, and what it does show outlived what it
+  missed.
+- A third data point for the account-selection question, free with the control: the player filled
+  **`sn_15`** for iHeartRadio (read live from `getMetadataStatus` while L-O-V-E played) — the
+  higher and newer of the two serials again. Consistent with both prior observations, and still
+  confounded the same way.
+
+Kitchen was paused and its queue cleared afterwards; the household is as this found it, minus the
+account its owner removed.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -3325,9 +3371,13 @@ failing container must not fail the listing" again at the level of services.
    this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
    `loadStreamUrl` cannot carry" was true and is no longer the whole story: the enqueue path does not
    resolve the stream at all, so the player supplies its own credential and protected content plays.
-   A kept YouTube Music track demonstrates it today, with x2rock holding no Google credential.
+   A kept YouTube Music track demonstrated it — until the household's account was disconnected
+   (2026-08-31, same day) and the same id started refusing at enqueue with UPnP 800. See "The
+   YouTube Music account was disconnected". So the mechanism is real but **conditional on the
+   household holding an account for the service**, which x2rock can neither create nor detect.
 
-   So for YouTube Music specifically, **playback is solved and only discovery is missing.** What
+   So for YouTube Music specifically, **playback was solved exactly as long as the household held
+   the account, and today it holds none** — discovery and playback are both missing again. What
    stands between here and a search is a single decision, not a puzzle: `getAppLink` answers 403
    asking for an API key, and YouTube Music's manifest — fetched anonymously from Sonos's CDN —
    still carries one (`apiKey: {cr, zp}`, re-confirmed 2026-08-31). Presenting a key Sonos

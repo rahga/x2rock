@@ -418,6 +418,11 @@ Start it once from the Sonos app, keep it, and it is on the bar from then on. Th
 YouTube Music, Spotify, Apple Music and everything else the household has linked — x2rock never
 sees a token.
 
+The credential the player resolves is the household's, so a kept item lives exactly as long as the
+household's account for that service does. Disconnect the service in the Sonos app and the player
+refuses the same id at the door (UPnP error 800, at enqueue) — and nothing in the kept item can
+warn about it in advance.
+
 `--container` keeps the album, playlist or station rather than the single track. Kept items live in
 `$XDG_STATE_HOME/x2rock/bookmarks.json`, on this machine rather than in the household.
 
