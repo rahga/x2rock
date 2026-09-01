@@ -1953,6 +1953,30 @@ the household's accounts, and the earlier framing of it as "a lower bound" was t
 `sn_14` and `sn_19` are now both TuneIn (`sid 333`) — a second service with two accounts, this one
 created under observation rather than found already present.
 
+##### One serial, followed end to end
+
+`sn_18` was watched from birth to invisibility, which is the whole problem in one row per hour:
+
+| moment | in the harvest? | account exists? |
+|---|---|---|
+| TIDAL added from the phone, a track playing | yes | yes |
+| TIDAL removed from the phone | **yes** | **no** |
+| Kitchen's queue cleared, ~an hour later | no | no |
+
+**Nothing about the removal made it disappear.** It went on being reported because 25 Dolly Parton
+tracks in a queue nobody was playing still named it, and it would have gone on being reported
+indefinitely. What finally cleared it was an unrelated `queue clear` — a coincidence, not a
+mechanism. There is no event, no expiry and no reconciliation that retires a serial from the
+harvest; only the deletion of whatever content happens to mention it.
+
+The reverse held at the same moment: `sn_19` was live and playing throughout the last two rows and
+appears in none of them, because TuneIn is a station and a station never enters the queue.
+
+So the seven pairs the harvest currently reports are not the household's accounts. `sn_2` and `sn_5`
+are unverified and may be fossils of exactly the kind this table watched form — and the only reason
+`sn_18` is known to be one is that its death was observed. For any serial not watched being created
+and destroyed, the harvest cannot say which column it belongs in.
+
 #### `RemoveAccount` is declared, not demonstrably functional
 
 `SystemProperties:1` declares `RemoveAccount(AccountType, AccountID)`, and an earlier note here read
