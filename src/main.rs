@@ -1902,11 +1902,44 @@ async fn main() -> Result<()> {
                 .collect();
             println!("{}", serde_json::to_string(&rows)?);
         } else if items.is_empty() {
-            let hidden = list.items.len();
-            if hidden > 0 && !*all {
-                println!("Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`.");
-            } else {
-                println!("Nothing kept. Play something and run `x2rock keep`.");
+            // Four states were wearing one message, and a query filtering
+            // everything out got the worst of it: "Nothing kept. Play something
+            // and run `x2rock keep`" told someone with a full file that their
+            // file was empty. What is empty, and what to do about it, differ.
+            match query {
+                Some(q) => {
+                    // Whether `--all` would have found it is the useful half of
+                    // the answer, and it costs one pass over what is loaded.
+                    let deeper = if *all {
+                        0
+                    } else {
+                        let needle = q.to_lowercase();
+                        list.listed(true)
+                            .iter()
+                            .filter(|b| b.name.to_lowercase().contains(&needle))
+                            .count()
+                    };
+                    if deeper > 0 {
+                        println!(
+                            "Nothing kept matches {q:?}, but {deeper} of what played recently \
+                             does. `x2rock bookmarks --all {q:?}`."
+                        );
+                    } else if *all {
+                        println!("Nothing kept or played recently matches {q:?}.");
+                    } else {
+                        println!("Nothing kept matches {q:?}.");
+                    }
+                }
+                None => {
+                    let hidden = list.items.len();
+                    if hidden > 0 && !*all {
+                        println!(
+                            "Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`."
+                        );
+                    } else {
+                        println!("Nothing kept. Play something and run `x2rock keep`.");
+                    }
+                }
             }
         } else {
             for b in items {
