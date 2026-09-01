@@ -4023,15 +4023,24 @@ still goes unnoticed until the view is reopened, and the comment that promised o
 from the Sonos app, which is what keeps this honest when someone else edits") is gone rather than
 left to mislead.
 
-**The real fix, not taken.** The queue's true version is already read over UPnP as `UpdateID`, in
-`Upnp::update_id`, before every mutation. Publishing that as `x2rock:queueVersion` would make the
-original design work, including for edits from the Sonos app. It needs a UPnP call on some trigger,
-which is why a daemon that deliberately never polls has not grown one - and the queue is a
-peripheral feature here, per the owner: playback is usually a stream or a podcast, running alongside
-the queue rather than through it.
+**And then the real fix as well, at the owner's request.** The queue's true version *is* available -
+the `UpdateID` on a `Q:0` browse, which `Upnp::update_id` already reads before every mutation. The
+daemon now publishes it as `x2rock:queueVersion`, so the mechanism the widget was written against
+finally exists.
 
-The constant is kept rather than deleted. It costs one map entry, it is what a player *would* send,
-and it names the thing to publish if this ever matters more.
+**Where the trigger came from.** The local API has no queue namespace to subscribe to: `queue:1` and
+`playbackQueue:1` both answer `ERROR_UNSUPPORTED_NAMESPACE`, and `playbackSession:1` has no queue
+command. So the read rides a playback event the daemon was already handling, which keeps the
+no-polling promise honest - a room doing nothing costs nothing, and the price is one small SOAP
+browse per state change or track boundary.
+
+Verified: the key went from `""` to `"84"`, and to `"85"` when a track was added.
+
+**What it catches, and what is still missed.** Anything that moves playback is seen - the Sonos
+app's Play Now, a track advancing, a queue cleared under a playing room. A *silent* append to a room
+that keeps playing what it was emits no event, so it waits for the next one. Closing that needs UPnP
+GENA eventing, which needs the players to reach an HTTP callback on this machine, which Omarchy's
+default-deny firewall does not allow - the same wall the cloud-queue note runs into.
 
 ### A queue row with no metadata, and whose fault it is
 

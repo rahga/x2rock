@@ -16,6 +16,7 @@ use mpris_server::{
 
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{self, MetadataStatus, PlayModes, PlaybackActions, Repeat};
+use crate::sonos::upnp::Upnp;
 
 /// `org.mpris.MediaPlayer2.<suffix>`. "Media Room" becomes `x2rock-media-room`,
 /// the same convention the Kotlin daemon used, so existing bar configs carry over.
@@ -78,7 +79,7 @@ const CAN_SHUFFLE: &str = "x2rock:canShuffle";
 /// that player is really several speakers - but a bar widget wants to show it,
 /// and needs it to tell "everything is grouped" from "there is only one room".
 const MEMBERS: &str = "x2rock:members";
-/// The queue's version, when a player sends one.
+/// The queue's version: a number that moves whenever the queue changes.
 ///
 /// **Observed empty on every player here, always** (2026-09-01). It is taken
 /// from `playbackStatus.queueVersion`, and this household's firmware
@@ -89,17 +90,14 @@ const MEMBERS: &str = "x2rock:members";
 /// either, so it is absent from the event body too and not merely from the
 /// polled response.
 ///
-/// The intent was that a client showing the queue re-reads it when this moves,
-/// which would keep a queue view correct without polling and would catch edits
-/// made from the Sonos app. **None of that has ever happened.** The bar widget
-/// now re-reads after each edit it makes itself instead; an edit from anywhere
-/// else still goes unnoticed until the view is reopened.
+/// **So it is filled from UPnP instead**, by [`RoomPlayer::refresh_queue_version`]
+/// on each playback event: the `UpdateID` of a `Q:0` browse, which is the
+/// version every queue mutation already reads before acting. The local API has
+/// no queue namespace to subscribe to - `queue:1` and `playbackQueue:1` both
+/// answer `ERROR_UNSUPPORTED_NAMESPACE` - so UPnP is the only source.
 ///
-/// Kept rather than removed: it costs one map entry, it is what a player *would*
-/// send, and the real queue version is already read over UPnP as `UpdateID`
-/// (`Upnp::update_id`) before every mutation - so publishing that instead is the
-/// fix if this ever matters enough. It would mean a UPnP call on some trigger,
-/// which is why a daemon that deliberately never polls has not grown one.
+/// Now carries a real number (84, 85, ... on this household) and moves when the
+/// queue does.
 const QUEUE_VERSION: &str = "x2rock:queueVersion";
 /// Each member's own volume, aligned with [`MEMBERS`].
 ///
@@ -278,6 +276,40 @@ impl RoomPlayer {
             properties.push(Property::Metadata(state.with_hints()));
         }
         properties
+    }
+
+    /// Read the queue's real version over UPnP, and say so if it moved.
+    ///
+    /// The players do not send one. `playbackStatus.queueVersion` is the field
+    /// this was designed around and firmware 95.0-77060 omits it entirely, in
+    /// the polled response and in events alike - see [`QUEUE_VERSION`]. UPnP
+    /// does have it, as the `UpdateID` on a `Q:0` browse, which is what every
+    /// queue mutation already reads before acting.
+    ///
+    /// **Called on a playback event, not on a timer.** That is the whole of the
+    /// no-polling promise this keeps: the read rides an event the daemon was
+    /// already handling, so a room doing nothing costs nothing. The price is one
+    /// small SOAP browse per playback event, which is a state change or a track
+    /// boundary rather than anything frequent.
+    ///
+    /// **What it therefore catches, and does not.** Anything that moves playback
+    /// is seen - the Sonos app's Play Now, a track advancing, a queue cleared
+    /// under a playing room. A silent append to a room that keeps playing what
+    /// it was emits no event and is still missed until something else happens.
+    /// Closing that needs UPnP GENA eventing, which needs the players to reach
+    /// an HTTP callback here, which Omarchy's default-deny firewall does not
+    /// allow - the same wall the cloud-queue note runs into.
+    ///
+    /// Never fails a caller: a browse that does not answer means the version is
+    /// simply not updated this time round.
+    pub async fn refresh_queue_version(&self) -> Option<Property> {
+        let version = Upnp::new(self.connection.ip()).update_id().await.ok()?;
+        let mut state = self.state.lock().unwrap();
+        if state.queue_version == version {
+            return None;
+        }
+        state.queue_version = version;
+        Some(Property::Metadata(state.with_hints()))
     }
 
     /// Fold a `metadataStatus` event in.

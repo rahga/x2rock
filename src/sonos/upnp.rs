@@ -479,7 +479,7 @@ impl Upnp {
     /// Every mutation asks for this immediately beforehand rather than making
     /// callers carry one around: a version fetched a moment ago is the whole
     /// point of the field, and one carried across a user's deliberations is not.
-    async fn update_id(&self) -> Result<String> {
+    pub async fn update_id(&self) -> Result<String> {
         Ok(self.browse_queue(0, 1).await?.update_id)
     }
 

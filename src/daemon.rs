@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::mpris::{RoomPlayer, bus_suffix};
+use mpris_server::Property;
 use crate::restart::{Restart, Restarts};
 use crate::session::{self, Session};
 use crate::sonos::local::Connection;
@@ -439,7 +440,18 @@ async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
     let player = server.imp();
     let body = event.body.clone();
     let properties = match event.namespace.as_str() {
-        "playback:1" => player.apply_playback(&serde_json::from_value(body)?),
+        "playback:1" => {
+            let mut properties = player.apply_playback(&serde_json::from_value(body)?);
+            // The queue's version has to be fetched rather than read off the
+            // event, because the players do not send one - see
+            // `RoomPlayer::refresh_queue_version`. A fresher Metadata supersedes
+            // whatever apply_playback built, rather than being sent beside it.
+            if let Some(metadata) = player.refresh_queue_version().await {
+                properties.retain(|p| !matches!(p, Property::Metadata(_)));
+                properties.push(metadata);
+            }
+            properties
+        }
         "playbackMetadata:1" => {
             let status: proto::MetadataStatus = serde_json::from_value(body)?;
             remember(&status);
