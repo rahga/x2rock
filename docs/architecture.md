@@ -1925,18 +1925,51 @@ account added from the phone during this session landed at 17 rather than at 1.
 **Confirmed by prediction rather than by hindsight (2026-08-31).** With the highest serial standing
 at 17, the next account added from the phone — TIDAL, `sid 174` — was predicted to be `sn_18` before
 it was added. It is: `getMetadataStatus` reported `accountId: "sn_18"` on the first track played
-from it. A household-wide monotonic counter, not a per-service one.
+from it. **Household-wide rather than per-service** — a brand new service landing at 18 rather than
+at 1 shows that much, and that half still stands. Whether the counter is *monotonic* is the half
+that did not survive; see the paragraph below.
 
-**"Not recycled" was claimed here, withdrawn, and then earned.** 17 → 18 was observed with no
-account deleted in between, so it showed only that the counter increments. The claim was withdrawn
-as unsupported and then tested properly: TIDAL (`sn_18`, the highest serial) was removed from the
-phone and TuneIn added in its place. The new account is **`sn_19`**. A freed serial is not reused,
-so the counter is monotonic across deletions, not merely across additions.
+**"Not recycled" was claimed here, withdrawn, earned - and withdrawn again on 2026-09-01. It is
+retired rather than re-litigated.** The history is the point, so it is left standing:
 
-That is the benign answer to the staleness hazard. A bookmark holding a dead serial stays a dead
-pointer; it cannot come back to life pointing at somebody else's account. Had 18 been reissued, the
-hazard under "The stored serial goes stale" would have been a correctness bug rather than a broken
-reference.
+1. 17 → 18 with nothing deleted in between showed only that the counter increments. Claimed, then
+   withdrawn as unsupported.
+2. Re-earned by a deletion test: TIDAL (`sn_18`, the *highest* serial) removed from the phone,
+   TuneIn added in its place, and the new account came back **`sn_19`**. Read as "a freed serial is
+   not reused".
+3. **Broken 2026-09-01.** The owner connected "TuneIn (New)" from the phone, and the station it
+   played reported `accountId: "sn_5"` live, from `getMetadataStatus` on the container. Under
+   high-water-plus-one a registration made that day should have been `sn_21` or above.
+
+**Why step 2 was weaker than it looked.** Removing the highest serial and getting highest-plus-one
+is exactly what "next = high-water + 1" predicts, so it never distinguished "freed serials are
+never reused" from "the high-water mark only moves up". `sn_5` is a *low* serial, freed long ago if
+it was ever live, and it came back.
+
+**No simple model survives all of it.** "Lowest free index" does not fit either: the 08-31 harvest
+found gaps at 1, 3, 4, 8, 9, 11-13 and 16, so a lowest-free allocator would have answered `sn_1`
+rather than `sn_18` when the prediction was made. Two successful predictions came out of a model
+that the next observation contradicts, which is the shape of a rule fitted to too little data.
+
+**The likeliest reason it kept flip-flopping is right above this paragraph: the harvest reads
+fossils.** `FV:2` and `Q:0` carry the serial that was current when a favorite was *saved*, so the
+table is a record of past registrations mixed with live ones and no way to tell which is which. It
+was never able to answer this question, and three attempts to make it do so produced two right
+predictions and one wrong model. **Treat serial allocation as unknown.** Anything that needs to
+know an account's identity should read it live from `getMetadataStatus`, not infer it.
+
+The same 09-01 reading shows the fossil problem directly: that harvest attributed `sn_5` to
+iHeartRadio (`sid 6`) and gave TuneIn (New) `sn_14`, while today TuneIn (New) reports `sn_5` live.
+Same household throughout - one player id, one network, one household in `networks.json` - so a
+second household is not the explanation.
+
+**None of this is a correctness problem, because the consequence it was carrying had already been
+closed by other means.** The claim mattered only as the benign answer to the staleness hazard: a
+bookmark holding a dead serial stays a dead pointer rather than coming back to life pointing at
+somebody else's account. That worry is moot either way - **the player never consults the serial on
+the enqueue path**, proven when a bookmark recorded under `sn_16` played under `sn_20` (see
+"Re-added the same day: `sn_20`"). A bookmark cannot pin an account deliberately, so it cannot be
+silently repointed accidentally. The serial is provenance and nothing else.
 
 TIDAL had been in x2rock's "14 services can be linked" list all day while the household held no
 TIDAL account, which is the offerable catalogue and the registry being independent, once more.
@@ -3247,9 +3280,13 @@ this repository.
   `account_id` was `none`.
 - **Household registration is per account**, and one service may hold several: `sid 6` held `sn_5`
   and `sn_15` simultaneously, TuneIn now holds `sn_14` and `sn_19`.
-- **Serials are a household-wide monotonic counter, not recycled.** Predicted `sn_18` before TIDAL
-  was added and got it; removed TIDAL and the next account was `sn_19`, not a reuse of 18. So a
-  bookmark holding a dead serial is a dead pointer, never a silently wrong one.
+- ~~**Serials are a household-wide monotonic counter, not recycled.**~~ **Withdrawn 2026-09-01**,
+  the third turn on this claim, and now retired rather than re-litigated: a TuneIn (New) account
+  connected that day reported `sn_5` live, where high-water-plus-one required `sn_21` or above. The
+  deletion test that earned it removed the *highest* serial, which never distinguished the two
+  models. Serial allocation is unknown; read an account live rather than inferring it. The
+  consequence this was carrying is moot anyway - the enqueue path ignores the serial. See
+  "Household registration is per *account*".
 - **The two playback paths run as different identities.** `loadStreamUrl` uses this machine's token,
   the enqueue path lets the player substitute the household default. Content type selects the
   account, which is nobody's intent.
@@ -3379,7 +3416,9 @@ Room. Two predictions were on the table, and both held:
 
 - **The new registration is `sn_20`** — read live from `getMetadataStatus` on Living Room. Called
   in advance from the monotonic-counter model (`sn_19` was the high-water mark; `sn_18` stayed
-  dead). That is the **second serial predicted before it existed**, after `sn_18`, and this one on
+  dead). *The prediction held and the model behind it did not: it was withdrawn 2026-09-01 when a
+  new account came back `sn_5`. Two right calls from a rule the next observation broke - see
+  "Household registration is per account".* That is the **second serial predicted before it existed**, after `sn_18`, and this one on
   a service that has now held `sn_2`/`sn_3`, `sn_16` and `sn_20` on one household. Per the owner it
   is the **same YouTube Premium subscription** each time — so this run is cleaner than the
   `sn_3`→`sn_16` plan switch: an identical service-side account, removed and re-added, minted a new
