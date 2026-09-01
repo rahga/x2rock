@@ -1948,6 +1948,51 @@ Two limits, both load-bearing for anything built on this:
   saved, so a serial can outlive the registration it named. See "The stored serial goes stale, and
   a bookmark cannot tell" — on this household `sn_2` for YouTube Music is most likely one.
 
+#### Searched properly: there is no listing anywhere (2026-08-31)
+
+The first pass tried four command names and concluded "no read command". That was a guess dressed
+as a search. Done properly, against a real player, every route fails:
+
+| route | answer |
+|---|---|
+| `musicServiceAccounts:1` — `getAccounts`, `getMusicServiceAccounts`, `list`, `getAccountList`, `getAll`, `getVersion`, `getHouseholdAccounts`, `refresh` | `ERROR_UNSUPPORTED_COMMAND`, each |
+| `musicServices:1` (plural) | `ERROR_UNSUPPORTED_NAMESPACE` |
+| `musicService:1 getSessions`, `households:1 getHousehold` / `getHouseholds` | `ERROR_UNSUPPORTED_COMMAND` |
+| UPnP `MusicServices:1`, from its own SCPD | three actions, and none of them lists accounts: `ListAvailableServices`, `UpdateAvailableServices`, `GetSessionId` |
+| UPnP `SystemProperties:1`, from its own SCPD | account **mutations** only — `AddAccountX`, `AddOAuthAccountX`, `RemoveAccount`, `ReplaceAccountX`, `SetAccountNicknameX`, `EditAccountMd`, `RefreshAccountCredentialsX` |
+| `SystemProperties GetString` on `R_SvcAccounts`, `R_Accounts`, `AccountList`, `Accounts`, `R_TrialAccount`, `sonos_accounts`, `McAccountsVersion` | UPnP 800 |
+| ContentDirectory `S:` | empty result, 0 matches |
+| `http://<player>:1400/status/accounts` | empty `ZPSupportInfo` |
+
+Reading the SCPDs rather than guessing verbs is what makes this a search and not another four
+guesses: `/xml/MusicServices1.xml` and `/xml/SystemProperties1.xml` enumerate every action the
+player implements. **A Sonos player will add, remove, rename and re-credential an account, and will
+not tell you which accounts exist.**
+
+So the harvest above is not a stopgap until the real call is found. It is the only route.
+
+#### But the household does say *when* accounts change
+
+`musicServiceAccounts:1 subscribe` succeeds — an empty reply, then an event:
+
+```json
+{ "_objectType": "musicServicesChanged",
+  "availableServicesVersion":  { "version": "2234" },
+  "registeredServicesVersion": { "version": "2026-09-01T01:36:42.389777473" } }
+```
+
+**`registeredServicesVersion` is a second version, and it tracks the accounts.** A timestamp rather
+than a counter, and it matched when TIDAL was added from the phone minutes earlier.
+
+This corrects the claim under "Four hypotheses this killed" that an account being added is
+undetectable. What is true is narrower: `AvailableServiceListVersion` is blind to it — the number
+the *catalogue* cache keys on did not move. `registeredServicesVersion` is not blind to it. Anything
+caching a harvested account table has a signal to invalidate on, which is worth knowing before
+building one, and it arrives by subscription rather than by polling.
+
+`x2rock raw --watch <seconds>` is how this was read: a `subscribe` reply is empty and the state it
+asked for turns up afterwards as an event.
+
 ### Choosing between several accounts is an open question
 
 Told from the phone to play iHeartRadio into Kitchen, the household played from **`sn_15`** — the
@@ -2010,7 +2055,10 @@ per service is not an iHeartRadio quirk.
 - ~~`AvailableServiceListVersion` will move when an account is added~~. It did not: `:2234` before
   and after. That version tracks the offerable catalogue only, so **the catalogue cache cannot
   detect an account being added or removed**, and the invalidation note under "The catalogue cache"
-  should not be read as covering account state.
+  should not be read as covering account state. (Narrowed later the same day: *that* version is
+  blind to it, but `registeredServicesVersion` on the `musicServicesChanged` event is not — see
+  "But the household does say *when* accounts change". The catalogue cache is still blind; the
+  household is not.)
 - ~~The single-use-code theory can be tested by calling `match` with an unredeemed code~~. It cannot,
   by anyone, from a controller. `match` requires a `userIdHashCode`; the hash arrives only from
   `getDeviceAuthToken`; that call is what redeems the code. **A valid hash and an unspent code cannot
