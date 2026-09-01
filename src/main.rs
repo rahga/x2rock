@@ -1860,8 +1860,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Kept items are x2rock's own and live on this machine, so listing them
-    // needs no household at all.
+    // Kept items are x2rock's own and live on this machine, so the *data* needs
+    // no household. The command still does, which the older version of this
+    // comment claimed it did not: `session::connect` above is unconditional, so
+    // `bookmarks` on a network with no remembered players fails with "no players
+    // remembered" before ever reaching here. Found by trying to list an empty
+    // store in a scratch `XDG_STATE_HOME`, which had no `networks.json` either.
+    //
+    // Left as it is rather than hoisted above the connect. Doing that would buy
+    // offline listing at the price of a second place deciding which commands are
+    // local-only, and this is a single-user install where the case does not come
+    // up. The comment is corrected instead of the behaviour, so the next reader
+    // is not misled about what actually runs first.
     if let Command::Bookmarks {
         action,
         query,
