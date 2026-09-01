@@ -752,7 +752,18 @@ fn print_queue(queue: &upnp::Queue, current: u32, json: bool) {
     }
     for item in &queue.items {
         let marker = if item.index == current { "▶" } else { " " };
-        let mut line = format!("{marker} {:>3}  {}", item.index, item.title);
+        // A row the player has nothing to say about still occupies a position,
+        // and a blank line reads as corruption rather than as an answer. The
+        // Sonos app makes these: its "..." -> Play Now adds an entry carrying no
+        // metadata at all, where tapping the track on the now-playing view adds
+        // a normal one. Nothing here can fill it in - the player has no title to
+        // give - so it is named rather than left empty.
+        let title = if item.title.trim().is_empty() {
+            "(no title from the player)"
+        } else {
+            &item.title
+        };
+        let mut line = format!("{marker} {:>3}  {}", item.index, title);
         if let Some(artist) = &item.artist {
             line.push_str(" — ");
             line.push_str(artist);

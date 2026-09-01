@@ -4033,6 +4033,24 @@ the queue rather than through it.
 The constant is kept rather than deleted. It costs one map entry, it is what a player *would* send,
 and it names the thing to publish if this ever matters more.
 
+### A queue row with no metadata, and whose fault it is
+
+Seen while the above was being fixed: one queue row rendered blank while the rows either side of it,
+from the same service and added minutes apart, carried title, artist, album and duration. `now`
+agreed - `title`, `artist` and `service` all `null` - so nothing was being dropped on the way
+through; the player genuinely held no metadata for it.
+
+**It is the Sonos app that makes these.** Per the owner, its `...` menu's **Play Now** adds an entry
+carrying no metadata, while tapping the track on the now-playing view adds a normal one. Two paths
+in first-party software, one of which produces a row nothing can describe. Worth writing down
+because the obvious suspect was x2rock's own synthesized DIDL in `bookmarks::service_didl`, and that
+is not it - items queued through `queue-item` come back with their titles intact.
+
+Nothing here can repair such a row: there is no title to fetch. So both surfaces name it instead of
+leaving a gap - `(no title from the player)` in `x2rock queue` and in the widget's queue panel,
+where a blank line reads as corruption rather than as an answer. The wording says *whose* silence it
+is, which is the useful part.
+
 ### What first-party Sonos does, for whenever this is picked up
 
 Per the owner, and matching the split x2rock already implements: **playing to a device does not
