@@ -878,6 +878,10 @@ Two consequences beyond this feature:
   in this household's file are from an iHeartRadio session on `sn_15`, the household default,
   played from the Sonos app by someone other than whoever linked x2rock here.
 
+  This is what `bookmarks remove` was added for (2026-08-31). Until it existed, taking something
+  back out of the history meant hand-editing `bookmarks.json` — which is a poor answer for a file
+  that fills itself with whatever anyone in the house plays.
+
 The design question this raises, unanswered on purpose: **should a bookmark store the serial at
 all?** The enqueue path already omits it and lets the player resolve the household's current
 account (see "The two playback paths use two different identities"), which is exactly the

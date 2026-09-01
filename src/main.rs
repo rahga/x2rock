@@ -203,6 +203,8 @@ enum Command {
     /// List what has been kept. The daemon also notes what plays, and `--all`
     /// includes that history.
     Bookmarks {
+        #[command(subcommand)]
+        action: Option<BookmarksAction>,
         query: Option<String>,
         /// Include what the daemon noticed, not just what was kept on purpose.
         #[arg(long, short = 'a')]
@@ -327,6 +329,18 @@ enum RawScope {
     /// command is also the cheapest way to see a namespace reject the shape
     /// rather than the address.
     None,
+}
+
+/// The one thing `bookmarks` does besides list.
+///
+/// A subcommand rather than a top-level `forget`, to sit beside `queue remove`:
+/// both take something out of a list the same command prints. The cost is that
+/// a bookmark actually named "remove" can no longer be queried by name, which
+/// `queue` has always accepted for the same reason.
+#[derive(Subcommand)]
+enum BookmarksAction {
+    /// Forget one, by name. Matches the history too, not just what was kept.
+    Remove { query: String },
 }
 
 #[derive(Subcommand)]
@@ -1848,7 +1862,22 @@ async fn main() -> Result<()> {
 
     // Kept items are x2rock's own and live on this machine, so listing them
     // needs no household at all.
-    if let Command::Bookmarks { query, all, json } = &cli.command {
+    if let Command::Bookmarks {
+        action,
+        query,
+        all,
+        json,
+    } = &cli.command
+    {
+        // Removing needs no household either, and has to happen before the
+        // listing below reads the file it is about to change.
+        if let Some(BookmarksAction::Remove { query }) = action {
+            let mut list = bookmarks::Bookmarks::load()?;
+            let gone = list.forget(query)?;
+            list.save()?;
+            println!("Forgot {}.", gone.name);
+            return Ok(());
+        }
         let list = bookmarks::Bookmarks::load()?;
         let mut items = list.listed(*all);
         if let Some(query) = query {

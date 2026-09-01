@@ -360,28 +360,62 @@ impl Bookmarks {
         out
     }
 
-    /// Find one by name: exact match, then unique substring.
+    /// Where one lives: exact match on the name, then unique substring.
     ///
     /// Substring rather than prefix, unlike services: these are titles, and
     /// remembering the middle of one is as likely as remembering its start.
-    pub fn find(&self, query: &str) -> Result<&Bookmark> {
+    ///
+    /// An index rather than a reference so that `forget` can reuse exactly the
+    /// resolution `find` offers. Two spellings of "which one did you mean" that
+    /// could drift apart is precisely the bug this avoids - the answer to
+    /// "which will play?" and "which will be removed?" must be the same answer.
+    fn position(&self, query: &str) -> Result<usize> {
         let needle = query.to_lowercase();
-        if let Some(exact) = self.items.iter().find(|b| b.name.to_lowercase() == needle) {
-            return Ok(exact);
-        }
-        let matches: Vec<_> = self
+        if let Some(exact) = self
             .items
             .iter()
-            .filter(|b| b.name.to_lowercase().contains(&needle))
+            .position(|b| b.name.to_lowercase() == needle)
+        {
+            return Ok(exact);
+        }
+        let matches: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.name.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
             .collect();
         match matches.as_slice() {
-            [only] => Ok(only),
+            [only] => Ok(*only),
             [] => bail!("nothing kept matches {query:?}. `x2rock bookmarks` lists them."),
             several => {
-                let names: Vec<_> = several.iter().map(|b| b.name.as_str()).collect();
+                let names: Vec<_> = several
+                    .iter()
+                    .map(|&i| self.items[i].name.as_str())
+                    .collect();
                 bail!("{query:?} matches {}: {}", several.len(), names.join(", "))
             }
         }
+    }
+
+    /// Find one by name.
+    pub fn find(&self, query: &str) -> Result<&Bookmark> {
+        Ok(&self.items[self.position(query)?])
+    }
+
+    /// Drop one by name, returning what was removed so the caller can name it.
+    ///
+    /// Searches the history as well as what was pinned, because the entry most
+    /// likely to want removing is one nobody chose to save: the daemon records
+    /// whatever plays, including what someone else played, and until now the
+    /// only way to take something back out was to hand-edit the file.
+    ///
+    /// No confirmation. A bookmark is a pointer, not the content - removing one
+    /// costs a `keep` to recreate while it is playing, which is a different
+    /// order of loss from `queue clear`, and that one asks.
+    pub fn forget(&mut self, query: &str) -> Result<Bookmark> {
+        let i = self.position(query)?;
+        Ok(self.items.remove(i))
     }
 }
 
@@ -628,5 +662,44 @@ mod tests {
                 .contains("matches 3")
         );
         assert!(list.find("nothing").is_err());
+    }
+
+    #[test]
+    fn forget_resolves_exactly_as_find_does() {
+        let names = [("Bodies", "a"), ("Body Language", "b"), ("Bodies Live", "c")];
+        let build = || {
+            let mut list = Bookmarks::default();
+            for (n, o) in names {
+                list.keep(Bookmark::from_id(n, &id(o, Some("284"), Some("sn_3"))).unwrap());
+            }
+            list
+        };
+
+        // The one that plays is the one that goes. Anything else is a trap.
+        let mut list = build();
+        assert_eq!(list.find("language").unwrap().object_id, "b");
+        assert_eq!(list.forget("language").unwrap().object_id, "b");
+        assert_eq!(list.items.len(), 2);
+        assert!(list.items.iter().all(|b| b.object_id != "b"));
+
+        // Exact still beats the substring it is contained in.
+        let mut list = build();
+        assert_eq!(list.forget("bodies").unwrap().object_id, "a");
+
+        // Ambiguous and absent both refuse, and refuse without removing.
+        let mut list = build();
+        assert!(list.forget("bod").unwrap_err().to_string().contains("matches 3"));
+        assert!(list.forget("nothing").is_err());
+        assert_eq!(list.items.len(), 3);
+    }
+
+    #[test]
+    fn forget_reaches_what_the_daemon_noticed() {
+        // The entry most worth removing is the one nobody chose to save.
+        let mut list = Bookmarks::default();
+        list.note(bm("In the Clouds", "a"), 1);
+        assert!(list.listed(false).is_empty(), "not pinned, so not listed plainly");
+        assert_eq!(list.forget("clouds").unwrap().object_id, "a");
+        assert!(list.items.is_empty());
     }
 }
