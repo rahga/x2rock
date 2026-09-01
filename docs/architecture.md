@@ -3813,6 +3813,31 @@ TuneIn, again the opposite shape: `art_url` is `null` outright. Three per-track 
 two services - name, artist and art - and none of them says anything about whether the source is
 live. Only `container.type` does.
 
+### `canPause` is not about the command, and Sonos Radio half-honours it
+
+The two live streams disagree about pausing, which is why the transport control asks the *player*
+rather than asking whether the source is a stream:
+
+| | `canPause` | `pause` gives | on resume |
+|---|---|---|---|
+| TuneIn "Jazz Club" | `false` | `IDLE` | starts again at the live edge |
+| Sonos Radio "Sound System" | `true` | `PAUSED`, position frozen | **the same track, from the top** |
+
+Measured 2026-09-01: paused at 90553 ms, held at 90813 ms across three seconds - a real hold, not a
+drifting counter - and came back at **5250 ms of the same track**. So the state is honest and the
+resumption is not. `canPause` reads as "can this be resumed where it left off", which is the
+narrower question its name does not ask; Sonos Radio answers yes and then delivers only the first
+half.
+
+**Not worth correcting in the widget.** The transition is real, the row correctly shows paused, and
+losing ninety seconds of a track that cannot be seeked anyway is a small cost. Making the button
+read `stop` here would mean hard-coding "Sonos Radio behaves oddly" - service-specific guessing of
+exactly the kind `stopRather` exists to avoid - and it would be wrong the day Sonos fixes it.
+
+The load-bearing point for anyone tempted to simplify: **being live and being pausable are
+different properties.** `stopRather` gates on `canPause` and must keep doing so. Folding it into an
+`isLiveStream` check would put a stop button on this station, which pauses perfectly well.
+
 ### Sonos Radio names the track, so the station needs saying
 
 `to_metadata` prefers `track.name` over `container.name`, which is right - the track is the more
