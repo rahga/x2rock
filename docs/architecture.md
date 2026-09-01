@@ -1910,11 +1910,16 @@ at 17, the next account added from the phone — TIDAL, `sid 174` — was predic
 it was added. It is: `getMetadataStatus` reported `accountId: "sn_18"` on the first track played
 from it. A household-wide monotonic counter, not a per-service one.
 
-**"Not recycled" was claimed here and is withdrawn.** 17 → 18 was observed with no account deleted
-in between, so it shows the counter increments; it says nothing about whether a *freed* number
-comes back. Whether a stale serial can later resolve to a different account is therefore still
-open, and it is the difference between the staleness hazard being a dead pointer and being a
-silently wrong one. Testing it needs an account removed and another added afterwards.
+**"Not recycled" was claimed here, withdrawn, and then earned.** 17 → 18 was observed with no
+account deleted in between, so it showed only that the counter increments. The claim was withdrawn
+as unsupported and then tested properly: TIDAL (`sn_18`, the highest serial) was removed from the
+phone and TuneIn added in its place. The new account is **`sn_19`**. A freed serial is not reused,
+so the counter is monotonic across deletions, not merely across additions.
+
+That is the benign answer to the staleness hazard. A bookmark holding a dead serial stays a dead
+pointer; it cannot come back to life pointing at somebody else's account. Had 18 been reissued, the
+hazard under "The stored serial goes stale" would have been a correctness bug rather than a broken
+reference.
 
 TIDAL had been in x2rock's "14 services can be linked" list all day while the household held no
 TIDAL account, which is the offerable catalogue and the registry being independent, once more.
@@ -1925,6 +1930,54 @@ but the queue entry that was the only URI naming it had been replaced. So the vi
 with whatever happens to be playing. An enumeration built on this cannot be cached and cannot be
 trusted to be stable between two reads a minute apart, which is a sharper limit than "only accounts
 with saved content appear".
+
+#### The harvest showed a deleted account and hid a live one, at the same time
+
+The removal test above put the worst case on the record. Immediately after TIDAL was removed and
+TuneIn added:
+
+| | in the harvest? | actually exists? |
+|---|---|---|
+| `sn_18`, TIDAL | **yes**, `sid=174&sn=18` in `Q:0` | **no** — removed minutes earlier |
+| `sn_19`, TuneIn | **no** | **yes** — playing at that moment |
+
+The dead one survives because removing an account does not rewrite the queue: four Dolly Parton
+tracks still name `sn_18` in their URIs. The live one is absent because it is a radio stream, and
+per "The design consequence, built" a station never becomes queue material, so nothing writes its
+serial anywhere the harvest reads.
+
+So the harvest is not a lower bound on live accounts. It is **a set that overlaps the real registry
+without containing it or being contained by it.** Nothing built on it should present its results as
+the household's accounts, and the earlier framing of it as "a lower bound" was too kind.
+
+`sn_14` and `sn_19` are now both TuneIn (`sid 333`) — a second service with two accounts, this one
+created under observation rather than found already present.
+
+#### `RemoveAccount` is declared, not demonstrably functional
+
+`SystemProperties:1` declares `RemoveAccount(AccountType, AccountID)`, and an earlier note here read
+that as "there is an API route to remove an account". That is a declaration read as a capability —
+the same error as reading the 108-service catalogue as the household's list. Probed:
+
+| call | answer |
+|---|---|
+| `RemoveAccount` type=44551 (TIDAL), id ∈ {18, sn_18, 174} | 806 |
+| `RemoveAccount` type=44551, id=999999 | 806 |
+| `RemoveAccount` type=99999 (no such type), id=18 | 806 |
+| `GetWebCode` type=44551, and type=0 | 800 |
+
+A real service type holding a real account fails **identically** to a type that does not exist, so
+the type is not being resolved at all. With `/status/accounts` also returning an empty
+`ZPSupportInfo`, the legacy account surface looks vestigial: declared in the SCPD, gutted in the
+firmware.
+
+Stated honestly: this does not separate "the right `AccountID` was never guessed" from "the action
+does nothing", because 806 covers both. What it does establish is that **removing an account from
+this side is not a route to rely on** — the Sonos app removed TIDAL in seconds, and that is what the
+test above used.
+
+`registeredServicesVersion` moved across both operations, `2026-09-01T01:36:42` → `T02:07:18`,
+confirming it tracks the account set rather than the catalogue.
 
 `sid 151` is an account for a service that `ListAvailableServices` does not list. The 108-service
 catalogue is what a household may *add*, not what it has, and it is not a superset of what it has.
