@@ -47,7 +47,16 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
     };
     let known = state.players_on(fingerprint);
     if known.is_empty() {
-        bail!("no players remembered for this network. Run `x2rock discover`, or pass --ip.");
+        // An unregistered network: this gateway has never been discovered on.
+        // `players_on` is empty only for a fingerprint not in state, because a
+        // network is remembered only once it has players - so this branch *is*
+        // the unregistered-network case, and says so by name. The daemon logs
+        // this verbatim every retry, and it is the one line an operator - or an
+        // agent driving Omarchy - needs to know the fix is `x2rock discover`.
+        bail!(
+            "unregistered network (gateway {fingerprint}): no speakers have been discovered here. \
+             Run `x2rock discover` to scan this network for speakers, or pass `--ip <speaker>`."
+        );
     }
 
     for player in &known {
