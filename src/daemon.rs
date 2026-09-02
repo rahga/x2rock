@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::mpris::{RoomPlayer, bus_suffix};
 use mpris_server::Property;
+use crate::netid;
 use crate::restart::{Restart, Restarts};
 use crate::session::{self, Session};
 use crate::sonos::local::Connection;
@@ -27,8 +28,85 @@ use crate::state::State;
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// How long an unchanging status may stay silent before it is re-logged once, so
+/// a daemon stuck in one state still proves it is alive without filling the
+/// journal. At the 60s retry floor an away-all-day laptop would otherwise write
+/// ~2880 identical lines a day.
+const HEARTBEAT: Duration = Duration::from_secs(3600);
+
 fn log(message: &str) {
     eprintln!("x2rock: {message}");
+}
+
+/// What [`StatusLog::decide`] resolved to: log fresh, log a heartbeat carrying
+/// the count held since the last line, or (the `None` case) stay silent.
+#[derive(Debug, PartialEq, Eq)]
+enum Emit {
+    Fresh,
+    Heartbeat(u32),
+}
+
+/// Coalesces repeated status lines. The daemon's retry loop revisits the same
+/// state every backoff cycle; without this it logs that state on every pass.
+///
+/// A line is logged when the *status key* changes and suppressed while it holds,
+/// with one heartbeat re-log per [`HEARTBEAT`]. The key carries the network
+/// fingerprint, so switching networks always counts as a change and flushes
+/// immediately - a move is exactly the event a reader wants to see.
+struct StatusLog {
+    key: Option<String>,
+    last_logged: Instant,
+    suppressed: u32,
+}
+
+impl StatusLog {
+    fn new() -> Self {
+        Self {
+            key: None,
+            last_logged: Instant::now(),
+            suppressed: 0,
+        }
+    }
+
+    /// Log `message` unless it repeats the current status within the heartbeat
+    /// window. On the heartbeat re-log, the count of everything held since the
+    /// last line rides along, journald-style, so the silence is accounted for.
+    fn note(&mut self, key: String, message: &str) {
+        match self.decide(key, Instant::now()) {
+            None => {}
+            Some(Emit::Fresh) => log(message),
+            Some(Emit::Heartbeat(n)) => {
+                log(&format!("{message} (unchanged, {n}\u{00d7} in the last hour)"))
+            }
+        }
+    }
+
+    /// The side-effect-free heart of [`note`], with the clock passed in so the
+    /// window and the count can be tested without waiting an hour.
+    fn decide(&mut self, key: String, now: Instant) -> Option<Emit> {
+        if self.key.as_ref() == Some(&key) {
+            if now.duration_since(self.last_logged) < HEARTBEAT {
+                self.suppressed += 1;
+                return None;
+            }
+            let held = self.suppressed + 1;
+            self.last_logged = now;
+            self.suppressed = 0;
+            return Some(Emit::Heartbeat(held));
+        }
+        self.key = Some(key);
+        self.last_logged = now;
+        self.suppressed = 0;
+        Some(Emit::Fresh)
+    }
+
+    /// A genuine change of state that another line already announces - a fresh
+    /// connection, whose rooms the publisher logs by name. Clears the coalescing
+    /// so the next failure logs at once instead of being taken for the old one.
+    fn reset(&mut self) {
+        self.key = None;
+        self.suppressed = 0;
+    }
 }
 
 /// Run until the process is stopped. Never returns `Ok` in practice; the `Result`
@@ -57,10 +135,19 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
     let mut restarts = restarts.subscribe();
 
     let mut backoff = MIN_BACKOFF;
+    let mut status = StatusLog::new();
     loop {
+        // Computed here, not read out of the error, so a network switch is a
+        // status change even when the failure text is identical - and connect()
+        // returns nothing to read a fingerprint out of anyway.
+        let fingerprint = netid::network_fingerprint();
         match session::connect(explicit_ip, &mut state).await {
             Ok(session) => {
                 backoff = MIN_BACKOFF;
+                // The publisher logs the rooms by name, so this transition is
+                // already announced; clear coalescing so the next failure - even
+                // the same one as before - logs afresh rather than as a repeat.
+                status.reset();
                 // The sockets date from here, so anything reported as having
                 // changed before now is already answered by them.
                 let established = Instant::now();
@@ -69,9 +156,12 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
                     Err(e) => log(&format!("{e:#}")),
                 }
             }
-            Err(e) => log(&format!("no player: {e:#}")),
+            // The retry cadence is not part of the status: it ramps 1s..60s and
+            // then holds, and folding it in would defeat the coalescing during
+            // the ramp. The heartbeat's "N× in the last hour" conveys that the
+            // daemon is still trying.
+            Err(e) => status.note(format!("{fingerprint:?}|{e:#}"), &format!("no player: {e:#}")),
         }
-        log(&format!("retrying in {}s", backoff.as_secs()));
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
 
@@ -510,5 +600,59 @@ fn remember(status: &proto::MetadataStatus) {
     }
     if let Err(e) = list.save() {
         log(&format!("could not write history: {e:#}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_status_is_silent_until_the_heartbeat_then_counts_the_silence() {
+        let t0 = Instant::now();
+        let mut s = StatusLog::new();
+        // First sighting of a status logs.
+        assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
+        // Same status inside the window says nothing, however many passes.
+        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(60)), None);
+        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(120)), None);
+        // Past the window, one line, counting itself plus the two it held.
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + HEARTBEAT + Duration::from_secs(1)),
+            Some(Emit::Heartbeat(3))
+        );
+        // And the window starts over from that heartbeat.
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + HEARTBEAT + Duration::from_secs(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_network_switch_flushes_at_once_without_waiting_for_the_heartbeat() {
+        let t0 = Instant::now();
+        let mut s = StatusLog::new();
+        assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
+        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)), None);
+        // The fingerprint is in the key, so moving to another network is a
+        // different status and logs immediately - a move is worth seeing.
+        assert_eq!(
+            s.decide("unreg|net-b".into(), t0 + Duration::from_secs(2)),
+            Some(Emit::Fresh)
+        );
+    }
+
+    #[test]
+    fn reset_makes_the_next_identical_status_log_rather_than_coalesce() {
+        let t0 = Instant::now();
+        let mut s = StatusLog::new();
+        assert_eq!(s.decide("fail|net-a".into(), t0), Some(Emit::Fresh));
+        // A connection came and went; the failure that follows must not be read
+        // as a continuation of the run before it.
+        s.reset();
+        assert_eq!(
+            s.decide("fail|net-a".into(), t0 + Duration::from_secs(1)),
+            Some(Emit::Fresh)
+        );
     }
 }
