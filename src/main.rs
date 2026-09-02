@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use sonos::local::Connection;
-use sonos::proto::{Favorite, Group, Groups, MetadataStatus, PlaybackStatus, Player, Repeat};
+use sonos::proto::{Favorite, Group, Groups, MetadataStatus, PlaybackStatus, Player, Repeat, Volume};
 use sonos::upnp::{self, Upnp};
 use state::State;
 
@@ -45,6 +45,13 @@ enum Command {
     },
     /// Show what is playing.
     Now {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The whole household at a glance: every room with its playback,
+    /// now-playing, volume, grouping and TV capability - one call, for scripts
+    /// and agents that want the full picture without a call per room.
+    Status {
         #[arg(long)]
         json: bool,
     },
@@ -624,6 +631,109 @@ fn now_json(room: &str, status: &PlaybackStatus, meta: &MetadataStatus) -> serde
         "surround": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.is_surround()),
         "art_url": track.and_then(|t| t.image_url.as_deref()).or(container.and_then(|c| c.image_url.as_deref())),
     })
+}
+
+/// Every group's coordinator answers for its own group and no other, so the
+/// snapshot opens a connection per coordinator (reusing the session's own where
+/// it coincides). One unreachable coordinator is that room's problem alone - it
+/// gets an `error` field and the rest of the household still reports.
+async fn print_status(session: &session::Session, json: bool) -> Result<()> {
+    let mut values = Vec::new();
+    let mut lines = Vec::new();
+    for group in &session.groups.groups {
+        let target = session::Target {
+            group_id: group.id.clone(),
+            name: group.name.clone(),
+            coordinator_id: group.coordinator_id.clone(),
+            coordinator_ip: session
+                .groups
+                .player(&group.coordinator_id)
+                .and_then(Player::ip),
+        };
+        let members: Vec<String> = session
+            .groups
+            .members(group)
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        // A soundbar's HDMI belongs to the player, so the group has a TV input
+        // if any member does - the same rule `x2rock tv` uses to find it.
+        let has_tv = session
+            .groups
+            .members(group)
+            .iter()
+            .any(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+        let coordinator = session
+            .groups
+            .player(&group.coordinator_id)
+            .map(|p| p.name.as_str());
+
+        match fetch_room(session, &target).await {
+            Ok((status, meta, volume)) => {
+                if json {
+                    let mut obj = now_json(&group.name, &status, &meta);
+                    if let serde_json::Value::Object(map) = &mut obj {
+                        map.insert("volume".into(), json!(volume.as_ref().map(|v| v.volume)));
+                        map.insert("muted".into(), json!(volume.as_ref().map(|v| v.muted)));
+                        map.insert("members".into(), json!(members));
+                        map.insert("coordinator".into(), json!(coordinator));
+                        map.insert("has_tv".into(), json!(has_tv));
+                    }
+                    values.push(obj);
+                } else {
+                    let vol = match &volume {
+                        Some(v) if v.muted => "  vol muted".to_string(),
+                        Some(v) => format!("  vol {}", v.volume),
+                        None => String::new(),
+                    };
+                    let grouped = if members.len() > 1 {
+                        format!("  [{}]", members.join(", "))
+                    } else {
+                        String::new()
+                    };
+                    lines.push(format!(
+                        "{:<16} {}{vol}{grouped}",
+                        group.name,
+                        now_line(&status, &meta)
+                    ));
+                }
+            }
+            Err(e) => {
+                if json {
+                    values.push(json!({
+                        "room": group.name,
+                        "error": format!("{e:#}"),
+                        "members": members,
+                        "coordinator": coordinator,
+                        "has_tv": has_tv,
+                    }));
+                } else {
+                    lines.push(format!("{:<16} unreachable ({e:#})", group.name));
+                }
+            }
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string(&values)?);
+    } else {
+        for line in lines {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// The three group-scoped reads a snapshot wants, off the group's coordinator.
+/// Volume is best-effort: a room that will not report it is still worth showing.
+async fn fetch_room(
+    session: &session::Session,
+    target: &session::Target,
+) -> Result<(PlaybackStatus, MetadataStatus, Option<Volume>)> {
+    let conn = session::coordinator(session, target).await?;
+    let status = conn.playback_status(&target.group_id).await?;
+    let meta = conn.metadata(&target.group_id).await?;
+    let volume = conn.group_volume(&target.group_id).await.ok();
+    Ok((status, meta, volume))
 }
 
 fn print_rooms(groups: &Groups, json: bool) {
@@ -2100,6 +2210,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Like `rooms`, this is a whole-household view and must not be forced to a
+    // single group; it queries every coordinator itself, so it runs here rather
+    // than after the single-room resolution below.
+    if let Command::Status { json } = cli.command {
+        return print_status(&session, json).await;
+    }
+
     // Favorites belong to the household, not a group, so listing them needs no
     // room and works when several groups would otherwise force a choice.
     if let Command::Favorites { query, json } = &cli.command {
@@ -2877,6 +2994,7 @@ async fn main() -> Result<()> {
             println!("{label:<24} {from}{level}{muted}");
         }
         Command::Rooms { .. }
+        | Command::Status { .. }
         | Command::Favorites { .. }
         | Command::Group { .. }
         | Command::Ungroup { .. }
