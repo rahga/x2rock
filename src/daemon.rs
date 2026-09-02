@@ -57,14 +57,19 @@ struct StatusLog {
     key: Option<String>,
     last_logged: Instant,
     suppressed: u32,
+    /// `X2ROCK_LOG_VERBOSE`: log every pass, coalescing off. For diagnosing the
+    /// reconnect/backoff/network machinery, where the repetition and the ramp
+    /// are the point rather than the noise.
+    verbose: bool,
 }
 
 impl StatusLog {
-    fn new() -> Self {
+    fn new(verbose: bool) -> Self {
         Self {
             key: None,
             last_logged: Instant::now(),
             suppressed: 0,
+            verbose,
         }
     }
 
@@ -84,6 +89,14 @@ impl StatusLog {
     /// The side-effect-free heart of [`note`], with the clock passed in so the
     /// window and the count can be tested without waiting an hour.
     fn decide(&mut self, key: String, now: Instant) -> Option<Emit> {
+        if self.verbose {
+            // Every pass logs; the state is still tracked so turning coalescing
+            // back on (a restart without the env) resumes cleanly.
+            self.key = Some(key);
+            self.last_logged = now;
+            self.suppressed = 0;
+            return Some(Emit::Fresh);
+        }
         if self.key.as_ref() == Some(&key) {
             if now.duration_since(self.last_logged) < HEARTBEAT {
                 self.suppressed += 1;
@@ -134,8 +147,10 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
     // off is still waiting to be seen rather than lost between subscriptions.
     let mut restarts = restarts.subscribe();
 
+    // Read once, not per line: a knob for the whole run, not a per-call cost.
+    let verbose = std::env::var_os("X2ROCK_LOG_VERBOSE").is_some();
     let mut backoff = MIN_BACKOFF;
-    let mut status = StatusLog::new();
+    let mut status = StatusLog::new(verbose);
     loop {
         // Computed here, not read out of the error, so a network switch is a
         // status change even when the failure text is identical - and connect()
@@ -161,6 +176,12 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
             // the ramp. The heartbeat's "N× in the last hour" conveys that the
             // daemon is still trying.
             Err(e) => status.note(format!("{fingerprint:?}|{e:#}"), &format!("no player: {e:#}")),
+        }
+        // Restored only under verbose: coalescing drops it because the backoff
+        // ramps and would defeat the dedup, but when diagnosing reconnects the
+        // ramp is exactly what you want to watch.
+        if verbose {
+            log(&format!("retrying in {}s", backoff.as_secs()));
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -610,7 +631,7 @@ mod tests {
     #[test]
     fn a_held_status_is_silent_until_the_heartbeat_then_counts_the_silence() {
         let t0 = Instant::now();
-        let mut s = StatusLog::new();
+        let mut s = StatusLog::new(false);
         // First sighting of a status logs.
         assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
         // Same status inside the window says nothing, however many passes.
@@ -631,7 +652,7 @@ mod tests {
     #[test]
     fn a_network_switch_flushes_at_once_without_waiting_for_the_heartbeat() {
         let t0 = Instant::now();
-        let mut s = StatusLog::new();
+        let mut s = StatusLog::new(false);
         assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
         assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)), None);
         // The fingerprint is in the key, so moving to another network is a
@@ -645,7 +666,7 @@ mod tests {
     #[test]
     fn reset_makes_the_next_identical_status_log_rather_than_coalesce() {
         let t0 = Instant::now();
-        let mut s = StatusLog::new();
+        let mut s = StatusLog::new(false);
         assert_eq!(s.decide("fail|net-a".into(), t0), Some(Emit::Fresh));
         // A connection came and went; the failure that follows must not be read
         // as a continuation of the run before it.
@@ -654,5 +675,16 @@ mod tests {
             s.decide("fail|net-a".into(), t0 + Duration::from_secs(1)),
             Some(Emit::Fresh)
         );
+    }
+
+    #[test]
+    fn verbose_logs_every_pass_with_no_coalescing() {
+        let t0 = Instant::now();
+        let mut s = StatusLog::new(true);
+        // The same status, back to back inside the window, still logs each time -
+        // never suppressed, never folded into a heartbeat.
+        assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
+        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)), Some(Emit::Fresh));
+        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(2)), Some(Emit::Fresh));
     }
 }

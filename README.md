@@ -499,6 +499,12 @@ X2ROCK_DUMP_SMAPI=1 x2rock search -s bandcamp miles
 The whole credentials header is replaced with `(credentials omitted)`, so the dump cannot leak a
 token into a terminal or a log.
 
+For the daemon, `X2ROCK_LOG_VERBOSE=1 x2rock daemon` turns off the status-log coalescing: every
+retry logs, and the backoff ramp (`retrying in 1s`, `2s`, …) comes back. Without it the daemon logs
+a state once and then stays quiet — repeating an unchanged line only once an hour — which is right
+for a laptop that is away all day but hides exactly what you want while diagnosing a flaky
+reconnect. A network switch always logs either way.
+
 ## Tested devices
 
 Everything here was developed against these, on one household:
