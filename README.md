@@ -10,6 +10,11 @@ The bar widget is Omarchy's. The CLI and the daemon are not: they carry no depen
 Quickshell or Hyprland and run on any Linux — see [Other Linux
 desktops](#other-linux-desktops).
 
+**Every Sonos room becomes a standard MPRIS media player.** Your media keys, lock screen, GNOME and
+KDE media applets, `playerctl`, and any bar's mpris widget play, pause, skip *and show what's
+playing on Sonos* — track, artist and cover art — with no Sonos-specific setup. The bar widget is
+one nice face on that; the desktop you already have is the other. See [MPRIS](#mpris).
+
 ![The x2rock bar popup: every room with per-room transport, volume and TV badges](quickshell/x2rock.sonos/preview.png)
 
 > Status: complete for daily use. Rooms, volume — per room as well as per group — transport,
@@ -174,10 +179,25 @@ its own — a laptop should not probe hotel or client WiFi unasked — and tells
 
 ## MPRIS
 
+This is the feature most of the rest rides on: **x2rock makes Sonos a first-class citizen of the
+Linux media ecosystem.** Anything that already speaks MPRIS controls Sonos and shows its
+now-playing with no further setup — Omarchy's built-in `omarchy.media` bar widget (`omarchy plugin
+enable omarchy.media`), Waybar's `mpris` module, `playerctl`, GNOME and KDE media applets, the lock
+screen, and the keyboard's own media keys.
+
 `x2rock daemon` publishes each group as `org.mpris.MediaPlayer2.x2rock-<room>` — "Media Room"
-becomes `x2rock-media-room`. Anything that speaks MPRIS then controls Sonos with no further setup:
-Omarchy's built-in `omarchy.media` bar widget (`omarchy plugin enable omarchy.media`), Waybar's
-`mpris` module, `playerctl`, desktop media keys.
+becomes `x2rock-media-room` — with full metadata, so the current track, artist and cover art
+appear wherever your desktop already shows what is playing:
+
+```sh
+playerctl -p x2rock-media-room play-pause
+playerctl -p x2rock-media-room metadata     # title, artist, cover-art URL
+playerctl -p x2rock-media-room next
+```
+
+The daemon is the product here; the bar widget is one consumer of it, and so is every surface
+above. That is also why the CLI and daemon carry no desktop dependency — see [Other Linux
+desktops](#other-linux-desktops).
 
 State comes from the player's own push events, not polling. The daemon keeps one WebSocket per
 group coordinator, pings them to survive firewall idle timeouts, and reconnects with backoff.
