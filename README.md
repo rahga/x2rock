@@ -10,6 +10,8 @@ The bar widget is Omarchy's. The CLI and the daemon are not: they carry no depen
 Quickshell or Hyprland and run on any Linux — see [Other Linux
 desktops](#other-linux-desktops).
 
+![The x2rock bar popup: every room with per-room transport, volume and TV badges](quickshell/x2rock.sonos/preview.png)
+
 > Status: complete for daily use. Rooms, volume — per room as well as per group — transport,
 > favorites, the queue and its editing, grouping and party mode, soundbar TV input with the audio
 > format it is actually receiving, all from the CLI, over MPRIS, or from the bar widget.
