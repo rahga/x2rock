@@ -562,6 +562,26 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     if let Some(album) = album.filter(|a| Some(*a) != title) {
         line.push_str(&format!(" ({album})"));
     }
+    // Where it is coming from. Only present for service content, so TV input and
+    // a bare queue track leave it off rather than printing "on ".
+    if let Some(service) = meta
+        .container
+        .as_ref()
+        .and_then(|c| c.service.as_ref())
+        .and_then(|s| s.name.as_deref())
+    {
+        line.push_str(&format!(" · on {service}"));
+    }
+    // Elapsed / total. Guarded on a real duration, which a live stream does not
+    // have - so a station is not made to show a running clock against nothing.
+    if let Some(duration) = track
+        .and_then(|t| t.duration_millis)
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+    {
+        let position = std::time::Duration::from_millis(status.position_millis);
+        line.push_str(&format!("  {} / {}", mmss(Some(position)), mmss(Some(duration))));
+    }
     // On a soundbar this is the whole point of looking: a source that has
     // quietly dropped to stereo says so here and nowhere else.
     if let Some(format) = meta
