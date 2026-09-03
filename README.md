@@ -179,6 +179,20 @@ just reconnects to what was remembered. On a network x2rock has never seen it re
 its own — a laptop should not probe hotel or client WiFi unasked — and tells you to run
 `discover`. On a known network where the remembered players have moved, it rescans once.
 
+### Errors, for agents
+
+A command that failed with `--json` reports the failure as JSON on stderr and exits non-zero, so a
+caller reads a field instead of parsing a sentence:
+
+```json
+{"code":"unregistered_network","error":"unregistered network (gateway …): … Run `x2rock discover` …","fix":"x2rock discover"}
+```
+
+`code` is a stable identifier for the *kind* of failure (e.g. `unregistered_network`,
+`unknown_room`), `error` is the same human message the plain CLI prints, and `fix` is the command
+that resolves it, verbatim, when there is one. An error with no known remedy is still structured —
+`{"code":"error", …, "fix":null}`. Without `--json` the message prints as prose exactly as before.
+
 ## MPRIS
 
 This is the feature most of the rest rides on: **x2rock makes Sonos a first-class citizen of the

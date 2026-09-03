@@ -3,6 +3,7 @@ mod catalogue;
 mod credentials;
 mod daemon;
 mod discover;
+mod hint;
 mod mpris;
 mod netid;
 mod restart;
@@ -1976,9 +1977,46 @@ async fn run_search(
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
+    // Decided before the command runs, so a failure knows how to report itself.
+    let json = wants_json(&cli.command);
+    if let Err(e) = run(cli).await {
+        if json {
+            // Structured for an agent: the message it always printed, plus a
+            // stable code and the fix command when the error carried one.
+            let (code, fix) = hint::of(&e);
+            let obj = json!({ "error": format!("{e:#}"), "code": code, "fix": fix });
+            eprintln!(
+                "{}",
+                serde_json::to_string(&obj).unwrap_or_else(|_| format!("{{\"error\":{e:?}}}"))
+            );
+        } else {
+            eprintln!("Error: {e:#}");
+        }
+        std::process::exit(1);
+    }
+}
 
+/// Whether the invoked command was asked for `--json`, so an error can match the
+/// output the caller expected. Only the data commands carry the flag.
+fn wants_json(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Rooms { json, .. }
+            | Command::Now { json, .. }
+            | Command::Status { json, .. }
+            | Command::Queue { json, .. }
+            | Command::Favorites { json, .. }
+            | Command::Search { json, .. }
+            | Command::Browse { json, .. }
+            | Command::Accounts { json, .. }
+            | Command::Bookmarks { json, .. }
+        if *json
+    )
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
         Command::PlayItem {

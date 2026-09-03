@@ -140,7 +140,14 @@ impl Groups {
                             .iter()
                             .any(|p| p.name.to_lowercase() == wanted)
                     })
-                    .ok_or_else(|| anyhow!("no room named {name:?}. Rooms: {}", self.room_names()))
+                    .ok_or_else(|| {
+                        crate::hint::Hint::new(
+                            format!("no room named {name:?}. Rooms: {}", self.room_names()),
+                            "unknown_room",
+                            Some("x2rock rooms".into()),
+                        )
+                        .into()
+                    })
             }
             None => match self.groups.as_slice() {
                 [only] => Ok(only),

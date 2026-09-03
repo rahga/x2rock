@@ -53,10 +53,16 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
         // the unregistered-network case, and says so by name. The daemon logs
         // this verbatim every retry, and it is the one line an operator - or an
         // agent driving Omarchy - needs to know the fix is `x2rock discover`.
-        bail!(
-            "unregistered network (gateway {fingerprint}): no speakers have been discovered here. \
-             Run `x2rock discover` to scan this network for speakers, or pass `--ip <speaker>`."
-        );
+        return Err(crate::hint::Hint::new(
+            format!(
+                "unregistered network (gateway {fingerprint}): no speakers have been discovered \
+                 here. Run `x2rock discover` to scan this network for speakers, or pass \
+                 `--ip <speaker>`."
+            ),
+            "unregistered_network",
+            Some("x2rock discover".into()),
+        )
+        .into());
     }
 
     for player in &known {
