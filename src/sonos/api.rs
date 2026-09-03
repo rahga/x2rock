@@ -26,16 +26,18 @@ fn on_group(namespace: &str, command: &str, group_id: &str) -> Value {
     })
 }
 
-/// The `playModes` body for a repeat setting.
+/// The whole `setPlayModes` body for a repeat setting.
 ///
 /// Both flags go every time, so the result never depends on what the other one
 /// was. Split out from the call so the mapping can be read - and tested -
-/// without a socket.
-fn repeat_modes(repeat: Repeat) -> Value {
-    json!({
+/// without a socket, and built complete rather than nested into a `json!` at
+/// the call site: a `Value` placed inside another `json!` is re-serialised
+/// through `to_value`, which would build this small object twice.
+fn repeat_body(repeat: Repeat) -> Value {
+    json!({ "playModes": {
         "repeat": repeat == Repeat::All,
         "repeatOne": repeat == Repeat::One,
-    })
+    }})
 }
 
 /// The options for a `musicServiceAccounts:1 match`.
@@ -143,7 +145,7 @@ impl Connection {
     pub async fn set_repeat(&self, group_id: &str, repeat: Repeat) -> Result<()> {
         self.call(
             on_group("playback:1", "setPlayModes", group_id),
-            json!({ "playModes": repeat_modes(repeat) }),
+            repeat_body(repeat),
         )
         .await?;
         Ok(())
@@ -353,17 +355,18 @@ mod tests {
     fn every_repeat_setting_sends_both_flags() {
         // Off is not "send nothing": leaving a flag out keeps whatever the group
         // had, so turning repeat-one off would silently leave repeat-all on.
+        // Asserted as the whole body, which is what goes over the socket.
         assert_eq!(
-            repeat_modes(Repeat::Off),
-            json!({"repeat": false, "repeatOne": false})
+            repeat_body(Repeat::Off),
+            json!({"playModes": {"repeat": false, "repeatOne": false}})
         );
         assert_eq!(
-            repeat_modes(Repeat::All),
-            json!({"repeat": true, "repeatOne": false})
+            repeat_body(Repeat::All),
+            json!({"playModes": {"repeat": true, "repeatOne": false}})
         );
         assert_eq!(
-            repeat_modes(Repeat::One),
-            json!({"repeat": false, "repeatOne": true})
+            repeat_body(Repeat::One),
+            json!({"playModes": {"repeat": false, "repeatOne": true}})
         );
     }
 
