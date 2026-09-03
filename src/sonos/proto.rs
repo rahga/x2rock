@@ -9,7 +9,7 @@
 
 use std::net::IpAddr;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// First element of every response and event.
@@ -140,14 +140,7 @@ impl Groups {
                             .iter()
                             .any(|p| p.name.to_lowercase() == wanted)
                     })
-                    .ok_or_else(|| {
-                        crate::hint::Hint::new(
-                            format!("no room named {name:?}. Rooms: {}", self.room_names()),
-                            "unknown_room",
-                            Some("x2rock rooms".into()),
-                        )
-                        .into()
-                    })
+                    .ok_or_else(|| self.unknown_room(name))
             }
             None => match self.groups.as_slice() {
                 [only] => Ok(only),
@@ -168,7 +161,26 @@ impl Groups {
         self.players
             .iter()
             .find(|p| p.name.to_lowercase() == wanted)
-            .ok_or_else(|| anyhow!("no room named {name:?}. Rooms: {}", self.room_names()))
+            .ok_or_else(|| self.unknown_room(name))
+    }
+
+    /// The `unknown_room` error, shared by every name-resolution site: the room
+    /// list and the typo-tolerant near-misses ride along in its `data`, so an
+    /// agent fixes a mistyped name from this one reply. Both `resolve` and
+    /// `player_named` raise it, so they cannot word or shape it differently.
+    fn unknown_room(&self, name: &str) -> anyhow::Error {
+        let rooms: Vec<&str> = self.players.iter().map(|p| p.name.as_str()).collect();
+        let did_you_mean = near_matches(name, &rooms);
+        crate::hint::Hint::new(
+            format!("no room named {name:?}. Rooms: {}", rooms.join(", ")),
+            "unknown_room",
+            Some("x2rock rooms".into()),
+        )
+        .with_data(serde_json::json!({
+            "did_you_mean": did_you_mean,
+            "rooms": rooms,
+        }))
+        .into()
     }
 
     /// The group a player currently belongs to.
@@ -185,6 +197,45 @@ impl Groups {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// Room names close enough to a mistyped one to be worth suggesting: a small
+/// edit distance (so "bedoom" finds "Bedroom") or one name containing the other
+/// (so a fragment finds its room). Ordered nearest-first, and capped, because a
+/// long list of guesses is no better than none.
+fn near_matches(query: &str, candidates: &[&str]) -> Vec<String> {
+    let q = query.to_lowercase();
+    let mut scored: Vec<(usize, &str)> = candidates
+        .iter()
+        .filter_map(|&name| {
+            let lower = name.to_lowercase();
+            let distance = levenshtein(&q, &lower);
+            // A third of the longer word (at least one edit), or a containment
+            // either way - loose enough for a typo, tight enough to stay useful.
+            let tolerance = (q.len().max(lower.len()) / 3).max(1);
+            (distance <= tolerance || lower.contains(&q) || q.contains(&lower))
+                .then_some((distance, name))
+        })
+        .collect();
+    scored.sort_by_key(|&(distance, _)| distance);
+    scored.into_iter().take(3).map(|(_, n)| n.to_string()).collect()
+}
+
+/// Ordinary Levenshtein edit distance, two rolling rows.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// `playback:1 getPlaybackStatus`, and the body of `playbackStatus` events.
@@ -495,6 +546,19 @@ pub struct Volume {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_matches_catches_a_typo_and_ignores_the_unrelated() {
+        let rooms = ["Bedroom", "Living Room", "Dining Room", "Guest TV", "Kitchen"];
+        // A one-letter typo finds its room.
+        assert_eq!(near_matches("bedoom", &rooms), vec!["Bedroom"]);
+        // A fragment finds its room by containment.
+        assert_eq!(near_matches("kitch", &rooms), vec!["Kitchen"]);
+        // Something unlike any room suggests nothing rather than a bad guess.
+        assert!(near_matches("garage", &rooms).is_empty());
+        // The list is capped, and ordered nearest-first.
+        assert!(near_matches("room", &rooms).len() <= 3);
+    }
 
     #[test]
     fn player_ip_comes_from_its_websocket_url() {

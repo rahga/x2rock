@@ -2024,9 +2024,9 @@ async fn main() {
     if let Err(e) = run(cli).await {
         if json {
             // Structured for an agent: the message it always printed, plus a
-            // stable code and the fix command when the error carried one.
-            let (code, fix) = hint::of(&e);
-            let obj = json!({ "error": format!("{e:#}"), "code": code, "fix": fix });
+            // stable code, the fix command when the error carried one, and any
+            // detail the hint attached (unknown_room's did_you_mean, say).
+            let obj = hint::error_json(&e);
             eprintln!(
                 "{}",
                 serde_json::to_string(&obj).unwrap_or_else(|_| format!("{{\"error\":{e:?}}}"))

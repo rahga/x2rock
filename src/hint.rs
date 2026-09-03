@@ -16,6 +16,7 @@
 use std::fmt;
 
 use anyhow::Error;
+use serde_json::{Value, json};
 
 /// An error that knows its own machine code and, when there is one, the command
 /// that resolves it.
@@ -27,6 +28,10 @@ pub struct Hint {
     pub code: &'static str,
     /// The command that fixes it, verbatim and runnable, when one exists.
     pub fix: Option<String>,
+    /// Extra machine-readable detail, merged into the `--json` error object - so
+    /// an error can hand back what a caller would otherwise re-fetch. Must be a
+    /// JSON object; its keys join `error`/`code`/`fix` (which it cannot shadow).
+    pub data: Option<Value>,
 }
 
 impl Hint {
@@ -35,7 +40,15 @@ impl Hint {
             message: message.into(),
             code,
             fix,
+            data: None,
         }
+    }
+
+    /// Attach structured detail rendered into the JSON error alongside the
+    /// standard fields - `unknown_room` uses it for `did_you_mean` and `rooms`.
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
     }
 }
 
@@ -54,6 +67,23 @@ pub fn of(error: &Error) -> (&'static str, Option<String>) {
         .downcast_ref::<Hint>()
         .map(|h| (h.code, h.fix.clone()))
         .unwrap_or(("error", None))
+}
+
+/// The `--json` error object for a failure: `{error, code, fix}`, plus any
+/// `data` a [`Hint`] carried, merged in (and unable to shadow the three
+/// standard keys). One place, so the CLI's error shape stays consistent.
+pub fn error_json(error: &Error) -> Value {
+    let hint = error.downcast_ref::<Hint>();
+    let mut obj = serde_json::Map::new();
+    obj.insert("error".into(), json!(format!("{error:#}")));
+    obj.insert("code".into(), json!(hint.map_or("error", |h| h.code)));
+    obj.insert("fix".into(), json!(hint.and_then(|h| h.fix.clone())));
+    if let Some(Value::Object(extra)) = hint.and_then(|h| h.data.as_ref()) {
+        for (key, value) in extra {
+            obj.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    Value::Object(obj)
 }
 
 /// Wrap a failure to reach a player as a `no_player` error - unless the inner
@@ -102,6 +132,24 @@ mod tests {
     fn a_plain_error_falls_back_to_a_generic_code() {
         let e = anyhow!("something went wrong");
         assert_eq!(of(&e), ("error", None));
+    }
+
+    #[test]
+    fn error_json_merges_hint_data_but_cannot_shadow_the_standard_fields() {
+        let e: Error = Hint::new("no room named \"x\"", "unknown_room", Some("x2rock rooms".into()))
+            // Includes a rogue "code" key that must NOT override the real one.
+            .with_data(json!({ "did_you_mean": ["Bedroom"], "code": "hijacked" }))
+            .into();
+        let v = error_json(&e);
+        assert_eq!(v["code"], "unknown_room", "data must not shadow code");
+        assert_eq!(v["fix"], "x2rock rooms");
+        assert_eq!(v["did_you_mean"], json!(["Bedroom"]));
+        assert!(v["error"].as_str().unwrap().contains("no room named"));
+
+        // A plain error still renders the three fields, with a null fix.
+        let plain = error_json(&anyhow!("boom"));
+        assert_eq!(plain["code"], "error");
+        assert!(plain["fix"].is_null());
     }
 
     #[test]

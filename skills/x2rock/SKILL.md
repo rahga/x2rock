@@ -46,10 +46,19 @@ that resolves it — run it, then retry. Codes you will meet:
 | `code` | meaning | `fix` |
 |---|---|---|
 | `unregistered_network` | on a network with no known speakers | `x2rock discover` |
-| `unknown_room` | the `-r` name is not a room here | `x2rock rooms` (use a listed name) |
+| `unknown_room` | the `-r` name is not a room here | `x2rock rooms` — but see below |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
 | `no_player` | no reachable speaker to act on | `x2rock discover` |
 | `error` | no known remedy (`fix` is null) | — |
+
+Some codes carry extra detail so you need not re-fetch. **`unknown_room`** includes `did_you_mean`
+(typo-tolerant suggestions) and `rooms` (the full list), so a mistyped `-r` is fixable from that one
+reply — no `x2rock rooms` round trip:
+
+```json
+{"code":"unknown_room","error":"no room named \"bedoom\"…","fix":"x2rock rooms",
+ "did_you_mean":["Bedroom"],"rooms":["Bedroom","Living Room","Dining Room","Guest TV","Kitchen"]}
+```
 
 ## Addressing a room
 
