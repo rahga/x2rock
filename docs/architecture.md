@@ -4147,6 +4147,120 @@ all of its tracks to the queue and plays them.** x2rock has the first half and n
 container is somewhere to browse into, and there is no "play this album" that fills the queue with
 its contents. `queue-item` adds one row at a time. That is the gap to close if queue work resumes.
 
+## x2rock as an agent substrate (2026-09-02)
+
+A distinct arc, and worth its own section because it changed what the CLI is *for*. The starting
+premise was that Omarchy is "AI first", so the person driving x2rock is as likely to be an agent as
+a human at a prompt. That reframes the CLI's output and errors as an API, and most of the work below
+is making that API honest. It was built, then **dogfooded by a second Claude session driving the
+CLI as an agent** - which turned up roughly a dozen concrete gaps a human never would, because a
+human reads prose and an agent parses fields. The dogfooding loop is the most useful process finding
+here: an agent leaning on the contract finds exactly the places the contract lies.
+
+### The one-call snapshot: `status --json`
+
+An agent's first move is almost always "what is the whole household doing", and answering it with
+`rooms` then `now` per room then `vol` per room is N+ round trips with no atomic view. `x2rock
+status` returns every group in one call, each room modelled on `now --json` (so a consumer that
+parses `now` needs no new shape) plus volume, grouping, coordinator and `has_tv`. Two decisions
+carried:
+
+- **Query each group through its own coordinator.** A group command answered on the wrong socket is
+  the same failure the daemon hit early ("one connection per coordinator"); the snapshot resolves a
+  connection per group, reusing the session's where it coincides.
+- **One unreachable coordinator is that room's problem, not the snapshot's.** Each room's fetch is
+  fallible on its own; a failure tags that room with an `error` field carrying its identity,
+  grouping and TV, and the other rooms still report. Proven by unplugging a speaker mid-`status`:
+  the room came back error-tagged after the 5s connect timeout, the rest answered, and the whole
+  array still returned. The per-room build is a pure function (`room_value`) so the error branch is
+  tested without a network.
+- **Bare array by default, envelope on `--full`.** A bare array is nicer at a `jq` prompt and is
+  what existing callers expect, so it stays the default; `--full` wraps it in `{household, network,
+  total, reachable, warnings, rooms}` for an agent that wants to know *which* household and network
+  it is on and whether every room answered. The household round trip and the fingerprint are
+  gathered only when `--full` asks.
+
+### Errors an agent can act on, not parse
+
+The error prose was already written to name its own fix (the unregistered-network message says to
+run `x2rock discover`). The agent turn was to make that a *field*: a `Hint` (src/hint.rs) is an
+ordinary `std::error::Error` carrying a stable `code`, an optional runnable `fix`, and optional
+structured `data`. It flows through `anyhow` like any error - its `Display` is just the message, so
+the daemon and the plain CLI are unchanged - and at the top level `main` splits into `main`/`run`:
+a `--json` invocation that fails prints `{error, code, fix, …data}` on stderr and exits non-zero,
+reading the code and fix by downcasting the error chain. A plain error is `{"code":"error",
+"fix":null}` - still structured.
+
+Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_player`,
+`too_many_rooms`. Two lessons in the shape:
+
+- **`no_player` inherits a sharper inner code.** Wrapping a connect failure as "no player to play it
+  on" would bury an `unregistered_network` underneath; the wrapper keeps a *connection-layer* inner
+  code when there is one (same `discover` fix, better diagnosis) and defaults to `no_player`
+  otherwise. Restricted to connection-layer codes after a review noted the general version could
+  pair a mismatched fix with the wrapper's message.
+- **The `data` payload lets an error hand back what the caller would re-fetch.** `unknown_room`
+  fills it with `rooms` (the whole list) and `did_you_mean` (Levenshtein near-misses), so a mistyped
+  `-r "bedoom"` comes back with `["Bedroom"]` in one call instead of a fail / `x2rock rooms` / retry
+  round trip. The `data` object cannot shadow `error`/`code`/`fix`, pinned by a test that tries.
+
+### The daemon stops narrating an unchanged state
+
+A road-warrior daemon on an unrecognised network logged the same "unregistered network" line every
+60s - ~2880 identical lines a day, burying the events worth seeing. A `StatusLog` coalesces on a
+key that carries the **network fingerprint**, so a network switch flushes at once (the move is
+exactly what a reader wants), and re-logs a held state once an hour with the count it held,
+journald-style. A successful connect resets the coalescing so a later failure logs fresh. The
+decision core takes the clock as an argument, so the window and heartbeat are pinned by tests
+without waiting an hour. `X2ROCK_LOG_VERBOSE` restores every line and the backoff ramp for
+debugging the reconnect machinery, which is the finickiest part of the daemon.
+
+Why this is safe against the AI-first goal: the *pull* (`x2rock rooms`, the sharpened
+`unregistered_network` message that names `x2rock discover`) is the agent's actionable surface, so
+the *push* log can go quiet without hiding anything. The log is observability; the CLI is the API.
+
+### Repeatable `-r`: multi-room in one invocation
+
+Setting three rooms' volume was three cold process starts, each re-resolving topology. `-r` is now
+repeatable for the per-room-state commands - `vol`, `repeat`, `shuffle`, and transport - so `-r
+Kitchen -r Bedroom vol 10` connects once and fans out, one result line per room. Deliberately
+agentic and nowhere else: a human uses `party` or one `-r`; an agent orchestrating "set the
+downstairs to 10" wants one call. Several `-r` on a command that does not fan out is a
+`too_many_rooms` error, not a silent act on the first; a fan-out stops at the first room that fails
+and names it. Mechanically, `--room` became a `Vec` (the single room bound from the field, disjoint
+from the moved `command`), and the vol/repeat/shuffle handlers were extracted into `apply_*` shared
+by the single arm and the fan-out - so the `--player` scoping, fixed-volume refusal and mute rules
+live in `apply_vol` once.
+
+### The skill ships in the binary
+
+An agent benefits from a written contract, but a skill only helps where it is installed. So the
+agent skill is embedded (`include_str!`), one source of truth that cannot drift from the CLI, and
+`x2rock skill` writes it into `~/.claude/skills/x2rock/` (or `$CLAUDE_CONFIG_DIR/skills/`, or
+`--dir`), `--print` for a non-Claude agent. It leads with the two contracts this arc built:
+`status --json` first, and read the error `code`/`fix`.
+
+### What dogfooding surfaced (and the shape of it)
+
+Two agent sessions driving the CLI found gaps a human review missed, all of the same shape - *a
+field an agent would read is missing or lying*:
+
+- `on_tv` and `audible` as fields, so "is the TV on" and "will this make a sound" are reads, not a
+  `"TV Audio"` title match or a volume-vs-mute deduction.
+- `service_id` alongside `service`, because the player leaves `service` null for some sources while
+  carrying the sid; and then `status`/`now` resolving that sid to a name from the cached catalogue,
+  because favorites names YouTube Music and now-playing did not. (Favorites was not "resolving" - the
+  player simply populates the field there and not in now-playing metadata.)
+- `favorites --json` marking `playable: false` for empty shells (no service and no type) - the
+  dead-streaming-service favorites a long-lived household accrues. A heuristic, and it says so: it
+  cannot see a live service that **recycled an id** (iHeartRadio swaps stations for seasonal ones at
+  the holidays), which nothing can detect.
+- `favorite "<name>"` naming the ids of two favorites that share a name rather than silently picking
+  the first.
+
+The through-line: the fixes were cheap; *finding* them needed an agent, because each is invisible
+until something parses the contract instead of reading it.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

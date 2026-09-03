@@ -198,10 +198,12 @@ caller reads a field instead of parsing a sentence:
 
 `code` is a stable identifier for the *kind* of failure — `unregistered_network` (fix
 `x2rock discover`), `unknown_room` (`x2rock rooms`), `needs_link` (`x2rock link <service>`),
-`no_player` (`x2rock discover`) — `error` is the same human message the plain CLI prints, and `fix`
-is the command that resolves it, verbatim, when there is one. An error with no known remedy is still
-structured — `{"code":"error", …, "fix":null}`. Without `--json` the message prints as prose exactly
-as before.
+`no_player` (`x2rock discover`), `too_many_rooms` (several `-r` on a single-room command) — `error`
+is the same human message the plain CLI prints, and `fix` is the command that resolves it, verbatim,
+when there is one. An error with no known remedy is still structured — `{"code":"error", …,
+"fix":null}`. Some codes carry extra detail: `unknown_room` includes `did_you_mean` (typo-tolerant
+suggestions) and `rooms` (the full list), so a mistyped `-r` is fixable from the one reply. Without
+`--json` the message prints as prose exactly as before.
 
 ### The agent skill
 
