@@ -5,7 +5,7 @@
 //! would rather read a field than parse a sentence. So an error raised at a
 //! site where the remedy is known carries a [`Hint`], and `x2rock <cmd> --json`
 //! renders a failure as `{error, code, fix}`. An ordinary error carries no hint
-//! and falls back to code `"error"` with a null `fix` - still structured, just
+//! and falls back to code `"unknown"` with a null `fix` - still structured, just
 //! without a suggested command.
 //!
 //! A `Hint` is a normal `std::error::Error`, so it flows through `anyhow` like
@@ -61,12 +61,12 @@ impl fmt::Display for Hint {
 impl std::error::Error for Hint {}
 
 /// The `(code, fix)` an error carries, reading the first [`Hint`] in its chain.
-/// A plain error - most of them - is `("error", None)`.
+/// A plain error - most of them - is `("unknown", None)`.
 pub fn of(error: &Error) -> (&'static str, Option<String>) {
     error
         .downcast_ref::<Hint>()
         .map(|h| (h.code, h.fix.clone()))
-        .unwrap_or(("error", None))
+        .unwrap_or(("unknown", None))
 }
 
 /// The `--json` error object for a failure: `{error, code, fix}`, plus any
@@ -76,7 +76,7 @@ pub fn error_json(error: &Error) -> Value {
     let hint = error.downcast_ref::<Hint>();
     let mut obj = serde_json::Map::new();
     obj.insert("error".into(), json!(format!("{error:#}")));
-    obj.insert("code".into(), json!(hint.map_or("error", |h| h.code)));
+    obj.insert("code".into(), json!(hint.map_or("unknown", |h| h.code)));
     obj.insert("fix".into(), json!(hint.and_then(|h| h.fix.clone())));
     if let Some(Value::Object(extra)) = hint.and_then(|h| h.data.as_ref()) {
         for (key, value) in extra {
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn a_plain_error_falls_back_to_a_generic_code() {
         let e = anyhow!("something went wrong");
-        assert_eq!(of(&e), ("error", None));
+        assert_eq!(of(&e), ("unknown", None));
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod tests {
 
         // A plain error still renders the three fields, with a null fix.
         let plain = error_json(&anyhow!("boom"));
-        assert_eq!(plain["code"], "error");
+        assert_eq!(plain["code"], "unknown");
         assert!(plain["fix"].is_null());
     }
 

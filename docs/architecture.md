@@ -4188,7 +4188,7 @@ ordinary `std::error::Error` carrying a stable `code`, an optional runnable `fix
 structured `data`. It flows through `anyhow` like any error - its `Display` is just the message, so
 the daemon and the plain CLI are unchanged - and at the top level `main` splits into `main`/`run`:
 a `--json` invocation that fails prints `{error, code, fix, …data}` on stderr and exits non-zero,
-reading the code and fix by downcasting the error chain. A plain error is `{"code":"error",
+reading the code and fix by downcasting the error chain. A plain error is `{"code":"unknown",
 "fix":null}` - still structured.
 
 Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_player`,

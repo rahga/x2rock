@@ -200,8 +200,8 @@ caller reads a field instead of parsing a sentence:
 `x2rock discover`), `unknown_room` (`x2rock rooms`), `needs_link` (`x2rock link <service>`),
 `no_player` (`x2rock discover`), `too_many_rooms` (several `-r` on a single-room command) — `error`
 is the same human message the plain CLI prints, and `fix` is the command that resolves it, verbatim,
-when there is one. An error with no known remedy is still structured — `{"code":"error", …,
-"fix":null}`. Some codes carry extra detail: `unknown_room` includes `did_you_mean` (typo-tolerant
+when there is one. An error with no known remedy is still structured — `{"code":"unknown", …,
+"fix":null}` (the code `unknown`, so it never collides with the `error` message field). Some codes carry extra detail: `unknown_room` includes `did_you_mean` (typo-tolerant
 suggestions) and `rooms` (the full list), so a mistyped `-r` is fixable from the one reply. Without
 `--json` the message prints as prose exactly as before.
 
