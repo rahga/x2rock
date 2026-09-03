@@ -149,6 +149,13 @@ x2rock party off         # break it up, every room on its own
 x2rock daemon            # every room as an MPRIS2 player, until stopped
 ```
 
+`-r`/`--room` is repeatable for the per-room commands — `vol`, `repeat`, `shuffle`, and transport
+(`play`/`pause`/`toggle`/`next`/`prev`). `x2rock -r Kitchen -r Bedroom vol 10` applies to each with
+the topology resolved once, printing one line per room; it is aimed at agents driving several rooms
+without a process per room. Commands that are not per-room (or take a single target) reject several
+`--room` rather than silently acting on the first, and a fan-out that hits an error stops there and
+names the room.
+
 `group` adds rooms to `--room`'s group; name as many as you like. `ungroup` takes its room
 positionally and needs no `--room`, since a room is only ever in one group. Both print the group as
 it ended up, so the result is visible rather than merely claimed. A room that joins a group plays

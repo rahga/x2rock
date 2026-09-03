@@ -27,8 +27,11 @@ use state::State;
 #[command(name = "x2rock", version, about = "Local-first Sonos control")]
 struct Cli {
     /// Room to control. Not needed when the household has a single group.
+    /// Repeatable for the per-room commands (volume, transport, repeat,
+    /// shuffle): `-r Kitchen -r Bedroom vol 10` applies to each, topology
+    /// resolved once. Other commands take a single `--room`.
     #[arg(long, short = 'r', global = true, env = "X2ROCK_ROOM")]
-    room: Option<String>,
+    room: Vec<String>,
 
     /// Address of a player, bypassing what is remembered for this network.
     #[arg(long, short = 'i', global = true, env = "X2ROCK_PLAYER")]
@@ -37,6 +40,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+
 
 #[derive(Subcommand)]
 enum Command {
@@ -2038,6 +2042,248 @@ async fn main() {
     }
 }
 
+/// Set or read a room's volume, printing the outcome (JSON of it under `json`).
+/// The one place volume is applied, so the single-room arm and the multi-room
+/// fan-out share it - `--player` scoping, the fixed-volume refusal, mute, and
+/// the report-what-was-asked rule all live here once.
+async fn apply_vol(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    change: Option<String>,
+    one_room: bool,
+    json: bool,
+) -> Result<()> {
+    let group = target.group_id.as_str();
+    let player = session::coordinator(session, target).await?;
+    // --player names the speaker, so it resolves the room asked for rather than
+    // the group's name: once rooms are grouped the group is called after its
+    // coordinator ("Dining Room + 1"), which is no player's name at all.
+    let this = one_room
+        .then(|| match room {
+            Some(name) => session.groups.player_named(name),
+            // No room named, so the group resolved by default; its coordinator
+            // is the speaker meant. By id: the group's name ("Kitchen + 1") is
+            // not a player's once grouped.
+            None => session
+                .groups
+                .player(&target.coordinator_id)
+                .ok_or_else(|| anyhow!("no player for {}", target.name)),
+        })
+        .transpose()?;
+    // A player-scoped command is refused by anyone but that player ("Incorrect
+    // playerId"), so it cannot ride the coordinator's connection.
+    let speaker = match this.as_ref() {
+        Some(named) => {
+            let ip = named.ip().with_context(|| {
+                format!("{} did not report an address to reach it on", named.name)
+            })?;
+            if ip == session.connection.ip() {
+                session.connection.clone()
+            } else {
+                Connection::open(ip).await?
+            }
+        }
+        None => player.clone(),
+    };
+    // Name the speaker, not the group: "Dining Room + 1  22" is a confusing way
+    // to report what Kitchen was set to.
+    let label = this.map_or(target.name.clone(), |p| p.name.clone());
+    let this = this.map(|p| p.id.clone());
+    // The player acks a volume command before the change is visible, so a read
+    // straight after a write can return the old value. Report the outcome from
+    // what was asked instead; the daemon gets the truth from events.
+    let before = match &this {
+        Some(id) => speaker.player_volume(id).await?,
+        None => player.group_volume(group).await?,
+    };
+    let change = change.as_deref().map(parse_volume).transpose()?;
+    if change.is_some() && before.fixed {
+        bail!("{} has fixed volume; adjust it on the amplifier", target.name);
+    }
+    let (level, muted) = match change {
+        None => (before.volume, before.muted),
+        // Both setVolume and setRelativeVolume unmute (verified).
+        Some(VolumeChange::Set(level)) => {
+            match &this {
+                Some(id) => speaker.set_player_volume(id, level).await?,
+                None => player.set_group_volume(group, level).await?,
+            }
+            (level, false)
+        }
+        Some(VolumeChange::Adjust(delta)) => {
+            match &this {
+                Some(id) => speaker.adjust_player_volume(id, delta).await?,
+                None => player.adjust_group_volume(group, delta).await?,
+            }
+            let level = (i16::from(before.volume) + i16::from(delta)).clamp(0, 100);
+            (level as u8, false)
+        }
+        Some(VolumeChange::Mute(muted)) => {
+            // Muting one speaker of a group is not offered: the group mute is
+            // what people mean, and a silently muted member is a puzzle later.
+            ensure!(this.is_none(), "--player does not apply to mute");
+            player.set_group_mute(group, muted).await?;
+            (before.volume, muted)
+        }
+    };
+    if json {
+        // previous_volume makes a set distinguishable from a read, and a clamp
+        // (+5 at 100) or a fixed-volume refusal visible: the value did not move.
+        // audible folds volume+muted into the one outcome.
+        println!(
+            "{}",
+            json!({
+                "room": label,
+                "volume": level,
+                "previous_volume": before.volume,
+                "muted": muted,
+                "audible": !muted && level > 0,
+                "fixed": before.fixed,
+            })
+        );
+    } else {
+        let from = transition(&before.volume.to_string(), &level.to_string());
+        let muted = if muted { "  (muted)" } else { "" };
+        println!("{label:<24} {from}{level}{muted}");
+    }
+    Ok(())
+}
+
+/// Set or read repeat, printing the outcome. Shared by the single arm and fan-out.
+async fn apply_repeat(
+    session: &session::Session,
+    target: &session::Target,
+    mode: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let group = target.group_id.as_str();
+    let player = session::coordinator(session, target).await?;
+    let status = player.playback_status(group).await?;
+    let before = status.play_modes.repeat();
+    let after = match mode.as_deref() {
+        None => before,
+        Some(text) => {
+            let Some(repeat) = Repeat::parse(text) else {
+                bail!("repeat takes off, all or one");
+            };
+            ensure!(
+                status.available_playback_actions.allows(repeat),
+                "what {} is playing cannot be {}",
+                target.name,
+                repeat.denied_as()
+            );
+            player.set_repeat(group, repeat).await?;
+            repeat
+        }
+    };
+    if json {
+        println!("{}", json!({ "room": target.name, "repeat": after.as_str() }));
+    } else {
+        let from = transition(before.as_str(), after.as_str());
+        println!("{:<24} repeat {from}{}", target.name, after.as_str());
+    }
+    Ok(())
+}
+
+/// Set or read shuffle, printing the outcome. Shared by the single arm and fan-out.
+async fn apply_shuffle(
+    session: &session::Session,
+    target: &session::Target,
+    mode: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let group = target.group_id.as_str();
+    let player = session::coordinator(session, target).await?;
+    let status = player.playback_status(group).await?;
+    let before = status.play_modes.shuffle;
+    let after = match mode.as_deref() {
+        None => before,
+        Some(text @ ("on" | "off")) => {
+            let shuffle = text == "on";
+            ensure!(
+                !shuffle || status.available_playback_actions.can_shuffle,
+                "what {} is playing cannot be shuffled",
+                target.name
+            );
+            player.set_shuffle(group, shuffle).await?;
+            shuffle
+        }
+        Some(_) => bail!("shuffle takes on or off"),
+    };
+    if json {
+        println!("{}", json!({ "room": target.name, "shuffle": after }));
+    } else {
+        let word = |on: bool| if on { "on" } else { "off" };
+        let from = transition(word(before), word(after));
+        println!("{:<24} shuffle {from}{}", target.name, word(after));
+    }
+    Ok(())
+}
+
+/// Apply one transport verb to a group, through its coordinator.
+async fn apply_transport(
+    session: &session::Session,
+    target: &session::Target,
+    verb: &str,
+) -> Result<()> {
+    let coordinator = session::coordinator(session, target).await?;
+    coordinator.playback(&target.group_id, verb).await
+}
+
+/// Fan a per-room command across several `--room`, topology resolved once. Only
+/// the per-room-state commands accept it; anything else is refused with a clear
+/// message rather than silently acting on the first room. A failure on one room
+/// stops the run - a half-applied "set them all to 10" is worse than a clear
+/// stop naming the room that failed.
+async fn fan_out(session: &session::Session, rooms: &[String], command: &Command) -> Result<()> {
+    for name in rooms {
+        let target = session::target(&session.groups, Some(name))?;
+        let outcome = match command {
+            Command::Vol {
+                change,
+                player: one_room,
+                json,
+            } => apply_vol(session, &target, Some(name), change.clone(), *one_room, *json).await,
+            Command::Repeat { mode, json } => {
+                apply_repeat(session, &target, mode.clone(), *json).await
+            }
+            Command::Shuffle { mode, json } => {
+                apply_shuffle(session, &target, mode.clone(), *json).await
+            }
+            Command::Play { track: None } => apply_transport(session, &target, "play").await,
+            Command::Pause => apply_transport(session, &target, "pause").await,
+            Command::Toggle => apply_transport(session, &target, "togglePlayPause").await,
+            Command::Next => apply_transport(session, &target, "skipToNextTrack").await,
+            Command::Prev => apply_transport(session, &target, "skipToPreviousTrack").await,
+            _ => Err(anyhow!(
+                "several --room were given, but this command takes a single room"
+            )),
+        };
+        // Name the room the batch stopped on: a fan-out that halts silently on
+        // the third of five rooms is a debugging puzzle. The rooms before it
+        // already applied; the ones after did not.
+        outcome.with_context(|| format!("on room {name:?}"))?;
+    }
+    Ok(())
+}
+
+/// Whether a command applies per room, so several `--room` fan it out. The
+/// read/whole-household and single-target commands do not.
+fn fans_out(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Vol { .. }
+            | Command::Repeat { .. }
+            | Command::Shuffle { .. }
+            | Command::Play { track: None }
+            | Command::Pause
+            | Command::Toggle
+            | Command::Next
+            | Command::Prev
+    )
+}
+
 /// The agent skill, embedded so it ships with the binary and cannot drift from
 /// the CLI it documents. Written to disk, or printed, by `x2rock skill`.
 const SKILL: &str = include_str!("../skills/x2rock/SKILL.md");
@@ -2098,6 +2344,11 @@ fn wants_json(command: &Command) -> bool {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // The single room most commands act on: the first `--room`, bound from the
+    // field (not a `&self` method) so it stays disjoint from `match cli.command`
+    // moving the command out. Multi-room commands read `cli.room` (the whole
+    // list) instead.
+    let room = cli.room.first().map(String::as_str);
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
         Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
@@ -2109,7 +2360,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_play_item(
                 cli.ip,
-                cli.room.as_deref(),
+                room,
                 service,
                 kind.as_deref(),
                 id,
@@ -2125,7 +2376,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_queue_item(
                 cli.ip,
-                cli.room.as_deref(),
+                room,
                 service,
                 kind.as_deref(),
                 id,
@@ -2143,7 +2394,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_browse(
                 cli.ip,
-                cli.room.as_deref(),
+                room,
                 service.as_ref(),
                 container.as_deref(),
                 count,
@@ -2205,9 +2456,9 @@ async fn run(cli: Cli) -> Result<()> {
                 // a question with no bearing on the answer. A room is honoured
                 // when given - it picks whose queue is read - and otherwise the
                 // first reachable player serves.
-                let ip = match cli.room.as_deref() {
+                let ip = match room {
                     Some(_) => {
-                        let target = session::target(&session.groups, cli.room.as_deref())?;
+                        let target = session::target(&session.groups, room)?;
                         target
                             .coordinator_ip
                             .ok_or_else(|| anyhow!("no address for {}", target.name))?
@@ -2327,7 +2578,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_search(
                 cli.ip,
-                cli.room.as_deref(),
+                room,
                 term.as_ref(),
                 service.as_ref(),
                 category.as_ref(),
@@ -2417,7 +2668,7 @@ async fn run(cli: Cli) -> Result<()> {
                 envelope["householdId"] = json!(session.connection.household_id().await?);
             }
             RawScope::Group => {
-                let target = session::target(&session.groups, cli.room.as_deref())?;
+                let target = session::target(&session.groups, room)?;
                 envelope["groupId"] = json!(target.group_id);
                 connection = session::coordinator(&session, &target).await?;
             }
@@ -2425,7 +2676,7 @@ async fn run(cli: Cli) -> Result<()> {
                 // A player answers player-scoped commands only for itself, so
                 // naming one over a socket to another gets ERROR_INVALID_OBJECT_ID
                 // - "Incorrect playerId" - for an id that is perfectly correct.
-                let player = match cli.room.as_deref() {
+                let player = match room {
                     Some(room) => session.groups.player_named(room)?,
                     None => {
                         let id = session.groups.resolve(None)?.coordinator_id.clone();
@@ -2619,7 +2870,7 @@ async fn run(cli: Cli) -> Result<()> {
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
     if let Command::Group { rooms } = &cli.command {
-        let host = session.groups.resolve(cli.room.as_deref())?;
+        let host = session.groups.resolve(room)?;
         let mut joining = Vec::new();
         let mut already = Vec::new();
         for name in rooms {
@@ -2639,7 +2890,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         let host_id = host.id.clone();
         let ids: Vec<String> = joining.iter().map(|(id, _)| id.clone()).collect();
-        let target = session::target(&session.groups, cli.room.as_deref())?;
+        let target = session::target(&session.groups, room)?;
         let coordinator = session::coordinator(&session, &target).await?;
         let info = coordinator
             .modify_group_members(&host_id, &ids, &[])
@@ -2651,7 +2902,7 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Party { mode } = &cli.command {
         match mode.as_deref() {
             None => {
-                let host = session.groups.resolve(cli.room.as_deref())?;
+                let host = session.groups.resolve(room)?;
                 let host_id = host.id.clone();
                 let joining: Vec<String> = session
                     .groups
@@ -2664,7 +2915,7 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{}", group_line(host, &session.groups));
                     return Ok(());
                 }
-                let target = session::target(&session.groups, cli.room.as_deref())?;
+                let target = session::target(&session.groups, room)?;
                 let coordinator = session::coordinator(&session, &target).await?;
                 let info = coordinator
                     .modify_group_members(&host_id, &joining, &[])
@@ -2743,7 +2994,19 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let target = session::target(&session.groups, cli.room.as_deref())?;
+    // Several --room fan a per-room command across each, topology already in
+    // hand from the one connect above. A single --room (or none) falls through
+    // to the ordinary path; more than one on a command that does not fan out is
+    // an error, not a silent act on the first.
+    if cli.room.len() > 1 {
+        ensure!(
+            fans_out(&cli.command),
+            "several --room were given, but this command takes a single room"
+        );
+        return fan_out(&session, &cli.room, &cli.command).await;
+    }
+
+    let target = session::target(&session.groups, room)?;
     let player = session::coordinator(&session, &target).await?;
     let group = target.group_id.as_str();
 
@@ -2883,8 +3146,8 @@ async fn run(cli: Cli) -> Result<()> {
             let is_soundbar = |p: &&Player| p.capabilities.iter().any(|c| c == "HT_PLAYBACK");
             let members = session
                 .groups
-                .members(session.groups.resolve(cli.room.as_deref())?);
-            let named = match cli.room.as_deref() {
+                .members(session.groups.resolve(room)?);
+            let named = match room {
                 Some(name) => Some(session.groups.player_named(name)?),
                 None => session.groups.player(&target.coordinator_id),
             };
@@ -3005,58 +3268,8 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Repeat { mode, json } => {
-            let status = player.playback_status(group).await?;
-            let before = status.play_modes.repeat();
-            let after = match mode.as_deref() {
-                None => before,
-                Some(text) => {
-                    let Some(repeat) = Repeat::parse(text) else {
-                        bail!("repeat takes off, all or one");
-                    };
-                    ensure!(
-                        status.available_playback_actions.allows(repeat),
-                        "what {} is playing cannot be {}",
-                        target.name,
-                        repeat.denied_as()
-                    );
-                    player.set_repeat(group, repeat).await?;
-                    repeat
-                }
-            };
-            if json {
-                println!("{}", json!({ "room": target.name, "repeat": after.as_str() }));
-            } else {
-                let from = transition(before.as_str(), after.as_str());
-                println!("{:<24} repeat {from}{}", target.name, after.as_str());
-            }
-        }
-        Command::Shuffle { mode, json } => {
-            let status = player.playback_status(group).await?;
-            let before = status.play_modes.shuffle;
-            let after = match mode.as_deref() {
-                None => before,
-                Some(text @ ("on" | "off")) => {
-                    let shuffle = text == "on";
-                    // Turning it off is always allowed, as with repeat.
-                    ensure!(
-                        !shuffle || status.available_playback_actions.can_shuffle,
-                        "what {} is playing cannot be shuffled",
-                        target.name
-                    );
-                    player.set_shuffle(group, shuffle).await?;
-                    shuffle
-                }
-                Some(_) => bail!("shuffle takes on or off"),
-            };
-            if json {
-                println!("{}", json!({ "room": target.name, "shuffle": after }));
-            } else {
-                let word = |on: bool| if on { "on" } else { "off" };
-                let from = transition(word(before), word(after));
-                println!("{:<24} shuffle {from}{}", target.name, word(after));
-            }
-        }
+        Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
+        Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Pause => player.playback(group, "pause").await?,
         Command::Toggle => player.playback(group, "togglePlayPause").await?,
         Command::Next => player.playback(group, "skipToNextTrack").await?,
@@ -3065,108 +3278,7 @@ async fn run(cli: Cli) -> Result<()> {
             change,
             player: one_room,
             json,
-        } => {
-            // --player names the speaker, so it resolves the room asked for
-            // rather than the group's name: once rooms are grouped the group is
-            // called after its coordinator ("Dining Room + 1"), which is no
-            // player's name at all.
-            let this = one_room
-                .then(|| match cli.room.as_deref() {
-                    Some(name) => session.groups.player_named(name),
-                    // No room named, so the group resolved by default; its
-                    // coordinator is the speaker meant. By id: the group's
-                    // name ("Kitchen + 1") is not a player's once grouped.
-                    None => session
-                        .groups
-                        .player(&target.coordinator_id)
-                        .ok_or_else(|| anyhow!("no player for {}", target.name)),
-                })
-                .transpose()?;
-            // A player-scoped command is refused by anyone but that player
-            // ("Incorrect playerId"), so it cannot ride the coordinator's
-            // connection the way group commands do.
-            let speaker = match this.as_ref() {
-                Some(named) => {
-                    // No falling back to whatever socket is handy: the command
-                    // would be refused as "Incorrect playerId", which reads as a
-                    // bug rather than as a player we could not address.
-                    let ip = named.ip().with_context(|| {
-                        format!("{} did not report an address to reach it on", named.name)
-                    })?;
-                    if ip == session.connection.ip() {
-                        session.connection.clone()
-                    } else {
-                        Connection::open(ip).await?
-                    }
-                }
-                None => player.clone(),
-            };
-            // Name the speaker, not the group: "Dining Room + 1  22" is a
-            // confusing way to report what Kitchen was set to.
-            let label = this.map_or(target.name.clone(), |p| p.name.clone());
-            let this = this.map(|p| p.id.clone());
-            // The player acks a volume command before the change is visible, so a read
-            // straight after a write can return the old value. Report the outcome from
-            // what was asked instead; the daemon gets the truth from events.
-            let before = match &this {
-                Some(id) => speaker.player_volume(id).await?,
-                None => player.group_volume(group).await?,
-            };
-            let change = change.as_deref().map(parse_volume).transpose()?;
-            if change.is_some() && before.fixed {
-                bail!(
-                    "{} has fixed volume; adjust it on the amplifier",
-                    target.name
-                );
-            }
-            let (level, muted) = match change {
-                None => (before.volume, before.muted),
-                // Both setVolume and setRelativeVolume unmute (verified).
-                Some(VolumeChange::Set(level)) => {
-                    match &this {
-                        Some(id) => speaker.set_player_volume(id, level).await?,
-                        None => player.set_group_volume(group, level).await?,
-                    }
-                    (level, false)
-                }
-                Some(VolumeChange::Adjust(delta)) => {
-                    match &this {
-                        Some(id) => speaker.adjust_player_volume(id, delta).await?,
-                        None => player.adjust_group_volume(group, delta).await?,
-                    }
-                    let level = (i16::from(before.volume) + i16::from(delta)).clamp(0, 100);
-                    (level as u8, false)
-                }
-                Some(VolumeChange::Mute(muted)) => {
-                    // Muting one speaker of a group is not offered: the group
-                    // mute is what people mean, and a silently muted member is
-                    // a puzzle to find later.
-                    ensure!(this.is_none(), "--player does not apply to mute");
-                    player.set_group_mute(group, muted).await?;
-                    (before.volume, muted)
-                }
-            };
-            if json {
-                // previous_volume makes a set distinguishable from a read, and a
-                // clamp (+5 at 100) or a fixed-volume refusal visible: the value
-                // did not move. audible folds volume+muted into the one outcome.
-                println!(
-                    "{}",
-                    json!({
-                        "room": label,
-                        "volume": level,
-                        "previous_volume": before.volume,
-                        "muted": muted,
-                        "audible": !muted && level > 0,
-                        "fixed": before.fixed,
-                    })
-                );
-            } else {
-                let from = transition(&before.volume.to_string(), &level.to_string());
-                let muted = if muted { "  (muted)" } else { "" };
-                println!("{label:<24} {from}{level}{muted}");
-            }
-        }
+        } => apply_vol(&session, &target, room, change, one_room, json).await?,
         Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
@@ -3208,6 +3320,24 @@ mod tests {
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
+    }
+
+    #[test]
+    fn only_the_per_room_commands_fan_out() {
+        // These act on one room's state, so several --room fan them out.
+        assert!(fans_out(&Command::Pause));
+        assert!(fans_out(&Command::Toggle));
+        assert!(fans_out(&Command::Next));
+        assert!(fans_out(&Command::Play { track: None }));
+        assert!(fans_out(&Command::Vol { change: None, player: false, json: false }));
+        assert!(fans_out(&Command::Repeat { mode: None, json: false }));
+        assert!(fans_out(&Command::Shuffle { mode: None, json: false }));
+        // Playing a specific queue position is per-queue, not a broadcast.
+        assert!(!fans_out(&Command::Play { track: Some(3) }));
+        // Reads and whole-household commands are not fanned out.
+        assert!(!fans_out(&Command::Now { json: false }));
+        assert!(!fans_out(&Command::Status { json: false }));
+        assert!(!fans_out(&Command::Rooms { json: false }));
     }
 
     #[test]

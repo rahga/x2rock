@@ -65,6 +65,11 @@ reply — no `x2rock rooms` round trip:
 - `-r "<Room>"` picks the room: `x2rock -r "Kitchen" pause`. Names come from `x2rock rooms`.
 - A household with a single group needs no `-r`.
 - Volume is **relative** with `+`/`-`: `x2rock -r Kitchen vol +5`. A bare number sets it: `vol 30`.
+- **`-r` is repeatable for the per-room commands** — `vol`, `repeat`, `shuffle`, and transport
+  (`play`/`pause`/`toggle`/`next`/`prev`). `x2rock -r Kitchen -r Bedroom vol 10` applies to each
+  (topology resolved once), printing one result line per room. Other commands take a single `-r`;
+  giving several is an error, not a silent act on the first. A fan-out stops at the first room that
+  fails, and the error names it — the rooms before it already applied.
 
 ## Commands, by intent
 
