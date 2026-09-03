@@ -231,16 +231,24 @@ impl RoomPlayer {
 
     /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
     pub fn apply_playback(&self, status: &proto::PlaybackStatus) -> Vec<Property> {
-        let mpris_status = match status.state() {
+        // Both of these are `None` on a partial event, and `None` means
+        // unchanged - the room keeps the state and the position it already had,
+        // rather than being announced as stopped at zero. See
+        // `proto::PlaybackStatus::playback_state`.
+        let mpris_status = status.state().map(|state| match state {
             "PLAYING" | "BUFFERING" => PlaybackStatus::Playing,
             "PAUSED" => PlaybackStatus::Paused,
             _ => PlaybackStatus::Stopped,
-        };
+        });
         let actions = status.available_playback_actions;
         let mut state = self.state.lock().unwrap();
-        state.status = Some(mpris_status);
-        state.position_millis = status.position_millis;
-        state.position_at = Some(Instant::now());
+        if let Some(mpris_status) = mpris_status {
+            state.status = Some(mpris_status);
+        }
+        if let Some(position_millis) = status.position_millis {
+            state.position_millis = position_millis;
+            state.position_at = Some(Instant::now());
+        }
         // The hints ride on Metadata, so it has to be re-announced when they move -
         // which is on a change of source, not on every playback event.
         let queue_moved = status
@@ -262,7 +270,6 @@ impl RoomPlayer {
         state.actions = actions;
         state.play_modes = status.play_modes;
         let mut properties = vec![
-            Property::PlaybackStatus(mpris_status),
             Property::CanGoNext(actions.can_skip),
             Property::CanGoPrevious(actions.can_skip_back),
             Property::CanPlay(actions.can_play),
@@ -271,6 +278,9 @@ impl RoomPlayer {
             Property::LoopStatus(state.loop_status()),
             Property::Shuffle(state.play_modes.shuffle),
         ];
+        if let Some(mpris_status) = mpris_status {
+            properties.push(Property::PlaybackStatus(mpris_status));
+        }
         // Both ride on Metadata, so either moving means re-announcing it.
         if hints_changed || queue_moved {
             properties.push(Property::Metadata(state.with_hints()));

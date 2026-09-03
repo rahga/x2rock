@@ -619,7 +619,9 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
         .and_then(|t| t.album.as_ref())
         .and_then(|a| a.name.as_deref());
 
-    let mut line = status.state().to_string();
+    // A state-less event is a daemon concern; the polled reply this reads has
+    // always carried one. Named rather than blank so an odd line is legible.
+    let mut line = status.state().unwrap_or("UNKNOWN").to_string();
     if let Some(title) = title {
         line.push_str("  ");
         line.push_str(title);
@@ -648,8 +650,8 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
         .filter(|ms| *ms > 0)
         .map(std::time::Duration::from_millis)
     {
-        let position = std::time::Duration::from_millis(status.position_millis);
-        line.push_str(&format!("  {} / {}", mmss(Some(position)), mmss(Some(duration))));
+        let position = status.position_millis.map(std::time::Duration::from_millis);
+        line.push_str(&format!("  {} / {}", mmss(position), mmss(Some(duration))));
     }
     // On a soundbar this is the whole point of looking: a source that has
     // quietly dropped to stereo says so here and nowhere else.

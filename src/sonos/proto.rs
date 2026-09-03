@@ -242,9 +242,22 @@ fn levenshtein(a: &str, b: &str) -> usize {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackStatus {
-    pub playback_state: String,
-    #[serde(default)]
-    pub position_millis: u64,
+    /// **Absent from some event bodies**, though present in every
+    /// `getPlaybackStatus` reply seen here. Observed missing four times in a day
+    /// on firmware 95.0-77060 (2026-09-02/03), which used to fail the whole
+    /// event's deserialization and drop it - position, play modes and the
+    /// queue-version refresh going with it, leaving MPRIS stale until the next
+    /// event.
+    ///
+    /// `None` therefore means *unchanged*, never stopped: a consumer keeps the
+    /// state it already had. Defaulting it to an empty string instead would
+    /// report a playing room as stopped, because that is the arm an unknown
+    /// state falls into.
+    pub playback_state: Option<String>,
+    /// `None` means unchanged, for the same reason and in the same events: a
+    /// partial body omits this alongside `playback_state`, and defaulting it to
+    /// 0 would rewind the position every time one arrived.
+    pub position_millis: Option<u64>,
     /// Bumps whenever the queue changes - the cue to re-read it over UPnP.
     pub queue_version: Option<String>,
     #[serde(default)]
@@ -356,11 +369,12 @@ impl Repeat {
 }
 
 impl PlaybackStatus {
-    /// `PLAYBACK_STATE_PLAYING` -> `PLAYING`.
-    pub fn state(&self) -> &str {
+    /// `PLAYBACK_STATE_PLAYING` -> `PLAYING`, and `None` when the player sent
+    /// no state at all - see [`PlaybackStatus::playback_state`].
+    pub fn state(&self) -> Option<&str> {
         self.playback_state
-            .strip_prefix("PLAYBACK_STATE_")
-            .unwrap_or(&self.playback_state)
+            .as_deref()
+            .map(|state| state.strip_prefix("PLAYBACK_STATE_").unwrap_or(state))
     }
 }
 
@@ -574,13 +588,30 @@ mod tests {
     #[test]
     fn playback_state_prefix_is_stripped() {
         let status = PlaybackStatus {
-            playback_state: "PLAYBACK_STATE_PLAYING".into(),
-            position_millis: 0,
+            playback_state: Some("PLAYBACK_STATE_PLAYING".into()),
+            position_millis: Some(0),
             queue_version: None,
             available_playback_actions: PlaybackActions::default(),
             play_modes: PlayModes::default(),
         };
-        assert_eq!(status.state(), "PLAYING");
+        assert_eq!(status.state(), Some("PLAYING"));
+    }
+
+    /// A `playbackStatus` body without the state field. This used to fail the
+    /// whole event with "missing field `playbackState`" and drop it; it must now
+    /// parse, and say "unchanged" rather than a state of its own.
+    #[test]
+    fn a_partial_playback_body_parses_as_unchanged() {
+        let status: PlaybackStatus = serde_json::from_str(
+            r#"{"availablePlaybackActions":{"canSkip":true},"playModes":{"shuffle":true}}"#,
+        )
+        .expect("a body without playbackState still parses");
+        assert_eq!(status.state(), None);
+        assert_eq!(status.position_millis, None);
+        // The rest of the body is still read, which is the point of not
+        // dropping the event.
+        assert!(status.available_playback_actions.can_skip);
+        assert!(status.play_modes.shuffle);
     }
 
     #[test]
