@@ -120,7 +120,8 @@ x2rock discover          # find players on this network and remember them
 x2rock rooms             # rooms and their playback state
 x2rock now               # what is playing
 x2rock status            # every room: now-playing, volume, grouping, TV — one call
-x2rock status --json     # the same, machine-readable, for scripts and agents
+x2rock status --json     # the same, machine-readable (a bare array), for scripts and agents
+x2rock status --json --full  # wrapped in a household envelope: which household/network, warnings
 x2rock play | pause | toggle | next | prev
 x2rock vol               # show volume  (--json for {room, volume, muted, fixed})
 x2rock vol 30            # set it

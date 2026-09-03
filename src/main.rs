@@ -60,6 +60,13 @@ enum Command {
     Status {
         #[arg(long)]
         json: bool,
+        /// Wrap the rooms in a household envelope: which household and network,
+        /// how many rooms answered, and warnings for any that did not. With
+        /// `--json` it becomes an object `{household, network, total, reachable,
+        /// warnings, rooms}`; on its own it adds a summary line. Plain `--json`
+        /// stays a bare array.
+        #[arg(long)]
+        full: bool,
     },
     /// Resume playback, or play track N from the queue.
     Play {
@@ -674,9 +681,12 @@ fn now_json(room: &str, status: &PlaybackStatus, meta: &MetadataStatus) -> serde
 /// snapshot opens a connection per coordinator (reusing the session's own where
 /// it coincides). One unreachable coordinator is that room's problem alone - it
 /// gets an `error` field and the rest of the household still reports.
-async fn print_status(session: &session::Session, json: bool) -> Result<()> {
+async fn print_status(session: &session::Session, json: bool, full: bool) -> Result<()> {
     let mut values = Vec::new();
     let mut lines = Vec::new();
+    // Rooms whose coordinator did not answer - the "expected but unreachable"
+    // an envelope warns about, and the count `reachable` is derived from.
+    let mut unreachable: Vec<String> = Vec::new();
     for group in &session.groups.groups {
         let target = session::Target {
             group_id: group.id.clone(),
@@ -715,15 +725,64 @@ async fn print_status(session: &session::Session, json: bool) -> Result<()> {
         // one unreachable coordinator is tagged, never propagated - the snapshot
         // always describes the whole household.
         let fetched = fetch_room(session, &target).await;
+        if fetched.is_err() {
+            unreachable.push(group.name.clone());
+        }
         if json {
             values.push(room_value(&facts, fetched));
         } else {
             lines.push(room_line(&facts, fetched));
         }
     }
-    if json {
-        println!("{}", serde_json::to_string(&values)?);
+
+    // The envelope's household context, gathered only when asked for it: a bare
+    // `status` should not pay a household round trip. Both are best-effort - a
+    // null beats a failed snapshot.
+    let (household, network, total) = if full {
+        (
+            session.connection.household_id().await.ok(),
+            netid::network_fingerprint(),
+            session.groups.groups.len(),
+        )
     } else {
+        (None, None, 0)
+    };
+    let warnings: Vec<String> = unreachable
+        .iter()
+        .map(|room| format!("{room} unreachable"))
+        .collect();
+
+    if json {
+        if full {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "household": household,
+                    "network": network,
+                    "total": total,
+                    "reachable": total - unreachable.len(),
+                    "warnings": warnings,
+                    "rooms": values,
+                }))?
+            );
+        } else {
+            // Bare array by default: the shape jq and existing callers expect.
+            println!("{}", serde_json::to_string(&values)?);
+        }
+    } else {
+        if full {
+            println!(
+                "household {}  network {}  {} rooms{}",
+                household.as_deref().unwrap_or("?"),
+                network.as_deref().unwrap_or("?"),
+                total,
+                if unreachable.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({} unreachable)", unreachable.len())
+                },
+            );
+        }
         for line in lines {
             println!("{line}");
         }
@@ -2612,8 +2671,8 @@ async fn run(cli: Cli) -> Result<()> {
     // Like `rooms`, this is a whole-household view and must not be forced to a
     // single group; it queries every coordinator itself, so it runs here rather
     // than after the single-room resolution below.
-    if let Command::Status { json } = cli.command {
-        return print_status(&session, json).await;
+    if let Command::Status { json, full } = cli.command {
+        return print_status(&session, json, full).await;
     }
 
     // Favorites belong to the household, not a group, so listing them needs no
@@ -3336,7 +3395,7 @@ mod tests {
         assert!(!fans_out(&Command::Play { track: Some(3) }));
         // Reads and whole-household commands are not fanned out.
         assert!(!fans_out(&Command::Now { json: false }));
-        assert!(!fans_out(&Command::Status { json: false }));
+        assert!(!fans_out(&Command::Status { json: false, full: false }));
         assert!(!fans_out(&Command::Rooms { json: false }));
     }
 

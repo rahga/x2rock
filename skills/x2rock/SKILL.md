@@ -15,6 +15,10 @@ has it, and read the fields rather than parsing the human prose.**
   now-playing (title, artist, service, position/duration), volume, grouping, and TV capability
   (`has_tv`). This is almost always the first thing to run.
 - `x2rock rooms --json` — just the room list and playback state; cheaper than `status`.
+- `x2rock status --json --full` — the same rooms wrapped in a household envelope: `{household,
+  network, total, reachable, warnings, rooms}`. Use it to confirm *which* household/network you are
+  on and whether every room answered (`warnings` names any that did not). Plain `--json` stays a
+  bare array.
 
 ### Reading a room's fields
 
