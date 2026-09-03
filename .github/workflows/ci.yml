@@ -1,0 +1,54 @@
+name: CI
+
+# Solo project committed straight to main, so main is where this has to run -
+# a pull_request-only workflow would never fire. PRs are covered too, for if
+# that ever changes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every job builds from the committed Cargo.lock. A CI run that quietly
+  # resolves a different dependency tree than the one on disk is not checking
+  # what is in the repo.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      # Stock rustfmt, no rustfmt.toml - see the sweep in ba4c186 for why the
+      # defaults rather than a config matching the hand style.
+      - name: Formatting
+        run: cargo fmt --check
+
+      # --all-targets so the test modules are linted too; that is where most of
+      # the code rustfmt reformatted actually lives.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+  msrv:
+    name: builds on 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo.toml claims rust-version = "1.88". Nothing checked that claim
+      # until now, and a dependency bump can raise it without saying so.
+      - name: Install 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+
+      - name: Check
+        run: cargo +1.88 check --all-targets --locked
