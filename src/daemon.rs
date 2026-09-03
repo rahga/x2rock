@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -36,6 +36,16 @@ const HEARTBEAT: Duration = Duration::from_secs(3600);
 
 fn log(message: &str) {
     eprintln!("x2rock: {message}");
+}
+
+/// `X2ROCK_LOG_VERBOSE`, read once for the whole run.
+///
+/// The flag is a knob for the run rather than a per-call cost, and [`apply`]
+/// sits well away from the loop that used to own it as a local - so it lives
+/// here instead of being threaded through every event path.
+fn verbose() -> bool {
+    static VERBOSE: OnceLock<bool> = OnceLock::new();
+    *VERBOSE.get_or_init(|| std::env::var_os("X2ROCK_LOG_VERBOSE").is_some())
 }
 
 /// What [`StatusLog::decide`] resolved to: log fresh, log a heartbeat carrying
@@ -147,10 +157,8 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
     // off is still waiting to be seen rather than lost between subscriptions.
     let mut restarts = restarts.subscribe();
 
-    // Read once, not per line: a knob for the whole run, not a per-call cost.
-    let verbose = std::env::var_os("X2ROCK_LOG_VERBOSE").is_some();
     let mut backoff = MIN_BACKOFF;
-    let mut status = StatusLog::new(verbose);
+    let mut status = StatusLog::new(verbose());
     loop {
         // Computed here, not read out of the error, so a network switch is a
         // status change even when the failure text is identical - and connect()
@@ -190,7 +198,7 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
         // Restored only under verbose: coalescing drops it because the backoff
         // ramps and would defeat the dedup, but when diagnosing reconnects the
         // ramp is exactly what you want to watch.
-        if verbose {
+        if verbose() {
             log(&format!("retrying in {}s", backoff.as_secs()));
         }
         tokio::time::sleep(backoff).await;
@@ -560,6 +568,16 @@ fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
 async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
     let player = server.imp();
     let body = event.body.clone();
+    // Under verbose, the body exactly as it arrived. A partial `playbackStatus`
+    // - one with no `playbackState` - is now folded in silently and leaves no
+    // other trace, so this is the only way to catch one in the act. Logged
+    // before the match, so a body that still fails to parse is shown too.
+    if verbose() {
+        log(&format!(
+            "{}: {} {}",
+            player.room, event.namespace, event.body
+        ));
+    }
     let properties = match event.namespace.as_str() {
         "playback:1" => {
             let mut properties = player.apply_playback(&serde_json::from_value(body)?);
