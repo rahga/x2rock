@@ -1,0 +1,50 @@
+name: Audit
+
+# Separate from CI because it answers a different question on a different
+# clock. CI asks "did this commit break something" and is driven by commits;
+# an advisory lands against a dependency you have not touched, so a
+# push-triggered audit on a project that goes quiet for weeks would say
+# nothing for exactly as long as it mattered. Hence the schedule.
+#
+# GitHub emails the repository owner when a scheduled run fails, which is the
+# whole notification mechanism here - there is nowhere else this reports.
+on:
+  schedule:
+    # Mondays, 07:00 UTC. Scheduled workflows only run on the default branch.
+    - cron: '0 7 * * 1'
+  push:
+    branches: [main]
+    # On a push, only when the dependency set or this workflow actually moved.
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/audit.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      # Built from source rather than pulled from a third-party action. It is
+      # ~2 minutes, which is nothing on a weekly job, and it keeps the trust
+      # surface to crates.io and RustSec's own advisory database - the two this
+      # check already depends on.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Default severity on purpose: vulnerabilities fail the job, and
+      # `unmaintained`/`yanked` notices are reported without failing it. A
+      # dependency going unmaintained is real information but it is not a
+      # vulnerability, and failing on it trains you to ignore a red build.
+      # Clean as of 2026-09-03: 173 crates, zero of either.
+      - name: Audit
+        run: cargo audit
