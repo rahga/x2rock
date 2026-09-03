@@ -4203,6 +4203,15 @@ Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_p
   fills it with `rooms` (the whole list) and `did_you_mean` (Levenshtein near-misses), so a mistyped
   `-r "bedoom"` comes back with `["Bedroom"]` in one call instead of a fail / `x2rock rooms` / retry
   round trip. The `data` object cannot shadow `error`/`code`/`fix`, pinned by a test that tries.
+- **A `fix` must not invite a harmful auto-run - so `unregistered_network` has none.** It originally
+  offered `x2rock discover`, but a testing agent pointed out that the "when `fix` is non-null, run it
+  and retry" contract then means: a laptop on a café network is asked to pause, gets
+  `unregistered_network`, and *scans the café's network* - the exact road-warrior behaviour the
+  design avoids. The fix is now `null`; the message says discovery is deliberate and offered, not
+  reflexive. The rule is general: a `fix` is a *safe, local* remedy, and a command that scans someone
+  else's network is not one to hand an agent that will run it unprompted. The generic no-remedy code
+  was also renamed `error` -> `unknown`, so `{"error": …, "code": "unknown"}` no longer reads a code
+  named `error` inside a field named `error`.
 
 ### The daemon stops narrating an unchanged state
 
