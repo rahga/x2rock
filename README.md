@@ -195,6 +195,22 @@ is the command that resolves it, verbatim, when there is one. An error with no k
 structured — `{"code":"error", …, "fix":null}`. Without `--json` the message prints as prose exactly
 as before.
 
+### The agent skill
+
+`x2rock skill` installs a [Claude](https://claude.com/claude-code) skill that teaches an AI
+assistant on this machine to drive the CLI — the `status --json` snapshot, the error `code`/`fix`
+contract above, and the command surface:
+
+```sh
+x2rock skill              # → ~/.claude/skills/x2rock/ (or $CLAUDE_CONFIG_DIR/skills/)
+x2rock skill --dir path   # write somewhere else, e.g. a project's .claude/skills
+x2rock skill --print      # emit it to stdout — to inspect, or to seed a non-Claude agent
+```
+
+The skill is embedded in the binary, so it always matches the CLI it documents; re-run after an
+upgrade to refresh it. With it installed, asking Claude to control Sonos loads x2rock's usage
+automatically.
+
 ## MPRIS
 
 This is the feature most of the rest rides on: **x2rock makes Sonos a first-class citizen of the

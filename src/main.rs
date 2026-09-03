@@ -12,6 +12,7 @@ mod sonos;
 mod state;
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -330,6 +331,19 @@ enum Command {
     Discover,
     /// Publish every room as an MPRIS2 media player, until stopped.
     Daemon,
+    /// Install the x2rock agent skill so an AI assistant on this machine knows
+    /// how to drive the CLI. Writes to `~/.claude/skills/x2rock/` by default
+    /// (or `$CLAUDE_CONFIG_DIR/skills/`); the skill is embedded in the binary,
+    /// so it always matches this version.
+    Skill {
+        /// Where to write it, in place of the default Claude skills directory.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Print the skill to stdout instead of writing it - for inspection, or
+        /// to seed an agent that is not Claude.
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 /// Worked examples for `raw --help`. Every one of these was run against a real
@@ -1998,6 +2012,44 @@ async fn main() {
     }
 }
 
+/// The agent skill, embedded so it ships with the binary and cannot drift from
+/// the CLI it documents. Written to disk, or printed, by `x2rock skill`.
+const SKILL: &str = include_str!("../skills/x2rock/SKILL.md");
+
+/// Where `x2rock skill` writes, absent `--dir`: `$CLAUDE_CONFIG_DIR/skills` when
+/// that is set (Claude Code honours it), else `~/.claude/skills`.
+fn default_skills_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("skills"));
+    }
+    let home = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow!("no home directory to find ~/.claude in; pass --dir"))?
+        .home_dir()
+        .to_path_buf();
+    Ok(home.join(".claude").join("skills"))
+}
+
+/// `x2rock skill`: drop the embedded skill into a Claude skills directory (or
+/// print it). Needs no network - it is a local file write.
+fn install_skill(dir: Option<&std::path::Path>, print: bool) -> Result<()> {
+    if print {
+        print!("{SKILL}");
+        return Ok(());
+    }
+    let base = match dir {
+        Some(d) => d.to_path_buf(),
+        None => default_skills_dir()?,
+    };
+    let target = base.join("x2rock");
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("creating {}", target.display()))?;
+    let path = target.join("SKILL.md");
+    std::fs::write(&path, SKILL).with_context(|| format!("writing {}", path.display()))?;
+    println!("Wrote the x2rock skill to {}.", path.display());
+    println!("A Claude assistant on this machine will pick it up for Sonos tasks.");
+    Ok(())
+}
+
 /// Whether the invoked command was asked for `--json`, so an error can match the
 /// output the caller expected. Only the data commands carry the flag.
 fn wants_json(command: &Command) -> bool {
@@ -2019,6 +2071,7 @@ fn wants_json(command: &Command) -> bool {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
+        Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
         Command::PlayItem {
             ref service,
             ref id,
@@ -3075,6 +3128,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Unlink { .. }
         | Command::Accounts { .. }
         | Command::Discover
+        | Command::Skill { .. }
         | Command::Daemon => unreachable!("handled above"),
     }
     Ok(())
@@ -3099,6 +3153,17 @@ mod tests {
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
+    }
+
+    #[test]
+    fn the_embedded_skill_carries_its_frontmatter_and_contracts() {
+        // include_str! guarantees the file exists at build time; this guards its
+        // shape - the frontmatter a skill needs, and the two contracts the skill
+        // exists to teach, so an edit cannot quietly drop them.
+        assert!(SKILL.starts_with("---\nname: x2rock\n"), "needs skill frontmatter");
+        assert!(SKILL.contains("description:"), "needs a description to be discovered");
+        assert!(SKILL.contains("x2rock status --json"), "should teach the status snapshot");
+        assert!(SKILL.contains("unregistered_network"), "should teach the error codes");
     }
 
     #[test]
