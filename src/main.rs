@@ -668,49 +668,20 @@ async fn print_status(session: &session::Session, json: bool) -> Result<()> {
             .player(&group.coordinator_id)
             .map(|p| p.name.as_str());
 
-        match fetch_room(session, &target).await {
-            Ok((status, meta, volume)) => {
-                if json {
-                    let mut obj = now_json(&group.name, &status, &meta);
-                    if let serde_json::Value::Object(map) = &mut obj {
-                        map.insert("volume".into(), json!(volume.as_ref().map(|v| v.volume)));
-                        map.insert("muted".into(), json!(volume.as_ref().map(|v| v.muted)));
-                        map.insert("members".into(), json!(members));
-                        map.insert("coordinator".into(), json!(coordinator));
-                        map.insert("has_tv".into(), json!(has_tv));
-                    }
-                    values.push(obj);
-                } else {
-                    let vol = match &volume {
-                        Some(v) if v.muted => "  vol muted".to_string(),
-                        Some(v) => format!("  vol {}", v.volume),
-                        None => String::new(),
-                    };
-                    let grouped = if members.len() > 1 {
-                        format!("  [{}]", members.join(", "))
-                    } else {
-                        String::new()
-                    };
-                    lines.push(format!(
-                        "{:<16} {}{vol}{grouped}",
-                        group.name,
-                        now_line(&status, &meta)
-                    ));
-                }
-            }
-            Err(e) => {
-                if json {
-                    values.push(json!({
-                        "room": group.name,
-                        "error": format!("{e:#}"),
-                        "members": members,
-                        "coordinator": coordinator,
-                        "has_tv": has_tv,
-                    }));
-                } else {
-                    lines.push(format!("{:<16} unreachable ({e:#})", group.name));
-                }
-            }
+        let facts = RoomFacts {
+            name: &group.name,
+            members: &members,
+            coordinator,
+            has_tv,
+        };
+        // Fetched once; a failure is this room's alone. Both branches push, so
+        // one unreachable coordinator is tagged, never propagated - the snapshot
+        // always describes the whole household.
+        let fetched = fetch_room(session, &target).await;
+        if json {
+            values.push(room_value(&facts, fetched));
+        } else {
+            lines.push(room_line(&facts, fetched));
         }
     }
     if json {
@@ -721,6 +692,63 @@ async fn print_status(session: &session::Session, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What the group listing knows about a room independent of reaching it: enough
+/// that an errored room still tells an agent its identity, grouping and TV.
+struct RoomFacts<'a> {
+    name: &'a str,
+    members: &'a [String],
+    coordinator: Option<&'a str>,
+    has_tv: bool,
+}
+
+type Fetched = Result<(PlaybackStatus, MetadataStatus, Option<Volume>)>;
+
+/// One room's JSON, whether or not its coordinator answered. On success it is
+/// the `now --json` object plus the group facts; on failure an `error` entry
+/// that still carries the facts, so a dead room is legible rather than absent.
+fn room_value(facts: &RoomFacts, fetched: Fetched) -> serde_json::Value {
+    match fetched {
+        Ok((status, meta, volume)) => {
+            let mut obj = now_json(facts.name, &status, &meta);
+            if let serde_json::Value::Object(map) = &mut obj {
+                map.insert("volume".into(), json!(volume.as_ref().map(|v| v.volume)));
+                map.insert("muted".into(), json!(volume.as_ref().map(|v| v.muted)));
+                map.insert("members".into(), json!(facts.members));
+                map.insert("coordinator".into(), json!(facts.coordinator));
+                map.insert("has_tv".into(), json!(facts.has_tv));
+            }
+            obj
+        }
+        Err(e) => json!({
+            "room": facts.name,
+            "error": format!("{e:#}"),
+            "members": facts.members,
+            "coordinator": facts.coordinator,
+            "has_tv": facts.has_tv,
+        }),
+    }
+}
+
+/// The text form of the same, one line per room.
+fn room_line(facts: &RoomFacts, fetched: Fetched) -> String {
+    match fetched {
+        Ok((status, meta, volume)) => {
+            let vol = match &volume {
+                Some(v) if v.muted => "  vol muted".to_string(),
+                Some(v) => format!("  vol {}", v.volume),
+                None => String::new(),
+            };
+            let grouped = if facts.members.len() > 1 {
+                format!("  [{}]", facts.members.join(", "))
+            } else {
+                String::new()
+            };
+            format!("{:<16} {}{vol}{grouped}", facts.name, now_line(&status, &meta))
+        }
+        Err(e) => format!("{:<16} unreachable ({e:#})", facts.name),
+    }
 }
 
 /// The three group-scoped reads a snapshot wants, off the group's coordinator.
@@ -3033,5 +3061,30 @@ mod tests {
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
+    }
+
+    #[test]
+    fn an_unreachable_room_is_tagged_not_dropped() {
+        // Proven live by unplugging a speaker: a coordinator that will not answer
+        // must not sink the snapshot. Its entry carries the error and still the
+        // room's identity, grouping and TV, so an agent is not blind about it -
+        // and no playback state, so an error is never misread as "stopped".
+        let members = vec!["Kitchen".to_string()];
+        let facts = RoomFacts {
+            name: "Kitchen",
+            members: &members,
+            coordinator: Some("Kitchen"),
+            has_tv: false,
+        };
+        let v = room_value(
+            &facts,
+            Err(anyhow!("timed out connecting to player at 192.168.86.26:1443")),
+        );
+        assert_eq!(v["room"], "Kitchen");
+        assert!(v["error"].as_str().unwrap().contains("timed out"), "{v}");
+        assert_eq!(v["has_tv"], json!(false));
+        assert_eq!(v["members"], json!(["Kitchen"]));
+        assert_eq!(v["coordinator"], json!("Kitchen"));
+        assert!(v.get("state").is_none(), "an errored room has no playback state");
     }
 }
