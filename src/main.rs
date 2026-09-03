@@ -2496,6 +2496,17 @@ async fn run(cli: Cli) -> Result<()> {
     // moving the command out. Multi-room commands read `cli.room` (the whole
     // list) instead.
     let room = cli.room.first().map(String::as_str);
+    // Refuse a misapplied --all before dispatch: most commands return from the
+    // match below without ever reaching the fan-out, and a silently ignored
+    // flag reads as whole-house semantics honored. `bookmarks` is exempt: its
+    // own `-a/--all` ("include daemon history") shares clap's arg id with this
+    // flag, so setting either sets both.
+    if cli.all && !matches!(cli.command, Command::Bookmarks { .. }) {
+        ensure!(
+            fans_out(&cli.command),
+            "--all applies only to the per-room commands (volume, transport, repeat, shuffle)"
+        );
+    }
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
         Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
@@ -3143,12 +3154,8 @@ async fn run(cli: Cli) -> Result<()> {
 
     // --all fans a per-room command across every group, resolved by each
     // group's coordinator name (a real room name; the composite group name is
-    // not addressable).
+    // not addressable). Already vetted against fans_out at the top of run().
     if cli.all {
-        ensure!(
-            fans_out(&cli.command),
-            "--all applies only to the per-room commands (volume, transport, repeat, shuffle)"
-        );
         let every: Vec<String> = session
             .groups
             .groups

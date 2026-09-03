@@ -175,7 +175,17 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
             // then holds, and folding it in would defeat the coalescing during
             // the ramp. The heartbeat's "N× in the last hour" conveys that the
             // daemon is still trying.
-            Err(e) => status.note(format!("{fingerprint:?}|{e:#}"), &format!("no player: {e:#}")),
+            // "no player: " frames a generic connect failure by its consequence,
+            // but the unregistered-network line must not lead with the *name* of
+            // the other error code - the skill teaches agents to tell the two
+            // apart in this very log.
+            Err(e) => {
+                let line = match crate::hint::of(&e).0 {
+                    "unregistered_network" => format!("{e:#}"),
+                    _ => format!("no player: {e:#}"),
+                };
+                status.note(format!("{fingerprint:?}|{e:#}"), &line);
+            }
         }
         // Restored only under verbose: coalescing drops it because the backoff
         // ramps and would defeat the dedup, but when diagnosing reconnects the

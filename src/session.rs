@@ -50,23 +50,9 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
         // An unregistered network: this gateway has never been discovered on.
         // `players_on` is empty only for a fingerprint not in state, because a
         // network is remembered only once it has players - so this branch *is*
-        // the unregistered-network case, and says so by name.
-        //
-        // The `fix` is deliberately null. `x2rock discover` scans the local
-        // network, which must not be auto-run on an unfamiliar one (a cafe, a
-        // client site) just because an agent follows a "run the fix" rule - the
-        // exact behaviour the road-warrior design avoids. Discovery is offered,
-        // not run. The message says how; the field withholds the command.
-        return Err(crate::hint::Hint::new(
-            format!(
-                "unregistered network (gateway {fingerprint}): no speakers are known here. This is \
-                 normal away from home. `x2rock discover` will scan *this* network for speakers - \
-                 offer it rather than run it unasked - or pass `--ip <speaker>`."
-            ),
-            "unregistered_network",
-            None,
-        )
-        .into());
+        // the unregistered-network case, and says so by name. The constructor
+        // owns the never-hand-out-a-scan rationale (and its pinning test).
+        return Err(crate::hint::unregistered_network(fingerprint));
     }
 
     for player in &known {
@@ -82,15 +68,7 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
         Some(ip) => attach(IpAddr::V4(*ip), state, Some(fingerprint)).await,
         None => {
             let names: Vec<_> = known.iter().map(|p| p.name.as_str()).collect();
-            Err(crate::hint::Hint::new(
-                format!(
-                    "no players found on this network (previously: {})",
-                    names.join(", ")
-                ),
-                "no_player",
-                Some("x2rock discover".into()),
-            )
-            .into())
+            Err(crate::hint::no_players_answered(&names))
         }
     }
 }

@@ -194,13 +194,15 @@ A command that failed with `--json` reports the failure as JSON on stderr and ex
 caller reads a field instead of parsing a sentence:
 
 ```json
-{"code":"unregistered_network","error":"unregistered network (gateway …): … `x2rock discover` will scan this network — offer it, do not auto-run …","fix":null}
+{"code":"unregistered_network","error":"unregistered network (gateway …): no speakers are known here. This is normal away from home. `x2rock discover` will scan this network for speakers - offer it rather than run it unasked - or pass `--ip <speaker>`.","fix":null}
 ```
 
 `code` is a stable identifier for the *kind* of failure — `unregistered_network` (fix **null**: the
 machine is on a network with no known speakers, normal away from home; `x2rock discover` is *offered*,
 never auto-run, since it scans the local network), `unknown_room` (`x2rock rooms`), `needs_link`
-(`x2rock link <service>`), `no_player` (`x2rock discover`), `too_many_rooms` (several `-r` on a
+(`x2rock link <service>`), `no_player` (fix **null** too: by the time it is reported, the rescan
+`connect` runs on a known network has already come back empty, so `x2rock discover` would only
+repeat it — the speakers are most likely powered off), `too_many_rooms` (several `-r` on a
 single-room command) — `error`
 is the same human message the plain CLI prints, and `fix` is the command that resolves it, verbatim,
 when there is one. An error with no known remedy is still structured — `{"code":"unknown", …,

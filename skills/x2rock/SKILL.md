@@ -7,8 +7,8 @@ description: Control Sonos speakers from the command line with the `x2rock` CLI 
 
 `x2rock` controls Sonos speakers on the local network — no account, no cloud. Every command is a
 one-shot subprocess. A **background daemon may also be running** (it publishes now-playing to the
-Linux desktop over MPRIS) — it is *not* needed for CLI control, but it keeps a log that is the first
-place to look when speakers seem missing (see "When no speakers are available"). Two contracts hold
+Linux desktop over MPRIS) — it is *not* needed for anything you do from the CLI. When speakers seem
+missing, `x2rock status` diagnoses it (see "When no speakers are available"). Two contracts hold
 everything together:
 
 1. **Run `x2rock status --json` first.** It is the whole household in one call, and you cannot write
@@ -71,9 +71,12 @@ CLI it came from — if the version has moved since you installed the skill, re-
 ]
 ```
 
-`now --json` is a **single bare object** — one room's fields, the same as a `status` entry (state,
-title, artist, service, position_ms, on_tv, …), with no `-r` picking the household's one group (and
-erroring if there are several). It is the confirm-step after a play.
+`now --json` is a **single bare object** — one room's *now-playing* fields (state, title, artist,
+album, service, service_id, position_ms, duration_ms, repeat, shuffle, on_tv, input_format,
+surround, art_url), with no `-r` picking the household's one group (and erroring if there are
+several). It is the confirm-step after a play. It is a **subset** of a `status` entry: `volume`,
+`muted`, `audible`, `members`, `coordinator` and `has_tv` are **not** in it — read those from
+`status --json` (or audibility from `vol --json`).
 
 `bookmarks --json` and `accounts --json` are bare arrays. `queue --json` is an **object**:
 `{"current": <index>, "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
@@ -89,19 +92,24 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - **`--player` reads *and* writes one speaker.** `-r Kitchen vol --player` (no number) **reads** that
   single speaker's own volume; with a number it sets it. This is how you observe the balance inside a
   group — the `volume` on a grouped `status` entry is the group mix, and per-member volumes are not
-  in `status`, so read them one at a time with `vol --player`. `--player` does **not** apply to
-  `mute` (muting one speaker of a group is refused — group mute is what people mean).
+  in `status`; read them all in one call by repeating `-r`:
+  `x2rock -r Kitchen -r "Dining Room" vol --player`. `--player` does **not** apply to `mute` — it is
+  refused always (code `unknown`), grouped or not: group mute is what people mean, and on a lone room
+  plain `vol mute` already is that one speaker.
 - **`--all` fans over groups, not raw rooms**, so a grouped pair is moved **once**, correctly:
   `--all vol -10` takes each group down 10, not each member (a grouped Kitchen+Dining does not go
   down 20). Read "every room" as "every group". `--all` is exclusive with `-r` (clap rejects both),
-  and on a command that does not fan out it errors (code `unknown`).
+  and on a command that does not fan out it errors (code `unknown`) — except `bookmarks`, where
+  `--all` means "include daemon-noticed history" instead.
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
 `group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
 topology takes a second or two to settle — re-read `status` rather than assuming. These are
 **idempotent**: `party` on an already-partied house, `party off` when nothing is grouped, `ungroup`
-a lone room, and `tv` on a room already on TV are all safe no-ops, not errors.
+a lone room, and `tv` on a room already on TV are all safe no-ops, not errors. Idempotent is not
+consequence-free when the state *does* change — `party` and `ungroup` reach other people's rooms;
+see "Ask before you act".
 
 ## Commands, by intent
 
@@ -115,7 +123,7 @@ a lone room, and `tv` on a room already on TV are all safe no-ops, not errors.
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
-| The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` |
+| The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
@@ -164,17 +172,15 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 |---|---|---|
 | `unknown_room` | the `-r` name is not a room (or is a group's composite label) | `x2rock rooms` (and see `did_you_mean`) |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
-| `no_player` | speakers were known here but none answered | `x2rock discover` |
+| `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry.** **When `fix` is null, do not — read the `error` and
-change the request.** The important null one is **`unregistered_network`**: it means the machine is
-on a network with no known speakers (a café, a client site — normal for a roaming laptop).
-`x2rock discover` *would* find speakers, but it **scans the local network**, so never run it
-unprompted on an unfamiliar one — offer it, and only when the user confirms this is their own
-network. See "When no speakers are available".
+change the request.** The two null network codes matter most: neither `unregistered_network` nor
+`no_player` carries a fix, because the remedy people reach for — `x2rock discover` — must never be
+run reflexively. Why, and what to do instead, is "When no speakers are available".
 
 `unknown_room` carries extra detail so you need not re-fetch:
 
@@ -190,7 +196,9 @@ normal, not a fault**, and almost always the answer when a command fails with `u
 or the user is surprised nothing responds.
 
 - **`x2rock status` diagnoses it:** `unregistered_network` (an unfamiliar network — the household is
-  simply elsewhere) vs `no_player` (a *known* network whose speakers moved, where `discover` helps).
+  simply elsewhere) vs `no_player` (a *known* network where a rescan already ran and found nothing —
+  the speakers are likely powered off, and another `discover` just repeats that scan, so re-check
+  later rather than looping it).
 - **A background daemon may be running** (Linux/MPRIS): it withdraws and reconnects on its own as the
   laptop moves networks, and logs the state — `journalctl --user -u x2rock.service` shows
   `x2rock: Kitchen -> org.mpris.MediaPlayer2.x2rock-…` when connected, or an hourly
@@ -212,11 +220,29 @@ or the user is surprised nothing responds.
   undetectable. After a favorite, `now --json` and compare the title to the favorite name; flag a
   surprising mismatch, don't warn routinely.
 
+## Ask before you act — it is a shared house
+
+Several commands reach other people, so the *unrequested* ones deserve a check — but **a user who
+names the action has already decided: run it, with no confirmation and no pros-and-cons.** "Ungroup
+the kitchen" means ungroup the kitchen; "wake her up with music at full volume" *is* the
+instruction. Confirm — one short question, never a debate — only when the risky part is your own
+inference from a vague request:
+
+- **`party`** as your reading of "play it everywhere"-ish — it captures every room; someone may be
+  asleep in one.
+- **A loud volume the user did not name** — a big jump or high absolute you derived (`vol 90`).
+- **`queue clear`** as your reading of "clean it up" — irreversible; Sonos keeps no undo (hence the
+  required `--yes`).
+- **`ungroup` as your means to some other end** — the room drops back to its *first* track (it loses
+  its place). Asked for directly, just do it; mention the lost place only when it clearly matters
+  (mid-audiobook).
+
 ## Verifying, and latency
 
 - **Confirm a play with `now --json`**: expect `BUFFERING` before `PLAYING`; an immediate read may
   still show `IDLE`/`BUFFERING`, so wait a second and re-check. `PLAYING` with `position_ms`
-  advancing between two reads is real sound (subject to `audible`).
+  advancing between two reads is real sound — subject to `audible`, which `now --json` does **not**
+  carry: read it from the room's `status --json` entry or `vol --json`.
 - **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`link` reach the
   internet — seconds, not instant. Everything local (transport, volume, status, queue) is fast.
 
@@ -230,7 +256,9 @@ or the user is surprised nothing responds.
 - A wrong room means loud music in the wrong place — accept a single high-confidence `did_you_mean`,
   confirm when unsure.
 - **`-r` is repeatable** (per-room commands); **`--all`** does every room; any other command rejects
-  several `-r` (`too_many_rooms`). A fan-out stops at the first failure, naming it.
+  several `-r` (`too_many_rooms`). A fan-out stops at the first failure, naming it — **the rooms
+  before it already applied**, the ones after did not. Never re-run the whole batch after a partial
+  failure (a relative `vol -10` would hit the finished rooms twice); redo only the rooms not reached.
 - Volume is **relative** (`vol +5`/`-10`) or absolute (`vol 30`); a relative change **clamps at
   0/100**, never errors.
 
@@ -253,7 +281,10 @@ YouTube Music" fails with `needs_link` or finds nothing). Reach them three other
   station) into a *local* list, so it can be replayed later without a favorite. It is x2rock's own
   record, not a Sonos favorite.
 - **`bookmark "<name>"`** — plays back something `keep` (or the daemon, automatically) recorded.
-  `bookmarks --json` is a bare array: `[{id, name, type, service, description, art_url}]`.
+  `bookmarks --json` is a bare array: `[{id, name, type, service, description, art_url}]`. By default
+  it lists only what was kept on purpose; `bookmarks --all` (here meaning "include daemon-noticed
+  history", not whole-house) adds what the daemon noticed playing — the answer to "that thing from
+  yesterday".
 
 ## `raw`, and its boundary
 

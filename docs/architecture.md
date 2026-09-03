@@ -4196,7 +4196,7 @@ Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_p
 
 - **`no_player` inherits a sharper inner code.** Wrapping a connect failure as "no player to play it
   on" would bury an `unregistered_network` underneath; the wrapper keeps a *connection-layer* inner
-  code when there is one (same `discover` fix, better diagnosis) and defaults to `no_player`
+  code when there is one (better diagnosis; at the time both carried the same `discover` fix) and defaults to `no_player`
   otherwise. Restricted to connection-layer codes after a review noted the general version could
   pair a mismatched fix with the wrapper's message.
 - **The `data` payload lets an error hand back what the caller would re-fetch.** `unknown_room`
@@ -4209,7 +4209,12 @@ Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_p
   `unregistered_network`, and *scans the café's network* - the exact road-warrior behaviour the
   design avoids. The fix is now `null`; the message says discovery is deliberate and offered, not
   reflexive. The rule is general: a `fix` is a *safe, local* remedy, and a command that scans someone
-  else's network is not one to hand an agent that will run it unprompted. The generic no-remedy code
+  else's network is not one to hand an agent that will run it unprompted. A later review generalized
+  it to `no_player`: `connect` has already rescanned a known network by the time it reports one, so
+  the fix just repeated the scan that came back empty — and the wrapper's fallback arm was minting a
+  scan for failures nothing had classified (a stale `--ip` on café wifi). `x2rock discover` now
+  appears only in messages, as an offer, never in `fix`; the hint constructors live in `hint.rs` and
+  a test pins that neither network error carries a runnable scan. The generic no-remedy code
   was also renamed `error` -> `unknown`, so `{"error": …, "code": "unknown"}` no longer reads a code
   named `error` inside a field named `error`.
 
