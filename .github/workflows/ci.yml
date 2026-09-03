@@ -21,7 +21,7 @@ jobs:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -43,7 +43,7 @@ jobs:
     name: builds on 1.88
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Cargo.toml claims rust-version = "1.88". Nothing checked that claim
       # until now, and a dependency bump can raise it without saying so.
