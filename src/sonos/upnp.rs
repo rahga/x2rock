@@ -784,8 +784,12 @@ pub fn serials_in(items: &[BrowseItem]) -> BTreeSet<(String, String)> {
         {
             // Art URLs carry the same query percent-encoded, as the `u=`
             // parameter of `/getaa`, so one decode serves both shapes.
-            let flat = text.replace("%3d", "=").replace("%3D", "=").replace("%26", "&");
-            if let (Some(sid), Some(sn)) = (digits_after(&flat, "sid="), digits_after(&flat, "sn=")) {
+            let flat = text
+                .replace("%3d", "=")
+                .replace("%3D", "=")
+                .replace("%26", "&");
+            if let (Some(sid), Some(sn)) = (digits_after(&flat, "sid="), digits_after(&flat, "sn="))
+            {
                 out.insert((sid.to_string(), sn.to_string()));
             }
         }
@@ -920,7 +924,9 @@ mod tests {
             item(Some("x-sonos-http:podcast.mp3?sid=6&flags=8&sn=15"), None),
             item(
                 None,
-                Some("/getaa?s=1&u=x-sonosapi-hls-static%3acloudcast%3fsid%3d181%26flags%3d8232%26sn%3d17"),
+                Some(
+                    "/getaa?s=1&u=x-sonosapi-hls-static%3acloudcast%3fsid%3d181%26flags%3d8232%26sn%3d17",
+                ),
             ),
         ];
         let got = serials_in(&items);

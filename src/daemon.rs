@@ -17,13 +17,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::mpris::{RoomPlayer, bus_suffix};
-use mpris_server::Property;
 use crate::netid;
 use crate::restart::{Restart, Restarts};
 use crate::session::{self, Session};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{self, Event, Groups, Player};
 use crate::state::State;
+use mpris_server::Property;
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -90,9 +90,9 @@ impl StatusLog {
         match self.decide(key, Instant::now()) {
             None => {}
             Some(Emit::Fresh) => log(message),
-            Some(Emit::Heartbeat(n)) => {
-                log(&format!("{message} (unchanged, {n}\u{00d7} in the last hour)"))
-            }
+            Some(Emit::Heartbeat(n)) => log(&format!(
+                "{message} (unchanged, {n}\u{00d7} in the last hour)"
+            )),
         }
     }
 
@@ -663,16 +663,28 @@ mod tests {
         // First sighting of a status logs.
         assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
         // Same status inside the window says nothing, however many passes.
-        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(60)), None);
-        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(120)), None);
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + Duration::from_secs(60)),
+            None
+        );
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + Duration::from_secs(120)),
+            None
+        );
         // Past the window, one line, counting itself plus the two it held.
         assert_eq!(
-            s.decide("unreg|net-a".into(), t0 + HEARTBEAT + Duration::from_secs(1)),
+            s.decide(
+                "unreg|net-a".into(),
+                t0 + HEARTBEAT + Duration::from_secs(1)
+            ),
             Some(Emit::Heartbeat(3))
         );
         // And the window starts over from that heartbeat.
         assert_eq!(
-            s.decide("unreg|net-a".into(), t0 + HEARTBEAT + Duration::from_secs(2)),
+            s.decide(
+                "unreg|net-a".into(),
+                t0 + HEARTBEAT + Duration::from_secs(2)
+            ),
             None
         );
     }
@@ -682,7 +694,10 @@ mod tests {
         let t0 = Instant::now();
         let mut s = StatusLog::new(false);
         assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
-        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)), None);
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)),
+            None
+        );
         // The fingerprint is in the key, so moving to another network is a
         // different status and logs immediately - a move is worth seeing.
         assert_eq!(
@@ -712,7 +727,13 @@ mod tests {
         // The same status, back to back inside the window, still logs each time -
         // never suppressed, never folded into a heartbeat.
         assert_eq!(s.decide("unreg|net-a".into(), t0), Some(Emit::Fresh));
-        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)), Some(Emit::Fresh));
-        assert_eq!(s.decide("unreg|net-a".into(), t0 + Duration::from_secs(2)), Some(Emit::Fresh));
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + Duration::from_secs(1)),
+            Some(Emit::Fresh)
+        );
+        assert_eq!(
+            s.decide("unreg|net-a".into(), t0 + Duration::from_secs(2)),
+            Some(Emit::Fresh)
+        );
     }
 }

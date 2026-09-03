@@ -666,7 +666,11 @@ mod tests {
 
     #[test]
     fn forget_resolves_exactly_as_find_does() {
-        let names = [("Bodies", "a"), ("Body Language", "b"), ("Bodies Live", "c")];
+        let names = [
+            ("Bodies", "a"),
+            ("Body Language", "b"),
+            ("Bodies Live", "c"),
+        ];
         let build = || {
             let mut list = Bookmarks::default();
             for (n, o) in names {
@@ -688,7 +692,12 @@ mod tests {
 
         // Ambiguous and absent both refuse, and refuse without removing.
         let mut list = build();
-        assert!(list.forget("bod").unwrap_err().to_string().contains("matches 3"));
+        assert!(
+            list.forget("bod")
+                .unwrap_err()
+                .to_string()
+                .contains("matches 3")
+        );
         assert!(list.forget("nothing").is_err());
         assert_eq!(list.items.len(), 3);
     }
@@ -698,7 +707,10 @@ mod tests {
         // The entry most worth removing is the one nobody chose to save.
         let mut list = Bookmarks::default();
         list.note(bm("In the Clouds", "a"), 1);
-        assert!(list.listed(false).is_empty(), "not pinned, so not listed plainly");
+        assert!(
+            list.listed(false).is_empty(),
+            "not pinned, so not listed plainly"
+        );
         assert_eq!(list.forget("clouds").unwrap().object_id, "a");
         assert!(list.items.is_empty());
     }

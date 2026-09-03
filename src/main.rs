@@ -19,7 +19,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use sonos::local::Connection;
-use sonos::proto::{Favorite, Group, Groups, MetadataStatus, PlaybackStatus, Player, Repeat, Volume};
+use sonos::proto::{
+    Favorite, Group, Groups, MetadataStatus, PlaybackStatus, Player, Repeat, Volume,
+};
 use sonos::upnp::{self, Upnp};
 use state::State;
 
@@ -46,7 +48,6 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
-
 
 #[derive(Subcommand)]
 enum Command {
@@ -708,9 +709,11 @@ fn now_json(
     // player's own metadata carries a wrong or internal id for HLS/stream
     // content (65435 for a YouTube Music stream) while the art URL says 284.
     // Prefer it; fall back to the metadata object's id when there is no art URL.
-    let service_id = art
-        .and_then(service_id_from_art)
-        .or_else(|| container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref()));
+    let service_id = art.and_then(service_id_from_art).or_else(|| {
+        container
+            .and_then(|c| c.id.as_ref())
+            .and_then(|id| id.service_id.as_deref())
+    });
     json!({
         "room": room,
         "state": status.state(),
@@ -918,7 +921,11 @@ fn room_line(facts: &RoomFacts, fetched: Fetched) -> String {
             } else {
                 String::new()
             };
-            format!("{:<16} {}{vol}{grouped}", facts.name, now_line(&status, &meta))
+            format!(
+                "{:<16} {}{vol}{grouped}",
+                facts.name,
+                now_line(&status, &meta)
+            )
         }
         Err(e) => format!("{:<16} unreachable ({e:#})", facts.name),
     }
@@ -1420,9 +1427,7 @@ async fn run_queue_item(
 /// its id with a grammar error - see `browse` - so it is somewhere to go rather
 /// than something to add.
 fn queueable(item: &sonos::smapi::Item, service: &sonos::smapi::Service) -> bool {
-    !item.container
-        && !item.item_type.eq_ignore_ascii_case("stream")
-        && service.cdudn().is_some()
+    !item.container && !item.item_type.eq_ignore_ascii_case("stream") && service.cdudn().is_some()
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -1569,17 +1574,17 @@ async fn run_link(
                 continue;
             };
             let urls = [
-                status.container.as_ref().and_then(|c| c.image_url.as_deref()),
+                status
+                    .container
+                    .as_ref()
+                    .and_then(|c| c.image_url.as_deref()),
                 status
                     .current_item
                     .as_ref()
                     .and_then(|i| i.track.as_ref())
                     .and_then(|t| t.image_url.as_deref()),
             ];
-            token = urls
-                .into_iter()
-                .flatten()
-                .find_map(sonos::plex::token_in);
+            token = urls.into_iter().flatten().find_map(sonos::plex::token_in);
             if token.is_some() {
                 break;
             }
@@ -1790,11 +1795,8 @@ async fn run_browse(
 ) -> Result<()> {
     let mut state = State::load()?;
     let reached = session::connect(ip, &mut state).await;
-    let live = || -> Result<&session::Session> {
-        reached
-            .as_ref()
-            .map_err(hint::no_player_to_play)
-    };
+    let live =
+        || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
     let mut catalogue = catalogue::Catalogue::load();
     match &reached {
@@ -1934,11 +1936,8 @@ async fn run_search(
 ) -> Result<()> {
     let mut state = State::load()?;
     let reached = session::connect(ip, &mut state).await;
-    let live = || -> Result<&session::Session> {
-        reached
-            .as_ref()
-            .map_err(hint::no_player_to_play)
-    };
+    let live =
+        || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
     let mut catalogue = catalogue::Catalogue::load();
     let mut dirty = false;
@@ -2010,9 +2009,7 @@ async fn run_search(
                 .iter()
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
-                Some(s) if s.auth != sonos::smapi::Auth::Anonymous => {
-                    s.needs_link_hint().into()
-                }
+                Some(s) if s.auth != sonos::smapi::Auth::Anonymous => s.needs_link_hint().into(),
                 _ => e,
             }
         })?
@@ -2237,7 +2234,10 @@ async fn apply_vol(
     // from a read where nothing moved.
     let was_set = change.is_some();
     if change.is_some() && before.fixed {
-        bail!("{} has fixed volume; adjust it on the amplifier", target.name);
+        bail!(
+            "{} has fixed volume; adjust it on the amplifier",
+            target.name
+        );
     }
     let (level, muted) = match change {
         None => (before.volume, before.muted),
@@ -2316,7 +2316,10 @@ async fn apply_repeat(
         }
     };
     if json {
-        println!("{}", json!({ "room": target.name, "repeat": after.as_str() }));
+        println!(
+            "{}",
+            json!({ "room": target.name, "repeat": after.as_str() })
+        );
     } else {
         let from = transition(before.as_str(), after.as_str());
         println!("{:<24} repeat {from}{}", target.name, after.as_str());
@@ -2382,7 +2385,17 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
                 change,
                 player: one_room,
                 json,
-            } => apply_vol(session, &target, Some(name), change.clone(), *one_room, *json).await,
+            } => {
+                apply_vol(
+                    session,
+                    &target,
+                    Some(name),
+                    change.clone(),
+                    *one_room,
+                    *json,
+                )
+                .await
+            }
             Command::Repeat { mode, json } => {
                 apply_repeat(session, &target, mode.clone(), *json).await
             }
@@ -2462,8 +2475,7 @@ fn install_skill(dir: Option<&std::path::Path>, print: bool) -> Result<()> {
         None => default_skills_dir()?,
     };
     let target = base.join("x2rock");
-    std::fs::create_dir_all(&target)
-        .with_context(|| format!("creating {}", target.display()))?;
+    std::fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
     let path = target.join("SKILL.md");
     std::fs::write(&path, SKILL).with_context(|| format!("writing {}", path.display()))?;
     println!("Wrote the x2rock skill to {}.", path.display());
@@ -2518,15 +2530,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref title,
             ref kind,
         } => {
-            return run_play_item(
-                cli.ip,
-                room,
-                service,
-                kind.as_deref(),
-                id,
-                title.as_ref(),
-            )
-            .await;
+            return run_play_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref()).await;
         }
         Command::QueueItem {
             ref service,
@@ -2534,15 +2538,8 @@ async fn run(cli: Cli) -> Result<()> {
             ref title,
             ref kind,
         } => {
-            return run_queue_item(
-                cli.ip,
-                room,
-                service,
-                kind.as_deref(),
-                id,
-                title.as_ref(),
-            )
-            .await;
+            return run_queue_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref())
+                .await;
         }
         Command::Browse {
             ref service,
@@ -2840,10 +2837,9 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(room) => session.groups.player_named(room)?,
                     None => {
                         let id = session.groups.resolve(None)?.coordinator_id.clone();
-                        session
-                            .groups
-                            .player(&id)
-                            .ok_or_else(|| anyhow!("group coordinator {id} is not a known player"))?
+                        session.groups.player(&id).ok_or_else(|| {
+                            anyhow!("group coordinator {id} is not a known player")
+                        })?
                     }
                 };
                 envelope["playerId"] = json!(player.id);
@@ -3189,7 +3185,10 @@ async fn run(cli: Cli) -> Result<()> {
             let meta = player.metadata(group).await?;
             if json {
                 let services = catalogue::Catalogue::load();
-                println!("{}", now_json(&target.name, &status, &meta, Some(&services)));
+                println!(
+                    "{}",
+                    now_json(&target.name, &status, &meta, Some(&services))
+                );
             } else {
                 println!("{}", now_line(&status, &meta));
             }
@@ -3318,9 +3317,7 @@ async fn run(cli: Cli) -> Result<()> {
             // named is asked first; otherwise (or when the widget names the
             // group by its coordinator) it is whichever member has one.
             let is_soundbar = |p: &&Player| p.capabilities.iter().any(|c| c == "HT_PLAYBACK");
-            let members = session
-                .groups
-                .members(session.groups.resolve(room)?);
+            let members = session.groups.members(session.groups.resolve(room)?);
             let named = match room {
                 Some(name) => Some(session.groups.player_named(name)?),
                 None => session.groups.player(&target.coordinator_id),
@@ -3504,9 +3501,15 @@ mod tests {
                    SOiG%3fsid%3d284%26flags%3d8%26sn%3d2";
         assert_eq!(service_id_from_art(art), Some("284"));
         // Plain, unencoded form.
-        assert_eq!(service_id_from_art("http://x/getaa?u=y?sid=212&flags=1"), Some("212"));
+        assert_eq!(
+            service_id_from_art("http://x/getaa?u=y?sid=212&flags=1"),
+            Some("212")
+        );
         // No sid (a TV or line-in art URL) yields nothing rather than a guess.
-        assert_eq!(service_id_from_art("http://x/getaa?s=1&u=x-sonos-htastream"), None);
+        assert_eq!(
+            service_id_from_art("http://x/getaa?s=1&u=x-sonos-htastream"),
+            None
+        );
     }
 
     #[test]
@@ -3523,8 +3526,14 @@ mod tests {
             i.1.as_str()
         }
         // A unique name resolves; an exact id always resolves.
-        assert_eq!(find_named(&items, "jazz24", id, name, "f", "h").unwrap().0, "fv7");
-        assert_eq!(find_named(&items, "fv2", id, name, "f", "h").unwrap().0, "fv2");
+        assert_eq!(
+            find_named(&items, "jazz24", id, name, "f", "h").unwrap().0,
+            "fv7"
+        );
+        assert_eq!(
+            find_named(&items, "fv2", id, name, "f", "h").unwrap().0,
+            "fv2"
+        );
         // Two favorites sharing a name are not silently reduced to the first -
         // the error names both ids so a caller can pick one.
         let err = find_named(&items, "That Christmas Channel", id, name, "favorite", "h")
@@ -3541,14 +3550,27 @@ mod tests {
         assert!(fans_out(&Command::Toggle));
         assert!(fans_out(&Command::Next));
         assert!(fans_out(&Command::Play { track: None }));
-        assert!(fans_out(&Command::Vol { change: None, player: false, json: false }));
-        assert!(fans_out(&Command::Repeat { mode: None, json: false }));
-        assert!(fans_out(&Command::Shuffle { mode: None, json: false }));
+        assert!(fans_out(&Command::Vol {
+            change: None,
+            player: false,
+            json: false
+        }));
+        assert!(fans_out(&Command::Repeat {
+            mode: None,
+            json: false
+        }));
+        assert!(fans_out(&Command::Shuffle {
+            mode: None,
+            json: false
+        }));
         // Playing a specific queue position is per-queue, not a broadcast.
         assert!(!fans_out(&Command::Play { track: Some(3) }));
         // Reads and whole-household commands are not fanned out.
         assert!(!fans_out(&Command::Now { json: false }));
-        assert!(!fans_out(&Command::Status { json: false, full: false }));
+        assert!(!fans_out(&Command::Status {
+            json: false,
+            full: false
+        }));
         assert!(!fans_out(&Command::Rooms { json: false }));
     }
 
@@ -3557,10 +3579,22 @@ mod tests {
         // include_str! guarantees the file exists at build time; this guards its
         // shape - the frontmatter a skill needs, and the two contracts the skill
         // exists to teach, so an edit cannot quietly drop them.
-        assert!(SKILL.starts_with("---\nname: x2rock\n"), "needs skill frontmatter");
-        assert!(SKILL.contains("description:"), "needs a description to be discovered");
-        assert!(SKILL.contains("x2rock status --json"), "should teach the status snapshot");
-        assert!(SKILL.contains("unregistered_network"), "should teach the error codes");
+        assert!(
+            SKILL.starts_with("---\nname: x2rock\n"),
+            "needs skill frontmatter"
+        );
+        assert!(
+            SKILL.contains("description:"),
+            "needs a description to be discovered"
+        );
+        assert!(
+            SKILL.contains("x2rock status --json"),
+            "should teach the status snapshot"
+        );
+        assert!(
+            SKILL.contains("unregistered_network"),
+            "should teach the error codes"
+        );
     }
 
     #[test]
@@ -3578,7 +3612,9 @@ mod tests {
         };
         let v = room_value(
             &facts,
-            Err(anyhow!("timed out connecting to player at 192.168.86.26:1443")),
+            Err(anyhow!(
+                "timed out connecting to player at 192.168.86.26:1443"
+            )),
             None,
         );
         assert_eq!(v["room"], "Kitchen");
@@ -3586,6 +3622,9 @@ mod tests {
         assert_eq!(v["has_tv"], json!(false));
         assert_eq!(v["members"], json!(["Kitchen"]));
         assert_eq!(v["coordinator"], json!("Kitchen"));
-        assert!(v.get("state").is_none(), "an errored room has no playback state");
+        assert!(
+            v.get("state").is_none(),
+            "an errored room has no playback state"
+        );
     }
 }

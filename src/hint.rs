@@ -98,7 +98,9 @@ pub fn error_json(error: &Error) -> Value {
 /// and it cannot be kept as a source.
 pub fn no_player(inner: &Error, message: impl Into<String>) -> Error {
     match of(inner) {
-        (code @ ("unregistered_network" | "no_player"), fix) => Hint::new(message, code, fix).into(),
+        (code @ ("unregistered_network" | "no_player"), fix) => {
+            Hint::new(message, code, fix).into()
+        }
         _ => Hint::new(message, "no_player", None).into(),
     }
 }
@@ -158,7 +160,12 @@ mod tests {
 
     #[test]
     fn a_hinted_error_yields_its_code_and_fix() {
-        let e: Error = Hint::new("deezer needs an account", "needs_link", Some("x2rock link deezer".into())).into();
+        let e: Error = Hint::new(
+            "deezer needs an account",
+            "needs_link",
+            Some("x2rock link deezer".into()),
+        )
+        .into();
         assert_eq!(of(&e), ("needs_link", Some("x2rock link deezer".into())));
         // Display stays the plain message, so prose output is unchanged.
         assert_eq!(format!("{e}"), "deezer needs an account");
@@ -167,9 +174,13 @@ mod tests {
     #[test]
     fn a_hint_is_found_through_added_context() {
         // A hint keeps its code even when a caller wraps it with more context.
-        let e: Error = Err::<(), _>(Hint::new("no such room", "unknown_room", Some("x2rock rooms".into())))
-            .context("resolving the target")
-            .unwrap_err();
+        let e: Error = Err::<(), _>(Hint::new(
+            "no such room",
+            "unknown_room",
+            Some("x2rock rooms".into()),
+        ))
+        .context("resolving the target")
+        .unwrap_err();
         assert_eq!(of(&e).0, "unknown_room");
     }
 
@@ -181,10 +192,14 @@ mod tests {
 
     #[test]
     fn error_json_merges_hint_data_but_cannot_shadow_the_standard_fields() {
-        let e: Error = Hint::new("no room named \"x\"", "unknown_room", Some("x2rock rooms".into()))
-            // Includes a rogue "code" key that must NOT override the real one.
-            .with_data(json!({ "did_you_mean": ["Bedroom"], "code": "hijacked" }))
-            .into();
+        let e: Error = Hint::new(
+            "no room named \"x\"",
+            "unknown_room",
+            Some("x2rock rooms".into()),
+        )
+        // Includes a rogue "code" key that must NOT override the real one.
+        .with_data(json!({ "did_you_mean": ["Bedroom"], "code": "hijacked" }))
+        .into();
         let v = error_json(&e);
         assert_eq!(v["code"], "unknown_room", "data must not shadow code");
         assert_eq!(v["fix"], "x2rock rooms");

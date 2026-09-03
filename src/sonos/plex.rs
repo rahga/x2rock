@@ -220,7 +220,10 @@ mod tests {
         let url = "https://sonos.plex.tv/img?height=1&url=https%3A%2F%2Fx.plex.direct%3A13502%2Flibrary%2Fmetadata%2F68162%2Fthumb%2F1%3FX-Plex-Client-Identifier%3Dsonos-abc%26X-Plex-Token%3Dz8mPgbR9RQEbBatkru1V&width=300";
         assert_eq!(token_in(url).as_deref(), Some("z8mPgbR9RQEbBatkru1V"));
         // A plain, un-encoded spelling works too, and absence is None.
-        assert_eq!(token_in("http://x/y?X-Plex-Token=abc-123&z=1").as_deref(), Some("abc-123"));
+        assert_eq!(
+            token_in("http://x/y?X-Plex-Token=abc-123&z=1").as_deref(),
+            Some("abc-123")
+        );
         assert_eq!(token_in("http://x/y?X-Plex-Token="), None);
         assert_eq!(token_in("http://x/y?width=300"), None);
     }

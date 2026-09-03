@@ -218,7 +218,11 @@ fn near_matches(query: &str, candidates: &[&str]) -> Vec<String> {
         })
         .collect();
     scored.sort_by_key(|&(distance, _)| distance);
-    scored.into_iter().take(3).map(|(_, n)| n.to_string()).collect()
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, n)| n.to_string())
+        .collect()
 }
 
 /// Ordinary Levenshtein edit distance, two rolling rows.
@@ -563,7 +567,13 @@ mod tests {
 
     #[test]
     fn near_matches_catches_a_typo_and_ignores_the_unrelated() {
-        let rooms = ["Bedroom", "Living Room", "Dining Room", "Guest TV", "Kitchen"];
+        let rooms = [
+            "Bedroom",
+            "Living Room",
+            "Dining Room",
+            "Guest TV",
+            "Kitchen",
+        ];
         // A one-letter typo finds its room.
         assert_eq!(near_matches("bedoom", &rooms), vec!["Bedroom"]);
         // A fragment finds its room by containment.
