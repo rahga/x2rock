@@ -192,6 +192,15 @@ impl Service {
     /// code `needs_link`, with the link command as its fix for a service that
     /// can be linked (anonymous ones carry none, and should never be asked).
     pub fn needs_link_hint(&self) -> crate::hint::Hint {
+        // Precondition: callers guard `auth != Anonymous` (an anonymous service
+        // needs no link). The arm below stays total for release safety, but a
+        // caller that reaches it with an anonymous service would mint a hint
+        // whose "needs no account" message contradicts its `needs_link` code -
+        // so catch that misuse in tests rather than ship the contradiction.
+        debug_assert!(
+            !matches!(self.auth, Auth::Anonymous),
+            "needs_link_hint on an anonymous service, which needs no link"
+        );
         let fix = match self.auth {
             Auth::Anonymous => None,
             _ => Some(format!("x2rock link {}", self.name)),

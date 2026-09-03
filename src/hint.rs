@@ -57,15 +57,23 @@ pub fn of(error: &Error) -> (&'static str, Option<String>) {
 }
 
 /// Wrap a failure to reach a player as a `no_player` error - unless the inner
-/// error already knew something sharper (an unregistered network stays that,
-/// because its fix, `x2rock discover`, is the same but its diagnosis is
-/// better). Used where only a borrowed error is in hand and it cannot be kept
-/// as a source.
+/// error already carried a sharper *connection-layer* code, which describes
+/// this same "get a player onto the network" problem more precisely and whose
+/// fix is the same `x2rock discover`. Only those codes are inherited: any other
+/// would describe a different problem than this wrapper's message, since the
+/// message is overwritten here. Used where only a borrowed error is in hand and
+/// it cannot be kept as a source.
 pub fn no_player(inner: &Error, message: impl Into<String>) -> Error {
     match of(inner) {
-        ("error", _) => Hint::new(message, "no_player", Some("x2rock discover".into())).into(),
-        (code, fix) => Hint::new(message, code, fix).into(),
+        (code @ ("unregistered_network" | "no_player"), fix) => Hint::new(message, code, fix).into(),
+        _ => Hint::new(message, "no_player", Some("x2rock discover".into())).into(),
     }
+}
+
+/// The error for a play or enqueue path that could not reach a player. Shared by
+/// the search and browse `--play` sites so the two cannot word it differently.
+pub fn no_player_to_play(inner: &Error) -> Error {
+    no_player(inner, format!("no player to play it on: {inner:#}"))
 }
 
 #[cfg(test)]
@@ -108,5 +116,16 @@ mod tests {
             Hint::new("unregistered network", "unregistered_network", Some("x2rock discover".into())).into();
         let wrapped = no_player(&inner, "no player to play it on");
         assert_eq!(of(&wrapped).0, "unregistered_network");
+    }
+
+    #[test]
+    fn no_player_does_not_inherit_a_non_connection_code() {
+        // A code from a different layer must not ride on this wrapper's message:
+        // an "unknown_room" fix (`x2rock rooms`) would not match "no player to
+        // play it on". It falls back to no_player rather than being adopted.
+        let inner: Error =
+            Hint::new("no such room", "unknown_room", Some("x2rock rooms".into())).into();
+        let wrapped = no_player(&inner, "no player to play it on");
+        assert_eq!(of(&wrapped), ("no_player", Some("x2rock discover".into())));
     }
 }

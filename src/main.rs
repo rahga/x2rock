@@ -1615,7 +1615,7 @@ async fn run_browse(
     let live = || -> Result<&session::Session> {
         reached
             .as_ref()
-            .map_err(|e| hint::no_player(e, format!("no player to play it on: {e:#}")))
+            .map_err(hint::no_player_to_play)
     };
 
     let mut catalogue = catalogue::Catalogue::load();
@@ -1759,7 +1759,7 @@ async fn run_search(
     let live = || -> Result<&session::Session> {
         reached
             .as_ref()
-            .map_err(|e| hint::no_player(e, format!("no player to play it on: {e:#}")))
+            .map_err(hint::no_player_to_play)
     };
 
     let mut catalogue = catalogue::Catalogue::load();
