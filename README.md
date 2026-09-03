@@ -575,6 +575,12 @@ a state once and then stays quiet — repeating an unchanged line only once an h
 for a laptop that is away all day but hides exactly what you want while diagnosing a flaky
 reconnect. A network switch always logs either way.
 
+`X2ROCK_LOG_EVENTS=1` is the other half, and separate on purpose: it logs every event body exactly
+as the player sent it, before x2rock tries to parse it — the only way to see a body that arrives
+short of a field, since a partial one is folded in silently and leaves no other trace. It is far
+louder than the flag above (every event, every group, while music is playing), which is why turning
+on the reconnect ramp does not turn this on with it.
+
 ## Tested devices
 
 Everything here was developed against these, on one household:

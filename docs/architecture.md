@@ -4227,7 +4227,8 @@ exactly what a reader wants), and re-logs a held state once an hour with the cou
 journald-style. A successful connect resets the coalescing so a later failure logs fresh. The
 decision core takes the clock as an argument, so the window and heartbeat are pinned by tests
 without waiting an hour. `X2ROCK_LOG_VERBOSE` restores every line and the backoff ramp for
-debugging the reconnect machinery, which is the finickiest part of the daemon.
+debugging the reconnect machinery, which is the finickiest part of the daemon. `X2ROCK_LOG_EVENTS`
+is its sibling rather than part of it - raw event bodies, at a rate that would bury the ramp.
 
 Why this is safe against the AI-first goal: the *pull* (`x2rock rooms`, the sharpened
 `unregistered_network` message that names `x2rock discover`) is the agent's actionable surface, so

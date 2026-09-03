@@ -38,14 +38,27 @@ fn log(message: &str) {
     eprintln!("x2rock: {message}");
 }
 
-/// `X2ROCK_LOG_VERBOSE`, read once for the whole run.
+/// `X2ROCK_LOG_VERBOSE`, read once for the whole run: the reconnect machinery
+/// out loud - every status pass with coalescing off, and the backoff ramp.
 ///
-/// The flag is a knob for the run rather than a per-call cost, and [`apply`]
-/// sits well away from the loop that used to own it as a local - so it lives
-/// here instead of being threaded through every event path.
+/// The flag is a knob for the run rather than a per-call cost, so it lives here
+/// instead of being threaded through every call site.
 fn verbose() -> bool {
     static VERBOSE: OnceLock<bool> = OnceLock::new();
     *VERBOSE.get_or_init(|| std::env::var_os("X2ROCK_LOG_VERBOSE").is_some())
+}
+
+/// `X2ROCK_LOG_EVENTS`, read once for the whole run: every event body exactly
+/// as it arrived.
+///
+/// Deliberately not folded into [`verbose`], and not implied by it. The two
+/// answer different questions at wildly different rates - verbose is a few
+/// lines per reconnect, this is every event on every group - so a household
+/// that is actually playing something buries the retry ramp under bodies. They
+/// are asked for separately because they are read separately.
+fn log_events() -> bool {
+    static EVENTS: OnceLock<bool> = OnceLock::new();
+    *EVENTS.get_or_init(|| std::env::var_os("X2ROCK_LOG_EVENTS").is_some())
 }
 
 /// What [`StatusLog::decide`] resolved to: log fresh, log a heartbeat carrying
@@ -568,11 +581,12 @@ fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
 async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
     let player = server.imp();
     let body = event.body.clone();
-    // Under verbose, the body exactly as it arrived. A partial `playbackStatus`
-    // - one with no `playbackState` - is now folded in silently and leaves no
-    // other trace, so this is the only way to catch one in the act. Logged
-    // before the match, so a body that still fails to parse is shown too.
-    if verbose() {
+    // Under X2ROCK_LOG_EVENTS, the body exactly as it arrived. A partial
+    // `playbackStatus` - one with no `playbackState` - is now folded in
+    // silently and leaves no other trace, so this is the only way to catch one
+    // in the act. Logged before the match, so a body that still fails to parse
+    // is shown too.
+    if log_events() {
         log(&format!(
             "{}: {} {}",
             player.room, event.namespace, event.body
