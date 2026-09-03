@@ -29,7 +29,9 @@ has it, and read the fields rather than parsing the human prose.**
   the two silent states rolled into one. Check it before "play something here", or the room stays
   quiet and the play still succeeds.
 - **`on_tv`** is `true` when a soundbar is on its TV input; prefer it over matching the `"TV Audio"`
-  title. `has_tv` (in `status`) is the *capability* — whether the room *can* take a TV input.
+  title. `has_tv` (in `status`) is the *capability* — whether the room *can* take a TV input. When
+  `on_tv` is true but **`input_format` is `"No Signal"`**, the TV input is selected but nothing is
+  coming through — do not report it as "playing TV audio", because no sound is.
 - **`service`** is the music service's name when the player reports one, else `null`; **`service_id`**
   carries the raw id even when the name is missing, so the source is never fully lost.
 - If either fails with `"code":"unregistered_network"`, run **`x2rock discover`** once — the machine
@@ -53,6 +55,7 @@ that resolves it — run it, then retry. Codes you will meet:
 | `unknown_room` | the `-r` name is not a room here | `x2rock rooms` — but see below |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
 | `no_player` | no reachable speaker to act on | `x2rock discover` |
+| `too_many_rooms` | several `-r` on a command that takes one | re-run with a single `-r` |
 | `error` | no known remedy (`fix` is null) | — |
 
 Some codes carry extra detail so you need not re-fetch. **`unknown_room`** includes `did_you_mean`
@@ -94,6 +97,23 @@ reply — no `x2rock rooms` round trip:
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` |
 | Link an account | `x2rock link [service]` / `x2rock accounts --json` |
+
+### `search` lists the searchable set, not the household's services
+
+This trips agents, so read it before offering to search. **`x2rock search` (no term) lists the
+services you can search *without the household's own account* — the anonymous ones plus whatever
+this machine has linked.** It is **not** the list of services the household actually uses. The
+household's real services — YouTube Music, Amazon Music, and the like — are **not searchable here**;
+offering to "search YouTube Music" will fail with `needs_link` or find nothing.
+
+The way *into* those services is **`favorites`** (what the household saved) and **`bookmark`** /
+`keep` (what has played and can be replayed) — not `search`. So: to play something the household
+already has, reach for `favorites`; use `search` only for the discovery-style services it lists.
+
+Favorites drift, too. Some are dead shells for shut-down services — `favorites --json` marks those
+`"playable": false` (no service and no type left). And a *live* service can quietly repurpose an id
+(iHeartRadio swaps stations for seasonal ones at the holidays), which nothing can detect — a
+favorite that used to play one thing may now play another.
 
 ## Rules that avoid mistakes
 

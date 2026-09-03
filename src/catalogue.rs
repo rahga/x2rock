@@ -135,6 +135,15 @@ impl Catalogue {
         &self.services
     }
 
+    /// A service's display name by its id, for filling in what the player leaves
+    /// blank: now-playing metadata carries the sid but not always the name.
+    pub fn name_of(&self, service_id: &str) -> Option<&str> {
+        self.services
+            .iter()
+            .find(|s| s.id == service_id)
+            .map(|s| s.name.as_str())
+    }
+
     /// The services that can actually be searched: the anonymous ones, plus any
     /// this machine holds a token for.
     ///

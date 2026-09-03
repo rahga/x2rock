@@ -522,8 +522,28 @@ fn find_named<'a, T>(
         [] => bail!("no {what} matches {query:?}. `{hint}` lists them."),
         [only] => Ok(only),
         several => {
-            if let Some(whole) = several.iter().find(|i| name(i).to_lowercase() == needle) {
-                return Ok(whole);
+            // An exact name wins over the substrings around it - but only when
+            // it is unique. Two favorites *named the same* (the household ages
+            // into these) cannot be told apart by name, so name the ids rather
+            // than silently pick the first.
+            let exact: Vec<_> = several
+                .iter()
+                .filter(|i| name(i).to_lowercase() == needle)
+                .collect();
+            match exact.as_slice() {
+                [whole] => return Ok(whole),
+                [_, ..] => {
+                    let shown: Vec<_> = exact
+                        .iter()
+                        .map(|i| format!("{} (id {})", name(i), id(i)))
+                        .collect();
+                    bail!(
+                        "{} {what}s are named {query:?}: {}. Give an id to pick one.",
+                        exact.len(),
+                        shown.join(", ")
+                    );
+                }
+                [] => {}
             }
             let shown: Vec<_> = several.iter().take(8).map(|i| name(i)).collect();
             bail!(
@@ -649,20 +669,28 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     line
 }
 
-fn now_json(room: &str, status: &PlaybackStatus, meta: &MetadataStatus) -> serde_json::Value {
+fn now_json(
+    room: &str,
+    status: &PlaybackStatus,
+    meta: &MetadataStatus,
+    services: Option<&catalogue::Catalogue>,
+) -> serde_json::Value {
     let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
+    let service_id = container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref());
     json!({
         "room": room,
         "state": status.state(),
         "title": track.and_then(|t| t.name.as_deref()).or(container.and_then(|c| c.name.as_deref())),
         "artist": track.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
         "album": track.and_then(|t| t.album.as_ref()).and_then(|a| a.name.as_deref()),
-        "service": container.and_then(|c| c.service.as_ref()).and_then(|s| s.name.as_deref()),
         // The player leaves `service` null for some sources (a soundbar playlist,
-        // say) while still carrying the id in the object. Emit it too so the
-        // field is never silently lossy - an agent can map the sid itself.
-        "service_id": container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref()),
+        // YouTube Music now-playing) while still carrying the sid in the object.
+        // Fall back to the catalogue's name for that sid, so `status` names the
+        // service `favorites` does. `service_id` is emitted regardless, never lossy.
+        "service": container.and_then(|c| c.service.as_ref()).and_then(|s| s.name.as_deref())
+            .or_else(|| service_id.and_then(|sid| services.and_then(|c| c.name_of(sid)))),
+        "service_id": service_id,
         "position_ms": status.position_millis,
         "duration_ms": track.and_then(|t| t.duration_millis),
         "repeat": status.play_modes.repeat().as_str(),
@@ -687,6 +715,10 @@ async fn print_status(session: &session::Session, json: bool, full: bool) -> Res
     // Rooms whose coordinator did not answer - the "expected but unreachable"
     // an envelope warns about, and the count `reachable` is derived from.
     let mut unreachable: Vec<String> = Vec::new();
+    // The cached catalogue names a service the player's metadata leaves blank
+    // (YouTube Music now-playing carries the sid, not the name). Best-effort and
+    // read-only - a cold or absent cache just leaves `service` null as before.
+    let services = json.then(catalogue::Catalogue::load);
     for group in &session.groups.groups {
         let target = session::Target {
             group_id: group.id.clone(),
@@ -729,7 +761,7 @@ async fn print_status(session: &session::Session, json: bool, full: bool) -> Res
             unreachable.push(group.name.clone());
         }
         if json {
-            values.push(room_value(&facts, fetched));
+            values.push(room_value(&facts, fetched, services.as_ref()));
         } else {
             lines.push(room_line(&facts, fetched));
         }
@@ -804,10 +836,14 @@ type Fetched = Result<(PlaybackStatus, MetadataStatus, Option<Volume>)>;
 /// One room's JSON, whether or not its coordinator answered. On success it is
 /// the `now --json` object plus the group facts; on failure an `error` entry
 /// that still carries the facts, so a dead room is legible rather than absent.
-fn room_value(facts: &RoomFacts, fetched: Fetched) -> serde_json::Value {
+fn room_value(
+    facts: &RoomFacts,
+    fetched: Fetched,
+    services: Option<&catalogue::Catalogue>,
+) -> serde_json::Value {
     match fetched {
         Ok((status, meta, volume)) => {
-            let mut obj = now_json(facts.name, &status, &meta);
+            let mut obj = now_json(facts.name, &status, &meta, services);
             if let serde_json::Value::Object(map) = &mut obj {
                 map.insert("volume".into(), json!(volume.as_ref().map(|v| v.volume)));
                 map.insert("muted".into(), json!(volume.as_ref().map(|v| v.muted)));
@@ -928,6 +964,12 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
                     "service": f.service(),
                     "type": f.kind(),
                     "art_url": f.image_url,
+                    // A heuristic, not a guarantee: false marks an empty shell -
+                    // neither a service nor a content type, which is what a
+                    // favorite for a shut-down service decays into. It cannot
+                    // catch a live service that recycled an id (iHeartRadio does
+                    // this at the holidays), only one with nothing left to play.
+                    "playable": f.service().is_some() || f.kind().is_some(),
                 })
             })
             .collect();
@@ -2315,9 +2357,7 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
             Command::Toggle => apply_transport(session, &target, "togglePlayPause").await,
             Command::Next => apply_transport(session, &target, "skipToNextTrack").await,
             Command::Prev => apply_transport(session, &target, "skipToPreviousTrack").await,
-            _ => Err(anyhow!(
-                "several --room were given, but this command takes a single room"
-            )),
+            _ => Err(too_many_rooms()),
         };
         // Name the room the batch stopped on: a fan-out that halts silently on
         // the third of five rooms is a debugging puzzle. The rooms before it
@@ -2325,6 +2365,19 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
         outcome.with_context(|| format!("on room {name:?}"))?;
     }
     Ok(())
+}
+
+/// Several `--room` on a command that takes one. Its own code, not the generic
+/// `error` bucket, so an agent drops the extra `--room` from the code rather
+/// than parsing the sentence. No `fix` command: the remedy is to re-run with a
+/// single `--room`, which is not a canned line.
+fn too_many_rooms() -> anyhow::Error {
+    hint::Hint::new(
+        "several --room were given, but this command takes a single room",
+        "too_many_rooms",
+        None,
+    )
+    .into()
 }
 
 /// Whether a command applies per room, so several `--room` fan it out. The
@@ -3058,10 +3111,9 @@ async fn run(cli: Cli) -> Result<()> {
     // to the ordinary path; more than one on a command that does not fan out is
     // an error, not a silent act on the first.
     if cli.room.len() > 1 {
-        ensure!(
-            fans_out(&cli.command),
-            "several --room were given, but this command takes a single room"
-        );
+        if !fans_out(&cli.command) {
+            return Err(too_many_rooms());
+        }
         return fan_out(&session, &cli.room, &cli.command).await;
     }
 
@@ -3074,7 +3126,8 @@ async fn run(cli: Cli) -> Result<()> {
             let status = player.playback_status(group).await?;
             let meta = player.metadata(group).await?;
             if json {
-                println!("{}", now_json(&target.name, &status, &meta));
+                let services = catalogue::Catalogue::load();
+                println!("{}", now_json(&target.name, &status, &meta, Some(&services)));
             } else {
                 println!("{}", now_line(&status, &meta));
             }
@@ -3382,6 +3435,31 @@ mod tests {
     }
 
     #[test]
+    fn find_named_disambiguates_two_of_the_same_name() {
+        let items = [
+            ("fv1".to_string(), "That Christmas Channel".to_string()),
+            ("fv2".to_string(), "That Christmas Channel".to_string()),
+            ("fv7".to_string(), "Jazz24".to_string()),
+        ];
+        fn id(i: &(String, String)) -> &str {
+            i.0.as_str()
+        }
+        fn name(i: &(String, String)) -> &str {
+            i.1.as_str()
+        }
+        // A unique name resolves; an exact id always resolves.
+        assert_eq!(find_named(&items, "jazz24", id, name, "f", "h").unwrap().0, "fv7");
+        assert_eq!(find_named(&items, "fv2", id, name, "f", "h").unwrap().0, "fv2");
+        // Two favorites sharing a name are not silently reduced to the first -
+        // the error names both ids so a caller can pick one.
+        let err = find_named(&items, "That Christmas Channel", id, name, "favorite", "h")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fv1") && err.contains("fv2"), "{err}");
+        assert!(err.contains("Give an id"), "{err}");
+    }
+
+    #[test]
     fn only_the_per_room_commands_fan_out() {
         // These act on one room's state, so several --room fan them out.
         assert!(fans_out(&Command::Pause));
@@ -3426,6 +3504,7 @@ mod tests {
         let v = room_value(
             &facts,
             Err(anyhow!("timed out connecting to player at 192.168.86.26:1443")),
+            None,
         );
         assert_eq!(v["room"], "Kitchen");
         assert!(v["error"].as_str().unwrap().contains("timed out"), "{v}");
