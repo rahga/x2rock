@@ -122,14 +122,14 @@ x2rock now               # what is playing
 x2rock status            # every room: now-playing, volume, grouping, TV — one call
 x2rock status --json     # the same, machine-readable, for scripts and agents
 x2rock play | pause | toggle | next | prev
-x2rock vol               # show volume
+x2rock vol               # show volume  (--json for {room, volume, muted, fixed})
 x2rock vol 30            # set it
 x2rock vol +5            # nudge it
 x2rock vol mute | unmute
 x2rock vol 30 --player   # this room's own speaker, not the group it plays with
-x2rock repeat            # show repeat mode
+x2rock repeat            # show repeat mode  (--json for {room, repeat})
 x2rock repeat all | one | off
-x2rock shuffle on | off
+x2rock shuffle on | off  # --json for {room, shuffle}; bare `shuffle` shows it
 x2rock queue             # the queue, current track marked
 x2rock play 4            # play the 4th track in the queue
 x2rock queue remove 4    # drop a track, or a range: remove 4-8

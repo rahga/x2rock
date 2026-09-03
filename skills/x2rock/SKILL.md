@@ -52,8 +52,8 @@ that resolves it — run it, then retry. Codes you will meet:
 | What's playing (one room) | `x2rock now --json` |
 | Transport | `x2rock play` / `pause` / `toggle` / `next` / `prev` |
 | Play queue track N | `x2rock play N` |
-| Volume | `x2rock vol` / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
-| Repeat / shuffle | `x2rock repeat all\|one\|off` / `x2rock shuffle on\|off` |
+| Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
+| Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` |
 | Favorites | `x2rock favorites --json` / `x2rock favorite "<name>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
@@ -67,6 +67,10 @@ that resolves it — run it, then retry. Codes you will meet:
 ## Rules that avoid mistakes
 
 - **Use `--json` and read the fields.** The prose wording can change; the JSON contract does not.
+- **`vol`, `repeat` and `shuffle` are dual-mode** — with no argument they *report* the current
+  state, with an argument they *change* it. `--json` gives the resulting `{room, …}` either way, so
+  reach for it both to read a value (`x2rock -r Kitchen vol --json`) and to confirm a change. Their
+  fields match a room's entry in `status --json`, which is where to read all rooms at once.
 - **`favorite` is the only way to start a stopped, empty room** — `play` only *resumes* something.
 - **`discover` runs once per new network**, and only when an error asks for it.
 - Grouping: `group` adds rooms to `-r`'s group, and a room that joins plays that group's music;

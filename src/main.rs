@@ -75,14 +75,24 @@ enum Command {
         /// together and this is the balance between them.
         #[arg(long)]
         player: bool,
+        /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
+        /// or for confirming a change.
+        #[arg(long)]
+        json: bool,
     },
     /// Show or set repeat: off, all (the queue) or one (the current track).
     Repeat {
         mode: Option<String>,
+        /// The resulting `{room, repeat}` as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Show or set shuffle: on or off.
     Shuffle {
         mode: Option<String>,
+        /// The resulting `{room, shuffle}` as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// List the queue, or change it.
     Queue {
@@ -2064,6 +2074,9 @@ fn wants_json(command: &Command) -> bool {
             | Command::Browse { json, .. }
             | Command::Accounts { json, .. }
             | Command::Bookmarks { json, .. }
+            | Command::Vol { json, .. }
+            | Command::Repeat { json, .. }
+            | Command::Shuffle { json, .. }
         if *json
     )
 }
@@ -2976,7 +2989,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Repeat { mode } => {
+        Command::Repeat { mode, json } => {
             let status = player.playback_status(group).await?;
             let before = status.play_modes.repeat();
             let after = match mode.as_deref() {
@@ -2995,10 +3008,14 @@ async fn run(cli: Cli) -> Result<()> {
                     repeat
                 }
             };
-            let from = transition(before.as_str(), after.as_str());
-            println!("{:<24} repeat {from}{}", target.name, after.as_str());
+            if json {
+                println!("{}", json!({ "room": target.name, "repeat": after.as_str() }));
+            } else {
+                let from = transition(before.as_str(), after.as_str());
+                println!("{:<24} repeat {from}{}", target.name, after.as_str());
+            }
         }
-        Command::Shuffle { mode } => {
+        Command::Shuffle { mode, json } => {
             let status = player.playback_status(group).await?;
             let before = status.play_modes.shuffle;
             let after = match mode.as_deref() {
@@ -3016,9 +3033,13 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 Some(_) => bail!("shuffle takes on or off"),
             };
-            let word = |on: bool| if on { "on" } else { "off" };
-            let from = transition(word(before), word(after));
-            println!("{:<24} shuffle {from}{}", target.name, word(after));
+            if json {
+                println!("{}", json!({ "room": target.name, "shuffle": after }));
+            } else {
+                let word = |on: bool| if on { "on" } else { "off" };
+                let from = transition(word(before), word(after));
+                println!("{:<24} shuffle {from}{}", target.name, word(after));
+            }
         }
         Command::Pause => player.playback(group, "pause").await?,
         Command::Toggle => player.playback(group, "togglePlayPause").await?,
@@ -3027,6 +3048,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Vol {
             change,
             player: one_room,
+            json,
         } => {
             // --player names the speaker, so it resolves the room asked for
             // rather than the group's name: once rooms are grouped the group is
@@ -3108,9 +3130,16 @@ async fn run(cli: Cli) -> Result<()> {
                     (before.volume, muted)
                 }
             };
-            let from = transition(&before.volume.to_string(), &level.to_string());
-            let muted = if muted { "  (muted)" } else { "" };
-            println!("{label:<24} {from}{level}{muted}");
+            if json {
+                println!(
+                    "{}",
+                    json!({ "room": label, "volume": level, "muted": muted, "fixed": before.fixed })
+                );
+            } else {
+                let from = transition(&before.volume.to_string(), &level.to_string());
+                let muted = if muted { "  (muted)" } else { "" };
+                println!("{label:<24} {from}{level}{muted}");
+            }
         }
         Command::Rooms { .. }
         | Command::Status { .. }
