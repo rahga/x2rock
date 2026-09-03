@@ -15,6 +15,19 @@ has it, and read the fields rather than parsing the human prose.**
   now-playing (title, artist, service, position/duration), volume, grouping, and TV capability
   (`has_tv`). This is almost always the first thing to run.
 - `x2rock rooms --json` — just the room list and playback state; cheaper than `status`.
+
+### Reading a room's fields
+
+- **`state`** is one of `PLAYING`, `PAUSED`, `IDLE`, `BUFFERING` — the Sonos Control-API set, *not*
+  UPnP, so `STOPPED`/`TRANSITIONING` never appear. `IDLE` means nothing is loaded or a stream has
+  stopped.
+- **`audible`** (in `status` and `vol --json`) is `false` when the room is muted *or* at volume 0 —
+  the two silent states rolled into one. Check it before "play something here", or the room stays
+  quiet and the play still succeeds.
+- **`on_tv`** is `true` when a soundbar is on its TV input; prefer it over matching the `"TV Audio"`
+  title. `has_tv` (in `status`) is the *capability* — whether the room *can* take a TV input.
+- **`service`** is the music service's name when the player reports one, else `null`; **`service_id`**
+  carries the raw id even when the name is missing, so the source is never fully lost.
 - If either fails with `"code":"unregistered_network"`, run **`x2rock discover`** once — the machine
   is on a network x2rock has not seen. After that it reconnects on its own; discovery is never
   automatic (it will not scan unfamiliar WiFi unasked).

@@ -648,10 +648,18 @@ fn now_json(room: &str, status: &PlaybackStatus, meta: &MetadataStatus) -> serde
         "artist": track.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
         "album": track.and_then(|t| t.album.as_ref()).and_then(|a| a.name.as_deref()),
         "service": container.and_then(|c| c.service.as_ref()).and_then(|s| s.name.as_deref()),
+        // The player leaves `service` null for some sources (a soundbar playlist,
+        // say) while still carrying the id in the object. Emit it too so the
+        // field is never silently lossy - an agent can map the sid itself.
+        "service_id": container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref()),
         "position_ms": status.position_millis,
         "duration_ms": track.and_then(|t| t.duration_millis),
         "repeat": status.play_modes.repeat().as_str(),
         "shuffle": status.play_modes.shuffle,
+        // Answers "is this the TV input?" as a field rather than by matching the
+        // "TV Audio" title. The audio format only exists on a soundbar's TV
+        // stream, so its presence is the signal.
+        "on_tv": container.and_then(|c| c.ht_input_format.as_ref()).is_some(),
         "input_format": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.summary()),
         "surround": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.is_surround()),
         "art_url": track.and_then(|t| t.image_url.as_deref()).or(container.and_then(|c| c.image_url.as_deref())),
@@ -740,6 +748,14 @@ fn room_value(facts: &RoomFacts, fetched: Fetched) -> serde_json::Value {
             if let serde_json::Value::Object(map) = &mut obj {
                 map.insert("volume".into(), json!(volume.as_ref().map(|v| v.volume)));
                 map.insert("muted".into(), json!(volume.as_ref().map(|v| v.muted)));
+                // Volume 0 and muted are different fields with the same outcome:
+                // silence. Derive the outcome so "will this make a sound?" is one
+                // read, and starting a room at volume 0 is a warning, not a
+                // silent no-op.
+                map.insert(
+                    "audible".into(),
+                    json!(volume.as_ref().map(|v| !v.muted && v.volume > 0)),
+                );
                 map.insert("members".into(), json!(facts.members));
                 map.insert("coordinator".into(), json!(facts.coordinator));
                 map.insert("has_tv".into(), json!(facts.has_tv));
@@ -3131,9 +3147,19 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             };
             if json {
+                // previous_volume makes a set distinguishable from a read, and a
+                // clamp (+5 at 100) or a fixed-volume refusal visible: the value
+                // did not move. audible folds volume+muted into the one outcome.
                 println!(
                     "{}",
-                    json!({ "room": label, "volume": level, "muted": muted, "fixed": before.fixed })
+                    json!({
+                        "room": label,
+                        "volume": level,
+                        "previous_volume": before.volume,
+                        "muted": muted,
+                        "audible": !muted && level > 0,
+                        "fixed": before.fixed,
+                    })
                 );
             } else {
                 let from = transition(&before.volume.to_string(), &level.to_string());
