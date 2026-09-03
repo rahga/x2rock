@@ -26,6 +26,50 @@ fn on_group(namespace: &str, command: &str, group_id: &str) -> Value {
     })
 }
 
+/// The `playModes` body for a repeat setting.
+///
+/// Both flags go every time, so the result never depends on what the other one
+/// was. Split out from the call so the mapping can be read - and tested -
+/// without a socket.
+fn repeat_modes(repeat: Repeat) -> Value {
+    json!({
+        "repeat": repeat == Repeat::All,
+        "repeatOne": repeat == Repeat::One,
+    })
+}
+
+/// The options for a `musicServiceAccounts:1 match`.
+///
+/// `linkCode` is sent only when there is one: the field is optional, and a null
+/// would be a different request from an absent key.
+fn match_options(
+    service_id: &str,
+    user_id_hash_code: &str,
+    nickname: &str,
+    link_code: Option<&str>,
+) -> Value {
+    let mut options = json!({
+        "serviceId": service_id,
+        "userIdHashCode": user_id_hash_code,
+        "nickname": nickname,
+    });
+    if let Some(code) = link_code {
+        options["linkCode"] = json!(code);
+    }
+    options
+}
+
+/// The household's account id out of a `match` reply, under either name it
+/// arrives with. A reply without one is still a success - the household
+/// accepted the account either way, and inventing an error over a missing field
+/// would undo a completed link.
+fn account_id(body: &Value) -> Option<String> {
+    body.get("id")
+        .or_else(|| body.get("accountId"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 impl Connection {
     /// Start receiving a namespace's events for a group. They arrive on
     /// [`Connection::events`], beginning with a snapshot of the current state.
@@ -99,10 +143,7 @@ impl Connection {
     pub async fn set_repeat(&self, group_id: &str, repeat: Repeat) -> Result<()> {
         self.call(
             on_group("playback:1", "setPlayModes", group_id),
-            json!({ "playModes": {
-                "repeat": repeat == Repeat::All,
-                "repeatOne": repeat == Repeat::One,
-            }}),
+            json!({ "playModes": repeat_modes(repeat) }),
         )
         .await?;
         Ok(())
@@ -175,16 +216,6 @@ impl Connection {
         nickname: &str,
         link_code: Option<&str>,
     ) -> Result<Option<String>> {
-        let mut options = json!({
-            "serviceId": service_id,
-            "userIdHashCode": user_id_hash_code,
-            "nickname": nickname,
-        });
-        // Sent only when there is one: the field is optional and a null would be
-        // a different request from an absent key.
-        if let Some(code) = link_code {
-            options["linkCode"] = json!(code);
-        }
         let body = self
             .call(
                 json!({
@@ -192,17 +223,10 @@ impl Connection {
                     "command": "match",
                     "householdId": household_id,
                 }),
-                options,
+                match_options(service_id, user_id_hash_code, nickname, link_code),
             )
             .await?;
-        // The account id is the useful half, but a reply without one is still a
-        // success - the household accepted the account either way, and inventing
-        // an error over a missing field would undo a completed link.
-        Ok(body
-            .get("id")
-            .or_else(|| body.get("accountId"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string))
+        Ok(account_id(&body))
     }
 
     /// Replace what a group is playing with a favorite, and start it.
@@ -299,5 +323,80 @@ impl Connection {
         )
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every method here is one `self.call`, so what is testable without a socket
+    // is the shape of what would go over it: the envelope, and the two bodies
+    // that are more than a field copied through.
+
+    #[test]
+    fn a_group_command_and_a_player_command_are_addressed_differently() {
+        // The same namespace is reached by group or by player depending on the
+        // command, and the only difference on the wire is which id key is used.
+        // Sending one where the other belongs fails at the player, far from here.
+        assert_eq!(
+            on_group("groupVolume:1", "setVolume", "g:1"),
+            json!({"namespace": "groupVolume:1", "command": "setVolume", "groupId": "g:1"})
+        );
+        assert_eq!(
+            on_player("playerVolume:1", "setVolume", "RINCON_1"),
+            json!({"namespace": "playerVolume:1", "command": "setVolume", "playerId": "RINCON_1"})
+        );
+    }
+
+    #[test]
+    fn every_repeat_setting_sends_both_flags() {
+        // Off is not "send nothing": leaving a flag out keeps whatever the group
+        // had, so turning repeat-one off would silently leave repeat-all on.
+        assert_eq!(
+            repeat_modes(Repeat::Off),
+            json!({"repeat": false, "repeatOne": false})
+        );
+        assert_eq!(
+            repeat_modes(Repeat::All),
+            json!({"repeat": true, "repeatOne": false})
+        );
+        assert_eq!(
+            repeat_modes(Repeat::One),
+            json!({"repeat": false, "repeatOne": true})
+        );
+    }
+
+    #[test]
+    fn a_link_code_is_absent_rather_than_null_when_there_is_none() {
+        let without = match_options("284", "hash", "x2rock", None);
+        // Absent, not null - the two are different requests, and a service that
+        // reads a null linkCode as an empty one rejects the link.
+        assert!(without.get("linkCode").is_none());
+        assert_eq!(without["serviceId"], "284");
+        assert_eq!(without["userIdHashCode"], "hash");
+        assert_eq!(without["nickname"], "x2rock");
+
+        let with = match_options("284", "hash", "x2rock", Some("ABCD"));
+        assert_eq!(with["linkCode"], "ABCD");
+    }
+
+    #[test]
+    fn the_account_id_is_read_under_either_name_and_its_absence_is_not_a_failure() {
+        assert_eq!(account_id(&json!({"id": "sn_2"})).as_deref(), Some("sn_2"));
+        assert_eq!(
+            account_id(&json!({"accountId": "sn_3"})).as_deref(),
+            Some("sn_3")
+        );
+        // `id` wins when both are there, being the documented one.
+        assert_eq!(
+            account_id(&json!({"id": "sn_2", "accountId": "sn_3"})).as_deref(),
+            Some("sn_2")
+        );
+        // No id at all: the link still completed, so this is None rather than an
+        // error that would tell the user to redo something already done.
+        assert_eq!(account_id(&json!({})), None);
+        // And a non-string id is not coerced into one.
+        assert_eq!(account_id(&json!({"id": 7})), None);
     }
 }
