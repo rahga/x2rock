@@ -55,7 +55,7 @@ that resolves it — run it, then retry. Codes you will meet:
 | `unknown_room` | the `-r` name is not a room here | `x2rock rooms` — but see below |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
 | `no_player` | no reachable speaker to act on | `x2rock discover` |
-| `too_many_rooms` | several `-r` on a command that takes one | re-run with a single `-r` |
+| `too_many_rooms` | several `-r` on a command that takes one | — (`fix` is null; re-run with a single `-r`) |
 | `error` | no known remedy (`fix` is null) | — |
 
 Some codes carry extra detail so you need not re-fetch. **`unknown_room`** includes `did_you_mean`
@@ -121,7 +121,9 @@ favorite that used to play one thing may now play another.
 - **`vol`, `repeat` and `shuffle` are dual-mode** — with no argument they *report* the current
   state, with an argument they *change* it. `--json` gives the resulting `{room, …}` either way, so
   reach for it both to read a value (`x2rock -r Kitchen vol --json`) and to confirm a change. Their
-  fields match a room's entry in `status --json`, which is where to read all rooms at once.
+  fields match a room's entry in `status --json`, which is where to read all rooms at once. In
+  `vol --json`, **`previous_volume` is `null` on a read** and the prior level on a set (even a set to
+  the same value), so its presence tells a confirmed set from a read.
 - **`favorite` is the only way to start a stopped, empty room** — `play` only *resumes* something.
 - **`discover` runs once per new network**, and only when an error asks for it.
 - Grouping: `group` adds rooms to `-r`'s group, and a room that joins plays that group's music;

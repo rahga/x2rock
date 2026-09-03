@@ -669,6 +669,22 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     line
 }
 
+/// The service id embedded in a player art URL - `…sid=284…`, or the
+/// percent-encoded `…sid%3d284…` the getaa wrapper produces. The reliable sid
+/// when the metadata object's own id disagrees (it does, for HLS/stream content).
+fn service_id_from_art(url: &str) -> Option<&str> {
+    for marker in ["sid=", "sid%3d", "sid%3D"] {
+        if let Some(pos) = url.find(marker) {
+            let rest = &url[pos + marker.len()..];
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits > 0 {
+                return Some(&rest[..digits]);
+            }
+        }
+    }
+    None
+}
+
 fn now_json(
     room: &str,
     status: &PlaybackStatus,
@@ -677,7 +693,16 @@ fn now_json(
 ) -> serde_json::Value {
     let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
-    let service_id = container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref());
+    let art = track
+        .and_then(|t| t.image_url.as_deref())
+        .or(container.and_then(|c| c.image_url.as_deref()));
+    // The art URL names the *playback* sid, and it is the reliable one: the
+    // player's own metadata carries a wrong or internal id for HLS/stream
+    // content (65435 for a YouTube Music stream) while the art URL says 284.
+    // Prefer it; fall back to the metadata object's id when there is no art URL.
+    let service_id = art
+        .and_then(service_id_from_art)
+        .or_else(|| container.and_then(|c| c.id.as_ref()).and_then(|id| id.service_id.as_deref()));
     json!({
         "room": room,
         "state": status.state(),
@@ -685,9 +710,9 @@ fn now_json(
         "artist": track.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
         "album": track.and_then(|t| t.album.as_ref()).and_then(|a| a.name.as_deref()),
         // The player leaves `service` null for some sources (a soundbar playlist,
-        // YouTube Music now-playing) while still carrying the sid in the object.
-        // Fall back to the catalogue's name for that sid, so `status` names the
-        // service `favorites` does. `service_id` is emitted regardless, never lossy.
+        // YouTube Music now-playing) while still carrying the sid. Fall back to
+        // the catalogue's name for that sid, so `status` names the service
+        // `favorites` does. `service_id` is emitted regardless, never lossy.
         "service": container.and_then(|c| c.service.as_ref()).and_then(|s| s.name.as_deref())
             .or_else(|| service_id.and_then(|sid| services.and_then(|c| c.name_of(sid)))),
         "service_id": service_id,
@@ -701,7 +726,7 @@ fn now_json(
         "on_tv": container.and_then(|c| c.ht_input_format.as_ref()).is_some(),
         "input_format": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.summary()),
         "surround": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.is_surround()),
-        "art_url": track.and_then(|t| t.image_url.as_deref()).or(container.and_then(|c| c.image_url.as_deref())),
+        "art_url": art,
     })
 }
 
@@ -2199,6 +2224,10 @@ async fn apply_vol(
         None => player.group_volume(group).await?,
     };
     let change = change.as_deref().map(parse_volume).transpose()?;
+    // Whether this was a set, not a read - so `previous_volume` is present only
+    // when there was a previous, distinguishing a set (even to the same value)
+    // from a read where nothing moved.
+    let was_set = change.is_some();
     if change.is_some() && before.fixed {
         bail!("{} has fixed volume; adjust it on the amplifier", target.name);
     }
@@ -2237,7 +2266,7 @@ async fn apply_vol(
             json!({
                 "room": label,
                 "volume": level,
-                "previous_volume": before.volume,
+                "previous_volume": was_set.then_some(before.volume),
                 "muted": muted,
                 "audible": !muted && level > 0,
                 "fixed": before.fixed,
@@ -3432,6 +3461,19 @@ mod tests {
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
+    }
+
+    #[test]
+    fn the_service_id_comes_off_the_art_url_encoded_or_not() {
+        // The real Guest TV art URL: a YouTube Music HLS stream, sid=284
+        // percent-encoded, while the metadata object carried the wrong 65435.
+        let art = "http://192.168.86.31:1400/getaa?s=1&u=x-sonosapi-hls-static%3aALk\
+                   SOiG%3fsid%3d284%26flags%3d8%26sn%3d2";
+        assert_eq!(service_id_from_art(art), Some("284"));
+        // Plain, unencoded form.
+        assert_eq!(service_id_from_art("http://x/getaa?u=y?sid=212&flags=1"), Some("212"));
+        // No sid (a TV or line-in art URL) yields nothing rather than a guess.
+        assert_eq!(service_id_from_art("http://x/getaa?s=1&u=x-sonos-htastream"), None);
     }
 
     #[test]

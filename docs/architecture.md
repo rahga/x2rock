@@ -4250,7 +4250,13 @@ field an agent would read is missing or lying*:
 - `service_id` alongside `service`, because the player leaves `service` null for some sources while
   carrying the sid; and then `status`/`now` resolving that sid to a name from the cached catalogue,
   because favorites names YouTube Music and now-playing did not. (Favorites was not "resolving" - the
-  player simply populates the field there and not in now-playing metadata.)
+  player simply populates the field there and not in now-playing metadata.) A second agent then found
+  the sid itself wrong for **HLS/stream content**: two rooms on YouTube Music at the same moment, one
+  reporting `serviceId` 284 (a track URI) and one 65435 (an `x-sonosapi-hls-static` stream), while
+  *both* art URLs carried the correct `sid=284`. So the **art URL is the reliable sid** - the player's
+  metadata object carries a wrong or internal id for HLS - and `service_id` now reads from the art
+  URL first, the metadata object only as a fallback. One `status` call reproduced it, which is the
+  whole argument for the snapshot: an A/B across rooms in a single reply.
 - `favorites --json` marking `playable: false` for empty shells (no service and no type) - the
   dead-streaming-service favorites a long-lived household accrues. A heuristic, and it says so: it
   cannot see a live service that **recycled an id** (iHeartRadio swaps stations for seasonal ones at
