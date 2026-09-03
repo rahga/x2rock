@@ -74,6 +74,7 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
 }
 
 /// The group a command applies to.
+#[derive(Debug)]
 pub struct Target {
     pub group_id: String,
     pub name: String,
@@ -97,5 +98,116 @@ pub async fn coordinator(session: &Session, target: &Target) -> Result<Connectio
     match target.coordinator_ip {
         Some(ip) if ip != session.connection.ip() => Connection::open(ip).await,
         _ => Ok(session.connection.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sonos::proto::Group;
+
+    // `attach`, `connect` and `coordinator` all open sockets, so what is unit
+    // testable here is `target` - the pure step that turns a room name into the
+    // group a command applies to. It is also the step with the most room to be
+    // quietly wrong: every grouping rule the CLI documents passes through it.
+
+    fn player(id: &str, name: &str, ip: &str) -> Player {
+        Player {
+            id: id.into(),
+            name: name.into(),
+            websocket_url: format!("wss://{ip}:1443/websocket/api"),
+            capabilities: vec![],
+        }
+    }
+
+    fn group(id: &str, name: &str, coordinator: &str, members: &[&str]) -> Group {
+        Group {
+            id: id.into(),
+            name: name.into(),
+            coordinator_id: coordinator.into(),
+            playback_state: String::new(),
+            player_ids: members.iter().map(|id| (*id).into()).collect(),
+        }
+    }
+
+    /// Media Room on its own, plus Dining Room and Kitchen playing together with
+    /// Dining Room coordinating - the shape the grouping rules are written for.
+    fn household() -> Groups {
+        Groups {
+            groups: vec![
+                group("g:media", "Media Room", "RINCON_1", &["RINCON_1"]),
+                group(
+                    "g:dining",
+                    "Dining Room + 1",
+                    "RINCON_2",
+                    &["RINCON_2", "RINCON_3"],
+                ),
+            ],
+            players: vec![
+                player("RINCON_1", "Media Room", "192.168.77.94"),
+                player("RINCON_2", "Dining Room", "192.168.77.95"),
+                player("RINCON_3", "Kitchen", "192.168.77.96"),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_member_name_targets_the_group_and_sends_upnp_to_the_coordinator() {
+        let target = target(&household(), Some("Kitchen")).unwrap();
+
+        // Naming any member addresses the whole group - "pause the kitchen"
+        // while the kitchen is grouped pauses the group, which is what people
+        // mean and what the CLI promises.
+        assert_eq!(target.group_id, "g:dining");
+        assert_eq!(target.name, "Dining Room + 1");
+        // But the queue lives on the coordinator, so the address a UPnP call
+        // goes to is Dining Room's - not the room that was named. Getting this
+        // backwards would edit the wrong queue while looking like it worked.
+        assert_eq!(target.coordinator_id, "RINCON_2");
+        assert_eq!(target.coordinator_ip, "192.168.77.95".parse().ok());
+    }
+
+    #[test]
+    fn the_composite_group_label_is_not_a_room_name() {
+        // "Dining Room + 1" is a display label built from the group; no player
+        // is called that. Passing it back as -r is the documented trap, and it
+        // has to fail as a room-resolution error rather than resolve to
+        // something plausible.
+        let error = target(&household(), Some("Dining Room + 1")).unwrap_err();
+        assert_eq!(crate::hint::of(&error).0, "unknown_room");
+    }
+
+    #[test]
+    fn a_room_name_matches_however_it_is_capitalised() {
+        // Rooms are addressed by name from a shell, so the name a user types is
+        // not the name Sonos stores.
+        let target = target(&household(), Some("kITCHEN")).unwrap();
+        assert_eq!(target.group_id, "g:dining");
+    }
+
+    #[test]
+    fn with_one_group_no_room_is_needed_and_with_several_it_is() {
+        let mut groups = household();
+        groups.groups.truncate(1);
+        assert_eq!(target(&groups, None).unwrap().group_id, "g:media");
+
+        // With more than one there is no defensible default: picking for the
+        // user means music in a room they did not ask for.
+        assert!(target(&household(), None).is_err());
+    }
+
+    #[test]
+    fn a_coordinator_with_no_usable_address_still_targets_the_group() {
+        let mut groups = household();
+        // The coordinator is missing from the player list - a topology that
+        // moved between the two reads that built it.
+        groups.players.retain(|p| p.id != "RINCON_2");
+
+        let target = target(&groups, Some("Kitchen")).unwrap();
+        assert_eq!(target.coordinator_id, "RINCON_2");
+        // None rather than an error: `coordinator()` reads this as "use the
+        // connection already open", which is the right fallback and a worse
+        // outcome to turn into a failed command.
+        assert_eq!(target.coordinator_ip, None);
     }
 }
