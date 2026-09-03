@@ -12,8 +12,9 @@ desktops](#other-linux-desktops).
 
 **Every Sonos room becomes a standard MPRIS media player.** Your media keys, lock screen, GNOME and
 KDE media applets, `playerctl`, and any bar's mpris widget play, pause, skip *and show what's
-playing on Sonos* — track, artist and cover art — with no Sonos-specific setup. The bar widget is
-one nice face on that; the desktop you already have is the other. See [MPRIS](#mpris).
+playing on Sonos* — track, artist and cover art — with no Sonos-specific setup. The bar widget
+adds what a generic MPRIS client cannot: every room at once, with per-room volume. See
+[MPRIS](#mpris).
 
 ![The x2rock bar popup: every room with per-room transport, volume and TV badges](quickshell/x2rock.sonos/preview.png)
 
