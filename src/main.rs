@@ -1615,7 +1615,7 @@ async fn run_browse(
     let live = || -> Result<&session::Session> {
         reached
             .as_ref()
-            .map_err(|e| anyhow!("no player to play it on: {e:#}"))
+            .map_err(|e| hint::no_player(e, format!("no player to play it on: {e:#}")))
     };
 
     let mut catalogue = catalogue::Catalogue::load();
@@ -1759,7 +1759,7 @@ async fn run_search(
     let live = || -> Result<&session::Session> {
         reached
             .as_ref()
-            .map_err(|e| anyhow!("no player to play it on: {e:#}"))
+            .map_err(|e| hint::no_player(e, format!("no player to play it on: {e:#}")))
     };
 
     let mut catalogue = catalogue::Catalogue::load();
@@ -1833,7 +1833,7 @@ async fn run_search(
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
                 Some(s) if s.auth != sonos::smapi::Auth::Anonymous => {
-                    anyhow!("{}", s.needs_link())
+                    s.needs_link_hint().into()
                 }
                 _ => e,
             }

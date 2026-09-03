@@ -187,6 +187,17 @@ impl Service {
             ),
         }
     }
+
+    /// The same advice as [`needs_link`](Self::needs_link), machine-actionable:
+    /// code `needs_link`, with the link command as its fix for a service that
+    /// can be linked (anonymous ones carry none, and should never be asked).
+    pub fn needs_link_hint(&self) -> crate::hint::Hint {
+        let fix = match self.auth {
+            Auth::Anonymous => None,
+            _ => Some(format!("x2rock link {}", self.name)),
+        };
+        crate::hint::Hint::new(self.needs_link(), "needs_link", fix)
+    }
 }
 
 /// One search hit, flattened from `mediaMetadata`.
@@ -793,7 +804,7 @@ async fn call(
     params: &str,
 ) -> Result<String> {
     if service.auth != Auth::Anonymous && token.is_none() {
-        bail!("{}", service.needs_link());
+        return Err(service.needs_link_hint().into());
     }
     match call_soap(service, token, action, params).await? {
         Ok(body) => Ok(body),

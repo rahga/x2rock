@@ -56,6 +56,18 @@ pub fn of(error: &Error) -> (&'static str, Option<String>) {
         .unwrap_or(("error", None))
 }
 
+/// Wrap a failure to reach a player as a `no_player` error - unless the inner
+/// error already knew something sharper (an unregistered network stays that,
+/// because its fix, `x2rock discover`, is the same but its diagnosis is
+/// better). Used where only a borrowed error is in hand and it cannot be kept
+/// as a source.
+pub fn no_player(inner: &Error, message: impl Into<String>) -> Error {
+    match of(inner) {
+        ("error", _) => Hint::new(message, "no_player", Some("x2rock discover".into())).into(),
+        (code, fix) => Hint::new(message, code, fix).into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +94,19 @@ mod tests {
     fn a_plain_error_falls_back_to_a_generic_code() {
         let e = anyhow!("something went wrong");
         assert_eq!(of(&e), ("error", None));
+    }
+
+    #[test]
+    fn no_player_defaults_but_keeps_a_sharper_inner_code() {
+        // A plain connection failure becomes no_player, fix discover.
+        let plain = no_player(&anyhow!("timed out"), "no player to play it on");
+        assert_eq!(of(&plain), ("no_player", Some("x2rock discover".into())));
+
+        // But an unregistered network keeps its own, better diagnosis - the fix
+        // is the same command, and the code is more specific.
+        let inner: Error =
+            Hint::new("unregistered network", "unregistered_network", Some("x2rock discover".into())).into();
+        let wrapped = no_player(&inner, "no player to play it on");
+        assert_eq!(of(&wrapped).0, "unregistered_network");
     }
 }

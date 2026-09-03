@@ -78,10 +78,15 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
         Some(ip) => attach(IpAddr::V4(*ip), state, Some(fingerprint)).await,
         None => {
             let names: Vec<_> = known.iter().map(|p| p.name.as_str()).collect();
-            bail!(
-                "no players found on this network (previously: {})",
-                names.join(", ")
+            Err(crate::hint::Hint::new(
+                format!(
+                    "no players found on this network (previously: {})",
+                    names.join(", ")
+                ),
+                "no_player",
+                Some("x2rock discover".into()),
             )
+            .into())
         }
     }
 }

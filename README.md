@@ -188,10 +188,12 @@ caller reads a field instead of parsing a sentence:
 {"code":"unregistered_network","error":"unregistered network (gateway …): … Run `x2rock discover` …","fix":"x2rock discover"}
 ```
 
-`code` is a stable identifier for the *kind* of failure (e.g. `unregistered_network`,
-`unknown_room`), `error` is the same human message the plain CLI prints, and `fix` is the command
-that resolves it, verbatim, when there is one. An error with no known remedy is still structured —
-`{"code":"error", …, "fix":null}`. Without `--json` the message prints as prose exactly as before.
+`code` is a stable identifier for the *kind* of failure — `unregistered_network` (fix
+`x2rock discover`), `unknown_room` (`x2rock rooms`), `needs_link` (`x2rock link <service>`),
+`no_player` (`x2rock discover`) — `error` is the same human message the plain CLI prints, and `fix`
+is the command that resolves it, verbatim, when there is one. An error with no known remedy is still
+structured — `{"code":"error", …, "fix":null}`. Without `--json` the message prints as prose exactly
+as before.
 
 ## MPRIS
 
