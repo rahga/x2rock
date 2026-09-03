@@ -581,6 +581,16 @@ short of a field, since a partial one is folded in silently and leaves no other 
 louder than the flag above (every event, every group, while music is playing), which is why turning
 on the reconnect ramp does not turn this on with it.
 
+Both are environment variables, so under the systemd unit they go in a drop-in rather than on a
+command line. `systemd/logging.conf.example` is that drop-in with both lines commented out —
+uncomment what you need, and delete the file to go quiet again:
+
+```sh
+mkdir -p ~/.config/systemd/user/x2rock.service.d
+cp systemd/logging.conf.example ~/.config/systemd/user/x2rock.service.d/logging.conf
+systemctl --user daemon-reload && systemctl --user restart x2rock.service
+```
+
 ## Tested devices
 
 Everything here was developed against these, on one household:

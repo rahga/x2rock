@@ -246,7 +246,8 @@ as reconnaissance on corporate gear.
         upnp.rs      # queue over UPnP/SOAP on port 1400 (SOAP calls only, never GENA)
     quickshell/x2rock.sonos/   # Omarchy Quattro bar widget: BarWidget.qml, CoverArt.qml,
                                # manifest.json, and a README of its shell.json keys
-    systemd/x2rock.service     # user unit for the daemon
+    systemd/x2rock.service     # user unit for the daemon, beside logging.conf.example
+                               # (a drop-in carrying the two diagnostic log flags)
   ```
   The one split that was worth having up front is the transport boundary (`sonos/local.rs` vs
   `sonos/api.rs`), because it is what contains the Authentication-setting risk noted above. The

@@ -1,0 +1,31 @@
+# Example drop-in: turn on the daemon's diagnostic logging.
+#
+# Install as a drop-in beside the unit, under a directory named for it, and
+# reload - the filename only has to end in .conf:
+#
+#   mkdir -p ~/.config/systemd/user/x2rock.service.d
+#   cp systemd/logging.conf.example ~/.config/systemd/user/x2rock.service.d/logging.conf
+#   # uncomment a line below, then:
+#   systemctl --user daemon-reload && systemctl --user restart x2rock.service
+#
+# Read what it produces with:
+#
+#   journalctl --user -u x2rock.service -f
+#
+# Both are off by default and neither implies the other - they answer different
+# questions at very different rates. Remove the .conf and reload to go quiet
+# again; nothing here changes what the daemon does, only what it says.
+
+[Service]
+
+# The reconnect machinery out loud: every status pass with coalescing off, plus
+# the backoff ramp (`retrying in 1s`, `2s`, ...). A handful of lines per
+# reconnect. This is the one for a daemon that will not stay connected.
+#Environment=X2ROCK_LOG_VERBOSE=1
+
+# Every event body exactly as the player sent it, logged before x2rock parses
+# it. The only way to see a body that arrives short of a field - a partial
+# `playbackStatus` with no `playbackState` is folded in silently and leaves no
+# other trace. Much louder than the flag above: every event on every group, so
+# a household that is playing something writes steadily.
+#Environment=X2ROCK_LOG_EVENTS=1
