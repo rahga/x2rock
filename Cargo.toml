@@ -24,6 +24,13 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 webpki-roots = "1.0"
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
+[dev-dependencies]
+# `#[tokio::test(start_paused = true)]` for the restart debouncer, whose settle
+# window is two seconds of wall clock the suite should not spend. Same tokio
+# already in the tree with one more feature - no new crate, and nothing here
+# reaches the release binary.
+tokio = { version = "1.53.1", features = ["test-util"] }
+
 [profile.release]
 strip = true
 lto = "thin"

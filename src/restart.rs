@@ -212,3 +212,95 @@ impl Restarts {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    // The debouncer only speaks `SETTLE` after the last thing it heard, so these
+    // run on a paused clock. Tokio advances it only when every task is stuck,
+    // which means the settle window is exercised in full and the suite still
+    // finishes instantly. `network` is reached directly: the D-Bus watchers that
+    // normally feed it need a system bus, and what is worth pinning here is what
+    // the debouncer does with what they send, not their plumbing.
+
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_settles_into_one_restart_stamped_when_it_last_moved() {
+        let restarts = Restarts::new();
+        let mut events = restarts.subscribe();
+
+        // One network switch as NetworkManager actually reports it: disconnect,
+        // connect, address, primary connection.
+        let first = Instant::now();
+        let last = first + Duration::from_millis(400);
+        for at in [first, first + Duration::from_millis(150), last] {
+            restarts.network.send(at).unwrap();
+        }
+
+        let restart = events.recv().await.unwrap();
+        assert_eq!(restart.reason, Reason::NetworkChanged);
+        // The moment the network last moved, not the moment the burst went
+        // quiet. That is the whole point of carrying `at`: a connection made
+        // after this instant is the answer to this restart, and settling adds a
+        // couple of seconds during which one can be made.
+        assert_eq!(restart.at, last);
+
+        // And the rest of the burst does not each arrive as its own restart,
+        // which is what would flap every MPRIS bus name on the way through.
+        assert!(timeout(SETTLE * 3, events.recv()).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn even_a_lone_change_waits_out_the_settle_window() {
+        let restarts = Restarts::new();
+        let mut events = restarts.subscribe();
+        restarts.network.send(Instant::now()).unwrap();
+
+        // Nothing yet, and nothing wrong: the first signal of a burst and a
+        // lone one are the same signal until the window closes on it.
+        assert!(timeout(SETTLE / 2, events.recv()).await.is_err());
+        // Then it lands, so a single change is not swallowed by the wait.
+        assert!(events.recv().await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_later_change_is_its_own_restart_rather_than_folded_into_the_last() {
+        let restarts = Restarts::new();
+        let mut events = restarts.subscribe();
+
+        let docked = Instant::now();
+        restarts.network.send(docked).unwrap();
+        assert_eq!(events.recv().await.unwrap().at, docked);
+
+        // A VPN coming up minutes later is a second move, not more of the first.
+        let vpn_up = docked + Duration::from_secs(300);
+        restarts.network.send(vpn_up).unwrap();
+        assert_eq!(events.recv().await.unwrap().at, vpn_up);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_with_nothing_subscribed_does_not_end_the_debouncer() {
+        let restarts = Restarts::new();
+
+        // Nobody is subscribed, so the broadcast send fails. That is a
+        // non-event - a restart asks whoever is serving a connection to drop it,
+        // and nobody is - but the loop has to survive it, or the first network
+        // change before the daemon settles would silently disarm the rest.
+        restarts.network.send(Instant::now()).unwrap();
+        tokio::time::sleep(SETTLE * 2).await;
+
+        let mut events = restarts.subscribe();
+        let moved = Instant::now();
+        restarts.network.send(moved).unwrap();
+        assert_eq!(events.recv().await.unwrap().at, moved);
+    }
+
+    #[test]
+    fn the_reasons_read_as_the_journal_prints_them() {
+        // daemon.rs logs these straight into "<reason>; reconnecting", so the
+        // wording is the log line rather than an internal label.
+        assert_eq!(Reason::Resumed.to_string(), "resumed from suspend");
+        assert_eq!(Reason::NetworkChanged.to_string(), "the network changed");
+    }
+}
