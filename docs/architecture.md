@@ -4223,7 +4223,13 @@ the *push* log can go quiet without hiding anything. The log is observability; t
 
 Setting three rooms' volume was three cold process starts, each re-resolving topology. `-r` is now
 repeatable for the per-room-state commands - `vol`, `repeat`, `shuffle`, and transport - so `-r
-Kitchen -r Bedroom vol 10` connects once and fans out, one result line per room. Deliberately
+Kitchen -r Bedroom vol 10` connects once and fans out, one result line per room; `--all` fans the
+same across every group (resolved by each group's coordinator name, since the composite group name
+is not addressable). A third agent asking for "quieter everywhere" is what surfaced `--all` as a
+real gap rather than a doc fix - N `-r` flags derived from a prior call is not a clean answer to a
+whole-house request. Worth stating for whoever documents grouping: `-r <any member>` of a group
+resolves to the *group* (transport and group volume), and `--player` is the only way to reach one
+speaker inside it - verified, and the reason the skill now leads its grouping section with it. Deliberately
 agentic and nowhere else: a human uses `party` or one `-r`; an agent orchestrating "set the
 downstairs to 10" wants one call. Several `-r` on a command that does not fan out is a
 `too_many_rooms` error, not a silent act on the first; a fan-out stops at the first room that fails

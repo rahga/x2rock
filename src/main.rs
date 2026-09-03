@@ -33,6 +33,12 @@ struct Cli {
     #[arg(long, short = 'r', global = true, env = "X2ROCK_ROOM")]
     room: Vec<String>,
 
+    /// Apply a per-room command to every room, topology resolved once - "turn
+    /// it down everywhere" as `--all vol -10`. Only the per-room commands
+    /// (volume, transport, repeat, shuffle); exclusive with `--room`.
+    #[arg(long, global = true, conflicts_with = "room")]
+    all: bool,
+
     /// Address of a player, bypassing what is remembered for this network.
     #[arg(long, short = 'i', global = true, env = "X2ROCK_PLAYER")]
     ip: Option<IpAddr>,
@@ -3133,6 +3139,24 @@ async fn run(cli: Cli) -> Result<()> {
         println!("{:<24} left {}", leaving_name, info.group.name);
         println!("{}", group_line(&info.group, &session.groups));
         return Ok(());
+    }
+
+    // --all fans a per-room command across every group, resolved by each
+    // group's coordinator name (a real room name; the composite group name is
+    // not addressable).
+    if cli.all {
+        ensure!(
+            fans_out(&cli.command),
+            "--all applies only to the per-room commands (volume, transport, repeat, shuffle)"
+        );
+        let every: Vec<String> = session
+            .groups
+            .groups
+            .iter()
+            .filter_map(|g| session.groups.player(&g.coordinator_id))
+            .map(|p| p.name.clone())
+            .collect();
+        return fan_out(&session, &every, &cli.command).await;
     }
 
     // Several --room fan a per-room command across each, topology already in

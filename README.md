@@ -128,6 +128,7 @@ x2rock vol 30            # set it
 x2rock vol +5            # nudge it
 x2rock vol mute | unmute
 x2rock vol 30 --player   # this room's own speaker, not the group it plays with
+x2rock --all vol -10     # every room at once (per-room commands only)
 x2rock repeat            # show repeat mode  (--json for {room, repeat})
 x2rock repeat all | one | off
 x2rock shuffle on | off  # --json for {room, shuffle}; bare `shuffle` shows it
