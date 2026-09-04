@@ -112,6 +112,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or set crossfade: on or off.
+    ///
+    /// The third play mode beside repeat and shuffle - it overlaps the end of
+    /// one track with the start of the next. Per group, like the other two.
+    Crossfade {
+        mode: Option<String>,
+        /// The resulting `{room, crossfade}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or set one speaker's tone controls: bass, treble and loudness.
     ///
     /// Per speaker rather than per group - rooms playing together share a group
@@ -736,6 +746,7 @@ fn now_json(
     services: Option<&catalogue::Catalogue>,
 ) -> serde_json::Value {
     let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
+    let next = meta.next_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
     let art = track
         .and_then(|t| t.image_url.as_deref())
@@ -766,6 +777,19 @@ fn now_json(
         "duration_ms": track.and_then(|t| t.duration_millis),
         "repeat": status.modes().repeat().as_str(),
         "shuffle": status.modes().shuffle,
+        // A third play mode the CLI can now set as well as read.
+        "crossfade": status.modes().crossfade,
+        // Where in the queue this is, 1-based. Null when the queue is not what
+        // is driving - a radio stream has no position. The *length* is not here
+        // because it needs the queue itself over UPnP; `queue --json` has both.
+        "queue_position": status.queue_position(),
+        // The explicit badge every controller shows on the row.
+        "explicit": track.and_then(|t| t.explicit),
+        // What follows, which the players supply beside the current item and
+        // nothing here read until now. Null at the end of a queue, and on a
+        // stream, which has no next.
+        "next_title": next.and_then(|t| t.name.as_deref()),
+        "next_artist": next.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
         // Answers "is this the TV input?" as a field rather than by matching the
         // "TV Audio" title. The audio format only exists on a soundbar's TV
         // stream, so its presence is the signal.
@@ -2558,6 +2582,35 @@ async fn apply_eq(
     Ok(())
 }
 
+/// Crossfade, which is a play mode like shuffle and set the same way.
+async fn apply_crossfade(
+    session: &session::Session,
+    target: &session::Target,
+    mode: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let group = target.group_id.as_str();
+    let player = session::coordinator(session, target).await?;
+    let before = player.playback_status(group).await?.modes().crossfade;
+    let after = match mode.as_deref() {
+        None => before,
+        Some(text @ ("on" | "off")) => {
+            let crossfade = text == "on";
+            player.set_crossfade(group, crossfade).await?;
+            crossfade
+        }
+        Some(_) => bail!("crossfade takes on or off"),
+    };
+    if json {
+        println!("{}", json!({ "room": target.name, "crossfade": after }));
+    } else {
+        let word = |on: bool| if on { "on" } else { "off" };
+        let from = transition(word(before), word(after));
+        println!("{:<24} crossfade {from}{}", target.name, word(after));
+    }
+    Ok(())
+}
+
 async fn apply_transport(
     session: &session::Session,
     target: &session::Target,
@@ -2633,6 +2686,7 @@ fn fans_out(command: &Command) -> bool {
         Command::Vol { .. }
             | Command::Repeat { .. }
             | Command::Shuffle { .. }
+            | Command::Crossfade { .. }
             | Command::Play { track: None }
             | Command::Pause
             | Command::Toggle
@@ -2695,6 +2749,7 @@ fn wants_json(command: &Command) -> bool {
             | Command::Vol { json, .. }
             | Command::Repeat { json, .. }
             | Command::Shuffle { json, .. }
+            | Command::Crossfade { json, .. }
         if *json
     )
 }
@@ -3668,6 +3723,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
+        Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
         Command::Pause => player.playback(group, "pause").await?,
         Command::Toggle => player.playback(group, "togglePlayPause").await?,
         Command::Next => player.playback(group, "skipToNextTrack").await?,
@@ -3829,7 +3885,7 @@ mod tests {
     fn playing_body() -> (PlaybackStatus, MetadataStatus) {
         let status = serde_json::from_str(
             r#"{"_objectType":"playbackStatus","playbackState":"PLAYBACK_STATE_PLAYING",
-                "positionMillis":33349,"queueVersion":"1","itemId":"1",
+                "positionMillis":33349,"queueVersion":"1","itemId":"2",
                 "availablePlaybackActions":{"canPause":true,"canSeek":true,"canSkip":false},
                 "playModes":{"repeat":false,"repeatOne":false,"shuffle":false}}"#,
         )
@@ -3841,8 +3897,10 @@ mod tests {
                     "service":{"id":"284","name":"YouTube Music"}},
                 "currentItem":{"track":{"_objectType":"track","name":"Bodies",
                     "artist":{"name":"Offset, JID"},"album":{"name":"Bodies"},
-                    "durationMillis":179000,
-                    "imageUrl":"http://192.168.77.94:1400/getaa?s=1&u=x-sonosapi-hls-static%3aALk%3fsid%3d284%26flags%3d65544%26sn%3d2"}}}"#,
+                    "durationMillis":179000,"explicit":true,"tags":["TAG_EXPLICIT"],
+                    "imageUrl":"http://192.168.77.94:1400/getaa?s=1&u=x-sonosapi-hls-static%3aALk%3fsid%3d284%26flags%3d65544%26sn%3d2"}},
+                "nextItem":{"track":{"_objectType":"track","name":"Enemies",
+                    "artist":{"name":"Offset"},"album":{"name":"KIARI:OFFSET"},"explicit":true}}}"#,
         )
         .unwrap();
         (status, meta)
@@ -3877,10 +3935,15 @@ mod tests {
                 "album",
                 "art_url",
                 "artist",
+                "crossfade",
                 "duration_ms",
+                "explicit",
                 "input_format",
+                "next_artist",
+                "next_title",
                 "on_tv",
                 "position_ms",
+                "queue_position",
                 "repeat",
                 "room",
                 "service",
@@ -3901,6 +3964,31 @@ mod tests {
         assert_eq!(now["repeat"], "off");
         assert_eq!(now["shuffle"], json!(false));
         assert_eq!(now["on_tv"], json!(false));
+        // The four added by the parity pass, each from data the snapshot was
+        // already fetching and throwing away.
+        assert_eq!(now["queue_position"], json!(2));
+        assert_eq!(now["explicit"], json!(true));
+        assert_eq!(now["next_title"], "Enemies");
+        assert_eq!(now["next_artist"], "Offset");
+        assert_eq!(now["crossfade"], json!(false));
+    }
+
+    /// A stream has no position in a queue and nothing after it, and must say
+    /// so with null rather than with a plausible number.
+    #[test]
+    fn a_stream_has_no_queue_position_and_no_next() {
+        // `itemId` is an opaque hash off the queue, which is what makes parsing
+        // it the discriminator rather than a guess about the source.
+        let status: PlaybackStatus = serde_json::from_str(
+            r#"{"playbackState":"PLAYBACK_STATE_PLAYING","itemId":"5zyo+/67QgriUYJZ8nB8ZwWcmqg="}"#,
+        )
+        .unwrap();
+        let meta: MetadataStatus =
+            serde_json::from_str(r#"{"container":{"name":"BTPM NPR","type":"station"}}"#).unwrap();
+        let now = now_json("Media Room", &status, &meta, None);
+        assert_eq!(now["queue_position"], serde_json::Value::Null);
+        assert_eq!(now["next_title"], serde_json::Value::Null);
+        assert_eq!(now["explicit"], serde_json::Value::Null);
     }
 
     /// The skill documents `now --json` as a **subset** of a `status` entry and

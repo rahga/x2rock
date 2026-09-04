@@ -265,6 +265,15 @@ pub struct PlaybackStatus {
     pub position_millis: Option<u64>,
     /// Bumps whenever the queue changes - the cue to re-read it over UPnP.
     pub queue_version: Option<String>,
+    /// The current item's id, which is **the 1-based queue position** whenever
+    /// the queue is what is driving, and an opaque hash otherwise (a radio
+    /// stream, a service station).
+    ///
+    /// Verified by moving a track: removing the queue's second entry left "Zero
+    /// to Hero" at position 2 instead of 3, and its `itemId` read 2 - so this
+    /// follows the position rather than identifying an item, and renumbers when
+    /// the queue is edited. See [`Self::queue_position`].
+    pub item_id: Option<String>,
     /// `None` means unchanged, for the same reason as the fields above.
     ///
     /// This used to be `#[serde(default)]`, which is all-false - "nothing is
@@ -402,6 +411,17 @@ impl PlaybackStatus {
     /// [`Self::actions`].
     pub fn modes(&self) -> PlayModes {
         self.play_modes.unwrap_or_default()
+    }
+
+    /// Where in the queue this is, 1-based, or `None` when the queue is not the
+    /// source.
+    ///
+    /// `itemId` carries the position for a queue and an opaque hash for a
+    /// stream, so parsing is the discriminator: a hash never reads as a number.
+    /// The *length* is not here - that needs the queue itself, over UPnP - so
+    /// this is a position without a total on purpose.
+    pub fn queue_position(&self) -> Option<u32> {
+        self.item_id.as_deref()?.parse().ok()
     }
 }
 
@@ -591,6 +611,10 @@ pub struct Track {
     /// Served by the player itself on port 1400 - usable as MPRIS `mpris:artUrl`.
     pub image_url: Option<String>,
     pub duration_millis: Option<u64>,
+    /// The explicit-content flag, which every controller shows as a badge on
+    /// the row. The player also sends `tags: ["TAG_EXPLICIT"]` beside it; this
+    /// is the boolean form and the one worth reading.
+    pub explicit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -692,6 +716,7 @@ mod tests {
             playback_state: Some("PLAYBACK_STATE_PLAYING".into()),
             position_millis: Some(0),
             queue_version: None,
+            item_id: None,
             available_playback_actions: None,
             play_modes: None,
         };

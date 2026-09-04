@@ -4626,6 +4626,32 @@ and `loadPlaylist` starts one on a group. Three facts cost a queue four times it
   ids increment rather than filling gaps - a saved queue destroyed as `SQ:0` does not free that id
   for the next save.
 
+## `itemId` is the queue position, and it renumbers (verified 2026-09-04)
+
+Four things the controller shows that x2rock had the data for and threw away - the cheap half of
+the parity list. Three were pure exposure: `metadataStatus.nextItem` was parsed and never read,
+`playModes.crossfade` was parsed and never set, and `track.explicit` was not in the wire type at
+all though the player sends it (with `tags: ["TAG_EXPLICIT"]` beside it). The fourth needed a fact.
+
+**"Song [2/4]" has no field.** No namespace carries a queue position, and the length needs the
+queue itself over UPnP. But `playbackStatus.itemId` turns out to be the position:
+
+| itemId | when |
+|---|---|
+| `"1"`, `"2"`, `"9"` … | the queue is driving - 1-based position |
+| `"5zyo+/67QgriUYJZ8nB8ZwWcmqg="` | anything else: a stream, a service station |
+
+The counts across a day of captured events fit that exactly (58 × `"1"`, 17 × `"2"`, and a `"9"`
+appearing only while the test queue was sixteen tracks long). **It follows position rather than
+identifying an item**: removing the queue's second entry left "Zero to Hero" at position 2 instead
+of 3, and its `itemId` read `2`. So it renumbers on an edit and cannot be used as a stable handle
+for a track - only as "where am I".
+
+Parsing is therefore the discriminator, and a good one: an opaque hash never reads as a number, so
+`queue_position` is `null` on a stream without anything having to ask what the source is. The
+*total* is deliberately absent - it would cost a UPnP browse per room on every snapshot, and
+`queue --json` already carries both halves for anyone who wants them.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

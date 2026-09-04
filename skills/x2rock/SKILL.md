@@ -28,6 +28,8 @@ CLI it came from — if the version has moved since you installed the skill, re-
   {
     "room": "Kitchen", "state": "PLAYING", "title": "Solitude",
     "artist": "…", "album": null, "position_ms": 41000, "duration_ms": null,
+    "queue_position": 3, "explicit": false, "crossfade": false,
+    "next_title": "Blue in Green", "next_artist": "Miles Davis",
     "service": "YouTube Music", "service_id": "284", "art_url": "http://…",
     "volume": 2, "muted": false, "audible": true,
     "repeat": "off", "shuffle": false,
@@ -50,7 +52,13 @@ CLI it came from — if the version has moved since you installed the skill, re-
 ```
 
 - Now-playing is **flat** on the room object (`title`, `artist`, `album`, `position_ms`,
-  `duration_ms`), not nested. `position_ms`/`duration_ms` are **milliseconds** (`duration_ms` is
+  `duration_ms`, `next_title`, `next_artist`), not nested.
+- **`queue_position` is 1-based and has no total.** It is `null` whenever the queue is not what is
+  driving - a radio stream has no position in a queue. For the length, read `queue --json`, which
+  carries both. `explicit` is the content flag every controller shows as a badge, `null` when the
+  source does not say. `crossfade` is a third play mode beside repeat and shuffle and is settable.
+- `next_title`/`next_artist` are what plays after this, `null` at the end of a queue and on a
+  stream. `position_ms`/`duration_ms` are **milliseconds** (`duration_ms` is
   `null` for a live stream). Any value can be `null` when the player does not supply it.
 - **Grouping**: two grouped rooms appear as **one** entry — the third above. Its `room` is a display
   label like `"Dining Room + 1"`, `members` is the real room names, `coordinator` is the room the
@@ -138,6 +146,7 @@ see "Ask before you act".
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
+| Crossfade | `x2rock crossfade [on\|off] --json` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

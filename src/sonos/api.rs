@@ -153,6 +153,19 @@ impl Connection {
         Ok(())
     }
 
+    /// Crossfade: overlap the end of one track with the start of the next.
+    ///
+    /// A third play mode beside repeat and shuffle, and settable the same way -
+    /// only the mode named changes.
+    pub async fn set_crossfade(&self, group_id: &str, crossfade: bool) -> Result<()> {
+        self.call(
+            on_group("playback:1", "setPlayModes", group_id),
+            json!({ "playModes": { "crossfade": crossfade } }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Only the mode given changes; Sonos keeps the others as they were.
     pub async fn set_shuffle(&self, group_id: &str, shuffle: bool) -> Result<()> {
         self.call(
