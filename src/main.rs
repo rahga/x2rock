@@ -3597,6 +3597,198 @@ mod tests {
         );
     }
 
+    /// A `playbackStatus` and a `metadataStatus` as the Media Room actually
+    /// sent them (captured 2026-09-03), trimmed of fields nothing here reads.
+    fn playing_body() -> (PlaybackStatus, MetadataStatus) {
+        let status = serde_json::from_str(
+            r#"{"_objectType":"playbackStatus","playbackState":"PLAYBACK_STATE_PLAYING",
+                "positionMillis":33349,"queueVersion":"1","itemId":"1",
+                "availablePlaybackActions":{"canPause":true,"canSeek":true,"canSkip":false},
+                "playModes":{"repeat":false,"repeatOne":false,"shuffle":false}}"#,
+        )
+        .unwrap();
+        let meta = serde_json::from_str(
+            r#"{"_objectType":"metadataStatus",
+                "container":{"_objectType":"container","name":"Bodies","type":"track",
+                    "id":{"accountId":"sn_2","objectId":"ALkSOiGTPQu2","serviceId":"284"},
+                    "service":{"id":"284","name":"YouTube Music"}},
+                "currentItem":{"track":{"_objectType":"track","name":"Bodies",
+                    "artist":{"name":"Offset, JID"},"album":{"name":"Bodies"},
+                    "durationMillis":179000,
+                    "imageUrl":"http://192.168.77.94:1400/getaa?s=1&u=x-sonosapi-hls-static%3aALk%3fsid%3d284%26flags%3d65544%26sn%3d2"}}}"#,
+        )
+        .unwrap();
+        (status, meta)
+    }
+
+    fn volume(volume: u8, muted: bool) -> Volume {
+        Volume {
+            volume,
+            muted,
+            fixed: false,
+        }
+    }
+
+    /// The keys `now --json` emits. The skill teaches agents to read these by
+    /// name, so a rename or a drop breaks every consumer silently - and the
+    /// binary is the side that has to be held to it, because prose cannot
+    /// enforce itself.
+    #[test]
+    fn now_json_emits_exactly_the_documented_keys() {
+        let (status, meta) = playing_body();
+        let now = now_json("Media Room", &status, &meta, None);
+        let mut keys: Vec<&str> = now
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "album",
+                "art_url",
+                "artist",
+                "duration_ms",
+                "input_format",
+                "on_tv",
+                "position_ms",
+                "repeat",
+                "room",
+                "service",
+                "service_id",
+                "shuffle",
+                "state",
+                "surround",
+                "title",
+            ]
+        );
+        // Spot-check that the keys carry what they claim, so this cannot pass
+        // on a body that parsed into nothing.
+        assert_eq!(now["state"], "PLAYING");
+        assert_eq!(now["title"], "Bodies");
+        assert_eq!(now["artist"], "Offset, JID");
+        assert_eq!(now["duration_ms"], json!(179000));
+        assert_eq!(now["position_ms"], json!(33349));
+        assert_eq!(now["repeat"], "off");
+        assert_eq!(now["shuffle"], json!(false));
+        assert_eq!(now["on_tv"], json!(false));
+    }
+
+    /// The skill documents `now --json` as a **subset** of a `status` entry and
+    /// names the six fields only the latter has. Both directions are pinned:
+    /// nothing group- or volume-shaped leaks into `now`, and a status entry adds
+    /// nothing beyond those six.
+    #[test]
+    fn a_status_entry_is_a_now_entry_plus_exactly_six_room_facts() {
+        let (status, meta) = playing_body();
+        let now = now_json("Media Room", &status, &meta, None);
+        let members = vec!["Media Room".to_string()];
+        let facts = RoomFacts {
+            name: "Media Room",
+            members: &members,
+            coordinator: Some("Media Room"),
+            has_tv: false,
+        };
+        let entry = room_value(&facts, Ok((status, meta, Some(volume(2, false)))), None);
+
+        let keys = |v: &serde_json::Value| -> std::collections::BTreeSet<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        let now_keys = keys(&now);
+        let entry_keys = keys(&entry);
+        assert!(
+            now_keys.is_subset(&entry_keys),
+            "a status entry must still contain every now field"
+        );
+        let extra: Vec<&str> = entry_keys
+            .difference(&now_keys)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            extra,
+            [
+                "audible",
+                "coordinator",
+                "has_tv",
+                "members",
+                "muted",
+                "volume"
+            ]
+        );
+    }
+
+    /// `audible` is the one read for "will this make a sound?", because muted
+    /// and volume 0 are different fields with the same outcome. A room at
+    /// volume 1 is audible - barely - which is true rather than "loud enough".
+    #[test]
+    fn audible_is_derived_from_both_mute_and_a_zero_level() {
+        let members = vec!["Media Room".to_string()];
+        for (level, muted, expected) in [
+            (2, false, true),
+            (1, false, true),
+            (0, false, false),
+            (2, true, false),
+            (0, true, false),
+        ] {
+            let (status, meta) = playing_body();
+            let facts = RoomFacts {
+                name: "Media Room",
+                members: &members,
+                coordinator: Some("Media Room"),
+                has_tv: false,
+            };
+            let entry = room_value(&facts, Ok((status, meta, Some(volume(level, muted)))), None);
+            assert_eq!(
+                entry["audible"],
+                json!(expected),
+                "volume {level}, muted {muted}"
+            );
+        }
+
+        // A room that would not report its volume at all: null rather than
+        // absent or guessed, so a consumer sees "unknown" instead of "silent".
+        let (status, meta) = playing_body();
+        let facts = RoomFacts {
+            name: "Media Room",
+            members: &members,
+            coordinator: Some("Media Room"),
+            has_tv: false,
+        };
+        let entry = room_value(&facts, Ok((status, meta, None)), None);
+        assert_eq!(entry["audible"], serde_json::Value::Null);
+        assert_eq!(entry["volume"], serde_json::Value::Null);
+        assert_eq!(entry["muted"], serde_json::Value::Null);
+    }
+
+    /// The other half of `the_embedded_skill_carries_its_frontmatter_and_contracts`.
+    /// That one checks the skill still *says* the right things; this one checks
+    /// the binary still emits what the skill says, so the two cannot drift in
+    /// either direction. An added field that nobody documented fails here.
+    #[test]
+    fn every_field_a_status_entry_emits_is_documented_in_the_skill() {
+        let (status, meta) = playing_body();
+        let members = vec!["Media Room".to_string()];
+        let facts = RoomFacts {
+            name: "Media Room",
+            members: &members,
+            coordinator: Some("Media Room"),
+            has_tv: false,
+        };
+        let entry = room_value(&facts, Ok((status, meta, Some(volume(2, false)))), None);
+
+        for key in entry.as_object().unwrap().keys() {
+            // Quoted, because that is how the skill's worked example writes
+            // them - a bare substring would match half the prose.
+            assert!(
+                SKILL.contains(&format!("\"{key}\"")),
+                "`{key}` is emitted but the skill never names it; \
+                 an agent told to read fields cannot read this one"
+            );
+        }
+    }
+
     #[test]
     fn an_unreachable_room_is_tagged_not_dropped() {
         // Proven live by unplugging a speaker: a coordinator that will not answer
