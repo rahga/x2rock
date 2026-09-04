@@ -1,6 +1,6 @@
 ---
 name: x2rock
-description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, internet radio by URL, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
+description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, internet radio by URL, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "find me a country/jazz/ambient station", "put on some free radio", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
 ---
 
 # Driving Sonos with the `x2rock` CLI
@@ -244,14 +244,9 @@ queue.
 
 **`stations` is not a Sonos service and reaches past all of them.** `x2rock search` and
 `x2rock browse` cover the 108 services the household's player knows about; `x2rock stations`
-searches a community directory of internet radio (Radio Browser) that needs no account, key or
-registration, and `--play N` plays a hit alongside the queue. Reach for it when someone asks for a
-station by name or genre and `search` has nothing - "put on some jazz radio", "find me a station
-from Berlin". Rows are `{name, url, codec, bitrate, country, tags, votes, hls, homepage}`; `url` is
-already the playable stream, so it can be handed to `play-url` directly. Two cautions: it needs the
-internet (not just the LAN), and **a station that the directory lists can still fail to play** -
-the player accepts the URL and then goes to `IDLE` rather than erroring, so confirm with
-`x2rock now` and try the next result rather than reporting success from the play command's output.
+searches a community directory of tens of thousands of internet radio stations that wants no
+account from anybody. See "Free radio" below - it is the answer to most "put something on" requests
+that the household's own services cannot serve.
 
 **`browse` reaches more services than `search` does.** `x2rock search` lists only the services that
 publish a search category; `x2rock browse` lists every service reachable at all, which on this
@@ -264,6 +259,75 @@ And **`group`/`ungroup` are asymmetric**: `group` takes `-r <coordinator>` plus 
 `ungroup` takes the room *positionally* with no `-r`. **`favorites` (listing) is household-wide** —
 `-r` is only meaningful on `favorite` (playing), to say which room.
 
+## Free radio: find a station and play it
+
+**There are tens of thousands of internet radio stations that need no account, no key and no
+registration, and x2rock can play any of them.** `x2rock stations` searches a community directory
+(Radio Browser) and `--play N` plays a hit; `x2rock play-url <url>` plays a stream URL directly.
+Neither touches a Sonos login. This is usually the shortest path from "put something on" to sound,
+and it works even when the household's own services have nothing.
+
+**Treat almost any description of music as a search you should just run.** A genre, a mood, a
+decade, a country, a city, a language, a format - all of it is a `stations` query or `--tag`. Do not
+answer "the household has no country station" when eleven thousand of them are one command away.
+
+```sh
+x2rock stations --tag country --limit 5        # a genre
+x2rock stations --tag "classic country"         # narrower; tags are free-form, so guess
+x2rock stations "WFMU"                          # a station by name
+x2rock stations --tag jazz --country FR         # jazz, from France
+x2rock stations --tag ambient --limit 10 --json # to pick from with reasons
+```
+
+Then play it and **check that it actually played**:
+
+```sh
+x2rock stations --tag country --limit 5 -r "Media Room" --play 1
+x2rock -r "Media Room" now                      # must say PLAYING
+```
+
+### Stations worth knowing, all verified working
+
+Good defaults when someone wants something on and has not said what, and good anchors for "more
+like this". Each plays with `play-url` as-is:
+
+| Station | What it is | URL |
+|---|---|---|
+| SomaFM Groove Salad | Chilled ambient beats and grooves. The safest "just put something nice on". | `https://ice5.somafm.com/groovesalad-128-mp3` |
+| SomaFM Drone Zone | Atmospheric ambient space music. Background, focus, sleep. | `https://ice2.somafm.com/dronezone-128-mp3` |
+| Radio Paradise (Main Mix) | Hand-curated eclectic rock, world and jazz, 320k AAC. | `http://stream.radioparadise.com/aac-320` |
+| WFMU | Freeform independent radio, East Orange NJ. Unpredictable by design. | `http://stream2.wfmu.org/freeform-128k` |
+| FIP (Radio France) | Eclectic French public radio, famously genre-hopping. | `http://icecast.radiofrance.fr/fip-hifi.aac` |
+
+```sh
+x2rock play-url "https://ice5.somafm.com/groovesalad-128-mp3" --title "SomaFM Groove Salad" -r "Media Room"
+```
+
+These five are a starting point, not the catalogue. SomaFM alone has around thirty channels, Radio
+Paradise has Mellow/Rock/Global mixes, FIP has Jazz/Reggae/Electro/Groove - so when one of these
+lands well, **searching for its neighbours is the obvious next move**: `x2rock stations "SomaFM"`,
+`x2rock stations "FIP"`, `x2rock stations "Radio Paradise"`.
+
+### Offer more than one, and keep going if one fails
+
+- **Two or three options beat one.** `--json` gives `codec`, `bitrate`, `country`, `tags` and
+  `votes`; `votes` is the directory's popularity signal and a reasonable tiebreak. Naming why you
+  picked one ("highest-voted, 320k, from France") is more useful than a bare confirmation.
+- **A listed station can still fail to play.** The player accepts the URL and then sits at `IDLE`
+  rather than erroring, so `--play` reports what it *asked for*, not what happened. Always confirm
+  with `x2rock now`, and if the room is `IDLE`, **try the next result** - do not report success, and
+  do not conclude radio is broken.
+- **A null `stream_info` is normal, not a failure.** Many stations send no ICY metadata: `.977
+  Country` plays perfectly and never names a track, so `title` is the station and `stream_info` is
+  `null`. Others take a few seconds to send the first one, so a null immediately after starting
+  means "not yet".
+- **`hls: true` is the directory's claim, not a verdict.** Some HLS stations play and some do not.
+  Treat it as one more thing to try, not a reason to skip a row.
+- **It needs the internet**, not just the LAN - unlike the rest of x2rock. A `stations` failure on a
+  network with working speakers usually means no route out.
+- **A stream plays alongside the queue and leaves it alone**, so putting radio on does not disturb
+  what was queued. Stopping the radio is `x2rock pause`.
+
 ## Worked examples
 
 **"Play something in the kitchen."** `play` only *resumes*; a stopped room needs `favorite`.
@@ -274,6 +338,28 @@ x2rock favorites --json                   # household favorites; pick a playable
 x2rock -r Kitchen favorite "Lo-Fi for Vampires Only"
 x2rock -r Kitchen now --json              # confirm: state PLAYING, position advancing
 ```
+
+**"Find and play a free country station."** No account needed and no reason to ask which service -
+go and look. This is the real transcript of doing it:
+
+```sh
+$ x2rock stations --tag country --limit 5
+  1  MP3 128k  US  .977 Country
+  2  MP3 128k  GB  Radio Caroline
+  3  MP3 128k  US  181.FM - Highway 181
+  4  MP3 256k  CH  1.FM - Absolute Country Hits Radio
+  5  AAC       CZ  Country Radio
+
+$ x2rock stations --tag country --limit 5 -r "Media Room" --play 1
+Media Room — .977 Country
+
+$ x2rock -r "Media Room" now
+PLAYING  .977 Country
+```
+
+`PLAYING` is the confirmation - without it, assume nothing and try `--play 2`. Then offer the
+neighbours rather than stopping: `--tag "classic country"`, `--tag bluegrass`,
+`--tag "country pop"`, or `--country US --tag country` for American stations specifically.
 
 **"Turn it down everywhere."** One call, no room names to derive:
 
