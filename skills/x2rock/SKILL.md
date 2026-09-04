@@ -117,7 +117,10 @@ reads what is left, `sleep 30m` arms it, `sleep off` cancels. Bare digits are **
 45`), and `2h`, `1h30m`, `90s` and `HH:MM:SS` all work; a trailing number after a unit (`1h30`) is
 refused as ambiguous rather than guessed at. `sleep --json` gives `{room, sleep_ms}`, null when
 none is set, and the number is what the player reports rather than what was asked for - it starts
-counting on acceptance, so a timer just set reads a second or two under.
+counting on acceptance, so a timer just set reads a second or two under. **`sleep_ms: 0` is not the
+same as null**: zero means the timer has expired and the room is seconds from pausing - it was
+observed reading zero while still playing for about seven seconds - while null means no timer is
+set. When it fires the room **pauses**, keeping its place, so `play` resumes it.
 
 **`eq` is per speaker, like `vol --player` and unlike everything else.** Bass and treble run
 -10..10 (0 flat) and loudness is on/off; `-r` names the *speaker*, so a grouped room gets its own

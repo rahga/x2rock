@@ -4672,6 +4672,14 @@ CurrentSleepTimerGeneration`.
   reported 1798000 ms. So the honest answer is always the player's own, which is why the CLI reads
   back after writing instead of echoing what was asked for - the same rule the tone controls follow
   for a different reason (there the setters answer with an empty body).
+- **`00:00:00` is a state, and it lingers.** A 20-second timer run end to end counted down
+  cleanly (19s, 16s, 14s ... 1s) and then read `00:00:00` **while still playing for about seven
+  seconds** before the transport actually moved. So `sleep_ms == 0` means "expired, about to stop"
+  and is a different answer from `null`, which means "no timer" - anything polling has to tell them
+  apart or it will report a room as un-timed while it is seconds from silence. Observed on a One SL
+  on 95.0-77060; whether the seven seconds is fixed or incidental is unknown.
+- **It pauses; it does not stop.** The room came to rest in `PAUSED`, keeping its place in the
+  queue, so resuming is `play` and nothing is lost.
 
 Worth noting for the alarms work, since they share this service: `RunAlarm`, `SnoozeAlarm` and
 `GetRunningAlarmProperties` live on `AVTransport` too, but the alarms themselves are the separate
