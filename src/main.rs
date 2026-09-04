@@ -112,6 +112,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List the household's alarms.
+    ///
+    /// Alarms are household-wide - one list, each entry naming its room - so
+    /// this takes no --room. Created in the Sonos app; x2rock can turn them on
+    /// and off and remove them.
+    Alarms {
+        /// The list as JSON: `{id, room, start, duration_ms, recurrence,
+        /// enabled, volume, play_mode, program, include_grouped}` per alarm.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn an alarm on or off, or remove it, by id from `x2rock alarms`.
+    Alarm {
+        id: u32,
+        #[command(subcommand)]
+        action: AlarmAction,
+    },
     /// Show or set the sleep timer: the room stops playing when it runs out.
     ///
     /// With no argument it reads what is left. Per group, like transport.
@@ -479,6 +496,20 @@ enum RawScope {
 enum BookmarksAction {
     /// Forget one, by name. Matches the history too, not just what was kept.
     Remove { query: String },
+}
+
+#[derive(Subcommand)]
+enum AlarmAction {
+    /// Arm it.
+    On,
+    /// Disarm it, leaving it in the list to be armed again.
+    Off,
+    /// Delete it. Sonos keeps no undo, and the app is the only way to make a
+    /// new one.
+    Remove {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1136,6 +1167,54 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
 /// the name. Several matches are reported rather than guessed between, except
 /// where one of them is the whole name - "Bedtime" should not be ambiguous just
 /// because "Bedtime P5 Mix" also exists.
+/// The household's alarms, one line each.
+///
+/// `RoomUUID` is resolved against the topology for a name, and left as the id
+/// when it does not resolve - an alarm survives its room being switched off, and
+/// hiding it would be worse than showing a raw id.
+fn print_alarms(alarms: &[upnp::Alarm], groups: &Groups, json: bool) {
+    let room_of = |uuid: &str| groups.player(uuid).map(|p| p.name.clone());
+    if json {
+        let items: Vec<_> = alarms
+            .iter()
+            .map(|a| {
+                json!({
+                    "id": a.id,
+                    "room": room_of(&a.room_uuid),
+                    "room_id": a.room_uuid,
+                    "start": a.start,
+                    "duration_ms": a.duration_ms(),
+                    "recurrence": a.recurrence,
+                    "enabled": a.enabled,
+                    "volume": a.volume,
+                    "play_mode": a.play_mode,
+                    "program": a.program_uri,
+                    "include_grouped": a.include_linked_zones,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&items).expect("serializable"));
+        return;
+    }
+    if alarms.is_empty() {
+        println!("No alarms.");
+        return;
+    }
+    for a in alarms {
+        println!(
+            "{:<4} {:<16} {}  {:<9} for {}  vol {:<4} {:<4} {}",
+            a.id,
+            room_of(&a.room_uuid).unwrap_or_else(|| a.room_uuid.clone()),
+            a.start,
+            a.recurrence,
+            a.duration,
+            a.volume,
+            if a.enabled { "on" } else { "off" },
+            a.program(),
+        );
+    }
+}
+
 fn find_favorite<'a>(favorites: &'a [Favorite], query: &str) -> Result<&'a Favorite> {
     find_named(
         favorites,
@@ -3147,6 +3226,52 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Household-wide, and addressed by id rather than by room, so these run
+    // before a target is resolved - `alarms` in a two-group house must not
+    // demand a --room it has no use for.
+    if let Command::Alarms { json } = &cli.command {
+        let alarms = Upnp::new(session.connection.ip()).alarms().await?;
+        print_alarms(&alarms, &session.groups, *json);
+        return Ok(());
+    }
+
+    if let Command::Alarm { id, action } = &cli.command {
+        let upnp = Upnp::new(session.connection.ip());
+        let alarms = upnp.alarms().await?;
+        let alarm = alarms
+            .iter()
+            .find(|a| a.id == *id)
+            .ok_or_else(|| anyhow!("no alarm with id {id}. `x2rock alarms` lists them."))?;
+        match action {
+            AlarmAction::Remove { yes } => {
+                ensure!(
+                    *yes,
+                    "removing alarm {id} cannot be undone, and only the Sonos app can make a \
+                     new one - pass --yes"
+                );
+                upnp.destroy_alarm(*id).await?;
+                println!("alarm {id} removed");
+            }
+            wanted => {
+                let enabled = matches!(wanted, AlarmAction::On);
+                let word = |on: bool| if on { "on" } else { "off" };
+                if alarm.enabled != enabled {
+                    // The whole record goes back, not just this field:
+                    // UpdateAlarm refuses a partial one with UPnP 402.
+                    let mut updated = alarm.clone();
+                    updated.enabled = enabled;
+                    upnp.update_alarm(&updated).await?;
+                }
+                println!(
+                    "alarm {id} {}{}",
+                    transition(word(alarm.enabled), word(enabled)),
+                    word(enabled)
+                );
+            }
+        }
+        return Ok(());
+    }
+
     if let Command::Raw {
         namespace,
         command,
@@ -3850,6 +3975,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
+        | Command::Alarms { .. }
+        | Command::Alarm { .. }
         | Command::Group { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }

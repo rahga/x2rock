@@ -112,6 +112,14 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
+**Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
+room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
+--yes` deletes one. **x2rock cannot create an alarm** - that is the Sonos app's job - so removing
+one is irreversible in a stronger sense than usual, which is why `--yes` is required. Turning an
+alarm to the state it is already in is a no-op that says so. `recurrence` is `ONCE`, `WEEKDAYS`,
+`WEEKENDS`, `DAILY` or `ON_<digits>` for named days; `program` is a URI, and
+`x-rincon-buzzer:0` is the built-in chime.
+
 **The sleep timer stops the room when it runs out**, and is per group like transport. `sleep`
 reads what is left, `sleep 30m` arms it, `sleep off` cancels. Bare digits are **minutes** (`sleep
 45`), and `2h`, `1h30m`, `90s` and `HH:MM:SS` all work; a trailing number after a unit (`1h30`) is
@@ -158,6 +166,7 @@ see "Ask before you act".
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
+| Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

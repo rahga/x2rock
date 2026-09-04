@@ -4685,6 +4685,37 @@ Worth noting for the alarms work, since they share this service: `RunAlarm`, `Sn
 `GetRunningAlarmProperties` live on `AVTransport` too, but the alarms themselves are the separate
 `AlarmClock:1` service - these three are only about one that is currently going off.
 
+## Alarms: `AlarmClock:1`, and why a toggle is a whole rewrite (verified 2026-09-04)
+
+A fourth UPnP service, at `/AlarmClock/Control`, household-wide - any player answers for every
+alarm, and each alarm names its room by `RoomUUID`. Nothing in the Control API touches alarms.
+
+- **`ListAlarms` answers with an escaped XML document inside the reply.** `CurrentAlarmList` is
+  text, not markup, so reading it is two parses: the envelope, then the `<Alarms>` it carries. Each
+  entry is a single element, every field an attribute.
+- **`UpdateAlarm` requires every field.** Omitting `Volume` is UPnP 402, not "leave it as it was" -
+  and the alarm is left untouched, so the failure is at least atomic. Turning one alarm off is
+  therefore a read-modify-write of the whole record: list, clone, set `Enabled`, hand all ten fields
+  back. Anything that sends a partial record silently does nothing.
+- **`StartTime` on the way out, `StartLocalTime` on the way in.** The same field under two names,
+  and only the write side uses the longer one.
+- **`Recurrence` accepts more than its own description lists.** The SCPD's `allowedValueList` names
+  `ONCE`, `WEEKDAYS`, `WEEKENDS`, `DAILY`; `ON_13` was accepted and read back intact, so the
+  `ON_<digits>` day bitmap the app offers is real and undocumented here. It does still validate -
+  `SOMETIMES` is a 402 - so the vocabulary is wider than the list, not absent. x2rock carries the
+  string through rather than checking it against the four, since checking would reject what the
+  player accepts.
+- **`x-rincon-buzzer:0` is the built-in chime**, which is what makes a test alarm safe: it needs no
+  stream and no queue. Creating one **disabled** is safer still, and is how all of this was probed
+  without any risk of a speaker going off in an office.
+
+**Creating alarms is deliberately not implemented.** `CreateAlarm` takes ten arguments including
+`ProgramURI` and `ProgramMetaData`, and the useful form of it - "wake me with this favorite" -
+needs the favorite resolved to a URI and a DIDL record. `bookmarks.rs` already builds both for its
+own replay, so that is the natural way in, but it is a piece of work rather than an afternoon. Until
+then x2rock manages the alarms the app made, and `alarm remove` says so: nothing here can make a new
+one, which is why it demands `--yes`.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

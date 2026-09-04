@@ -38,6 +38,9 @@ enum Service {
     AvTransport,
     ContentDirectory,
     MusicServices,
+    /// Alarms. Household-wide: any player answers for all of them, and each
+    /// alarm names the room it belongs to.
+    AlarmClock,
     /// Tone controls. Per speaker, and reachable nowhere else: the Control API
     /// has no EQ namespace at all, so this is the only door to bass, treble and
     /// loudness - the Sonos app's own "EQ Settings for <room>" panel.
@@ -50,6 +53,7 @@ impl Service {
             Self::AvTransport => "/MediaRenderer/AVTransport/Control",
             Self::ContentDirectory => "/MediaServer/ContentDirectory/Control",
             Self::MusicServices => "/MusicServices/Control",
+            Self::AlarmClock => "/AlarmClock/Control",
             Self::RenderingControl => "/MediaRenderer/RenderingControl/Control",
         }
     }
@@ -59,6 +63,7 @@ impl Service {
             Self::AvTransport => "urn:schemas-upnp-org:service:AVTransport:1",
             Self::ContentDirectory => "urn:schemas-upnp-org:service:ContentDirectory:1",
             Self::MusicServices => "urn:schemas-upnp-org:service:MusicServices:1",
+            Self::AlarmClock => "urn:schemas-upnp-org:service:AlarmClock:1",
             Self::RenderingControl => "urn:schemas-upnp-org:service:RenderingControl:1",
         }
     }
@@ -92,6 +97,50 @@ pub struct Tone {
     /// toggle: it reads on with nothing measured behind it, which is why both
     /// are reported rather than one.
     pub trueplay_available: bool,
+}
+
+/// One alarm, exactly as `ListAlarms` reports it.
+///
+/// Every field is carried even where the CLI does nothing with it, because
+/// **`UpdateAlarm` demands all of them**: omitting `Volume` is a UPnP 402, not a
+/// "leave it alone". So changing one thing means reading the alarm, editing the
+/// field and writing the whole record back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alarm {
+    pub id: u32,
+    /// `HH:MM:SS` local. Reported as `StartTime` and written back as
+    /// `StartLocalTime` - the two names are the same field.
+    pub start: String,
+    pub duration: String,
+    /// `ONCE`, `WEEKDAYS`, `WEEKENDS`, `DAILY` - or `ON_<digits>` for named
+    /// days, which the service accepts but its own description does not list.
+    pub recurrence: String,
+    pub enabled: bool,
+    pub room_uuid: String,
+    pub program_uri: String,
+    pub program_metadata: String,
+    pub play_mode: String,
+    pub volume: u8,
+    pub include_linked_zones: bool,
+}
+
+impl Alarm {
+    /// How long it plays for, in milliseconds. `None` if the player reported
+    /// something that is not a duration.
+    pub fn duration_ms(&self) -> Option<u128> {
+        parse_hms(&self.duration).map(|d| d.as_millis())
+    }
+
+    /// The program in a word where there is one. `x-rincon-buzzer:0` is the
+    /// built-in chime and every controller shows it as a name rather than a
+    /// URI; anything else is a stream or a queue and is shown as it is.
+    pub fn program(&self) -> &str {
+        if self.program_uri.starts_with("x-rincon-buzzer") {
+            "chime"
+        } else {
+            &self.program_uri
+        }
+    }
 }
 
 pub struct Upnp {
@@ -188,6 +237,58 @@ pub struct Queue {
 impl Upnp {
     pub fn new(ip: IpAddr) -> Self {
         Self { ip }
+    }
+
+    /// Every alarm in the household.
+    ///
+    /// `CurrentAlarmList` is an escaped XML document inside the reply, so this
+    /// parses twice: the envelope, then the `<Alarms>` it carries as text.
+    pub async fn alarms(&self) -> Result<Vec<Alarm>> {
+        let text = self.soap(Service::AlarmClock, "ListAlarms", &[]).await?;
+        let outer = Document::parse(&text)?;
+        let inner = text_of(&outer, "CurrentAlarmList").unwrap_or("");
+        if inner.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        alarms_in(inner)
+    }
+
+    /// Write an alarm back whole.
+    ///
+    /// Every field goes, because the action requires it - see [`Alarm`]. Read
+    /// one, change what you meant to change, hand it back.
+    pub async fn update_alarm(&self, alarm: &Alarm) -> Result<()> {
+        let bit = |on: bool| if on { "1" } else { "0" };
+        self.soap(
+            Service::AlarmClock,
+            "UpdateAlarm",
+            &[
+                ("ID", &alarm.id.to_string()),
+                // Reported as StartTime, written as StartLocalTime.
+                ("StartLocalTime", &alarm.start),
+                ("Duration", &alarm.duration),
+                ("Recurrence", &alarm.recurrence),
+                ("Enabled", bit(alarm.enabled)),
+                ("RoomUUID", &alarm.room_uuid),
+                ("ProgramURI", &alarm.program_uri),
+                ("ProgramMetaData", &alarm.program_metadata),
+                ("PlayMode", &alarm.play_mode),
+                ("Volume", &alarm.volume.to_string()),
+                ("IncludeLinkedZones", bit(alarm.include_linked_zones)),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn destroy_alarm(&self, id: u32) -> Result<()> {
+        self.soap(
+            Service::AlarmClock,
+            "DestroyAlarm",
+            &[("ID", &id.to_string())],
+        )
+        .await?;
+        Ok(())
     }
 
     /// What is left on the group's sleep timer, or `None` when none is set.
@@ -929,6 +1030,37 @@ impl Upnp {
     }
 }
 
+/// The alarms in an `<Alarms>` document.
+///
+/// Split from the call because the document arrives escaped inside the reply
+/// and is worth reading on its own - it is the one place every field of an
+/// alarm appears at once.
+fn alarms_in(xml: &str) -> Result<Vec<Alarm>> {
+    let doc = Document::parse(xml)?;
+    Ok(doc
+        .descendants()
+        .filter(|n| n.tag_name().name() == "Alarm")
+        .filter_map(|n| {
+            let attr = |name: &str| n.attribute(name).unwrap_or("").to_string();
+            Some(Alarm {
+                // An alarm with no usable id could not be addressed afterwards,
+                // so it is dropped rather than listed as one nothing can act on.
+                id: n.attribute("ID")?.parse().ok()?,
+                start: attr("StartTime"),
+                duration: attr("Duration"),
+                recurrence: attr("Recurrence"),
+                enabled: attr("Enabled") == "1",
+                room_uuid: attr("RoomUUID"),
+                program_uri: attr("ProgramURI"),
+                program_metadata: attr("ProgramMetaData"),
+                play_mode: attr("PlayMode"),
+                volume: attr("Volume").parse().unwrap_or(0),
+                include_linked_zones: attr("IncludeLinkedZones") == "1",
+            })
+        })
+        .collect())
+}
+
 /// A tone level out of a `RenderingControl` reply.
 fn level_in(text: &str, field: &str) -> Result<i8> {
     let doc = Document::parse(text)?;
@@ -1044,6 +1176,36 @@ mod tests {
     /// Replies captured off the Media Room speaker, 2026-09-04.
     const GET_BASS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetBassResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentBass>0</CurrentBass></u:GetBassResponse></s:Body></s:Envelope>"#;
     const GET_LOUDNESS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetLoudnessResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentLoudness>1</CurrentLoudness></u:GetLoudnessResponse></s:Body></s:Envelope>"#;
+
+    /// The `<Alarms>` document as the player produced it, 2026-09-04.
+    #[test]
+    fn an_alarm_is_read_out_of_the_escaped_list() {
+        let list = r#"<Alarms><Alarm ID="1" StartTime="07:00:00" Duration="00:15:00" Recurrence="ON_13" Enabled="0" RoomUUID="RINCON_48A6B81853E001400" ProgramURI="x-rincon-buzzer:0" ProgramMetaData="" PlayMode="NORMAL" Volume="10" IncludeLinkedZones="0"/></Alarms>"#;
+        let alarms = alarms_in(list).unwrap();
+        assert_eq!(alarms.len(), 1);
+        let a = &alarms[0];
+        assert_eq!(a.id, 1);
+        // Reported as StartTime; written back as StartLocalTime. Same field,
+        // two names, and only the write side uses the longer one.
+        assert_eq!(a.start, "07:00:00");
+        assert_eq!(a.duration_ms(), Some(900_000));
+        // `ON_13` is a day bitmap the service accepts although its own
+        // description lists only ONCE/WEEKDAYS/WEEKENDS/DAILY, so it is carried
+        // through rather than validated against that list.
+        assert_eq!(a.recurrence, "ON_13");
+        assert!(!a.enabled);
+        assert_eq!(a.volume, 10);
+        assert_eq!(a.program(), "chime");
+
+        // An empty list is empty, not an error.
+        assert!(alarms_in("<Alarms></Alarms>").unwrap().is_empty());
+        // An entry with no id cannot be addressed later, so it is dropped.
+        assert!(
+            alarms_in(r#"<Alarms><Alarm StartTime="07:00:00"/></Alarms>"#)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn a_tone_level_is_read_out_of_the_reply_signed() {
