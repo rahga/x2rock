@@ -4531,7 +4531,7 @@ is the control that actually changes what volume 1 sounds like.
   Sonos Fabric is the thing that could change that - its Positioning Technology senses placement
   with high-frequency sound, which is TruePlay's own measurement machinery, so per-role profiles
   would plausibly arrive as new actions here. **Baseline for that diff, read 2026-09-04 from a One
-  SL on firmware 95.0-77060** - the 27 actions `RenderingControl:1` publishes today:
+  SL on firmware 96.1-79270** - the 27 actions `RenderingControl:1` publishes today:
 
   ```
   GetBass, GetEQ, GetHeadphoneConnected, GetLoudness, GetMute, GetOutputFixed,
@@ -4677,7 +4677,7 @@ CurrentSleepTimerGeneration`.
   seconds** before the transport actually moved. So `sleep_ms == 0` means "expired, about to stop"
   and is a different answer from `null`, which means "no timer" - anything polling has to tell them
   apart or it will report a room as un-timed while it is seconds from silence. Observed on a One SL
-  on 95.0-77060; whether the seven seconds is fixed or incidental is unknown.
+  on 96.1-79270; whether the seven seconds is fixed or incidental is unknown.
 - **It pauses; it does not stop.** The room came to rest in `PAUSED`, keeping its place in the
   queue, so resuming is `play` and nothing is lost.
 
@@ -4801,7 +4801,7 @@ contradict the monotonic allocation that let `sn_18` be predicted for TIDAL - or
 stale entries from different content, four days apart. **Unresolved**, and the reason to treat the
 proxy as evidence about *content* rather than about accounts.
 
-**The registry itself is not readable from the LAN on 95.0-77060.** Two doors were tried and both
+**The registry itself is not readable from the LAN on 96.1-79270.** Two doors were tried and both
 are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportInfo></ZPSupportInfo>`
 (the endpoint survives, its content does not), and `musicServiceAccounts:1` refuses
 `getAccounts`, `listAccounts`, `getMusicServiceAccounts` and `getAccountList` alike with
@@ -4810,6 +4810,45 @@ enumerate what else might exist.
 
 So `accounts --household` stays as it is. It is the best available answer and its own output says
 what it is not; what changed here is that "not the account list" now has a number attached.
+
+## The firmware update is dated, and the hunt has its answer (2026-09-04)
+
+A port scan turned up the speaker's own banner, which disagreed with this file:
+`Server: Linux UPnP/1.0 Sonos/96.1-79270 (ZPS22)`, `softwareVersion 96.1-79270`, `displayVersion
+18.7`, where the 2026-08-31 probe recorded `95.0-77060 / 18.4`. Three attributions were wrong and
+are corrected - the `RenderingControl` action baseline, the sleep-timer timing and the
+account-registry negative result were all read today and belong to 96.1.
+
+**The update is dated to the minute, by the daemon's own journal.** The owner flashed it at 07:30;
+the log shows `192.168.77.94: connection lost` at **07:24:57**, four rescans finding nothing, and
+`Media Room -> org.mpris...` again at **07:26:22**. So a firmware update looks, from the daemon's
+side, exactly like a speaker being switched off for eighty-five seconds - which is worth knowing,
+because it is the only timestamp available for correlating a finding with a version.
+
+**And it gives the partial-`playbackStatus` hunt a real answer.** Splitting the capture at 07:25:
+
+| firmware | window | `playbackStatus` bodies | partial | `playbackError` |
+|---|---|---|---|---|
+| 95.0-77060 | Sep 03 14:27 - Sep 04 07:24 | 149 | **0** | 3 |
+| 96.1-79270 | Sep 04 07:26 - 10:08 | 90 | **0** | 0 |
+
+Seventeen hours and 149 status bodies **on the very firmware the bug was reported against**, and it
+did not appear once - against a reported rate of four a day. That is a genuine non-reproduction, not
+a test invalidated by a version change, and it points at conditions rather than firmware. The
+likeliest condition is in plain sight: the room was **paused for most of that window**, and a paused
+room emits an order of magnitude fewer events than a playing one. The original sighting was
+presumably during sustained listening.
+
+It is also the last word that will ever be had on 95.0 here, since the speaker is now past it. What
+the capture caught instead - three `playbackError` bodies, all in the 95.0 window - turned out to be
+the more consequential bug, and is fixed in 1418f13.
+
+Also from the same scan, and unexplained: the speaker listens on **1410** alongside 1400, 1443 and
+7000 (AirPlay). An HTTP server whose `SERVER` header carries an *empty* version where 1400 gives the
+full one, answering 404 to every path tried - `/`, the UPnP control paths, `/status`,
+`/xml/device_description.xml`. Whether it arrived with 96.1 cannot be said, because nothing scanned
+the speaker before today. Which is the argument for keeping a port baseline as well as an action
+baseline.
 
 ## Open questions
 
