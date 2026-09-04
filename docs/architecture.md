@@ -5329,6 +5329,151 @@ credentials, or the device certificate. It is gated behind a **Sonos account ses
 logged-in client gets YouTube Music search. x2rock is excluded by its own design axiom, not by a
 technical barrier — and that is a much stronger sentence than the open question it replaces.
 
+## A stream URL needs no service, and `play-url` is the whole feature (verified 2026-09-04)
+
+Prompted by a design question - is there a "discover more services" feature worth building? - whose
+first two readings turned out to be already answered. There is nothing more to *discover*:
+`ListAvailableServices` already returns all 108 services Sonos knows about rather than the
+household's subset, so x2rock enumerates the ceiling. And "services that need no registration" is
+the anonymous tier, which x2rock has reached from the start and which the cloud path cannot reach at
+all. The third reading is the one with something in it: **a URL is not a service.**
+
+### `x-rincon-mp3radio://` works, and `http://` does not
+
+The codebase already believed in the scheme. `can_enqueue` in `sonos/upnp.rs` treats four schemes
+as enqueueable for an item with no metadata to judge by:
+
+```rust
+"file" | "x-rincon-mp3radio" | "http" | "https"
+```
+
+That belief was never tested - the scheme appeared exactly once in the tree, in that predicate, and
+nowhere in this document. Nothing had ever sent one. So, against a live player, with a control:
+
+| URI | `SetAVTransportURI` | `AddURIToQueue` |
+|---|---|---|
+| `x-rincon-mp3radio://ice1.somafm.com/groovesalad-128-mp3` | **accepted** | **accepted**, 1 track, queue 3 → 4 |
+| `http://ice1.somafm.com/…` | 714 | 804 |
+| `https://ice1.somafm.com/…` | 714 | — |
+| `x-not-a-scheme://example.invalid/nope` | 714 | 804 |
+
+**The control is what makes this useful.** `http://` fails identically to a scheme invented for the
+occasion, on both paths. It is not degraded or partially supported; the player does not recognise it.
+So `can_enqueue` is right about `x-rincon-mp3radio` and **wrong about `http` and `https`** - and
+wrong in exactly the branch it was written for, since the test sent no metadata, which is that
+branch's own stated condition. A metadata-less favorite carrying a bare `http://` URI would be
+offered as enqueueable and then refused 804. Latent rather than live: nothing in this household has
+one. Left as it is for now, recorded here so the next reader does not trust the list.
+
+`file` is untested and probably means a path in the *player's* namespace rather than this machine's;
+`x-file-cifs:` is the spelling that appears in real favorites.
+
+### It plays, and the player rewrites the URI
+
+`SetAVTransportURI` then `Play`: `TRANSITIONING` for several seconds, then `PLAYING` with `RelTime`
+advancing 0:00:34 → 0:35 → 0:36. Real audio, no service, no account, no registration.
+
+Two details from the reply. **First audio is not immediate** - it was still `TRANSITIONING` after
+about four seconds of polling, which is long enough that a first attempt at watching for `PLAYING`
+gave up too early and briefly looked like a negative result. Anything waiting on this must not read
+`TRANSITIONING` as failure.
+
+And the player normalises the URI. Given `x-rincon-mp3radio://ice1.somafm.com/…`, its own `<res>`
+comes back as:
+
+```
+x-rincon-mp3radio://http://ice1.somafm.com/groovesalad-128-mp3
+```
+
+It re-inserts the `http://`, so the canonical internal form is the scheme wrapping the entire URL.
+Either input is accepted.
+
+### The title problem, and where the ICY metadata actually lives
+
+`dc:title` for a bare stream is the URL's last path segment - `groovesalad-128-mp3`, which is a
+bitrate slug and not a station name. The real now-playing arrives separately, because **the player
+reads the stream's ICY metadata itself**:
+
+```xml
+<r:streamContent>Eguana - Kineta Lounge</r:streamContent>
+<dc:title>groovesalad-128-mp3</dc:title>
+```
+
+x2rock was discarding it. `grep -rn streamContent src/` returned nothing, and a room playing this
+way reported a bare `PLAYING` with `title`, `artist`, `album`, `art_url`, `duration_ms`, `service`
+and `service_id` all null. Service streams do not need it - their per-track name and artist come off
+the Control API's metadata channel - but a service-less stream has nothing on that channel, so this
+was its only track information and nothing read it.
+
+**And it does not need a UPnP call.** The same string is already in the metadata reply x2rock
+fetches for every `now` and `status`, as `streamInfo`:
+
+```json
+{ "container": { "name": "SomaFM Groove Salad", "type": "station" },
+  "playbackSession": { "clientId": "com.rahga.x2rock", "isSuspended": false },
+  "streamInfo": "Eguana - Kineta Lounge" }
+```
+
+So `MetadataStatus` gained a `stream_info` field and `now`/`status --json` a `stream_info` key, at
+the cost of no extra round trip. It is **deliberately not parsed**: "Artist - Title" is an Icecast
+convention rather than a format, and stations put show names and slogans in the same field, so
+splitting on a hyphen would invent an artist wherever the guess happened to fit. The human line
+appends it only when it says something the title does not - the same rule the daemon's
+`stationName` already uses for the opposite half of this problem.
+
+It also arrives a few seconds *after* playback starts, so `play-url --json` deliberately does not
+report it: at that instant it is null and would mean "this station says nothing" rather than "not
+read yet".
+
+### Built: `play-url`, on the session rather than the transport
+
+`x-rincon-mp3radio` proved the player will take a bare URL, but it is not the right mechanism for
+the feature. `SetAVTransportURI` **replaces** what the room was doing and loses the queue's
+position; `playbackSession:1 loadStreamUrl` plays alongside the queue and leaves it untouched, which
+is what a radio station should do, and it is already the path a service's live stream takes.
+
+The open question was whether `loadStreamUrl` would accept a URL that came from no service. It does
+- verified end to end, with the queue intact afterwards:
+
+```
+$ x2rock play-url http://ice1.somafm.com/groovesalad-128-mp3
+Media Room — ice1.somafm.com
+
+$ x2rock now
+PLAYING  ice1.somafm.com · Smooth Genestar - Me and the jazzman
+```
+
+And the two routes converge: the session's own `<res>` is `x-rincon-mp3radio://http://…`, so
+`loadStreamUrl` is implemented on top of the same scheme. The transport route is the mechanism; the
+session is the manners.
+
+Three decisions worth keeping:
+
+- **`stationMetadata.service` is omitted for a bare URL.** It is where the room's displayed name
+  comes from, so the name goes in `name`, but naming a service that is not involved would put a
+  wrong sid in the room's now-playing.
+- **The default title is the host, not the path.** `ice1.somafm.com` rather than
+  `groovesalad-128-mp3`. The player picks the slug when given nothing, which is what makes the
+  default worth having at all; `--title` overrides it.
+- **`play-url` takes `--json`, alone among the play commands.** Its one refusal is about the
+  argument rather than the household - `bad_stream_url`, for anything that is not `http`/`https` -
+  and a code that can only ever print as prose is a contract with nobody on the other end. The
+  refusal carries no `fix`: nothing here can mint a working URL for the caller.
+
+**What it cannot do anything about:** `loadStreamUrl` accepts a URL it cannot play and then fails
+*silently*, minutes later, at `IDLE` - the trap `play_item` already documents. A wrong URL is
+reported by the room going quiet, not by an error, and validating the scheme is the whole of what
+can be checked from this side. The player fetches the URL, so it must be reachable from the
+*speaker* rather than from this machine, which is the other half of the same asymmetry.
+
+### What this changes about scope
+
+The 108 services are a ceiling on what *Sonos* carries, and until now they were the ceiling on what
+x2rock could play. They are not any more. Anything that serves audio over HTTP is now playable
+without an account, a registration or a sid - which also means a station catalogue is a client-side
+concern rather than something to be negotiated with Sonos. That is the first content axis this
+project has that is not bounded by the household's service list.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

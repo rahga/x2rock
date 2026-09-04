@@ -1,6 +1,6 @@
 ---
 name: x2rock
-description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
+description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, internet radio by URL, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
 ---
 
 # Driving Sonos with the `x2rock` CLI
@@ -34,6 +34,7 @@ CLI it came from — if the version has moved since you installed the skill, re-
     "volume": 2, "muted": false, "audible": true,
     "repeat": "off", "shuffle": false,
     "on_tv": false, "has_tv": false, "input_format": null, "surround": null,
+    "stream_info": null,
     "members": ["Kitchen"], "coordinator": "Kitchen"
   },
   {
@@ -57,6 +58,12 @@ CLI it came from — if the version has moved since you installed the skill, re-
   driving - a radio stream has no position in a queue. For the length, read `queue --json`, which
   carries both. `explicit` is the content flag every controller shows as a badge, `null` when the
   source does not say. `crossfade` is a third play mode beside repeat and shuffle and is settable.
+- **`stream_info` is a live stream's own "now playing" text**, verbatim and unparsed - typically
+  `"Artist - Title"`, but a station may put a show name or a slogan there instead, so do not split
+  it. `null` for anything that is not a live stream. For a stream started by `play-url` it is the
+  *only* track information there is: `title` is then the station's name and `artist`, `album`,
+  `duration_ms` and `service` are all `null`. Report it as what is playing; do not present it as a
+  parsed artist and title.
 - `next_title`/`next_artist` are what plays after this, `null` at the end of a queue and on a
   stream. `position_ms`/`duration_ms` are **milliseconds** (`duration_ms` is
   `null` for a live stream). Any value can be `null` when the player does not supply it.
@@ -218,6 +225,7 @@ see "Ask before you act".
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
+| Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
 | Play a search/browse hit | `x2rock search -s <svc> <term> --play N -r "<Room>"` |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
@@ -275,6 +283,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `unknown_room` | the `-r` name is not a room (or is a group's composite label) | `x2rock rooms` (and see `did_you_mean`) |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
+| `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

@@ -501,6 +501,22 @@ pub struct MetadataStatus {
     pub container: Option<Container>,
     pub current_item: Option<QueueItem>,
     pub next_item: Option<QueueItem>,
+    /// The station's own free-form text about what is playing *now* - ICY
+    /// metadata read off the stream by the player and passed through verbatim,
+    /// e.g. `"Eguana - Kineta Lounge"`.
+    ///
+    /// **The only now-playing a service-less stream has.** A stream loaded by
+    /// URL has no `currentItem` and no track object at all, so without this a
+    /// room playing internet radio reports its station name and nothing else.
+    /// The same string appears in UPnP's DIDL as `r:streamContent`; this is the
+    /// cheaper source, since the metadata reply is already being fetched.
+    ///
+    /// Deliberately not parsed. "Artist - Title" is an Icecast *convention*,
+    /// not a format - stations put a show name, a slogan or nothing at all in
+    /// the same field - so splitting it on a hyphen would invent an artist
+    /// wherever the guess happened to fit.
+    #[serde(default)]
+    pub stream_info: Option<String>,
 }
 
 /// How Sonos names a piece of a service's catalogue: what it is, which service

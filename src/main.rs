@@ -271,6 +271,32 @@ enum Command {
         #[arg(long)]
         kind: Option<String>,
     },
+    /// Play an internet radio stream by its own URL, with no music service in
+    /// the loop at all.
+    ///
+    /// The other end of `search`/`browse`: those reach the 108 services the
+    /// household's player knows about, and this reaches anything else that
+    /// serves audio over HTTP - an Icecast or SHOUTcast station, a podcast
+    /// enclosure, a stream a service does not carry. No account, no
+    /// registration, no sid.
+    ///
+    /// It opens a playback session, as a live stream from a service does, so
+    /// the room's queue is left exactly as it was.
+    PlayUrl {
+        /// The stream's URL. `http` or `https`; the *player* fetches it, so it
+        /// must be reachable from the speaker rather than from this machine.
+        url: String,
+        /// What the room should display. Defaults to the URL's host, which is
+        /// the most recognisable part of a stream URL.
+        #[arg(long)]
+        title: Option<String>,
+        /// Unlike the other play commands this one takes `--json`, because its
+        /// one refusal is about the *argument*: `bad_stream_url` is a code a
+        /// caller can act on, and a code that only ever prints as prose is a
+        /// contract with nobody on the other end.
+        #[arg(long)]
+        json: bool,
+    },
     /// Put one search result in the queue without playing it.
     ///
     /// `play-item`'s sibling, and the same enqueue underneath - it simply stops
@@ -768,6 +794,19 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     if let Some(album) = album.filter(|a| Some(*a) != title) {
         line.push_str(&format!(" ({album})"));
     }
+    // What the station says is on right now, which for a stream loaded by URL
+    // is the only track information there is. Shown only when it says something
+    // the title does not, so a service stream that already names its track is
+    // not made to say it twice - the same rule the daemon's `stationName` uses
+    // for the opposite half of this problem.
+    if let Some(info) = meta
+        .stream_info
+        .as_deref()
+        .map(str::trim)
+        .filter(|i| !i.is_empty() && Some(*i) != title)
+    {
+        line.push_str(&format!(" · {info}"));
+    }
     // Where it is coming from. Only present for service content, so TV input and
     // a bare queue track leave it off rather than printing "on ".
     if let Some(service) = meta
@@ -886,6 +925,10 @@ fn now_json(
         "input_format": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.summary()),
         "surround": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.is_surround()),
         "art_url": art,
+        // The station's own "now playing" text, verbatim and unparsed. Null for
+        // anything that is not a live stream, and the only track information a
+        // stream loaded by `play-url` has - see `MetadataStatus::stream_info`.
+        "stream_info": meta.stream_info.as_deref().map(str::trim).filter(|i| !i.is_empty()),
     })
 }
 
@@ -1518,6 +1561,32 @@ async fn stream_item(
     title: &str,
 ) -> Result<()> {
     let uri = sonos::smapi::media_uri(service, token, id).await?;
+    let room_name = stream_url(session, room, &uri, title, Some(service)).await?;
+    println!("{room_name} — {title} on {}", service.name);
+    Ok(())
+}
+
+/// Open a playback session in the room and load one stream URL into it.
+///
+/// The half of [`stream_item`] that has nothing to do with services, shared so
+/// that `play-url` and a service's live stream cannot drift apart: they are the
+/// same two calls to the same namespace, and the only difference is whether a
+/// service gets named in the metadata. Returns the room's name, so the caller
+/// can word its own confirmation.
+///
+/// **A session rather than the transport, on purpose.** `SetAVTransportURI`
+/// with `x-rincon-mp3radio://<url>` also plays an arbitrary stream (verified
+/// 2026-09-04, and see "A stream URL needs no service" in
+/// docs/architecture.md), but it *replaces* what the room was doing and loses
+/// the queue's position. A session plays alongside the queue and leaves it
+/// exactly as it was, which is what a radio station should do.
+async fn stream_url(
+    session: &session::Session,
+    room: Option<&str>,
+    url: &str,
+    title: &str,
+    service: Option<&sonos::smapi::Service>,
+) -> Result<String> {
     let target = session::target(&session.groups, room)?;
     let coordinator = session::coordinator(session, &target).await?;
 
@@ -1535,6 +1604,14 @@ async fn stream_item(
         .as_str()
         .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
 
+    // stationMetadata is optional, but it is where the name the room displays
+    // comes from; without it the stream plays with nothing to show. `service`
+    // is omitted entirely for a bare URL - there is no service to name, and
+    // naming a false one would put a wrong sid in the room's now-playing.
+    let mut metadata = json!({ "name": title, "type": "station" });
+    if let Some(service) = service {
+        metadata["service"] = json!({ "name": service.name, "id": service.id });
+    }
     coordinator
         .call(
             json!({
@@ -1542,21 +1619,88 @@ async fn stream_item(
                 "command": "loadStreamUrl",
                 "sessionId": session_id,
             }),
-            // stationMetadata is optional, but it is where the name the room
-            // displays comes from; without it the stream plays with nothing
-            // to show.
             json!({
-                "streamUrl": uri,
+                "streamUrl": url,
                 "playOnCompletion": true,
-                "stationMetadata": {
-                    "name": title,
-                    "type": "station",
-                    "service": { "name": service.name, "id": service.id },
-                },
+                "stationMetadata": metadata,
             }),
         )
         .await?;
-    println!("{} — {title} on {}", target.name, service.name);
+    Ok(target.name.clone())
+}
+
+/// Check a URL is one a speaker could fetch, and decide what the room shows.
+///
+/// Split out from [`run_play_url`] because it is the whole of what can be
+/// judged without a speaker, and therefore the whole of what a test can pin.
+fn stream_display_name(url: &str, title: Option<&str>) -> Result<String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| bad_stream_url(url))
+        .map(|(s, r)| (s.to_lowercase(), r))?;
+    if !matches!(scheme.as_str(), "http" | "https") || rest.is_empty() {
+        return Err(bad_stream_url(url));
+    }
+    if let Some(title) = title {
+        return Ok(title.to_owned());
+    }
+    // The host, not the last path segment: a stream URL's path is usually a
+    // bitrate-and-format slug ("groovesalad-128-mp3") while the host names the
+    // station. The player picks that slug when given nothing at all, which is
+    // what makes this default worth having.
+    Ok(rest
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty())
+        .unwrap_or(url)
+        .to_owned())
+}
+
+fn bad_stream_url(url: &str) -> anyhow::Error {
+    hint::Hint::new(
+        format!(
+            "{url:?} is not an http(s) URL. A stream URL is fetched by the speaker itself over \
+             HTTP, so nothing else can be one - and note it must be reachable from the speaker \
+             rather than from this machine."
+        ),
+        "bad_stream_url",
+        None,
+    )
+    .into()
+}
+
+/// `x2rock play-url`: play a stream URL with no service behind it.
+///
+/// **The player fetches the URL, not this machine**, so the only validation
+/// worth doing here is the scheme: anything else is the speaker's verdict to
+/// give, and it gives it late. `loadStreamUrl` accepts a URL it cannot play
+/// and then fails *silently*, minutes later, at `IDLE` - the same trap
+/// `play_item` documents - so a wrong URL is reported by the room going quiet
+/// rather than by an error. Nothing here can improve on that; saying so is the
+/// next best thing.
+async fn run_play_url(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    url: &str,
+    title: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let name = stream_display_name(url, title)?;
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state).await?;
+    let room_name = stream_url(&session, room, url, &name, None).await?;
+    if json {
+        // No `stream_info` here on purpose: the player has not read the
+        // station's metadata yet at this instant - it arrives a few seconds
+        // in - so reporting it would report null and mean nothing. `x2rock
+        // now --json` is where to read it.
+        println!(
+            "{}",
+            serde_json::json!({ "room": room_name, "title": name, "url": url })
+        );
+    } else {
+        println!("{room_name} — {name}");
+    }
     Ok(())
 }
 
@@ -3010,6 +3154,7 @@ fn wants_json(command: &Command) -> bool {
             | Command::Status { json, .. }
             | Command::Queue { json, .. }
             | Command::Favorites { json, .. }
+            | Command::PlayUrl { json, .. }
             | Command::Search { json, .. }
             | Command::Browse { json, .. }
             | Command::Accounts { json, .. }
@@ -3049,6 +3194,13 @@ async fn run(cli: Cli) -> Result<()> {
             ref kind,
         } => {
             return run_play_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref()).await;
+        }
+        Command::PlayUrl {
+            ref url,
+            ref title,
+            json,
+        } => {
+            return run_play_url(cli.ip, room, url, title.as_deref(), json).await;
         }
         Command::QueueItem {
             ref service,
@@ -4212,6 +4364,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Bookmarks { .. }
         | Command::Search { .. }
         | Command::PlayItem { .. }
+        | Command::PlayUrl { .. }
         | Command::QueueItem { .. }
         | Command::Browse { .. }
         | Command::Link { .. }
@@ -4438,6 +4591,75 @@ mod tests {
         (status, meta)
     }
 
+    #[test]
+    fn a_stream_url_is_checked_and_named() {
+        // A title wins outright.
+        assert_eq!(
+            stream_display_name(
+                "http://ice1.somafm.com/groovesalad-128-mp3",
+                Some("Groove Salad")
+            )
+            .unwrap(),
+            "Groove Salad"
+        );
+        // Without one, the host - not the path slug the player would pick.
+        assert_eq!(
+            stream_display_name("http://ice1.somafm.com/groovesalad-128-mp3", None).unwrap(),
+            "ice1.somafm.com"
+        );
+        assert_eq!(
+            stream_display_name("https://example.test:8000/stream?x=1", None).unwrap(),
+            "example.test:8000"
+        );
+        assert_eq!(
+            stream_display_name("HTTP://Example.Test/s", None).unwrap(),
+            "Example.Test",
+            "the scheme is matched case-insensitively without lowercasing the host"
+        );
+    }
+
+    #[test]
+    fn only_a_fetchable_scheme_is_a_stream_url() {
+        // The player fetches this over HTTP; nothing else can be a stream URL.
+        for bad in [
+            "ice1.somafm.com/stream",
+            "file:///tmp/x.mp3",
+            "x-rincon-mp3radio://ice1.somafm.com/s",
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+            "http://",
+        ] {
+            let err = stream_display_name(bad, None).unwrap_err();
+            assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
+            // No fix: nothing here can mint a working URL for the caller.
+            assert!(hint::of(&err).1.is_none(), "{bad} handed out a fix");
+        }
+    }
+
+    #[test]
+    fn a_station_says_what_is_on_without_repeating_itself() {
+        let (status, mut meta) = playing_body();
+
+        // A live stream's only track information, appended to the line.
+        meta.stream_info = Some("Eguana - Kineta Lounge".into());
+        let line = now_line(&status, &meta);
+        assert!(line.contains("· Eguana - Kineta Lounge"), "{line}");
+        assert_eq!(
+            now_json("Media Room", &status, &meta, None)["stream_info"],
+            "Eguana - Kineta Lounge"
+        );
+
+        // Saying the same thing as the title is noise, not information.
+        meta.stream_info = Some("Bodies".into());
+        assert!(
+            !now_line(&status, &meta).contains("· Bodies"),
+            "the title is already Bodies"
+        );
+
+        // Whitespace-only is a station sending nothing, not a track called " ".
+        meta.stream_info = Some("   ".into());
+        assert!(now_json("Media Room", &status, &meta, None)["stream_info"].is_null());
+    }
+
     fn volume(volume: u8, muted: bool) -> Volume {
         Volume {
             volume,
@@ -4482,6 +4704,7 @@ mod tests {
                 "service_id",
                 "shuffle",
                 "state",
+                "stream_info",
                 "surround",
                 "title",
             ]

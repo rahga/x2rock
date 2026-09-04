@@ -375,6 +375,7 @@ x2rock search                                   # what can be searched here
 x2rock search -s tunein                         # that service's categories
 x2rock search -s tunein jazz                    # search it
 x2rock search -s somafm --play 3 ambient        # play the third hit
+x2rock play-url http://ice1.somafm.com/groovesalad-128-mp3   # a stream, no service at all
 ```
 
 This was a non-goal until it turned out not to need an account. A music service is linked to the
@@ -386,6 +387,12 @@ none and are browse-only, so `x2rock browse` reaches them and `x2rock search` sa
 you at it. `--play` plays the hit: a live stream opens a playback session and leaves
 the queue alone, while anything on-demand is added to the queue, because that is the only way the
 player will resolve a service's own media. See "Browsing a service" for why both exist.
+
+And a stream needs no service at all. `x2rock play-url <http url>` hands the speaker an ordinary
+internet radio URL — an Icecast or SHOUTcast station, anything that serves audio over HTTP — which
+it fetches itself, with no account, no registration and no sid. It opens a playback session like a
+service's live stream does, so the room's queue is left alone, and `x2rock now` reports whatever
+the station says is playing.
 
 The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
 can drive — see below. The remaining sixty-two link through the service's own app rather than a
