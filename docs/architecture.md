@@ -4843,6 +4843,47 @@ It is also the last word that will ever be had on 95.0 here, since the speaker i
 the capture caught instead - three `playbackError` bodies, all in the 95.0 window - turned out to be
 the more consequential bug, and is fixed in 1418f13.
 
+### "Update Now" is the firmware updater, not a library reindex
+
+The legacy controller's music-source list opens with **Update Now**, which the parity pass filed as
+`ContentDirectory::RefreshShareIndex` - the music-library reindex. Wrong, per the owner: that is
+what they used to flash 96.1 at 07:30. The tell is in the screenshot and was missed: every other
+entry in that list carries a chevron and navigates into a container, and this one has none. It is an
+action sitting among sources. That the household has no music library configured at all should have
+settled it too.
+
+Both readings do have a real action behind them, which is why the mistake was easy:
+`ContentDirectory:1` has `RefreshShareIndex` (with `ShareIndexInProgress` and `ShareIndexLastError`
+beside it), and `ZoneGroupTopology:1` has `CheckForUpdate` and `BeginSoftwareUpdate`.
+
+**`CheckForUpdate` is read-only and answers the useful question.**
+`CheckForUpdate(UpdateType, CachedOnly, Version) -> UpdateItem`:
+
+```xml
+<UpdateItem xmlns="urn:schemas-rinconnetworks-com:update-1-0" Type="Software" Version="96.1-79270"
+  UpdateURL="http://update-firmware.sonos.com/firmware/Prod/96.1-79270-v18.7-4b07MiHfnw-RC-2/^96.1-79270"
+  DownloadSize="0" ManifestURL="http://update.sonos.com/firmware/Prod/2026-Sonos-17-aiVIZ66IGK-GA-1/update.upm"
+  Swgen="2" LatestSwgen="2" ManifestRevision="440de5db-d97a-4ee3-888e-4b98d5ab07a7"/>
+```
+
+- **`UpdateType` must be `Software`** when `CachedOnly=1`; `All` and `Firmware` are UPnP 402 cached
+  and silently answer as `Software` uncached.
+- **Up to date reads as the offered `Version` matching the installed one, with `DownloadSize="0"`.**
+  That is the whole check - there is no boolean.
+- `Swgen`/`LatestSwgen` are the software generation, both 2 here, so a generation jump would show as
+  a mismatch rather than as a version one.
+- The `ManifestURL` names a release train verbatim - `2026-Sonos-17-aiVIZ66IGK-GA-1` - recorded
+  without interpretation, since its numbering matches neither `96.1` nor `displayVersion 18.7`.
+
+`BeginSoftwareUpdate(UpdateURL, Flags, ExtraOptions)` exists beside it and is **deliberately
+untouched**: it reboots speakers, and a household mid-update is not a state worth reaching by
+accident from a CLI. The vendor agrees, which is the strongest argument available - clicking "Update
+Now" does not update anything, it opens a modal that starts the process and warns against unplugging
+the speakers. A single unconfirmed CLI call would be a worse door onto the same operation than the
+one Sonos ships, and `--yes` would not close the gap: the app's dialog exists to make someone read a
+sentence about power, not to collect a keystroke. A read-only `update` command would be worth having with Sonos 27 rolling out,
+and would be exactly `CheckForUpdate` and nothing else.
+
 Also from the same scan, and unexplained: the speaker listens on **1410** alongside 1400, 1443 and
 7000 (AirPlay). An HTTP server whose `SERVER` header carries an *empty* version where 1400 gives the
 full one, answering 404 to every path tried - `/`, the UPnP control paths, `/status`,
