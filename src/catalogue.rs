@@ -144,17 +144,65 @@ impl Catalogue {
             .map(|s| s.name.as_str())
     }
 
-    /// The services that can actually be searched: the anonymous ones, plus any
-    /// this machine holds a token for.
+    /// The services this machine can talk to at all: the anonymous ones, plus
+    /// any it holds a token for.
     ///
     /// Takes the credentials rather than reading them itself so that the two
     /// stores stay independent - the catalogue is a cache and this is a secret,
     /// and only the caller has reason to hold both.
-    pub fn searchable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
+    ///
+    /// This is the set for browsing, and for resolving a name that is about to
+    /// be called - `play-item`, `queue-item`. It is deliberately *wider* than
+    /// [`searchable`](Self::searchable); see the note there.
+    pub fn usable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
         self.services
             .iter()
             .filter(|s| s.auth == smapi::Auth::Anonymous || linked.get(&s.id).is_some())
             .collect()
+    }
+
+    /// The services that can actually be *searched*: [`usable`](Self::usable),
+    /// less any known to publish no search categories.
+    ///
+    /// **Reachable and searchable are not the same question, and this is where
+    /// they parted.** Credentials answer "may this be asked"; the presentation
+    /// map answers "is there anything to ask it". Radio Paloma answers yes and
+    /// no - anonymous, and browse-only: its presentation map carries a
+    /// `BrowseOptions` and not one `Category`. It was listed as searchable and
+    /// then refused when named, because this filter did not exist.
+    ///
+    /// Only the credential half is free, so the list is as honest as what has
+    /// been asked so far allows: a service drops out once
+    /// [`categories_for`](Self::categories_for) has come back empty for it, and
+    /// not before. A cold cache still over-promises once, which is the price of
+    /// not fetching 108 presentation maps to print a list.
+    pub fn searchable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
+        self.usable(linked)
+            .into_iter()
+            .filter(|s| !self.publishes_no_categories(&s.id))
+            .collect()
+    }
+
+    /// Whether this service has been asked for its search categories and had
+    /// none - the negative [`searchable`](Self::searchable) acts on.
+    ///
+    /// A cached *empty* list is knowledge, not a miss: the presentation map was
+    /// read and declared nothing searchable. Absent means unasked, so this is
+    /// false for a service nobody has looked up yet - unasked is not the same
+    /// as answered-no, and only one of them is worth acting on.
+    pub fn publishes_no_categories(&self, service_id: &str) -> bool {
+        self.categories
+            .get(service_id)
+            .is_some_and(|c| c.is_empty())
+    }
+
+    /// Whether [`categories_for`](Self::categories_for) would be a cache hit.
+    ///
+    /// Read *before* that call: a freshly learned empty list is exactly what is
+    /// worth writing to disk, and testing `is_empty()` afterwards cannot tell
+    /// it from a hit that changed nothing.
+    pub fn categories_cached(&self, service_id: &str) -> bool {
+        self.categories.contains_key(service_id)
     }
 
     /// The services `x2rock link` can *reliably* get a credential for, whether
@@ -335,6 +383,72 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(names, ["TuneIn", "YouTube Music"]);
+    }
+
+    /// The Radio Paloma shape: reachable with no credential, and browse-only.
+    fn browse_only() -> Catalogue {
+        let mut cat = three_tiers();
+        cat.services
+            .push(service("962", "Radio Paloma", smapi::Auth::Anonymous));
+        // What `categories_for` stores after reading a presentation map that
+        // declares no `Category` at all: present, and empty.
+        cat.categories.insert("962".into(), Vec::new());
+        cat
+    }
+
+    #[test]
+    fn a_browse_only_service_is_usable_but_not_searchable() {
+        // The bug this splits apart: one list promised Radio Paloma and the
+        // other refused it. Browse must keep it - that is the route that works.
+        let cat = browse_only();
+        let creds = Credentials::default();
+
+        let usable: Vec<&str> = cat.usable(&creds).iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(usable, ["TuneIn", "Radio Paloma"]);
+
+        let searchable: Vec<&str> = cat
+            .searchable(&creds)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(searchable, ["TuneIn"], "browse-only must not be offered");
+    }
+
+    #[test]
+    fn unasked_is_not_the_same_as_answered_no() {
+        // Nothing may drop out of the list on the strength of never having been
+        // looked up, or a cold cache would offer nothing at all.
+        let cat = three_tiers();
+        assert!(!cat.publishes_no_categories("1"));
+        assert!(!cat.categories_cached("1"));
+        assert_eq!(cat.searchable(&Credentials::default()).len(), 1);
+
+        // And a service with categories stays in.
+        let mut warm = three_tiers();
+        warm.categories.insert(
+            "1".into(),
+            vec![Category {
+                id: "stations".into(),
+                mapped_id: "STATIONS".into(),
+            }],
+        );
+        assert!(warm.categories_cached("1"));
+        assert!(!warm.publishes_no_categories("1"));
+        assert_eq!(warm.searchable(&Credentials::default()).len(), 1);
+    }
+
+    #[test]
+    fn a_learned_negative_does_not_survive_the_catalogue_moving() {
+        // `refresh` clears categories when the version moves, so a service that
+        // gains search later is not held out by a stale no.
+        let mut cat = browse_only();
+        assert_eq!(cat.searchable(&Credentials::default()).len(), 1);
+        cat.categories.clear();
+        assert_eq!(
+            cat.searchable(&Credentials::default()).len(),
+            2,
+            "a cleared cache means unasked again, not answered-no"
+        );
     }
 
     #[test]

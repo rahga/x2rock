@@ -1580,7 +1580,7 @@ async fn run_play_item(
         .refresh(&Upnp::new(session.connection.ip()), false)
         .await?;
     let linked = credentials::Credentials::load()?;
-    let usable = catalogue.searchable(&linked);
+    let usable = catalogue.usable(&linked);
     let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
     let token = linked.get(&chosen.id).map(|a| a.token());
     play_item(
@@ -1612,7 +1612,7 @@ async fn run_queue_item(
         .refresh(&Upnp::new(session.connection.ip()), false)
         .await?;
     let linked = credentials::Credentials::load()?;
-    let usable = catalogue.searchable(&linked);
+    let usable = catalogue.usable(&linked);
     let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
     let title = title.map(String::as_str).unwrap_or(id);
 
@@ -2035,10 +2035,12 @@ async fn run_browse(
     }
 
     let linked = credentials::Credentials::load()?;
-    // The same set `search` offers. Browsing needs exactly what searching needs -
-    // an endpoint and, for a linked service, a token - so a service that can be
-    // searched can be walked, and one that cannot, cannot.
-    let usable = catalogue.searchable(&linked);
+    // Everything reachable, which is wider than what `search` offers. Browsing
+    // needs an endpoint and, for a linked service, a token; searching needs a
+    // published search category on top of that. This comment used to say the
+    // two sets were the same - Radio Paloma is the counterexample, browse-only,
+    // and filtering here would have removed the one route that works for it.
+    let usable = catalogue.usable(&linked);
 
     let Some(query) = service else {
         let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
@@ -2232,22 +2234,35 @@ async fn run_search(
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
                 Some(s) if s.auth != sonos::smapi::Auth::Anonymous => s.needs_link_hint().into(),
+                // A real service that `searchable` has since dropped for
+                // publishing no categories. Without this arm `find` calls it
+                // unmatched, which reads as a typo rather than as the fact it
+                // is - and buys a `x2rock search` retry that will not help.
+                Some(s) if catalogue.publishes_no_categories(&s.id) => {
+                    s.no_search_categories_hint().into()
+                }
                 _ => e,
             }
         })?
         .clone();
 
+    // Asked before the call, because a freshly learned *empty* list is the
+    // whole reason to write here and `is_empty()` afterwards cannot tell it
+    // from a cache hit. Persisting the negative is what stops the next
+    // `x2rock search` listing this service as searchable again.
+    let learned = !catalogue.categories_cached(&chosen.id);
     let categories = catalogue.categories_for(&chosen).await?;
-    dirty |= !categories.is_empty();
+    dirty |= learned;
     if dirty {
         catalogue.save()?;
     }
     let chosen = &chosen;
-    ensure!(
-        !categories.is_empty(),
-        "{} publishes no search categories, so it cannot be searched",
-        chosen.name
-    );
+    // The cold-cache path to the same refusal the `find` arm above gives: on a
+    // first encounter nothing had been asked, so the service was still listed
+    // and `find` had no reason to object. Same hint, so the two cannot drift.
+    if categories.is_empty() {
+        return Err(chosen.no_search_categories_hint().into());
+    }
     let picked = match category {
         Some(want) => {
             let want = want.to_lowercase();

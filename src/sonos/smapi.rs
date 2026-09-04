@@ -207,6 +207,28 @@ impl Service {
         };
         crate::hint::Hint::new(self.needs_link(), "needs_link", fix)
     }
+
+    /// What to say when a service publishes no search categories at all.
+    ///
+    /// Not a credential problem and not a typo, so neither `needs_link` nor
+    /// "no such service" fits: the service is reachable and simply has nothing
+    /// searchable to offer. `browse` is the route that does work, and the fix
+    /// hands it over runnable - Radio Paloma refuses `search` and answers
+    /// `getMetadata` with eight streams.
+    ///
+    /// The name is quoted because most of them have spaces in, and a `fix` is
+    /// promised verbatim and runnable.
+    pub fn no_search_categories_hint(&self) -> crate::hint::Hint {
+        crate::hint::Hint::new(
+            format!(
+                "{} publishes no search categories, so it cannot be searched. \
+                 Its own containers can still be walked.",
+                self.name
+            ),
+            "no_search_categories",
+            Some(format!("x2rock browse -s {:?}", self.name)),
+        )
+    }
 }
 
 /// One search hit, flattened from `mediaMetadata`.
@@ -847,6 +869,26 @@ mod tests {
         </Service>
         <Service Id="999" Name="Broken"/>
       </Services>"#;
+
+    #[test]
+    fn the_no_search_categories_hint_points_at_browse_and_is_runnable() {
+        let services = parse_services(DESCRIPTORS, "").unwrap();
+        let tunein = services.iter().find(|s| s.name == "TuneIn").unwrap();
+        let hint = tunein.no_search_categories_hint();
+
+        assert_eq!(hint.code, "no_search_categories");
+        // Not a credential problem, so it must not send an agent to `link`.
+        assert!(!format!("{hint}").contains("link"), "{hint}");
+        assert!(format!("{hint}").contains("can still be walked"));
+
+        // The fix is promised runnable, and most service names have a space in.
+        let spaced = services.iter().find(|s| s.name == "YouTube Music").unwrap();
+        assert_eq!(
+            spaced.no_search_categories_hint().fix.as_deref(),
+            Some(r#"x2rock browse -s "YouTube Music""#),
+            "an unquoted name would resolve as an ambiguous prefix, or not at all"
+        );
+    }
 
     #[test]
     fn each_auth_tier_gets_the_advice_that_fits_it() {

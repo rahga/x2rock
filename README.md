@@ -380,8 +380,10 @@ x2rock search -s somafm --play 3 ambient        # play the third hit
 This was a non-goal until it turned out not to need an account. A music service is linked to the
 **household**, not to a Sonos login, and a speaker hands any controller on the LAN the service's
 endpoint, manifest and search categories with no credential at all. About a third of the catalogue
-— 32 of 108 services here, and most of the radio-shaped ones — declare anonymous access and can
-then be searched outright. `--play` plays the hit: a live stream opens a playback session and leaves
+— 32 of 108 services here, and most of the radio-shaped ones — declare anonymous access. Twenty of
+those thirty-two publish a search category and can be searched outright; the other twelve publish
+none and are browse-only, so `x2rock browse` reaches them and `x2rock search` says so and points
+you at it. `--play` plays the hit: a live stream opens a playback session and leaves
 the queue alone, while anything on-demand is added to the queue, because that is the only way the
 player will resolve a service's own media. See "Browsing a service" for why both exist.
 

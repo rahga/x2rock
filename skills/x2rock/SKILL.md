@@ -231,6 +231,11 @@ see "Ask before you act".
 playlist is idempotent: it replaces rather than appends, so running it twice does not double the
 queue.
 
+**`browse` reaches more services than `search` does.** `x2rock search` lists only the services that
+publish a search category; `x2rock browse` lists every service reachable at all, which on this
+household is twelve more. A service that answers `no_search_categories` is browse-only — walk it
+with `x2rock browse -s "<service>"` rather than reporting it as unavailable.
+
 Two shapes worth noting because they are inconsistent: **`favorite` is name/id-addressed**
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).
 And **`group`/`ungroup` are asymmetric**: `group` takes `-r <coordinator>` plus room arguments;
@@ -269,6 +274,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 |---|---|---|
 | `unknown_room` | the `-r` name is not a room (or is a group's composite label) | `x2rock rooms` (and see `did_you_mean`) |
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
+| `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

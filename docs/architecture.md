@@ -558,7 +558,7 @@ lists that service's categories, and a term searches. `--play N` plays the Nth h
 
 ```
 $ x2rock search
-32 of 108 services can be searched without an account:
+24 of 108 services can be searched:
   ... Hype Machine, SomaFM Radio, TuneIn, ...
 
 $ x2rock search -s tunein --count 5 jazz
@@ -645,7 +645,7 @@ A cold search cost ~950ms and three round trips before any query ran; warm it is
   ```
   $ X2ROCK_PLAYER=<unreachable> x2rock search
   x2rock: no player reached, using the cached catalogue (…Connection refused…)
-  32 of 108 services can be searched without an account: …
+  24 of 108 services can be searched: …
 
   $ X2ROCK_PLAYER=<unreachable> x2rock search -s tunein --play 1 jazz
   Error: no player to play it on: …
@@ -1109,7 +1109,9 @@ link, log in, done. That is the graceful flow, and it exists today.
 ### But it is per-service, and YouTube Music is not one of them
 
 The 108 services split three ways by `<Policy Auth>`: **32 Anonymous** (working now), **14
-DeviceLink**, **62 AppLink**.
+DeviceLink**, **62 AppLink**. (`Auth` is reachability. Of the 32 anonymous, 20 publish a search
+category and 12 are browse-only — counted 2026-09-04, see "A third of the anonymous tier cannot be
+searched at all".)
 
 The 14 device-link services are the tractable next tier: AccuRadio, Bandcamp, Classical Archives,
 Deezer, FIT Radio, iHeartRadio, Mixcloud, Murfie, NhacCuaTui, Saavn, Sonos Backgrounds, Sonos
@@ -1178,7 +1180,9 @@ job and is noted below as the one thing still unconfirmed.
 `link` with no argument lists the 14 device-link services, which is the doc's list exactly -
 AccuRadio, Sonos Backgrounds, Bandcamp, Classical Archives, Deezer, FIT Radio, iHeartRadio,
 Mixcloud, Murfie, NhacCuaTui, Saavn, TIDAL, Tribe of Noise, Sonos Radio. `search` with no argument
-still lists 32 of 108, and now says how many more could be linked.
+still lists what can be searched, and now says how many more could be linked. (It said 32 of 108
+when this was written; that number was the *reachable* count and is now 24 — see "A third of the
+anonymous tier cannot be searched at all".)
 
 ### The finding that cost the most: a fault at HTTP 200
 
@@ -2350,7 +2354,7 @@ From [SOAP requests and responses](https://docs.sonos.com/docs/soap-requests-and
 |---|---|
 | `deviceProvider` | **required**, always the string `Sonos` |
 | `loginToken` (`token`, `key`, `householdId`) | required **for services that authenticate** |
-| `deviceCert` | optional; only when the service declares "Requires Device Certificate" |
+| `deviceCert` | optional; only when the service declares "Requires Device Certificate" — and **enforced by nothing**, on either path (tested 2026-09-04; see "`request-header-device-cert` gates nothing") |
 | `zonePlayerId` | optional; only when the service declares that capability |
 | `deviceId` | deprecated, ignorable |
 
@@ -2358,7 +2362,9 @@ From [SOAP requests and responses](https://docs.sonos.com/docs/soap-requests-and
 credential. But the header is only as heavy as the service demands, and this is the fact that
 changes everything:
 
-**32 of the 108 services on this household's descriptor list are `Auth="Anonymous"`.** The split:
+**32 of the 108 services on this household's descriptor list are `Auth="Anonymous"`.** That is what
+can be *reached* with no credential; 20 of the 32 can also be searched, the rest being browse-only
+(counted 2026-09-04). The split:
 
 | `Policy Auth` | count |
 |---|---|
@@ -2469,6 +2475,13 @@ This is not the LAN transport being a subset of the cloud — it is the *cloud* 
 finding that `musicService:1` rejects `search` was never about firmware or about the local API. The
 command does not exist anywhere, and no amount of probing a player will produce it. **Question
 closed: the Control API will never search.**
+
+> **Bounded 2026-09-04, and still true.** Sonos *does* have a cloud content API — favorites,
+> playlists, history, browse, federated search — but it is not this one and not in this spec. It is
+> the private, cookie-authenticated surface the first-party web app uses, at
+> `play.sonos.com/api/content/v1`. See "The first-party web app has a third API". Nothing above
+> changes: the *Control* API has no content discovery, and the published spec is the whole of what
+> Sonos documents.
 
 ### `musicServiceAccounts match` is for service providers, not controllers
 
@@ -3861,6 +3874,40 @@ circumvention, nothing built into the repo:
      rather than the sealed key, and revisitable only if Google ever opens the client set.
    - **401 / scope error** → wrong scope; retry with another before concluding anything.
 
+**Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
+
+- **Read `details[].reason`, not the HTTP status.** `ACCESS_TOKEN_SCOPE_INSUFFICIENT` returns
+  **403**, not 401, so the branch table above would close the question on a scope error while
+  reporting it as a `client_id` pin. Capture the whole JSON error body.
+- **There is a fourth branch, and it is the likeliest.** `403` with `reason: SERVICE_DISABLED` and
+  `metadata.consumer: projects/<n>` means the endpoint wants the API *enabled on the calling
+  project*, and when a Bearer is presented the calling project is whichever project minted it.
+  `music.googleapis.com` is absent from the public discovery directory, so there is no console page
+  to enable it — a harder no than an allowlist, and the exact signature of a partner API.
+  `CONSUMER_INVALID` means the project identity is not resolving; a bare `PERMISSION_DENIED` with
+  no `ErrorInfo` is the allowlist hypothesis.
+- **Free pre-step:** `https://oauth2.googleapis.com/tokeninfo?access_token=…` reports the scopes
+  actually granted, separating "wrong scope" from "wrong client" at no cost.
+
+Weak evidence in favour of bothering: `ytmusicapi`'s documented setup has each user create their
+own "TVs and Limited Input devices" client, and since November 2024 that own-client flow is
+mandatory and works against InnerTube. So a self-service client is not categorically refused by
+YouTube Music's backend. Weak because InnerTube is consumer-facing and takes any YouTube-scoped
+token, while `sendRequest` is the partner door. The two facts point opposite ways, which is why one
+request settles it.
+
+> **Superseded 2026-09-04 — there is no second wall.** The paragraph below reasoned correctly about
+> what the 36 bytes are *not* and then drew the wrong conclusion from it. **Sonos does not wrap or
+> re-mint object ids**: the first-party web app hands back Plex ids in plain Plex format and
+> iHeartRadio ids in plain iHeartRadio format, so the opacity of the YouTube Music ones is
+> *Google's*, not a Sonos envelope. `music.googleapis.com/v1:sendRequest` is YouTube Music's own
+> SMAPI route, SMAPI returns ids in the service's own space, and that space passes through
+> untouched — **therefore the ids `sendRequest` returns are these opaque Google strings**, which
+> the existing enqueue path already accepts. There is no mapping for Sonos to be holding. The probe
+> is now the whole remaining question rather than the first of two, and it is the cheaper half of
+> what was budgeted. See "Object ids are the service's own, not Sonos's" under "The first-party web
+> app has a third API".
+
 **The second wall, only reached if the first opens: the id namespace.** Even a 200 gives results in
 whatever id space `sendRequest` returns; the Sonos player enqueues only its **36-byte opaque
 object id** (`x2rock keep` harvests one: `00b9123a…`, which is not a videoId, not an `MPRE…` browse
@@ -4924,6 +4971,364 @@ The scan is worth keeping as a baseline for the same reason the `RenderingContro
 if Fabric or Sonos 27 opens a port, the only way to notice is to have written down what was open
 before.
 
+## The first-party web app has a third API, and it is neither of the two this document ruled out (verified 2026-09-04)
+
+`play.sonos.com` was driven by hand in a signed-in browser while `fetch`, `XMLHttpRequest` and
+`WebSocket` were wrapped at the page level, with `authorization`, `cookie` and `x-sonos-api-key`
+replaced by a length-and-prefix stub before anything was read — the same bargain `X2ROCK_DUMP_SMAPI`
+makes. Household id is written `<HH>` throughout. Everything below was observed on the wire or read
+from a live response; the inferences are marked as such.
+
+### What it is
+
+```
+https://play.sonos.com/api/content/v1/...
+https://play.sonos.com/api/content/v2/...
+```
+
+Authenticated by the **Sonos account session cookie**. No `Authorization` header, no API key, no
+device certificate. The only other request headers the app sends are `accept-language`,
+`x-sonos-corr-id` (a client-generated uuid), `x-sonos-debug: use-section-text=true` and
+`x-sonos-timezone`.
+
+Endpoints captured just from loading the app, searching once, and playing one album:
+
+```
+GET /api/content/v1/households/<HH>/integrations
+GET /api/content/v1/households/<HH>/integrations/registrations
+GET /api/content/v1/households/<HH>/search?query=&services=<csv of sids>
+GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/favorites
+GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/favorites/resources
+GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/playlists/10/images
+GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/history
+GET /api/content/v1/integrations/<reverse-dns-id>/configurations/<uuid>/images/icon
+GET /api/content/v2/households/<HH>/services/<sid>/accounts/<acct>/albums/<objId>/browse
+GET /api/content/v2/households/<HH>/services/<sid>/accounts/<acct>/tracks/<objId>/nowplaying
+```
+
+**So "the Control API has no content discovery anywhere in its 53 paths" stays true and stops being
+the whole story.** Sonos does content discovery, just not there. Favorites, playlists, history,
+browse, search and per-track metadata all live on this private surface.
+
+`16751367` / account `124750326` is **not among the 107 services** the cloud catalogue lists, and it
+took a `history` call immediately after playback started. It is the household's own internal
+favorites/playlists/history store, in an id space unlike the real services' small integers.
+
+Integrations are keyed by reverse-DNS id with a UUID configuration per service:
+`com.googleapis.music.sonos`, `com.iheart.sonos`, `com.tunein.sonos`, `com.mixcloud.sonos`,
+`radio.sonos.sali` — matching the `integration-id` field in the catalogue.
+
+### Search: one federated call
+
+```
+GET /api/content/v1/households/<HH>/search?query=coheed&services=72711,1543,46343,85255,77575,54279
+```
+
+148 results in six blocks, each with `info.count`, `offset` and `pageSize` 20. The `services` list is
+exactly **the household's registered accounts** — which is x2rock's own linked set, plus the one
+service it cannot link:
+
+| sid | service | tier | cert | hits | types returned |
+|---|---|---|---|---|---|
+| 72711 | YouTube Music | OAUTH | **true** | 20 | ARTIST, ALBUM, PLAYLIST |
+| 1543 | iHeartRadio | OAUTH_WEB_ONLY | false | 46 | PROGRAM, PODCAST |
+| 46343 | Mixcloud | OAUTH_WEB_ONLY | false | 60 | ARTIST, TRACK, PLAYLIST |
+| 85255 | TuneIn (New) | OAUTH | false | 2 | CONTAINER |
+| 77575 | Sonos Radio | OAUTH_WEB_ONLY | false | 0 | — |
+| 54279 | Plex | OAUTH | false | 20 | TRACK |
+
+Resources carry `id.{objectId,serviceId,accountId,serviceName,serviceNameId}`, `name`, `type`,
+`playable`, `images[]`, and a base64 `defaults` blob. Note `playable: false` on ARTIST and PLAYLIST
+rows — the container/thing distinction `browse` already draws, reported here as a flag.
+
+### The catalogue, read from the cloud side — and Sonos's own names for the tiers
+
+`/integrations` returns the whole service catalogue as clean JSON: the same manifests x2rock reads
+off the player, without SOAP. Keys per service include `authentication`, `api-endpoints`,
+`search-capabilities`, `browse-options`, `resource-types`, `supported-features`,
+`playlist-editing-enabled`, `page-size-default`, `request-header-device-cert`, `integration-id`,
+`service-id`, `distribution-type`, `availability-restrictions`.
+
+| cloud `authentication` | cloud count | player `<Policy Auth>` | player count |
+|---|---|---|---|
+| `ANONYMOUS` | 31 | `Anonymous` | 32 |
+| `OAUTH_WEB_ONLY` | 14 | `DeviceLink` | 14 |
+| `OAUTH` | 62 | `AppLink` | 62 |
+| | **107** | | **108** |
+
+**Two sources, one service apart, and neither is wrong.** The player's descriptor list is the
+authority for what x2rock can reach and still reads 108/32 exactly (re-counted 2026-09-04 from the
+cached catalogue); the cloud omits one anonymous service. Which one is unidentified — the cloud
+list needs a Sonos login to read, so this cannot be settled from the LAN side. It is a one-service
+discrepancy between two vendor lists, not an error in either count.
+
+**The names are worth adopting.** `OAUTH_WEB_ONLY` is Sonos's own label for the tier that completes
+in a browser, which is exactly the door `x2rock link` walks through. That is a better legitimacy
+footing than "it answered when we asked".
+
+YouTube Music's endpoints confirm, from the cloud side, what the player already said:
+
+```
+soap:   https://music.googleapis.com/v1:sendRequest   (version 1.1)
+report: https://music.googleapis.com/v1/v2.3/report/  (version 1)
+```
+
+### `request-header-device-cert` gates nothing, on either path (settled 2026-09-04)
+
+A per-service boolean, **true for exactly 8 of 107**: Apple Music, Bookmate, Classical Archives,
+YouTube Music, Pocket Casts, Radio Paloma, SoundCloud, Neon. It is orthogonal to `authentication`:
+Radio Paloma is `ANONYMOUS` and cert `true`, with a third-party SMAPI route
+(`sonos.konsole-labs.com/radiopaloma.php`).
+
+**It is not a client-side gate on the cloud path.** The browser presented no certificate and
+searched YouTube Music successfully. So the certificate — and the sealed `apiKey` — sit between
+**Sonos's cloud and Google**, not between a client and Sonos.
+
+**And it is not a gate on the SMAPI-direct path either.** Radio Paloma was the control: anonymous,
+cert-flagged, non-Google endpoint, and the only one of the eight in x2rock's reachable set. The
+experiment as written was `x2rock search -s "Radio Paloma"`, which cannot run it — that refuses
+locally, before any SMAPI call, because the service publishes no search categories. `x2rock browse
+-s "Radio Paloma"` does run it, and one `getMetadata` for `root` with no certificate and an empty
+credentials header returns **HTTP 200 and eight streams**:
+
+```
+3   stream  Radio Paloma - Live              15  stream  Radio Paloma - Volksmusik
+6   stream  Radio Paloma - Fresh             18  stream  Radio Paloma - Kuschelschlager
+9   stream  Radio Paloma - Kuschelschlager   21  stream  Radio Paloma - Weihnachtsschlager
+12  stream  Radio Paloma - Partschlager      23  stream  Radio Paloma - PartyEXTREM
+```
+
+So the flag is **declarative** — a statement of what first-party Sonos sends — and not access
+control anywhere. Nothing in the tree needs to grow a certificate to satisfy it.
+
+Two smaller facts from the same reply, both worth having:
+
+- **A service's `count`/`total` can lie.** Radio Paloma declared `count 3, total 3` and delivered
+  eight items. x2rock ignores both and parses what arrived, which is why all eight show; anything
+  paginating on the declared `total` would have silently dropped five.
+- **`browse` is the better cert probe than `search`**, because it needs nothing of the service
+  except an endpoint. Worth remembering the next time a per-service flag wants testing.
+
+### Registration versus use, which is the real split
+
+Probed four services the household has **not** registered, one from each interesting cell:
+
+| probe | tier | cert | result |
+|---|---|---|---|
+| Hit Network | ANONYMOUS | false | **200, count 0** |
+| Radio Paloma | ANONYMOUS | true | **200, count 0** |
+| Apple Music | OAUTH | true | **200, count 0** |
+| Radio Javan | OAUTH | false | **200, count 0** |
+
+No error, no refusal — silently empty. The Bandcamp shape again: working perfectly, looks broken.
+
+So cloud search is scoped to registrations, **even for services needing no credential**. Which
+produces the first of three inversions:
+
+> **On the anonymous tier x2rock reaches services the web app returns nothing for.** The
+> SMAPI-direct path needs no registration; the cloud path does. Parity runs backwards here.
+
+### Object ids are the service's own, not Sonos's — and this corrects a hypothesis
+
+Sample ids pulled from one search across five services:
+
+| service | id |
+|---|---|
+| YouTube Music | `ALkSOiFWk0JUuJ-f31-M86gn4gQp6S-EI_JfXS8TxFR0q9xSkiNNm-VkwfbyWMRw…` (87 for artists, 48 for albums/tracks) |
+| iHeartRadio | `artist_radio.89592`, `podcast_show.339277002` |
+| Mixcloud | `user:cohenmickle`, `cloudcast:520464348` |
+| TuneIn (New) | `search:show:coheed:topic--8b3c7a4c4c27435693ff93db54f1cfd1` |
+| Plex | `c69ee188b0215613ed754152d214c16c2e89aeb5::67268:track` |
+
+Five services, five formats: readable `type.id`, `type:slug`, a path, Plex's
+`machineIdentifier::ratingKey:type`.
+
+**Sonos does not wrap or re-mint object ids.** Plex's arrive in plain Plex format, iHeartRadio's in
+plain iHeartRadio format. See the supersession note under "TASK: the OAuth identity probe" — the
+reasoning about what the 36 bytes are *not* stands, the conclusion that they are a Sonos envelope
+does not. The opacity of `ALkSOi…` is **Google's**.
+
+`artist_radio.89592` is the same shape as the iHeartRadio container this document already warns
+about for its lying `canPlay` flag, and `cloudcast:…` is the Mixcloud shape — byte-identical to
+what x2rock already gets from SMAPI-direct. **Same namespace, same source, reached by a route that
+costs a Sonos login.**
+
+### The web app cannot add a service. Any service.
+
+Observed: no affordance anywhere in the web app to add YouTube Music.
+
+Sonos's support pages were then sampled for the "Add … to Sonos" section across 16 services
+spanning all three tiers — Apple Music, Plex, Pocket Casts, Neon, Bookmate (`OAUTH`); iHeartRadio,
+Mixcloud, Classical Archives, Sonos Radio, Bandcamp, Deezer, TIDAL (`OAUTH_WEB_ONLY`); Hit Network,
+80s80s (`ANONYMOUS`); plus Audible and Pandora.
+
+**All 16 are byte-identical.** One reusable CMS block (Sanity, sheet id `msdp`) with the service
+name substituted. Two surfaces only — the mobile app via Account → Content Services → Add Content
+Service, and the **Sonos Desktop Controller** via Add Music Services. No web path. Distinct step
+texts across the sample: **1**.
+
+**Read this correctly.** The support page is boilerplate, so the YouTube Music page's lack of a web
+path is *not* evidence about YouTube Music — it says the same thing about iHeartRadio and Mixcloud,
+which x2rock links through a browser flow, and about Hit Network, which needs no account at all. The
+support docs carry **no tier information whatsoever**, and cannot corroborate `OAUTH_WEB_ONLY`
+versus `OAUTH`. That distinction rests on the catalogue field and on x2rock's own probe results,
+where it already rested.
+
+What the uniformity *does* establish is better: Sonos treats "add a service" as one uniform act with
+exactly two client surfaces, and the web app is not one of them **for anything**. It is a pure
+consumer of registrations minted on a phone or the desktop controller. It also independently confirms
+the correction already in this document — the desktop controller completes app-link, so "app-link
+needs a mobile hand-off" was never real, and Sonos now says so in writing.
+
+Which gives the second and third inversions:
+
+> **x2rock beats the first-party web app on service registration.** TuneIn (New) (`sid 85255`) and
+> Plex (`54279`) are both plain `OAUTH` — the 62-service tier the web app cannot add — and x2rock
+> links both, one through `getAppLink` and one through Plex's own PIN flow.
+
+> **"Parity with the first-party app" is the wrong frame.** The web app is a thin client. The target
+> is the mobile app or the desktop controller.
+
+### Control is not on this API
+
+Playback of a YouTube Music album into a room produced **exactly one HTTP request** — a
+`tracks/<objId>/nowplaying` metadata GET — and no command traffic at all. Resource timing confirms
+nothing further was sent: last request at 765s, playback started, still nothing at 843s. No service
+worker, no worker script, and across 224 resource entries the only hosts touched are
+`play.sonos.com`, Typekit, Sentry and image CDNs.
+
+**Inference, not observation:** the control channel is a persistent socket opened at app boot, which
+the page-level hook missed because it was installed after the bundle had taken its reference to the
+constructor. WebSockets do not appear in resource timing either, so it is invisible from both
+angles. Confirming it needs the hook injected at document start.
+
+**Not worth chasing.** The control half is the half x2rock already does better — locally, on push
+events, with no cloud and no account. Nothing the cloud control plane does would improve on it.
+
+Two capture caveats for whoever picks this up:
+
+- The app is Next.js and some content fetching happens **server-side via RSC**
+  (`/en-us/search?_rsc=…`), so those calls never appear in the browser. The Plex album page
+  fetched nothing client-side at all. Absence of a request is not absence of a fetch.
+- A single click on a track row does nothing, even though the row *is* the button
+  (`aria-label="Play Welcome Home"`, 890x56, opacity 0.9, pointer-events auto). It takes a
+  double-click.
+
+### Per-service search, and the category question closed
+
+There is a second search endpoint, per service rather than per household:
+
+```
+GET /api/content/v1/households/<HH>/services/<sid>/accounts/<acct>/search?query=<q>&count=<n>
+```
+
+**There is no category parameter.** The response is keyed by category at the top level, and every
+category comes back in one call:
+
+```
+{ "info": {"count": 41},
+  "errors": [],
+  "resourceOrder": ["ARTISTS","TRACKS","ALBUMS","PLAYLISTS"],
+  "ARTISTS": {…}, "TRACKS": {…}, "ALBUMS": {…}, "PLAYLISTS": {…},
+  "externalLinks": [] }
+```
+
+`resourceOrder` gives display order. `errors` is an array, present and empty here, so per-category
+partial failure is expressible. Observed for YouTube Music (`sid 72711`) and Plex (`54279`):
+
+| sid | `resourceOrder` | per-category counts at `count=50` |
+|---|---|---|
+| 72711 YouTube Music | ARTISTS, TRACKS, ALBUMS, PLAYLISTS | ARTISTS 1, TRACKS 20, ALBUMS 10, PLAYLISTS 10 (info.count 41) |
+| 54279 Plex | TRACKS | TRACKS 20 (info.count 20) |
+
+So `resourceOrder` is per-service and follows that service's own `search-capabilities`.
+
+**`count` is a total budget, not a per-category limit.** At `count=10` only ALBUMS and ARTISTS came
+back; at `count=50` all four did. Which retires the earlier reading that YouTube Music's missing
+TRACK block implied a category parameter: there is none, and the missing TRACKS was the count budget
+being spent before that category was reached. The app sends `count=50`.
+
+**The category keys are the SMAPI category `id`, uppercased — not the `mappedId`.** The presentation
+map declares `<Category id="tracks" mappedId="SONGS"/>`, and the cloud API returns `TRACKS`. Same
+for artists/albums/playlists, where id and mappedId happen to agree. Only the Library group's four
+(`LIBRARY_PLAYLISTS`, `UPLOADED_SONGS`, `UPLOADED_ALBUMS`, `UPLOADED_ARTISTS`) never appeared, which
+this query cannot distinguish from simply being empty.
+
+Note also the singular/plural split between the two endpoints: the household-level search reports
+each resource as `type: "ARTIST"`, while the per-service one uses `ARTISTS` as a container key.
+
+`view=TRACKS` is **not** an API parameter. Clicking "View All" on a category navigates the Next.js
+route `/en-us/search?service=72711&account=21&view=TRACKS&_rsc=…` and the content call happens
+server-side — a live example of the RSC hole noted above, where a visible UI state change produces
+no browser-side API request at all.
+
+### A third of the anonymous tier cannot be searched at all (found 2026-09-04)
+
+Chasing the cert control experiment turned up a bug of this document's own making. `x2rock search`
+listed Radio Paloma among the services that can be searched, and `x2rock search -s "Radio Paloma"`
+then refused it. Both were reading a real fact and only one of them was the right fact:
+
+- **Reachability is a credential question and is free.** Anonymous, or a token on disk.
+- **Searchability needs a published search category**, which lives in the presentation map — two
+  HTTP GETs per service, so it cannot be asked while printing a list of 108.
+
+Radio Paloma's manifest and presentation map, fetched by hand, settle what it is:
+
+```
+manifest:          "search-catalogs": {},  "endpoints": [],  "apiKey": {}
+presentation map:  <Presentation><BrowseOptions PageSize="100"/></Presentation>
+```
+
+No `SearchCategories`, not one `Category` element. A **browse-only service** — and `browse` walks it
+happily, which is how the cert experiment ran at all.
+
+**It is not a one-off.** All 32 anonymous services were then asked for their categories, which is
+the survey the list had never done:
+
+| | count | |
+|---|---|---|
+| searchable | 20 | TuneIn, SomaFM, Hype Machine, Audacy, Global Player, Radio France, myTuner, NRK, PowerApp, Sveriges Radio, Hit Network, Triple M, radioPup, Community Radio Plus, 90s90s, 80s80s, 80er-Radio harmony, HIT RADIO FFH, planet radio, RauteMusik.FM |
+| **browse-only** | **12** | CBC Radio & Music, Convoy Network, LITT Live, NTS Radio, Piraten.FM, Radio Energy, Radio Paloma, Relisten, Reservatet.fm, Schlager Radio, The Lot Radio, Virgin Radio UK |
+
+**So "32 of 108 services can be searched without an account" was overstated by twelve.** The
+anonymous tier is 32 services reachable with no credential, of which **20 can be searched** and 12
+can only be walked. Every earlier count in this document and the README said 32, and meant
+reachable.
+
+The fix splits the two questions rather than picking one:
+
+- `Catalogue::usable` — anonymous or tokened. What `browse`, `play-item` and `queue-item` resolve
+  names through. **This had to stay wide**: the comment at that call site used to assert "a service
+  that can be searched can be walked, and one that cannot, cannot", and filtering it would have
+  removed the one route that works for a browse-only service.
+- `Catalogue::searchable` — the same set less any service known to publish no categories, learned
+  by having asked and cached. A cold cache still over-promises once, which is the price of not
+  fetching 108 presentation maps to print a list.
+- The refusal became a [`Hint`](#errors-an-agent-can-act-on-not-parse): code
+  `no_search_categories`, with `x2rock browse -s "<name>"` as the runnable `fix`. It had been
+  falling through as `{"code":"unknown","fix":null}` — the exact shape the error contract exists to
+  avoid, on a condition that is entirely knowable. Both paths to it — a cold cache, and a warm one
+  where the service has already dropped off the list — now mint the same hint, so the two cannot
+  drift.
+
+`x2rock search` now says **24 of 108** (20 anonymous + 4 linked) and `x2rock browse` says **36**,
+and the difference between those two numbers is exactly the twelve.
+
+### The standing position, restated
+
+The cloud content API gives x2rock **nothing it does not already have**, except the services it
+cannot authenticate — essentially the cert-flagged three, YouTube Music, Apple Music and SoundCloud.
+Everything else it reaches by a better route: local, no account, no cloud.
+
+And building on it would cost the one axiom the project is organized around, for an undocumented,
+cookie-authenticated surface Sonos owes no stability. Recorded as a map of where the gates are,
+which is what it was gathered for — not as a route.
+
+**The gate, finally located:** service search is not gated behind Sonos code, a developer key, SMAPI
+credentials, or the device certificate. It is gated behind a **Sonos account session**. Any
+logged-in client gets YouTube Music search. x2rock is excluded by its own design axiom, not by a
+technical barrier — and that is a much stronger sentence than the open question it replaces.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -4961,8 +5366,12 @@ before.
    alternative identity and **the sealed key is one door, not the door.** The live task is now
    narrow and testable — does a self-service Cloud OAuth client's token clear the endpoint, or is
    it pinned to Sonos's `client_id`? — and it needs the user to create the OAuth client. Full
-   probe, decision tree and the second wall (id namespace) are in **"TASK: the OAuth identity
-   probe"** inside "The YouTube Music `apiKey` is sealed". The **registered-key proxy** recorded
+   probe and decision tree are in **"TASK: the OAuth identity probe"** inside "The YouTube Music
+   `apiKey` is sealed" — including three refinements added 2026-09-04 (read `details[].reason`, not
+   the status; a likely fourth branch in `SERVICE_DISABLED`; a free `tokeninfo` pre-step). **The
+   second wall this entry used to name is gone**: Sonos does not re-mint object ids, so
+   `sendRequest` returns ids the enqueue path already accepts and there is no `videoId → objectId`
+   mapping to solve. One request is now the whole of it. The **registered-key proxy** recorded
    there stays the right pattern for a future service with a registerable endpoint; it does not fit
    this one.
 
@@ -4978,11 +5387,14 @@ before.
    Asking costs nothing. YouTube Music remains not one of them.
 
    Worth noting what is *not* a route, so it is not re-tried: the Control API has no content
-   discovery anywhere in its 53 paths, UPnP `Search` reports empty `SearchCaps`,
-   `musicService:1 search` does not exist and that namespace is about accounts, and `GetSessionId`
-   answers 806 even for a service that plays. And the object id cannot be derived from outside —
+   discovery anywhere in its 53 paths (Sonos's *private* cloud content API does — see "The
+   first-party web app has a third API" — and it is gated behind a Sonos account session, which is
+   the axiom, not a wall), UPnP `Search` reports empty `SearchCaps`, `musicService:1 search` does
+   not exist and that namespace is about accounts, and `GetSessionId` answers 806 even for a
+   service that plays. And the object id cannot be derived from outside —
    `ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H` is 48 opaque characters, not a YouTube video
-   id, so searching YouTube by another route gives nothing a player would accept.
+   id, so searching YouTube by another route gives nothing a player would accept. **The opacity is
+   Google's own** (2026-09-04), which is why no Sonos-side decoding exists to be found.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
