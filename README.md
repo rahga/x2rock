@@ -34,8 +34,10 @@ Sonos speakers expose the same JSON Control API on the LAN that Sonos's cloud ex
 over a WebSocket on port 1443, with no OAuth and no internet round-trip. It is the transport the
 official Sonos mobile app itself has used since 2024. x2rock is built on it directly:
 
-- **No account, no login, no cloud dependency** for normal use. Searching a music service does
-  talk to that service, and only that; control never leaves the LAN.
+- **No Sonos account, ever.** That is the line, and it is narrower than "no cloud": searching a
+  music service talks to that service, and `x2rock stations` talks to a radio directory, because
+  neither wants a Sonos login. What x2rock will not do is depend on signing in to Sonos — a speaker
+  on the LAN answers to whoever is on the LAN, and **control never leaves it**.
 - **Push events, not polling** — the LAN API supports real subscriptions.
 - **One outbound connection**, which matters on Linux boxes with a default-deny firewall (Omarchy
   ships one) and on locked-down office networks.

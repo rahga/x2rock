@@ -7,13 +7,16 @@
 //! and every row in it is an ordinary HTTP stream URL - which is exactly what
 //! `play-url` proved a speaker will take.
 //!
-//! **This is not a hole in the local-first axiom.** The axiom is no *Sonos*
-//! account and no Sonos cloud, not "never touch the internet" - x2rock already
-//! calls out to music services over SMAPI for every search. The rule that does
-//! apply is "talking to a service never enters the daemon" (see
-//! docs/architecture.md): this runs from the CLI, on demand, and the daemon
-//! never calls it. Nothing here is cached to disk either, because a directory
-//! answer is a query result rather than a fact about the household.
+//! **This is not a hole in the axiom.** Calling a cloud service is fine; living
+//! off a Sonos cloud login is not - x2rock already calls music services over
+//! SMAPI for every search, and this directory asks for no account at all, from
+//! Sonos or from anyone. See "The axiom, stated precisely" in
+//! docs/architecture.md.
+//!
+//! The rule that does apply is "talking to a service never enters the daemon":
+//! this runs from the CLI, on demand, and the daemon never calls it. Nothing
+//! here is cached to disk either, because a directory answer is a query result
+//! rather than a fact about the household.
 //!
 //! Why Radio Browser and not another: it is the only substantial directory that
 //! needs no key, and its rows already carry the one field that matters, a

@@ -47,13 +47,42 @@ A concrete porting guide is under "Porting to Android TV" below.
 
 ## Scope
 
+### The axiom, stated precisely (sharpened 2026-09-04)
+
+**x2rock never requires a Sonos account.** That is the whole of it, and the rest of this document
+should be read against that sentence rather than against a vaguer one.
+
+It is *not* "never touches the internet" and it is *not* "never calls a cloud service". x2rock calls
+somebody's server in another country for every music-service search — SMAPI is a cloud API — and
+`x2rock stations` calls a radio directory that has nothing to do with Sonos at all. Both are fine.
+The line is a **Sonos login**: nothing may depend on signing in to Sonos, because that is the
+dependency that would make this a client of Sonos's cloud instead of a client of the speakers on
+the LAN. A speaker on the LAN answers to whoever is on the LAN; a cloud account answers to whoever
+holds the account.
+
+Two rules follow, and both were already being kept for their own reasons:
+
+- **Control never leaves the LAN.** Not because cloud is forbidden, but because the local transport
+  is better at it — push events, one connection, no round trip.
+- **Talking to a service never enters the daemon** (see the rule of that name). Outbound calls are
+  the CLI's business, on demand.
+
+Nothing in this document's conclusions changes under the sharper wording, which is the useful check
+on it: cloud OAuth was cut because it needs a Sonos login, and the first-party web app's content
+API is refused because it is gated behind a Sonos account session. Both were the right call for
+this reason and not for the looser one. What the sharper wording does is stop "it is cloud" being
+mistaken for an argument on its own.
+
+### What is in and out
+
 - **In scope**: **local-first** Sonos control over the LAN Control API (see below), a `clap`-based
   CLI (`x2rock play`, `rooms`, `vol`, etc.), an MPRIS2 server so it works with anything that
   already speaks MPRIS, and first-class support for Omarchy Quattro's Quickshell top bar.
 - **Also in scope, and required**: UPnP queue navigation (see below). Playing a chosen track from
   the queue is a core requirement, and only UPnP can do it.
-- **Cut from v1**: cloud OAuth (Sonos Control API over `api.ws.sonos.com`). Off-LAN control is not
-  wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since off-LAN
+- **Cut from v1**: cloud OAuth (Sonos Control API over `api.ws.sonos.com`). This is the axiom's
+  one hard exclusion rather than a preference about transports: it is the Sonos *login*. Off-LAN
+  control is also not wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since off-LAN
   control is what would arrive through it, but build no OAuth, no token storage and no `login`
   command for v1. An earlier draft of this bullet also listed *music services* as an account-linked
   feature waiting on the cloud. That was wrong — a service is linked to the **household**, not to a
@@ -5335,16 +5364,19 @@ and the difference between those two numbers is exactly the twelve.
 
 The cloud content API gives x2rock **nothing it does not already have**, except the services it
 cannot authenticate — essentially the cert-flagged three, YouTube Music, Apple Music and SoundCloud.
-Everything else it reaches by a better route: local, no account, no cloud.
+Everything else it reaches by a better route: on the LAN, with no login of any kind.
 
-And building on it would cost the one axiom the project is organized around, for an undocumented,
-cookie-authenticated surface Sonos owes no stability. Recorded as a map of where the gates are,
+And building on it would cost the axiom — **not because it is cloud, but because it is gated behind
+a Sonos account session**, which is the one dependency this project does not take. For an
+undocumented surface Sonos owes no stability, at that. Recorded as a map of where the gates are,
 which is what it was gathered for — not as a route.
 
 **The gate, finally located:** service search is not gated behind Sonos code, a developer key, SMAPI
 credentials, or the device certificate. It is gated behind a **Sonos account session**. Any
-logged-in client gets YouTube Music search. x2rock is excluded by its own design axiom, not by a
-technical barrier — and that is a much stronger sentence than the open question it replaces.
+logged-in client gets YouTube Music search. x2rock is excluded by its own design axiom — no Sonos
+account, ever — and not by a technical barrier. That is a much stronger sentence than the open
+question it replaces, and it is the axiom's clearest test case: the door is unlocked, the key is a
+Sonos login, and the project declines to carry one.
 
 ## A stream URL needs no service, and `play-url` is the whole feature (verified 2026-09-04)
 
@@ -5502,11 +5534,14 @@ key, no account, no registration**, and its rows already carry the one field tha
 
 ### Why this does not spend the axiom
 
-Worth stating plainly, because "x2rock now calls a cloud service" is the wrong reading. The axiom is
-**no Sonos account and no Sonos cloud** - not "never touch the internet". x2rock already makes
-outbound calls to music services for every single search; SMAPI is somebody's server in another
-country. The rule that does apply is the existing one: **talking to a service never enters the
-daemon.** `stations` runs from the CLI, on demand, and the daemon never calls it.
+Worth stating plainly, because "x2rock now calls a cloud service" is the wrong reading. **Calling a
+cloud service is fine; living off a Sonos cloud login is not** - see "The axiom, stated precisely"
+under Scope. x2rock already makes outbound calls to music services for every single search, and
+SMAPI is somebody's server in another country. Radio Browser is one more of those, and it asks for
+no account at all, from Sonos or from anyone.
+
+The rule that does apply is the existing one: **talking to a service never enters the daemon.**
+`stations` runs from the CLI, on demand, and the daemon never calls it.
 
 Nothing is cached to disk either, unlike the service catalogue. A directory answer is a query
 result, not a fact about the household - there is no `AvailableServiceListVersion` to invalidate it

@@ -5,7 +5,9 @@ description: Control Sonos speakers from the command line with the `x2rock` CLI 
 
 # Driving Sonos with the `x2rock` CLI
 
-`x2rock` controls Sonos speakers on the local network — no account, no cloud. Every command is a
+`x2rock` controls Sonos speakers on the local network, with **no Sonos account**. Control never
+leaves the LAN; `search`, `browse` and `stations` do reach out to music services and a radio
+directory, none of which want a Sonos login. Every command is a
 one-shot subprocess. A **background daemon may also be running** (it publishes now-playing to the
 Linux desktop over MPRIS) — it is *not* needed for anything you do from the CLI. When speakers seem
 missing, `x2rock status` diagnoses it (see "When no speakers are available"). Two contracts hold
