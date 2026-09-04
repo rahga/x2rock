@@ -4506,6 +4506,15 @@ is the control that actually changes what volume 1 sounds like.
   for a room it no longer sits in. That is worse than no correction, which is why `eq` reports both
   booleans rather than one, and why enabling TruePlay where nothing is available is refused instead
   of quietly accepted.
+
+  **It is a plain reversible toggle (tested 2026-09-04).** Off, on, off, on - accepted every time,
+  confirmed by an independent `GetRoomCalibrationStatus` after each, and never a refusal. So
+  unapplying a calibration does not discard it: whatever is stored survives and comes back. What
+  the test does *not* settle is what `Available` means, because it read `1` throughout and never
+  moved - it is either "a curve is stored" or merely "this model supports one", and those cannot be
+  told apart on a speaker that has one. **The experiment that would settle it needs the home
+  household**, where some of the five rooms are calibrated and some are not: an uncalibrated
+  speaker reporting `Available=0` would settle it as "stored", and `1` as "supported".
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
