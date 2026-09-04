@@ -4440,6 +4440,50 @@ journalctl --user -u x2rock.service --since today \
   | grep 'playback:1 {"_objectType":"playbackStatus"' | grep -v '"playbackState"'
 ```
 
+## EQ is UPnP-only, and loudness was on the whole time (verified 2026-09-04)
+
+A parity pass against the legacy Windows controller started with one checkbox: its EQ panel for
+Media Room showed **Loudness ticked**, bass and treble centred. The speaker agreed - `GetLoudness`
+answers `1` - so it has been on since the day it was unboxed, which is the factory default and not
+something anyone here chose.
+
+**The Control API cannot reach any of this.** The namespaces verified against real players are
+`playback:1`, `playbackMetadata:1`, `groupVolume:1` (group-scoped), `playerVolume:1`,
+`homeTheater:1`, `audioClip:1` (player), and `groups:1`, `favorites:1`, `playlists:1`,
+`musicServiceAccounts:1` (household). There is no EQ namespace among them, and `playerVolume:1`
+carries only volume, muted and fixed. The one door is UPnP `RenderingControl:1` on port 1400 -
+touched once before, for the TV audio format, and found not to carry that either.
+
+**The service publishes its own contract, so nothing here was guessed.**
+`http://<ip>:1400/xml/RenderingControl1.xml` gives the argument names and the ranges:
+
+| action | arguments | out |
+|---|---|---|
+| `GetBass` / `GetTreble` | `InstanceID` | `CurrentBass` / `CurrentTreble` |
+| `SetBass` / `SetTreble` | `InstanceID`, `DesiredBass` / `DesiredTreble` | - |
+| `GetLoudness` | `InstanceID`, **`Channel`** | `CurrentLoudness` |
+| `SetLoudness` | `InstanceID`, **`Channel`**, `DesiredLoudness` | - |
+
+- **`Bass` and `Treble` are `i2` with `allowedValueRange` -10..10, step 1.** Read off the device
+  rather than inferred, and the CLI checks both levels before sending either, so a rejected treble
+  cannot leave an accepted bass already applied.
+- **Loudness alone takes a `Channel`** (`Master`), which bass and treble do not. Omitting it gets a
+  UPnP 402, which reads like a bad value rather than a missing field - worth knowing because the
+  asymmetry is invisible until the call fails.
+- **The wire says `1` and `0`, not `true`/`false`**, so `parse::<bool>()` rejects it. The reply is
+  compared as text instead.
+- **The setters answer with an empty body**, so the CLI reads the tone back after writing rather
+  than echoing what was asked for. What the speaker now holds is the only truthful report.
+- **It is per player, never per group.** The app's own panel is titled "EQ Settings for <room>";
+  two speakers playing together share a group volume and keep their own tone. So `x2rock eq`
+  resolves `--room` to the *speaker*, the way `vol --player` does, and `--all` - which is
+  per-group - does not apply to it.
+
+Why the checkbox mattered beyond parity: loudness is a low-frequency lift that does most of its
+work at low listening levels, which is exactly where this household listens - the earlier question
+was whether a room could go quieter than volume 1. It cannot, in Sonos steps; turning loudness off
+is the control that actually changes what volume 1 sounds like.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

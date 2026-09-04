@@ -112,6 +112,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or set one speaker's tone controls: bass, treble and loudness.
+    ///
+    /// Per speaker rather than per group - rooms playing together share a group
+    /// volume but keep their own tone - so --room names the speaker itself.
+    /// With no flags it reads what the speaker holds. Reachable only over UPnP:
+    /// the Control API has no EQ namespace, so this is the one door to it.
+    Eq {
+        /// Bass, -10 to 10. 0 is flat.
+        #[arg(long, allow_negative_numbers = true)]
+        bass: Option<i8>,
+        /// Treble, -10 to 10. 0 is flat.
+        #[arg(long, allow_negative_numbers = true)]
+        treble: Option<i8>,
+        /// Loudness: on or off. A bass lift that works at low listening levels,
+        /// and on from the factory - a speaker nobody has touched is not flat.
+        #[arg(long)]
+        loudness: Option<String>,
+        /// The resulting `{room, bass, treble, loudness}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List the queue, or change it.
     Queue {
         #[command(subcommand)]
@@ -2389,6 +2410,95 @@ async fn apply_shuffle(
 }
 
 /// Apply one transport verb to a group, through its coordinator.
+/// Bass, treble and loudness on one speaker.
+///
+/// Addressed to a player, not a group: two rooms playing together each keep
+/// their own tone, and the Sonos app agrees - its panel is titled "EQ Settings
+/// for <room>".
+async fn apply_eq(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    bass: Option<i8>,
+    treble: Option<i8>,
+    loudness: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let speaker = match room {
+        Some(name) => session.groups.player_named(name)?,
+        // No room named, so the default group resolved; its coordinator is the
+        // speaker meant. By id, because once grouped the group's name
+        // ("Kitchen + 1") is no player's name at all.
+        None => session
+            .groups
+            .player(&target.coordinator_id)
+            .ok_or_else(|| anyhow!("no player for {}", target.name))?,
+    };
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    let upnp = Upnp::new(ip);
+
+    // Both levels are checked before either is sent, so a bad treble cannot
+    // leave a good bass already applied - the same partial-application care the
+    // fan-out takes.
+    for (what, level) in [("bass", bass), ("treble", treble)] {
+        if let Some(level) = level {
+            ensure!(
+                upnp::TONE_RANGE.contains(&level),
+                "{what} {level} is outside the {}..{} a player accepts",
+                upnp::TONE_RANGE.start(),
+                upnp::TONE_RANGE.end()
+            );
+        }
+    }
+    let wanted_loudness = match loudness.as_deref() {
+        None => None,
+        Some(text @ ("on" | "off")) => Some(text == "on"),
+        Some(_) => bail!("loudness takes on or off"),
+    };
+
+    let before = upnp.tone().await?;
+    if let Some(level) = bass {
+        upnp.set_bass(level).await?;
+    }
+    if let Some(level) = treble {
+        upnp.set_treble(level).await?;
+    }
+    if let Some(on) = wanted_loudness {
+        upnp.set_loudness(on).await?;
+    }
+    // Read back rather than echo what was asked for: the setters answer with an
+    // empty body, so what the speaker now holds is the only truthful report.
+    let changed = bass.is_some() || treble.is_some() || wanted_loudness.is_some();
+    let after = if changed { upnp.tone().await? } else { before };
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "room": speaker.name,
+                "bass": after.bass,
+                "treble": after.treble,
+                "loudness": after.loudness,
+            })
+        );
+    } else {
+        let word = |on: bool| if on { "on" } else { "off" };
+        println!(
+            "{:<24} bass {}{}  treble {}{}  loudness {}{}",
+            speaker.name,
+            transition(&before.bass.to_string(), &after.bass.to_string()),
+            after.bass,
+            transition(&before.treble.to_string(), &after.treble.to_string()),
+            after.treble,
+            transition(word(before.loudness), word(after.loudness)),
+            word(after.loudness),
+        );
+    }
+    Ok(())
+}
+
 async fn apply_transport(
     session: &session::Session,
     target: &session::Target,
@@ -3372,6 +3482,12 @@ async fn run(cli: Cli) -> Result<()> {
             upnp.use_tv_input(&room.id, bar).await?;
             println!("{:<24} TV input", room.name);
         }
+        Command::Eq {
+            bass,
+            treble,
+            loudness,
+            json,
+        } => apply_eq(&session, &target, room, bass, treble, loudness, json).await?,
         Command::Queue { action, json } => {
             let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
             let room = target.name.as_str();

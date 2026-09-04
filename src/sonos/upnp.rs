@@ -38,6 +38,10 @@ enum Service {
     AvTransport,
     ContentDirectory,
     MusicServices,
+    /// Tone controls. Per speaker, and reachable nowhere else: the Control API
+    /// has no EQ namespace at all, so this is the only door to bass, treble and
+    /// loudness - the Sonos app's own "EQ Settings for <room>" panel.
+    RenderingControl,
 }
 
 impl Service {
@@ -46,6 +50,7 @@ impl Service {
             Self::AvTransport => "/MediaRenderer/AVTransport/Control",
             Self::ContentDirectory => "/MediaServer/ContentDirectory/Control",
             Self::MusicServices => "/MusicServices/Control",
+            Self::RenderingControl => "/MediaRenderer/RenderingControl/Control",
         }
     }
 
@@ -54,8 +59,28 @@ impl Service {
             Self::AvTransport => "urn:schemas-upnp-org:service:AVTransport:1",
             Self::ContentDirectory => "urn:schemas-upnp-org:service:ContentDirectory:1",
             Self::MusicServices => "urn:schemas-upnp-org:service:MusicServices:1",
+            Self::RenderingControl => "urn:schemas-upnp-org:service:RenderingControl:1",
         }
     }
+}
+
+/// The bounds `RenderingControl`'s own service description gives for bass and
+/// treble: `i2`, `-10..10`, step 1. Read off the player rather than guessed -
+/// `http://<ip>:1400/xml/RenderingControl1.xml` publishes them.
+pub const TONE_RANGE: std::ops::RangeInclusive<i8> = -10..=10;
+
+/// One speaker's tone controls.
+///
+/// Per player, never per group: the app calls this panel "EQ Settings for
+/// <room>", and two speakers playing together keep their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tone {
+    pub bass: i8,
+    pub treble: i8,
+    /// A low-frequency lift that does its work at low listening levels. **On
+    /// from the factory on every Sonos speaker**, so a household that has never
+    /// touched it is not neutral.
+    pub loudness: bool,
 }
 
 pub struct Upnp {
@@ -152,6 +177,84 @@ pub struct Queue {
 impl Upnp {
     pub fn new(ip: IpAddr) -> Self {
         Self { ip }
+    }
+
+    /// Read all three tone controls.
+    ///
+    /// Three round trips because the service offers no combined read; they go
+    /// out together rather than in sequence, since none depends on the others.
+    pub async fn tone(&self) -> Result<Tone> {
+        let (bass, treble, loudness) = tokio::try_join!(
+            self.tone_number("GetBass", "CurrentBass"),
+            self.tone_number("GetTreble", "CurrentTreble"),
+            self.loudness(),
+        )?;
+        Ok(Tone {
+            bass,
+            treble,
+            loudness,
+        })
+    }
+
+    async fn tone_number(&self, action: &str, field: &str) -> Result<i8> {
+        let text = self
+            .soap(Service::RenderingControl, action, &[("InstanceID", "0")])
+            .await?;
+        level_in(&text, field)
+    }
+
+    /// Loudness alone takes a `Channel`, which the other two do not. The
+    /// service description says so and the player enforces it: without it the
+    /// call comes back a UPnP 402 (invalid args), which reads like a bad level
+    /// rather than a missing field.
+    async fn loudness(&self) -> Result<bool> {
+        let text = self
+            .soap(
+                Service::RenderingControl,
+                "GetLoudness",
+                &[("InstanceID", "0"), ("Channel", "Master")],
+            )
+            .await?;
+        loudness_in(&text)
+    }
+
+    pub async fn set_bass(&self, level: i8) -> Result<()> {
+        self.set_tone("SetBass", "DesiredBass", level).await
+    }
+
+    pub async fn set_treble(&self, level: i8) -> Result<()> {
+        self.set_tone("SetTreble", "DesiredTreble", level).await
+    }
+
+    async fn set_tone(&self, action: &str, field: &str, level: i8) -> Result<()> {
+        if !TONE_RANGE.contains(&level) {
+            bail!(
+                "{level} is outside the {}..{} the player accepts",
+                TONE_RANGE.start(),
+                TONE_RANGE.end()
+            );
+        }
+        self.soap(
+            Service::RenderingControl,
+            action,
+            &[("InstanceID", "0"), (field, &level.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_loudness(&self, on: bool) -> Result<()> {
+        self.soap(
+            Service::RenderingControl,
+            "SetLoudness",
+            &[
+                ("InstanceID", "0"),
+                ("Channel", "Master"),
+                ("DesiredLoudness", if on { "1" } else { "0" }),
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     /// One HTTP/1.1 POST, returning `(status, body)`.
@@ -730,6 +833,26 @@ impl Upnp {
     }
 }
 
+/// A tone level out of a `RenderingControl` reply.
+fn level_in(text: &str, field: &str) -> Result<i8> {
+    let doc = Document::parse(text)?;
+    let raw = text_of(&doc, field).ok_or_else(|| anyhow!("no {field} in the reply: {text}"))?;
+    raw.trim()
+        .parse()
+        .with_context(|| format!("{field} was {raw:?}, which is not a level"))
+}
+
+/// Loudness out of a `GetLoudness` reply.
+///
+/// The wire carries `1` and `0`, which `parse::<bool>()` rejects - it wants
+/// "true"/"false" - so the comparison is written out rather than parsed.
+fn loudness_in(text: &str) -> Result<bool> {
+    let doc = Document::parse(text)?;
+    let raw = text_of(&doc, "CurrentLoudness")
+        .ok_or_else(|| anyhow!("no CurrentLoudness in the reply: {text}"))?;
+    Ok(raw.trim() == "1")
+}
+
 fn text_of<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
     doc.descendants()
         .find(|n| n.tag_name().name() == tag)
@@ -821,6 +944,32 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replies captured off the Media Room speaker, 2026-09-04.
+    const GET_BASS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetBassResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentBass>0</CurrentBass></u:GetBassResponse></s:Body></s:Envelope>"#;
+    const GET_LOUDNESS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetLoudnessResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentLoudness>1</CurrentLoudness></u:GetLoudnessResponse></s:Body></s:Envelope>"#;
+
+    #[test]
+    fn a_tone_level_is_read_out_of_the_reply_signed() {
+        assert_eq!(level_in(GET_BASS, "CurrentBass").unwrap(), 0);
+        // The signed half is the one worth pinning: the state variable is `i2`
+        // over -10..10, so a cut at zero would silently lose everything below
+        // flat - and "less bass" is the whole reason to reach for this.
+        assert_eq!(
+            level_in(&GET_BASS.replace(">0<", ">-7<"), "CurrentBass").unwrap(),
+            -7
+        );
+        // A field that is not there is an error naming it, not a quiet 0: a
+        // flat EQ and an unanswered question must not read the same.
+        assert!(level_in(GET_BASS, "CurrentTreble").is_err());
+    }
+
+    #[test]
+    fn loudness_reads_the_wires_one_rather_than_the_word_true() {
+        assert!(loudness_in(GET_LOUDNESS).unwrap());
+        assert!(!loudness_in(&GET_LOUDNESS.replace(">1<", ">0<")).unwrap());
+        assert!(loudness_in(GET_BASS).is_err(), "wrong reply, not a false");
+    }
 
     #[test]
     fn hms_parses_upnp_durations() {

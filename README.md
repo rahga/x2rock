@@ -20,7 +20,8 @@ adds what a generic MPRIS client cannot: every room at once, with per-room volum
 
 > Status: complete for daily use. Rooms, volume — per room as well as per group — transport,
 > favorites, the queue and its editing, grouping and party mode, soundbar TV input with the audio
-> format it is actually receiving, all from the CLI, over MPRIS, or from the bar widget.
+> format it is actually receiving, per-speaker tone controls, all from the CLI, over MPRIS, or from
+> the bar widget.
 >
 > Every one of those was exercised against real speakers rather than against the protocol
 > documentation, which repeatedly turned out to be the only way to learn what is true: the

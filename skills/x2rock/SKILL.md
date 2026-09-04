@@ -104,6 +104,13 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
+**`eq` is per speaker, like `vol --player` and unlike everything else.** Bass and treble run
+-10..10 (0 flat) and loudness is on/off; `-r` names the *speaker*, so a grouped room gets its own
+tone rather than its group's, and `--all` does not apply to it. **Loudness is on from the factory**,
+so a household nobody has adjusted is not flat - it is a low-frequency lift that does most of its
+work at low listening levels, which is worth knowing before concluding a room is simply too loud at
+volume 1. Reading takes three round trips and setting one per control; it is local either way.
+
 `group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
 topology takes a second or two to settle — re-read `status` rather than assuming. These are
 **idempotent**: `party` on an already-partied house, `party off` when nothing is grouped, `ungroup`
@@ -123,6 +130,7 @@ see "Ask before you act".
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
+| Tone: bass, treble, loudness | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off` |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
