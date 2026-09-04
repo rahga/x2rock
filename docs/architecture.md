@@ -4875,13 +4875,27 @@ beside it), and `ZoneGroupTopology:1` has `CheckForUpdate` and `BeginSoftwareUpd
 - The `ManifestURL` names a release train verbatim - `2026-Sonos-17-aiVIZ66IGK-GA-1` - recorded
   without interpretation, since its numbering matches neither `96.1` nor `displayVersion 18.7`.
 
-`BeginSoftwareUpdate(UpdateURL, Flags, ExtraOptions)` exists beside it and is **deliberately
-untouched**: it reboots speakers, and a household mid-update is not a state worth reaching by
-accident from a CLI. The vendor agrees, which is the strongest argument available - clicking "Update
-Now" does not update anything, it opens a modal that starts the process and warns against unplugging
-the speakers. A single unconfirmed CLI call would be a worse door onto the same operation than the
-one Sonos ships, and `--yes` would not close the gap: the app's dialog exists to make someone read a
-sentence about power, not to collect a keystroke. A read-only `update` command would be worth having with Sonos 27 rolling out,
+### `BeginSoftwareUpdate` is a permanent no, not a backlog item
+
+`BeginSoftwareUpdate(UpdateURL, Flags, ExtraOptions)` sits beside `CheckForUpdate` and **x2rock will
+never offer it**. That is a decision rather than an omission, so it is recorded as one: nobody should
+come back to this file in a year and read it as unfinished work.
+
+The reason is the vendor's own, which is the strongest argument available. Clicking "Update Now"
+does not update anything - it opens a modal that starts the process and warns against unplugging the
+speakers. **The sentence is the point of that dialog**, and no CLI can carry it. `--yes` would not
+close the gap either, because a flag collects a keystroke where the modal collects a moment of
+reading. A household part-way through a firmware flash is not a state to reach from a shell, and
+what would be gained is one convenience against the small chance of a bricked speaker in someone
+else's office.
+
+**And this is not a security boundary, so it should not be dressed as one.** `raw` is no back door -
+it speaks the Control API and this is UPnP, so there is no route through it by construction rather
+than by prohibition, and x2rock has no raw UPnP escape hatch at all. But the SOAP call is a dozen
+lines of `curl`, and the probing recorded in this very file used exactly that. The policy governs
+**what x2rock offers**, not what anyone can do to their own speakers. Anyone determined can flash a
+player without asking x2rock's permission; they will simply not be handed a one-word command that
+does it by accident. A read-only `update` command would be worth having with Sonos 27 rolling out,
 and would be exactly `CheckForUpdate` and nothing else.
 
 ### What the speaker actually listens on (scanned 2026-09-04)
