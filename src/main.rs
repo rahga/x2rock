@@ -1650,7 +1650,7 @@ async fn stream_item(
     // that turns out to be wrong; the capability is one argument away.
     let (room_name, started) =
         stream_url(session, room, &uri, title, Some(service), Duration::ZERO).await?;
-    report_started(&room_name, title, Some(&service.name), started)
+    report_started(&room_name, title, Some(&service.name), &started)
 }
 
 /// How long to wait for a loaded stream to actually reach `PLAYING`.
@@ -1671,7 +1671,7 @@ const STREAM_POLL: Duration = Duration::from_millis(500);
 /// success means only that the URL was taken, so collapsing this to
 /// worked/failed would have to guess which of the other two a buffering room
 /// is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Started {
     /// Reached `PLAYING`. Real sound.
     Playing,
@@ -1682,15 +1682,24 @@ enum Started {
     /// Idle or stopped at the deadline. This is the silent failure: the player
     /// took a URL it cannot play and said nothing about it.
     Silent,
-    /// **Nothing answered.** Every status poll failed for the whole wait, so
-    /// nothing is known about the stream either way.
+    /// **The state could not be established**, so nothing is known about the
+    /// stream either way. Two ways to get here, and neither is a verdict:
+    /// every poll failed for the whole wait, or they answered without naming a
+    /// state - which `PlaybackStatus::playback_state` documents as meaning
+    /// *unchanged*, and therefore nothing.
     ///
     /// Distinct from `Silent` on purpose, and the distinction is the remedy: a
-    /// silent stream means try another one, while this means the room stopped
-    /// answering and trying more streams at it is pointless. Folding the two
-    /// together also contradicted the loop's own rule - a failed poll is
-    /// evidence about the poll, not about the stream.
-    Unverified,
+    /// silent stream means try another one, while this means stop and find out
+    /// why the room is not answering. Folding the two together also
+    /// contradicted the loop's own rule - a failed poll is evidence about the
+    /// poll, not about the stream.
+    ///
+    /// Carries what the last failed poll said, where one failed at all. The
+    /// polls do not only fail because a room went away: an API error body or a
+    /// stale `groupId` fails deterministically for the whole wait and looks
+    /// identical from here, so the message reports the cause it has instead of
+    /// asserting one it does not.
+    Unverified(Option<String>),
 }
 
 /// One wording for the three outcomes, shared by every caller that starts a
@@ -1700,7 +1709,7 @@ enum Started {
 /// there is none, and an agent driving this needs a non-zero exit and a code to
 /// branch on rather than a cheerful line it has to go and disprove. No `fix` -
 /// nothing here can mint a stream that plays.
-fn report_started(room: &str, title: &str, on: Option<&str>, started: Started) -> Result<()> {
+fn report_started(room: &str, title: &str, on: Option<&str>, started: &Started) -> Result<()> {
     let on = on.map(|svc| format!(" on {svc}")).unwrap_or_default();
     match started {
         Started::Playing => println!("{room} — {title}{on}"),
@@ -1718,19 +1727,25 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: Started) -
             )
             .into());
         }
-        // Reuses the established `no_player` code rather than minting a new
-        // one: this is the documented "speakers were known here but none
-        // answered" case, arrived at mid-command. No fix, as that code never
-        // carries one.
-        Started::Unverified => {
+        // **Its own code, not `no_player`.** These commands already emit
+        // `no_player` before a stream is loaded, from `session::connect` - so
+        // reusing it here would leave a caller branching on `code` unable to
+        // tell "no speakers answered, nothing was loaded" from "the stream was
+        // loaded and then the room went quiet on us", which are different
+        // situations with different remedies.
+        Started::Unverified(why) => {
+            let because = why
+                .as_deref()
+                .map(|e| format!(" The last attempt said: {e}."))
+                .unwrap_or_default();
             return Err(hint::Hint::new(
                 format!(
-                    "{room} took {title:?}, and then stopped answering for {}s - so whether it \
-                     is playing is unknown. This is the room going away rather than a bad \
-                     stream; check the speaker before trying another.",
+                    "{room} took {title:?}, but its state could not be read for {}s, so whether \
+                     it is playing is unknown.{because} This is not a verdict on the stream: do \
+                     not swap it for a different one, find out why the room is not answering.",
                     STREAM_START.as_secs()
                 ),
-                "no_player",
+                "stream_unverified",
                 None,
             )
             .into());
@@ -1747,8 +1762,8 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: Started) -
 /// caller told to branch on `code` could parse the failure and not the success.
 /// A failure still routes through `report_started`, so the error shape stays
 /// the standard `{error, code, fix}` rather than a second invented one.
-fn report_started_json(room: &str, title: &str, url: &str, started: Started) -> Result<()> {
-    if matches!(started, Started::Silent | Started::Unverified) {
+fn report_started_json(room: &str, title: &str, url: &str, started: &Started) -> Result<()> {
+    if matches!(started, Started::Silent | Started::Unverified(_)) {
         return report_started(room, title, None, started);
     }
     // No `stream_info`: the player has often not read the station's metadata
@@ -1760,7 +1775,7 @@ fn report_started_json(room: &str, title: &str, url: &str, started: Started) -> 
             "room": room,
             "title": title,
             "url": url,
-            "started": if started == Started::Playing { "playing" } else { "starting" },
+            "started": if *started == Started::Playing { "playing" } else { "starting" },
         })
     );
     Ok(())
@@ -1844,17 +1859,23 @@ async fn stream_url(
     // what it said - and the one that separates a dead stream from a room that
     // went away.
     let mut answered = false;
+    // Kept rather than discarded: it is the only evidence about *why* nothing
+    // could be read, and the failure message would otherwise have to guess.
+    let mut last_err = None;
     loop {
         // A failed poll is not evidence about the stream - it is evidence
         // about the poll. Keep asking until the deadline and let the last
         // reading that did arrive decide.
-        if let Ok(status) = coordinator.playback_status(&target.group_id).await {
-            answered = true;
-            match status.state() {
-                Some("PLAYING") => return Ok((target.name.clone(), Started::Playing)),
-                Some(state) => last = Some(state.to_string()),
-                None => {}
+        match coordinator.playback_status(&target.group_id).await {
+            Ok(status) => {
+                answered = true;
+                match status.state() {
+                    Some("PLAYING") => return Ok((target.name.clone(), Started::Playing)),
+                    Some(state) => last = Some(state.to_string()),
+                    None => {}
+                }
             }
+            Err(e) => last_err = Some(format!("{e:#}")),
         }
         if tokio::time::Instant::now() >= deadline {
             break;
@@ -1866,11 +1887,15 @@ async fn stream_url(
     // IDLE between taking the URL and starting to buffer, so an early look
     // would condemn every stream.
     let started = match (answered, last.as_deref()) {
-        (false, _) => Started::Unverified,
         (true, Some("IDLE") | Some("STOPPED")) => Started::Silent,
-        // Answered, but never named a state. Not grounds for calling a stream
-        // dead, so it reads as still starting.
-        (true, _) => Started::Starting,
+        (true, Some(_)) => Started::Starting,
+        // Answered, but never named a state for the whole wait. That field is
+        // documented as meaning *unchanged* rather than stopped, so it is
+        // evidence of nothing - which makes this unknown rather than either a
+        // success or a dead stream. Reporting it as `Starting` would have been
+        // a false success on a stream that may well be dead.
+        (true, None) => Started::Unverified(None),
+        (false, _) => Started::Unverified(last_err),
     };
     Ok((target.name.clone(), started))
 }
@@ -1928,9 +1953,9 @@ async fn run_stations(
         )
         .await?;
         if json {
-            return report_started_json(&room_name, &station.name, &station.url_resolved, started);
+            return report_started_json(&room_name, &station.name, &station.url_resolved, &started);
         }
-        return report_started(&room_name, &station.name, None, started);
+        return report_started(&room_name, &station.name, None, &started);
     }
 
     if json {
@@ -2046,9 +2071,9 @@ async fn run_play_url(
     };
     let (room_name, started) = stream_url(&session, room, url, &name, None, wait).await?;
     if json {
-        return report_started_json(&room_name, &name, url, started);
+        return report_started_json(&room_name, &name, url, &started);
     }
-    report_started(&room_name, &name, None, started)
+    report_started(&room_name, &name, None, &started)
 }
 
 /// `x2rock play-item`: play a hit whose id is already known.
@@ -5030,12 +5055,12 @@ mod tests {
         // Playing and Starting are both successes - a stream still buffering
         // when the wait ran out has not failed, and must not be reported as
         // though it had.
-        assert!(report_started("Media Room", "SomaFM", None, Started::Playing).is_ok());
-        assert!(report_started("Media Room", "Jazz", Some("TuneIn"), Started::Starting).is_ok());
+        assert!(report_started("Media Room", "SomaFM", None, &Started::Playing).is_ok());
+        assert!(report_started("Media Room", "Jazz", Some("TuneIn"), &Started::Starting).is_ok());
 
         // Silent is the one that used to print a cheerful line. It is an error,
         // it carries a code to branch on, and it names the stream.
-        let err = report_started("Media Room", ".977 Country", None, Started::Silent).unwrap_err();
+        let err = report_started("Media Room", ".977 Country", None, &Started::Silent).unwrap_err();
         assert_eq!(hint::of(&err).0, "stream_did_not_play");
         assert!(
             hint::of(&err).1.is_none(),
@@ -5052,15 +5077,33 @@ mod tests {
         // dead", because the remedy differs: trying more streams at a room
         // that has gone away is pointless. It must not carry the
         // stream_did_not_play code, and must not blame the stream.
-        let gone = report_started("Media Room", "SomaFM", None, Started::Unverified).unwrap_err();
-        assert_eq!(hint::of(&gone).0, "no_player");
+        // "Could not be read" is a *third* thing, not a dead stream: its own
+        // code, because these commands already emit `no_player` before a
+        // stream is loaded and a caller must be able to tell those apart.
+        let gone =
+            report_started("Media Room", "SomaFM", None, &Started::Unverified(None)).unwrap_err();
+        assert_eq!(hint::of(&gone).0, "stream_unverified");
         assert!(hint::of(&gone).1.is_none());
-        let text = format!("{gone:#}");
-        assert!(text.contains("stopped answering"), "{text}");
+        let text = format!("{gone:#}").to_lowercase();
+        assert!(text.contains("could not be read"), "{text}");
+        // Case-insensitively, because the previous version of this assertion
+        // checked for "Try another" while the message said "trying another" -
+        // it passed on capitalisation alone and enforced nothing.
         assert!(
-            !text.contains("Try another"),
-            "must not send a caller after another stream: {text}"
+            !text.contains("another one") && !text.contains("try another"),
+            "must not send a caller after a different stream: {text}"
         );
+
+        // And it reports the cause it has rather than asserting one, because a
+        // stale groupId fails the polls exactly like a room going away.
+        let why = report_started(
+            "Media Room",
+            "SomaFM",
+            None,
+            &Started::Unverified(Some("connection refused".into())),
+        )
+        .unwrap_err();
+        assert!(format!("{why:#}").contains("connection refused"), "{why:#}");
     }
 
     #[test]
@@ -5069,19 +5112,19 @@ mod tests {
         // success while rendering failure as JSON, so a caller could parse the
         // failure and not the success. One helper now serves both.
         assert!(
-            report_started_json("Media Room", "SomaFM", "http://x/s", Started::Playing).is_ok()
+            report_started_json("Media Room", "SomaFM", "http://x/s", &Started::Playing).is_ok()
         );
         assert!(
-            report_started_json("Media Room", "SomaFM", "http://x/s", Started::Starting).is_ok()
+            report_started_json("Media Room", "SomaFM", "http://x/s", &Started::Starting).is_ok()
         );
         // Failures keep the standard {error, code, fix} shape rather than a
         // second invented one, for both failing outcomes.
         for (outcome, code) in [
             (Started::Silent, "stream_did_not_play"),
-            (Started::Unverified, "no_player"),
+            (Started::Unverified(None), "stream_unverified"),
         ] {
             let err =
-                report_started_json("Media Room", "SomaFM", "http://x/s", outcome).unwrap_err();
+                report_started_json("Media Room", "SomaFM", "http://x/s", &outcome).unwrap_err();
             assert_eq!(hint::of(&err).0, code);
         }
     }
