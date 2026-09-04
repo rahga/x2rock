@@ -183,7 +183,8 @@ of them is the whole name, so `favorite Bedtime` is not made ambiguous by "Bedti
 a favorite replaces what the room had queued, which is what Sonos itself does.
 
 With one group in the household no room needs naming. Otherwise pass `-r "Media Room"` or set
-`X2ROCK_ROOM`. `rooms --json`, `now --json` and `favorites --json` emit a flat schema meant for
+`X2ROCK_ROOM` — and `x2rock rooms` says so, with a ready-to-paste `export`, whenever there is more
+than one room and no default set. `rooms --json`, `now --json` and `favorites --json` emit a flat schema meant for
 bar widgets.
 
 Discovery is explicit. `x2rock discover` sweeps the local subnet once and remembers what it finds

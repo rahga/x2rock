@@ -1202,6 +1202,40 @@ async fn fetch_room(
     Ok((status, meta, volume))
 }
 
+/// The line `x2rock rooms` adds for a person who is about to need `--room` and
+/// has no default set.
+///
+/// **Shown only where it would actually help**, which is the whole design: a
+/// household with one group needs no `--room` at all - `Groups::resolve` picks
+/// the only one - so mentioning the variable there is noise, and someone who
+/// has already set it is being told what they know. This is the command a
+/// person runs *before* hitting "this household has several groups; choose one
+/// with --room", so it is the right place to answer that question early.
+///
+/// The example is a **player** name and not a group name. A group is named
+/// after whichever player coordinates it and reads as `Dining Room + 1` when
+/// several are joined, which is a label and not a room - handing that back as
+/// something to export would produce `no room named "Dining Room + 1"`. Room
+/// names have spaces, so it goes through `shell_arg` for the same reason a
+/// `fix` does.
+fn room_default_hint(groups: &Groups, current: Option<&str>) -> Option<String> {
+    if groups.groups.len() < 2 {
+        return None;
+    }
+    // An empty or blank value is treated as unset: clap would pass it through
+    // as a room name and it would resolve to nothing, so the person still
+    // needs this line.
+    if current.is_some_and(|v| !v.trim().is_empty()) {
+        return None;
+    }
+    let example = groups.players.first()?.name.as_str();
+    Some(format!(
+        "Several rooms here, so most commands want `-r <room>`. For a default in this shell: \
+         export X2ROCK_ROOM={}",
+        hint::shell_arg(example)
+    ))
+}
+
 fn print_rooms(groups: &Groups, json: bool) {
     if json {
         let rooms: Vec<_> = groups
@@ -1231,6 +1265,11 @@ fn print_rooms(groups: &Groups, json: bool) {
         } else {
             println!("{:<24} {}", group.name, state);
         }
+    }
+    // Deliberately after the rooms and only in the human output: a hint is not
+    // data, and `--json` returned above.
+    if let Some(line) = room_default_hint(groups, std::env::var("X2ROCK_ROOM").ok().as_deref()) {
+        println!("\n{line}");
     }
 }
 
@@ -4875,6 +4914,68 @@ mod tests {
         )
         .unwrap();
         (status, meta)
+    }
+
+    /// Two groups, three players, one of them a joined pair - so the group list
+    /// carries a composite label that is not a room name.
+    fn two_group_household() -> Groups {
+        Groups {
+            groups: vec![
+                Group {
+                    id: "g:media".into(),
+                    name: "Media Room".into(),
+                    coordinator_id: "RINCON_1".into(),
+                    playback_state: String::new(),
+                    player_ids: vec!["RINCON_1".into()],
+                },
+                Group {
+                    id: "g:dining".into(),
+                    name: "Dining Room + 1".into(),
+                    coordinator_id: "RINCON_2".into(),
+                    playback_state: String::new(),
+                    player_ids: vec!["RINCON_2".into(), "RINCON_3".into()],
+                },
+            ],
+            players: vec![
+                Player {
+                    id: "RINCON_1".into(),
+                    name: "Media Room".into(),
+                    websocket_url: String::new(),
+                    capabilities: vec![],
+                },
+                Player {
+                    id: "RINCON_2".into(),
+                    name: "Dining Room".into(),
+                    websocket_url: String::new(),
+                    capabilities: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_room_default_hint_appears_only_where_it_helps() {
+        let several = two_group_household();
+
+        // The case it exists for: several rooms, nothing set.
+        let hint = room_default_hint(&several, None).expect("several rooms, no default");
+        assert!(hint.contains("export X2ROCK_ROOM='Media Room'"), "{hint}");
+
+        // Quoted, and a *player* name - never the composite group label, which
+        // is not a room and would not resolve.
+        assert!(!hint.contains("Dining Room + 1"), "{hint}");
+
+        // Already set: saying it again is telling someone what they know.
+        assert!(room_default_hint(&several, Some("Kitchen")).is_none());
+        // Blank counts as unset - clap would pass it on and it would resolve
+        // to nothing.
+        assert!(room_default_hint(&several, Some("")).is_some());
+        assert!(room_default_hint(&several, Some("   ")).is_some());
+
+        // One group needs no --room at all, so the line would be noise.
+        let mut single = two_group_household();
+        single.groups.truncate(1);
+        assert!(room_default_hint(&single, None).is_none());
     }
 
     #[test]
