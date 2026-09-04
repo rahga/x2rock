@@ -118,6 +118,8 @@ enum Command {
     /// this takes no --room. Created in the Sonos app; x2rock can turn them on
     /// and off and remove them.
     Alarms {
+        #[command(subcommand)]
+        action: Option<AlarmsAction>,
         /// The list as JSON: `{id, room, start, duration_ms, recurrence,
         /// enabled, volume, play_mode, program, include_grouped}` per alarm.
         #[arg(long)]
@@ -496,6 +498,41 @@ enum RawScope {
 enum BookmarksAction {
     /// Forget one, by name. Matches the history too, not just what was kept.
     Remove { query: String },
+}
+
+#[derive(Subcommand)]
+enum AlarmsAction {
+    /// Create an alarm. It is armed unless --off is given.
+    Add {
+        /// When, as `HH:MM` or `HH:MM:SS`, local to the household.
+        time: String,
+        /// How long it plays for: `15`/`15m` minutes, `1h`, `HH:MM:SS`.
+        #[arg(long, default_value = "15m")]
+        duration: String,
+        /// `once` (the default), `daily`, `weekdays`, `weekends`, or `on_` and
+        /// the days as digits with Sunday 0 - `on_135` for Mon/Wed/Fri. The
+        /// player takes more than its own description admits, so this is passed
+        /// through rather than checked against a list.
+        #[arg(long, default_value = "once")]
+        recurrence: String,
+        /// 0-100. Loud enough to wake someone is the point, so this does not
+        /// inherit the room's current level.
+        #[arg(long, default_value_t = 25)]
+        volume: u8,
+        /// What it plays: a favorite or saved playlist, by name or id. Left
+        /// out, it is the speaker's built-in chime.
+        #[arg(long)]
+        program: Option<String>,
+        /// `normal` (the default), `repeat_all`, `shuffle`, `shuffle_norepeat`.
+        #[arg(long, default_value = "normal")]
+        play_mode: String,
+        /// Also sound in rooms grouped with this one.
+        #[arg(long)]
+        grouped: bool,
+        /// Create it disarmed, to be turned on later.
+        #[arg(long)]
+        off: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2672,6 +2709,22 @@ async fn apply_eq(
     Ok(())
 }
 
+/// `HH:MM` or `HH:MM:SS` as the alarm service wants it: `HH:MM:SS`.
+///
+/// Padded rather than reformatted loosely, because the player takes the string
+/// as given - `7:00` is refused where `07:00:00` is not.
+fn parse_time_of_day(text: &str) -> Result<String> {
+    let bad = || anyhow!("{text:?} is not a time of day - try 07:00 or 07:00:00");
+    let parts: Option<Vec<u32>> = text.trim().split(':').map(|p| p.parse().ok()).collect();
+    let (h, m, sec) = match parts.as_deref() {
+        Some([h, m]) => (*h, *m, 0),
+        Some([h, m, s]) => (*h, *m, *s),
+        _ => return Err(bad()),
+    };
+    ensure!(h < 24 && m < 60 && sec < 60, "{text:?} is not a real time");
+    Ok(format!("{h:02}:{m:02}:{sec:02}"))
+}
+
 /// A sleep-timer duration as someone would type it; `None` means cancel.
 ///
 /// The player accepts `HH:MM:SS` and nothing else, so this is where `30m`
@@ -3229,9 +3282,107 @@ async fn run(cli: Cli) -> Result<()> {
     // Household-wide, and addressed by id rather than by room, so these run
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
-    if let Command::Alarms { json } = &cli.command {
-        let alarms = Upnp::new(session.connection.ip()).alarms().await?;
-        print_alarms(&alarms, &session.groups, *json);
+    if let Command::Alarms { action, json } = &cli.command {
+        let upnp = Upnp::new(session.connection.ip());
+        match action {
+            None => {
+                let alarms = upnp.alarms().await?;
+                print_alarms(&alarms, &session.groups, *json);
+            }
+            Some(AlarmsAction::Add {
+                time,
+                duration,
+                recurrence,
+                volume,
+                program,
+                play_mode,
+                grouped,
+                off,
+            }) => {
+                // The alarm belongs to a speaker, so the room resolves to a
+                // player rather than to the group it happens to play with.
+                let speaker = match room {
+                    Some(name) => session.groups.player_named(name)?,
+                    // An alarm belongs to exactly one speaker, so there is no
+                    // defensible default past a one-speaker household: guessing
+                    // would put it in a room nobody asked to be woken in.
+                    None => match session.groups.players.as_slice() {
+                        [only] => only,
+                        _ => bail!(
+                            "which room? an alarm belongs to one speaker - pass --room. \
+                             Rooms: {}",
+                            session.groups.room_names()
+                        ),
+                    },
+                };
+                let start = parse_time_of_day(time)?;
+                let plays = parse_sleep(duration)?
+                    .ok_or_else(|| anyhow!("an alarm that plays for no time is not an alarm"))?;
+                ensure!(*volume <= 100, "volume is 0-100, not {volume}");
+                // The program: a favorite or playlist resolved to the same
+                // (uri, metadata) pair `queue add` uses, or the built-in chime.
+                let (uri, metadata) = match program {
+                    None => ("x-rincon-buzzer:0".to_string(), String::new()),
+                    Some(query) => {
+                        let mut sources = upnp.browse_content("SQ:").await?;
+                        sources.extend(upnp.browse_content("FV:2").await?);
+                        sources.retain(|item| !item.shortcut);
+                        let item = find_content(&sources, query)?;
+                        let uri = item
+                            .uri
+                            .as_deref()
+                            .with_context(|| format!("{:?} has nothing to play", item.title))?;
+                        (uri.to_string(), item.metadata.clone())
+                    }
+                };
+                let secs = plays.as_secs();
+                let alarm = upnp::Alarm {
+                    id: 0,
+                    start,
+                    duration: format!(
+                        "{:02}:{:02}:{:02}",
+                        secs / 3600,
+                        (secs / 60) % 60,
+                        secs % 60
+                    ),
+                    recurrence: recurrence.to_uppercase(),
+                    enabled: !off,
+                    room_uuid: speaker.id.clone(),
+                    program_uri: uri,
+                    program_metadata: metadata,
+                    play_mode: play_mode.to_uppercase(),
+                    volume: *volume,
+                    include_linked_zones: *grouped,
+                };
+                let id = upnp.create_alarm(&alarm).await?;
+                // The time is local *to the household*, which is not
+                // necessarily local to whoever typed it. Said on stderr so it
+                // stays out of anything reading the result, and always - a
+                // clock that agrees is worth confirming too.
+                if let Ok((clock, zone)) = upnp.household_time().await {
+                    if zone < 0 {
+                        eprintln!(
+                            "note: this household has no timezone set, so {} is UTC. \
+                             Its clock reads {clock}.",
+                            alarm.start
+                        );
+                    } else {
+                        eprintln!(
+                            "note: alarm times are the household's; its clock reads {clock}."
+                        );
+                    }
+                }
+                println!(
+                    "alarm {id} created  {:<16} {}  {}  for {}  vol {}  {}",
+                    speaker.name,
+                    alarm.start,
+                    alarm.recurrence,
+                    alarm.duration,
+                    alarm.volume,
+                    if alarm.enabled { "on" } else { "off" },
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -3999,6 +4150,23 @@ async fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_of_day_is_padded_to_what_the_player_takes() {
+        // The player takes the string as given: `7:00` is refused where
+        // `07:00:00` is not, so padding is the whole job.
+        assert_eq!(parse_time_of_day("7:00").unwrap(), "07:00:00");
+        assert_eq!(parse_time_of_day("07:00").unwrap(), "07:00:00");
+        assert_eq!(parse_time_of_day("06:30:15").unwrap(), "06:30:15");
+        assert_eq!(parse_time_of_day(" 23:59 ").unwrap(), "23:59:00");
+
+        assert!(parse_time_of_day("25:00").is_err(), "no 25th hour");
+        assert!(parse_time_of_day("07:60").is_err(), "no 60th minute");
+        // An hour alone is ambiguous and a 12-hour clock is not parsed, so
+        // both are refused rather than guessed into a wrong time of day.
+        assert!(parse_time_of_day("7").is_err());
+        assert!(parse_time_of_day("7pm").is_err());
+    }
 
     #[test]
     fn a_sleep_duration_is_read_the_way_people_type_it() {

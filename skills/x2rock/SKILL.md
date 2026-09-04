@@ -122,11 +122,20 @@ the household's services", and never tell a user an account is missing on this b
 
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
---yes` deletes one. **x2rock cannot create an alarm** - that is the Sonos app's job - so removing
-one is irreversible in a stronger sense than usual, which is why `--yes` is required. Turning an
-alarm to the state it is already in is a no-op that says so. `recurrence` is `ONCE`, `WEEKDAYS`,
-`WEEKENDS`, `DAILY` or `ON_<digits>` for named days; `program` is a URI, and
-`x-rincon-buzzer:0` is the built-in chime.
+--yes` deletes one, and `alarms add <time>` creates one. Turning an alarm to the state it is
+already in is a no-op that says so. `recurrence` is `ONCE`, `WEEKDAYS`, `WEEKENDS`, `DAILY` or
+`ON_<digits>` for named days with Sunday 0; `program` is a URI, and `x-rincon-buzzer:0` is the
+built-in chime, which is what `alarms add` uses unless `--program` names a favorite or playlist.
+
+Three things about alarms that will otherwise surprise a user:
+
+- **The time is the household's, not the user's.** `StartLocalTime` is local to the Sonos system,
+  and a household with no timezone set runs on UTC - so `alarms add 07:00` can mean 07:00 UTC. The
+  command prints the household's own clock on stderr for exactly this reason; read it back to the
+  user rather than assuming their morning.
+- **An alarm sets the room's volume and leaves it there.** After one fires, the room stays at the
+  alarm's level, not the level it had before. Say so if a user wonders why a room went quiet.
+- **Removing a running alarm does not stop it**, and neither does disarming it. Use `pause`.
 
 **The sleep timer stops the room when it runs out**, and is per group like transport. `sleep`
 reads what is left, `sleep 30m` arms it, `sleep off` cancels. Bare digits are **minutes** (`sleep
@@ -175,6 +184,7 @@ see "Ask before you act".
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
+| Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off]` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

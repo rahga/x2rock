@@ -191,7 +191,7 @@ impl Groups {
             .find(|g| g.player_ids.iter().any(|id| id == player_id))
     }
 
-    fn room_names(&self) -> String {
+    pub fn room_names(&self) -> String {
         self.players
             .iter()
             .map(|p| p.name.as_str())

@@ -4709,12 +4709,33 @@ alarm, and each alarm names its room by `RoomUUID`. Nothing in the Control API t
   stream and no queue. Creating one **disabled** is safer still, and is how all of this was probed
   without any risk of a speaker going off in an office.
 
-**Creating alarms is deliberately not implemented.** `CreateAlarm` takes ten arguments including
-`ProgramURI` and `ProgramMetaData`, and the useful form of it - "wake me with this favorite" -
-needs the favorite resolved to a URI and a DIDL record. `bookmarks.rs` already builds both for its
-own replay, so that is the natural way in, but it is a piece of work rather than an afternoon. Until
-then x2rock manages the alarms the app made, and `alarm remove` says so: nothing here can make a new
-one, which is why it demands `--yes`.
+### Creating one, and what firing it revealed (verified 2026-09-04)
+
+`CreateAlarm` takes the same ten fields as `UpdateAlarm` with `ID` as an output, and the hard two
+are `ProgramURI` and `ProgramMetaData`. They needed no new work: `browse_content("FV:2")` and
+`("SQ:")` already yield a `uri` and a `metadata` per item, which is exactly the pair `queue add`
+enqueues - so "wake me with this favorite" is that resolution reused, and the default is
+`x-rincon-buzzer:0`, the built-in chime, which needs neither.
+
+An alarm was then created 82 seconds before its own start time and watched. It **fired** - the room
+played the chime at the alarm's volume - and four things came out of that which no document says:
+
+- **A just-created alarm fires late.** Set for 14:34:00 and created at 14:32:38, it went off at
+  14:36:14: two minutes and fourteen seconds after its time. Alarms are presumably scheduled off a
+  periodically refreshed index rather than checked continuously, so one created moments before it is
+  due misses its slot. Not a problem for a 7am alarm; fatal for a test that polls for two minutes
+  and concludes it never fired, which is exactly what happened first.
+- **It sets the room's volume and leaves it there.** The room was at 2; the alarm's volume was 1;
+  afterwards the room was at 1. The journal shows it go 0 then 1 as the alarm took over. So an alarm
+  is a lasting change to a room's volume, not a temporary one.
+- **Removing a running alarm does not stop it.** `DestroyAlarm` on the alarm that was playing left
+  the chime playing. Only `pause` stopped it.
+- **`StartLocalTime` is local to the *household*.** `GetTimeZone` answers `Index -1` here - unset -
+  and `GetTimeNow` reports a clock five hours ahead of the machine, i.e. UTC. So `alarms add 07:00`
+  in this household means 07:00 UTC, 02:00 where the user is. The first attempt at a live test was
+  scheduled against the *machine's* clock and would have fired at 04:34 local. `alarms add` now
+  prints the household's own clock on stderr, and says outright that times are UTC when no timezone
+  is set.
 
 ## How good the serial proxy actually is (measured 2026-09-04)
 

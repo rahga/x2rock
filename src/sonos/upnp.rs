@@ -253,6 +253,55 @@ impl Upnp {
         alarms_in(inner)
     }
 
+    /// The household's own clock, and whether it knows what timezone it is in.
+    ///
+    /// Returns the local time it reports and its timezone index, where **-1
+    /// means unset**. This matters because an alarm's `StartLocalTime` is local
+    /// *to the household*: with no timezone configured the clock runs UTC, so
+    /// "07:00" is 07:00 UTC and not 07:00 wherever the person typing it is.
+    pub async fn household_time(&self) -> Result<(String, i32)> {
+        let now = self.soap(Service::AlarmClock, "GetTimeNow", &[]).await?;
+        let doc = Document::parse(&now)?;
+        let local = text_of(&doc, "CurrentLocalTime").unwrap_or("").to_string();
+        let zone = self.soap(Service::AlarmClock, "GetTimeZone", &[]).await?;
+        let doc = Document::parse(&zone)?;
+        let index = text_of(&doc, "Index")
+            .and_then(|i| i.trim().parse().ok())
+            .unwrap_or(-1);
+        Ok((local, index))
+    }
+
+    /// Create an alarm, returning the id the household assigns it.
+    ///
+    /// Takes an [`Alarm`] with its `id` ignored, so the ten fields are named
+    /// once rather than twice - the create and update argument lists are
+    /// identical but for `ID` being an output here and an input there.
+    pub async fn create_alarm(&self, alarm: &Alarm) -> Result<u32> {
+        let bit = |on: bool| if on { "1" } else { "0" };
+        let text = self
+            .soap(
+                Service::AlarmClock,
+                "CreateAlarm",
+                &[
+                    ("StartLocalTime", &alarm.start),
+                    ("Duration", &alarm.duration),
+                    ("Recurrence", &alarm.recurrence),
+                    ("Enabled", bit(alarm.enabled)),
+                    ("RoomUUID", &alarm.room_uuid),
+                    ("ProgramURI", &alarm.program_uri),
+                    ("ProgramMetaData", &alarm.program_metadata),
+                    ("PlayMode", &alarm.play_mode),
+                    ("Volume", &alarm.volume.to_string()),
+                    ("IncludeLinkedZones", bit(alarm.include_linked_zones)),
+                ],
+            )
+            .await?;
+        let doc = Document::parse(&text)?;
+        text_of(&doc, "AssignedID")
+            .and_then(|id| id.trim().parse().ok())
+            .ok_or_else(|| anyhow!("CreateAlarm answered without an AssignedID: {text}"))
+    }
+
     /// Write an alarm back whole.
     ///
     /// Every field goes, because the action requires it - see [`Alarm`]. Read
