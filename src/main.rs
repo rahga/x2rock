@@ -112,6 +112,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check what firmware every speaker has, and whether one is offered.
+    ///
+    /// **Read-only.** x2rock will not apply an update: that reboots speakers,
+    /// and the Sonos app gates it behind a dialog warning against unplugging
+    /// anything, which a command-line flag would not replace. Use the app.
+    Update {
+        /// `{room, installed, offered, up_to_date, download_bytes}` per speaker.
+        #[arg(long)]
+        json: bool,
+    },
     /// List the household's alarms.
     ///
     /// Alarms are household-wide - one list, each entry naming its room - so
@@ -3279,6 +3289,57 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Every speaker has its own firmware, so this asks each rather than the
+    // group's coordinator - and needs no target at all.
+    if let Command::Update { json } = &cli.command {
+        let mut rows = Vec::new();
+        for player in &session.groups.players {
+            let found = match player.ip() {
+                Some(ip) => Upnp::new(ip).software_update().await,
+                None => Err(anyhow!("no address to reach it on")),
+            };
+            rows.push((player.name.clone(), found));
+        }
+        if *json {
+            let items: Vec<_> = rows
+                .iter()
+                .map(|(room, found)| match found {
+                    Ok(u) => json!({
+                        "room": room,
+                        "installed": u.installed,
+                        "offered": u.offered,
+                        "up_to_date": u.up_to_date(),
+                        "download_bytes": u.download_bytes,
+                        "swgen": u.swgen,
+                        "latest_swgen": u.latest_swgen,
+                    }),
+                    // A speaker that would not answer is reported as one, not
+                    // dropped - "no update" and "no answer" are different news.
+                    Err(e) => json!({ "room": room, "error": format!("{e:#}") }),
+                })
+                .collect();
+            println!("{}", serde_json::to_string(&items).expect("serializable"));
+        } else {
+            for (room, found) in &rows {
+                match found {
+                    Ok(u) if u.up_to_date() => {
+                        println!("{room:<24} {}  up to date", u.installed)
+                    }
+                    Ok(u) => println!(
+                        "{room:<24} {} → {}  update offered ({:.1} MB)",
+                        u.installed,
+                        u.offered.as_deref().unwrap_or("?"),
+                        u.download_bytes as f64 / 1_000_000.0,
+                    ),
+                    Err(e) => println!("{room:<24} unreachable ({e:#})"),
+                }
+            }
+            // Said once, not per room: applying it is the app's job.
+            println!("Applying an update is the Sonos app's job; x2rock only reads this.");
+        }
+        return Ok(());
+    }
+
     // Household-wide, and addressed by id rather than by room, so these run
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
@@ -4128,6 +4189,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Favorites { .. }
         | Command::Alarms { .. }
         | Command::Alarm { .. }
+        | Command::Update { .. }
         | Command::Group { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }

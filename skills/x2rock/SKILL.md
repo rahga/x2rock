@@ -120,6 +120,12 @@ queue is invisible, and a serial outlives the account in content that still name
 registry is not readable over the LAN. So treat it as evidence about content, never as "these are
 the household's services", and never tell a user an account is missing on this basis.
 
+**`update` reads firmware and never applies it.** It reports each speaker's installed version, the
+version being offered and whether anything is pending - `up_to_date` comes from `download_bytes`
+being 0 rather than from comparing version strings, because a current player is offered its own
+version back. **x2rock cannot install an update and must not claim to**: that reboots speakers, and
+the Sonos app gates it behind a dialog warning against unplugging anything. Point a user at the app.
+
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
 --yes` deletes one, and `alarms add <time>` creates one. Turning an alarm to the state it is
@@ -200,6 +206,7 @@ see "Ask before you act".
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
+| Firmware check (read-only) | `x2rock update --json` |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off]` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |

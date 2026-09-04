@@ -41,6 +41,8 @@ enum Service {
     /// Alarms. Household-wide: any player answers for all of them, and each
     /// alarm names the room it belongs to.
     AlarmClock,
+    /// Topology, and the software-update check that lives oddly beside it.
+    ZoneGroupTopology,
     /// Tone controls. Per speaker, and reachable nowhere else: the Control API
     /// has no EQ namespace at all, so this is the only door to bass, treble and
     /// loudness - the Sonos app's own "EQ Settings for <room>" panel.
@@ -54,6 +56,7 @@ impl Service {
             Self::ContentDirectory => "/MediaServer/ContentDirectory/Control",
             Self::MusicServices => "/MusicServices/Control",
             Self::AlarmClock => "/AlarmClock/Control",
+            Self::ZoneGroupTopology => "/ZoneGroupTopology/Control",
             Self::RenderingControl => "/MediaRenderer/RenderingControl/Control",
         }
     }
@@ -64,6 +67,7 @@ impl Service {
             Self::ContentDirectory => "urn:schemas-upnp-org:service:ContentDirectory:1",
             Self::MusicServices => "urn:schemas-upnp-org:service:MusicServices:1",
             Self::AlarmClock => "urn:schemas-upnp-org:service:AlarmClock:1",
+            Self::ZoneGroupTopology => "urn:schemas-upnp-org:service:ZoneGroupTopology:1",
             Self::RenderingControl => "urn:schemas-upnp-org:service:RenderingControl:1",
         }
     }
@@ -97,6 +101,35 @@ pub struct Tone {
     /// toggle: it reads on with nothing measured behind it, which is why both
     /// are reported rather than one.
     pub trueplay_available: bool,
+}
+
+/// What a player says about its own firmware.
+///
+/// Read-only by construction: this is `CheckForUpdate` and the device
+/// description, never `BeginSoftwareUpdate`. Applying an update reboots
+/// speakers, and the Sonos app gates it behind a dialog whose purpose is to
+/// make someone read a sentence about not unplugging anything - a CLI flag
+/// would not be the same warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftwareUpdate {
+    /// `softwareVersion` from the device description, e.g. `96.1-79270`.
+    pub installed: String,
+    /// The version the player is being offered, which equals `installed` when
+    /// there is nothing to do.
+    pub offered: Option<String>,
+    /// `0` when up to date. This, rather than comparing versions, is the check.
+    pub download_bytes: u64,
+    /// Software generation, and the newest one. A generation jump shows here
+    /// rather than in the version - an S1 household would read `1` against a
+    /// latest of `2`.
+    pub swgen: Option<String>,
+    pub latest_swgen: Option<String>,
+}
+
+impl SoftwareUpdate {
+    pub fn up_to_date(&self) -> bool {
+        self.download_bytes == 0
+    }
 }
 
 /// One alarm, exactly as `ListAlarms` reports it.
@@ -251,6 +284,50 @@ impl Upnp {
             return Ok(Vec::new());
         }
         alarms_in(inner)
+    }
+
+    /// Ask the player what firmware it has and what it is being offered.
+    ///
+    /// `CheckForUpdate` wants `UpdateType` = `Software` - `All` and `Firmware`
+    /// are UPnP 402 with `CachedOnly` set - and **ignores its `Version`
+    /// argument** entirely: three different values, including an empty one, all
+    /// answer with the same offered version. So nothing has to be known before
+    /// asking. `CachedOnly=1` keeps it local rather than reaching Sonos.
+    pub async fn software_update(&self) -> Result<SoftwareUpdate> {
+        let text = self
+            .soap(
+                Service::ZoneGroupTopology,
+                "CheckForUpdate",
+                &[
+                    ("UpdateType", "Software"),
+                    ("CachedOnly", "1"),
+                    ("Version", ""),
+                ],
+            )
+            .await?;
+        let outer = Document::parse(&text)?;
+        // The UpdateItem arrives as escaped XML inside the reply, like the
+        // alarm list does.
+        let inner = text_of(&outer, "UpdateItem").unwrap_or("");
+        let mut update = update_item_in(inner)?;
+        update.installed = self.firmware_version().await?;
+        Ok(update)
+    }
+
+    /// `softwareVersion` off the device description.
+    ///
+    /// The same string the HTTP `SERVER` header carries, read from the
+    /// description because `soap` hands back a body and not the headers.
+    pub async fn firmware_version(&self) -> Result<String> {
+        let url = format!("http://{}:{PORT}/xml/device_description.xml", self.ip);
+        let (status, body) = http::get(&url, Duration::from_secs(8)).await?;
+        if status != 200 {
+            bail!("the player answered {status} for its own description");
+        }
+        let doc = Document::parse(&body)?;
+        Ok(text_of(&doc, "softwareVersion")
+            .unwrap_or("unknown")
+            .to_string())
     }
 
     /// The household's own clock, and whether it knows what timezone it is in.
@@ -1079,6 +1156,38 @@ impl Upnp {
     }
 }
 
+/// An `<UpdateItem>` document, leaving `installed` for the caller to fill.
+///
+/// Empty is not an error: a player with nothing cached answers with an empty
+/// element, which reads as up to date rather than as a failure.
+fn update_item_in(xml: &str) -> Result<SoftwareUpdate> {
+    let mut update = SoftwareUpdate {
+        installed: String::new(),
+        offered: None,
+        download_bytes: 0,
+        swgen: None,
+        latest_swgen: None,
+    };
+    if xml.trim().is_empty() {
+        return Ok(update);
+    }
+    let doc = Document::parse(xml)?;
+    let Some(item) = doc
+        .descendants()
+        .find(|n| n.tag_name().name() == "UpdateItem")
+    else {
+        return Ok(update);
+    };
+    let attr = |name: &str| item.attribute(name).map(str::to_owned);
+    update.offered = attr("Version");
+    update.download_bytes = attr("DownloadSize")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    update.swgen = attr("Swgen");
+    update.latest_swgen = attr("LatestSwgen");
+    Ok(update)
+}
+
 /// The alarms in an `<Alarms>` document.
 ///
 /// Split from the call because the document arrives escaped inside the reply
@@ -1225,6 +1334,36 @@ mod tests {
     /// Replies captured off the Media Room speaker, 2026-09-04.
     const GET_BASS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetBassResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentBass>0</CurrentBass></u:GetBassResponse></s:Body></s:Envelope>"#;
     const GET_LOUDNESS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetLoudnessResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentLoudness>1</CurrentLoudness></u:GetLoudnessResponse></s:Body></s:Envelope>"#;
+
+    /// The `UpdateItem` a One SL on 96.1-79270 produced, 2026-09-04.
+    #[test]
+    fn an_up_to_date_player_is_told_by_its_download_size() {
+        let item = r#"<UpdateItem xmlns="urn:schemas-rinconnetworks-com:update-1-0" Type="Software" Version="96.1-79270" UpdateURL="http://update-firmware.sonos.com/firmware/Prod/96.1-79270-v18.7-4b07MiHfnw-RC-2/^96.1-79270" DownloadSize="0" ManifestURL="http://update.sonos.com/firmware/Prod/2026-Sonos-17-aiVIZ66IGK-GA-1/update.upm" Swgen="2" LatestSwgen="2" ManifestRevision="440de5db-d97a-4ee3-888e-4b98d5ab07a7"/>"#;
+        let u = update_item_in(item).unwrap();
+        assert_eq!(u.offered.as_deref(), Some("96.1-79270"));
+        assert_eq!(u.swgen.as_deref(), Some("2"));
+        assert_eq!(u.latest_swgen.as_deref(), Some("2"));
+        // `DownloadSize` is the check rather than a version comparison: a
+        // current player is offered *its own* version back, so comparing
+        // strings would answer correctly by accident and wrongly the moment
+        // Sonos offers the same version twice.
+        assert_eq!(u.download_bytes, 0);
+        assert!(u.up_to_date());
+
+        // A pending update is the same shape with a size on it.
+        let pending = item
+            .replace(r#"DownloadSize="0""#, r#"DownloadSize="52428800""#)
+            .replace(r#"Version="96.1-79270""#, r#"Version="97.0-80000""#);
+        let u = update_item_in(&pending).unwrap();
+        assert!(!u.up_to_date());
+        assert_eq!(u.download_bytes, 52_428_800);
+        assert_eq!(u.offered.as_deref(), Some("97.0-80000"));
+
+        // Nothing cached reads as up to date, not as an error.
+        let empty = update_item_in("").unwrap();
+        assert!(empty.up_to_date());
+        assert_eq!(empty.offered, None);
+    }
 
     /// The `<Alarms>` document as the player produced it, 2026-09-04.
     #[test]

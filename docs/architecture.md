@@ -4884,12 +4884,31 @@ one Sonos ships, and `--yes` would not close the gap: the app's dialog exists to
 sentence about power, not to collect a keystroke. A read-only `update` command would be worth having with Sonos 27 rolling out,
 and would be exactly `CheckForUpdate` and nothing else.
 
-Also from the same scan, and unexplained: the speaker listens on **1410** alongside 1400, 1443 and
-7000 (AirPlay). An HTTP server whose `SERVER` header carries an *empty* version where 1400 gives the
-full one, answering 404 to every path tried - `/`, the UPnP control paths, `/status`,
-`/xml/device_description.xml`. Whether it arrived with 96.1 cannot be said, because nothing scanned
-the speaker before today. Which is the argument for keeping a port baseline as well as an action
-baseline.
+### What the speaker actually listens on (scanned 2026-09-04)
+
+A TCP connect scan of the One SL, against Sonos's own firewall guidance. Their published list of
+ports that "shouldn't be blocked" is TCP 445, 1400, 1410, 1443, 1843, 3400, 3401, 3445, 3500, 4070,
+4444 and UDP 136-139, 1901, 2869, 5353, 6969, 10243, 10280-10284. **Open on this speaker: 1400,
+1410, 1443 and 7000. Nothing else in 1-1100, and none of 3400, 3401, 3500, 4070, 4444, 445 or
+1843.**
+
+So the published list is firewall guidance across the whole product line and history, not an
+inventory of one speaker: the S1-era control ports (3400/3401/3500), the SMB ports (445, 136-139)
+and 4070/4444 are simply not listening on an S22 on 96.1. Worth remembering before reading that
+list as a description of anything.
+
+Two that need saying:
+
+- **1410 is on Sonos's own list**, so it is long-standing rather than new in 96.1 - which is what
+  the scan could not settle on its own, having no earlier baseline to compare with. It is a second
+  HTTP server whose `SERVER` header carries an **empty** version where 1400 gives the full
+  `96.1-79270 (ZPS22)`, and it answers 404 to every path tried: `/`, the UPnP control paths,
+  `/status`, `/xml/device_description.xml`. What it serves is still unknown.
+- **7000 is open and is *not* on the list** - AirPlay 2, which postdates the guidance.
+
+The scan is worth keeping as a baseline for the same reason the `RenderingControl` action list is:
+if Fabric or Sonos 27 opens a port, the only way to notice is to have written down what was open
+before.
 
 ## Open questions
 
