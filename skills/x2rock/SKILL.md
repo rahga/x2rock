@@ -7,9 +7,9 @@ description: Control Sonos speakers from the command line with the `x2rock` CLI 
 
 `x2rock` controls Sonos speakers on the local network, with **no Sonos account**. Control never
 leaves the LAN; `search`, `browse` and `stations` do reach out to music services and a radio
-directory, none of which want a Sonos login. Every command is a
-one-shot subprocess. A **background daemon may also be running** (it publishes now-playing to the
-Linux desktop over MPRIS) — it is *not* needed for anything you do from the CLI. When speakers seem
+directory, none of which want a Sonos login. Every command is a one-shot subprocess. A **background
+daemon may also be running** (it publishes now-playing to the Linux desktop over MPRIS) — it is
+*not* needed for anything you do from the CLI. When speakers seem
 missing, `x2rock status` diagnoses it (see "When no speakers are available"). Two contracts hold
 everything together:
 
@@ -243,15 +243,16 @@ playlist is idempotent: it replaces rather than appends, so running it twice doe
 queue.
 
 **`stations` is not a Sonos service and reaches past all of them.** `x2rock search` and
-`x2rock browse` cover the 108 services the household's player knows about; `x2rock stations`
-searches a community directory of tens of thousands of internet radio stations that wants no
-account from anybody. See "Free radio" below - it is the answer to most "put something on" requests
-that the household's own services cannot serve.
+`x2rock browse` cover the music services the household's player knows about - about a hundred, and
+that list is Sonos's ceiling. `x2rock stations` searches a community directory of tens of thousands
+of internet radio stations that wants no account from anybody. See "Free radio" below - it is the
+answer to most "put something on" requests the household's own services cannot serve.
 
 **`browse` reaches more services than `search` does.** `x2rock search` lists only the services that
-publish a search category; `x2rock browse` lists every service reachable at all, which on this
-household is twelve more. A service that answers `no_search_categories` is browse-only — walk it
-with `x2rock browse -s "<service>"` rather than reporting it as unavailable.
+publish a search category; `x2rock browse` lists every service reachable at all, which is a dozen or
+so more - run both rather than assuming they match. A service that answers `no_search_categories` is
+browse-only, not broken: walk it with `x2rock browse -s "<service>"` rather than reporting it as
+unavailable.
 
 Two shapes worth noting because they are inconsistent: **`favorite` is name/id-addressed**
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).
@@ -269,7 +270,10 @@ and it works even when the household's own services have nothing.
 
 **Treat almost any description of music as a search you should just run.** A genre, a mood, a
 decade, a country, a city, a language, a format - all of it is a `stations` query or `--tag`. Do not
-answer "the household has no country station" when eleven thousand of them are one command away.
+answer "the household has no country station" without looking: the directory holds roughly 59,000
+stations under some 12,000 tags, and `country` alone is about 700 of them (measured 2026-09-04;
+`jazz` ~1200, `ambient` ~400, `classic country` ~70, `bluegrass` ~43). Tags are free-form, so a
+narrow guess that returns nothing is a reason to widen it, not to give up.
 
 ```sh
 x2rock stations --tag country --limit 5        # a genre
@@ -310,9 +314,13 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
 
 ### Offer more than one, and keep going if one fails
 
-- **Two or three options beat one.** `--json` gives `codec`, `bitrate`, `country`, `tags` and
-  `votes`; `votes` is the directory's popularity signal and a reasonable tiebreak. Naming why you
-  picked one ("highest-voted, 320k, from France") is more useful than a bare confirmation.
+- **Two or three options beat one - but make them different stations.** The directory lists every
+  bitrate and codec as its own row, so a search for `SomaFM` returns 119 rows covering about thirty
+  actual channels, and `FIP` returns 90 rows for 53 names. Offering "three choices" that are one
+  station at 128k, 64k and 32k is not a choice. De-duplicate on the name before presenting.
+  `--json` gives `codec`, `bitrate`, `country`, `tags` and `votes`; `votes` is the directory's
+  popularity signal and a reasonable tiebreak, and naming why you picked one ("highest-voted, 320k,
+  from France") beats a bare confirmation.
 - **A listed station can still fail to play, and the command now checks.** The player accepts a URL
   it cannot play and then sits at `IDLE` without erroring, so `play-url` and `stations --play` wait
   for the room to reach `PLAYING` before saying anything. Three outcomes, and they are worded apart:
@@ -322,9 +330,9 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
   - a `stream_did_not_play` error, exit non-zero, means the room is still idle. **Try the next
     result**; do not report success and do not conclude radio is broken. The room is fine.
 
-  A good station costs about four seconds of waiting and a dead one about ten. `--no-wait` skips
-  the check and returns in milliseconds, but then the confirmation means nothing - it reports
-  `"started": "starting"` and you own the verifying.
+  A good station costs about four seconds of waiting and a dead one about ten - worth saying if
+  someone is watching a prompt. `--no-wait` skips the check and returns in milliseconds, but then
+  the confirmation means nothing: it reports `"started": "starting"` and you own the verifying.
 - **A null `stream_info` is normal, not a failure.** Many stations send no ICY metadata: `.977
   Country` plays perfectly and never names a track, so `title` is the station and `stream_info` is
   `null`. Others take a few seconds to send the first one, so a null immediately after starting
@@ -465,8 +473,14 @@ inference from a vague request:
   still show `IDLE`/`BUFFERING`, so wait a second and re-check. `PLAYING` with `position_ms`
   advancing between two reads is real sound — subject to `audible`, which `now --json` does **not**
   carry: read it from the room's `status --json` entry or `vol --json`.
-- **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`link` reach the
-  internet — seconds, not instant. Everything local (transport, volume, status, queue) is fast.
+- **Two commands verify themselves, and the rest do not.** `play-url` and `stations --play` wait for
+  the room to reach `PLAYING` and report one of three outcomes (see "Offer more than one, and keep
+  going if one fails"), so their confirmation is worth believing and their failure is an error with
+  a code. `favorite`, `playlist`, `bookmark` and `search`/`browse --play` do not wait — confirm
+  those yourself.
+- **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`link` and `stations`
+  reach the internet — seconds, not instant, and a dead stream costs `play-url` ten. Everything
+  local (transport, volume, status, queue) is fast.
 
 ## Addressing a room
 
