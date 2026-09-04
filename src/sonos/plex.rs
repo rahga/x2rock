@@ -71,7 +71,7 @@ pub async fn pin() -> Result<(Pin, String)> {
     // the headers.
     let path = format!(
         "/api/v2/pins?strong=true&X-Plex-Product=x2rock&X-Plex-Client-Identifier={}",
-        urlencode(&client)
+        http::urlencode(&client)
     );
     let (endpoint, _, tls) = http::parse_url("https://plex.tv/")?;
     let (status, body) = http::post(&endpoint, tls, &path, &[], "", TIMEOUT).await?;
@@ -81,8 +81,8 @@ pub async fn pin() -> Result<(Pin, String)> {
     let (id, code, _) = parse_pin(&body)?;
     let url = format!(
         "https://app.plex.tv/auth#?clientID={}&code={}&context%5Bdevice%5D%5Bproduct%5D=x2rock",
-        urlencode(&client),
-        urlencode(&code)
+        http::urlencode(&client),
+        http::urlencode(&code)
     );
     Ok((Pin { id, code, client }, url))
 }
@@ -94,8 +94,8 @@ pub async fn poll(pin: &Pin) -> Result<Option<String>> {
     let url = format!(
         "https://plex.tv/api/v2/pins/{}?code={}&X-Plex-Client-Identifier={}",
         pin.id,
-        urlencode(&pin.code),
-        urlencode(&pin.client)
+        http::urlencode(&pin.code),
+        http::urlencode(&pin.client)
     );
     let (status, body) = http::get(&url, TIMEOUT).await?;
     // An expired or foreign pin is a 404; anything else unexpected is worth
@@ -166,23 +166,6 @@ pub fn token_in(url: &str) -> Option<String> {
     }
 }
 
-/// Enough percent-encoding for the two things that ride in these URLs: a
-/// hostname-derived identifier and a plex-minted code. Everything unreserved
-/// passes through; everything else is encoded, lowercase hex as elsewhere in
-/// this codebase.
-fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02x}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,7 +213,7 @@ mod tests {
 
     #[test]
     fn the_identifier_survives_url_encoding() {
-        assert_eq!(urlencode("x2rock-my.host"), "x2rock-my.host");
-        assert_eq!(urlencode("a b:c"), "a%20b%3ac");
+        assert_eq!(http::urlencode("x2rock-my.host"), "x2rock-my.host");
+        assert_eq!(http::urlencode("a b:c"), "a%20b%3ac");
     }
 }

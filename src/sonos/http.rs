@@ -146,10 +146,43 @@ pub async fn post(
 /// One HTTP/1.1 GET. Service manifests and presentation maps are plain
 /// documents on a CDN, fetched with no credential of any kind.
 pub async fn get(url: &str, timeout: Duration) -> Result<(u16, String)> {
+    get_with(url, timeout, &[]).await
+}
+
+/// A GET that carries headers. Only the radio directory needs this so far, to
+/// send the `User-Agent` its operators ask third-party clients for; Sonos's own
+/// CDN wants nothing.
+pub async fn get_with(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+) -> Result<(u16, String)> {
     let (endpoint, path, tls) = parse_url(url)?;
-    tokio::time::timeout(timeout, exchange(&endpoint, tls, "GET", &path, &[], None))
-        .await
-        .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
+    tokio::time::timeout(
+        timeout,
+        exchange(&endpoint, tls, "GET", &path, headers, None),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
+}
+
+/// Percent-encode one value for a URL: everything unreserved passes through,
+/// everything else becomes `%xx` in lowercase hex.
+///
+/// Shared rather than copied - it was written for Plex's client identifier and
+/// pin code, and a search term going to the radio directory needs exactly the
+/// same treatment. A second copy would be a second chance to get it wrong.
+pub fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02x}")),
+        }
+    }
+    out
 }
 
 async fn exchange(

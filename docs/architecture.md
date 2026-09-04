@@ -5491,6 +5491,132 @@ without an account, a registration or a sid - which also means a station catalog
 concern rather than something to be negotiated with Sonos. That is the first content axis this
 project has that is not bounded by the household's service list.
 
+## A station catalogue that is not Sonos's: `x2rock stations` (built 2026-09-04)
+
+`play-url` made any HTTP stream playable and left the obvious gap: knowing a URL. So the catalogue
+that fills it has to come from outside Sonos, because Sonos's own is the 108 services this document
+has spent a fortnight mapping, and that list is the ceiling `play-url` exists to get past.
+
+[Radio Browser](https://www.radio-browser.info) is the directory: community-maintained, **no API
+key, no account, no registration**, and its rows already carry the one field that matters.
+
+### Why this does not spend the axiom
+
+Worth stating plainly, because "x2rock now calls a cloud service" is the wrong reading. The axiom is
+**no Sonos account and no Sonos cloud** - not "never touch the internet". x2rock already makes
+outbound calls to music services for every single search; SMAPI is somebody's server in another
+country. The rule that does apply is the existing one: **talking to a service never enters the
+daemon.** `stations` runs from the CLI, on demand, and the daemon never calls it.
+
+Nothing is cached to disk either, unlike the service catalogue. A directory answer is a query
+result, not a fact about the household - there is no `AvailableServiceListVersion` to invalidate it
+against, and a stale copy of somebody else's database is worse than a round trip.
+
+### What a row carries, and the one field that matters
+
+```
+name              SomaFM Groove Salad (128k MP3)
+url               https://somafm.com/groovesalad.pls          <- registered
+url_resolved      https://ice5.somafm.com/groovesalad-128-mp3  <- playable
+codec / bitrate   MP3 / 128
+countrycode       US
+tags              ambient,chillout,downtempo,groove,lounge,sleep
+votes             47541
+hls               0
+```
+
+**`url_resolved`, never `url`.** A station's registered `url` is often a `.pls` or `.m3u`
+*playlist*, as SomaFM's is, which a Sonos player will not take. `url_resolved` is the directory's
+dereferenced stream URL. Getting this wrong would produce the silent `IDLE` failure below for a
+third of the catalogue, and it would look like the feature not working rather than the wrong field
+being read.
+
+The `--json` output renames it to `url` on the way out, because by then it is *the* URL - the one to
+hand to `play-url` - and carrying a field called `url_resolved` past the module that resolved it
+would only invite the same mistake later.
+
+### https plays, and so does HLS - tested rather than assumed
+
+Two things had to be checked before the directory could be trusted, because most of its rows are
+one or both.
+
+**https:** `x2rock play-url https://ice5.somafm.com/groovesalad-128-mp3` plays, with ICY metadata
+arriving as it does over plain http (`Lemongrass - What You Believe`). This is not in tension with
+the earlier finding that a bare `https://` URI is refused 714 by `SetAVTransportURI` - that was the
+*transport* rejecting an unwrapped scheme. `loadStreamUrl` takes a URL as a URL.
+
+**HLS:** the directory flags it, 14 of the top 400 stations carry it, and the answer is that it
+depends on the station rather than the format:
+
+| station | result |
+|---|---|
+| BBC Somali Radio (`hls: 1`, AAC+, GB) | **IDLE** - never played |
+| الجزيرة صوت (`hls: 1`, Qatar) | **PLAYING** |
+
+One HLS station failing would have been enough to conclude "Sonos does not do HLS radio" and filter
+the whole flag out of the listing. A second one, picked only because it was also `hls: 1`, plays
+fine. **So the flag is reported and not acted on** - `[hls]` appears in the listing and `hls` in the
+JSON, as the directory's own claim, and nothing pretends to know whether a given row will play. The
+BBC failure is more likely geo-blocking or that stream's own arrangement than the container format.
+
+### The listing, and what `--play` reuses
+
+```
+$ x2rock stations --tag jazz --limit 5
+  1  MP3 320k  US  Classic Vinyl HD
+  2  MP3 320k  US  Adroit Jazz Underground
+  3  MP3 192k  US  101 SMOOTH JAZZ
+  4  OGG 192k  US  Adroit Jazz Underground HD Opus
+  5  MP3 128k  FR  Jazz Radio Blues
+
+$ x2rock stations soma --limit 1 --play 1
+Media Room — SomaFM Groove Salad (128k MP3)
+
+$ x2rock now
+PLAYING  SomaFM Groove Salad (128k MP3) · Lemongrass - What You Believe
+```
+
+`--play` goes through the same `stream_url` that `play-url` and a service's live stream use, so a
+directory station plays alongside the queue and leaves it alone, and its ICY text arrives through
+`stream_info` exactly as any other stream's does. Nothing new was needed on the playback side at
+all, which is the sign that `play-url` was cut at the right joint.
+
+**No player is needed to search**, only to `--play` - the same bargain `search` strikes, and for a
+better reason here: the directory has nothing whatsoever to do with the household, so a listing
+works with every speaker off. The connection is made lazily, after the directory has answered.
+
+### Decisions worth keeping
+
+- **Sorted by `votes`, descending, with `hidebroken=true`.** The directory last-checked every row
+  and knows which answered; asking for stations known not to play would be a strange default. Votes
+  are the only popularity signal it has, and unsorted community data is unusable.
+- **No arguments lists the most-voted stations** rather than erroring, which is the directory's
+  nearest thing to a front page and mirrors `x2rock search` with no arguments listing services.
+- **`_api._tcp.radio-browser.info` SRV round-robin is deliberately not implemented.** Radio
+  Browser's guidance is to resolve the SRV record and pick a mirror at random; that needs a DNS
+  resolver this tree does not have, and `all.api.radio-browser.info` already round-robins. Recorded
+  so the shortcut is a decision rather than an oversight.
+- **A `User-Agent` is sent** (`x2rock/<version>`), because the operators ask third-party clients to
+  identify themselves. It is not enforced - requests succeed without one, tested - which is exactly
+  why it is worth sending.
+- **`urlencode` moved from `sonos/plex.rs` to `sonos/http.rs`** and is shared. It was written for
+  Plex's client identifier and a search term needs identical treatment; a second copy would have
+  been a second chance to get it wrong. `http::get_with` is new for the same reason - one GET that
+  can carry headers, rather than a second client.
+- **Every field of `Station` is `#[serde(default)]`.** This is somebody else's community-edited
+  schema: half the fields are routinely absent, and a missing `country` is not a reason to fail a
+  search. Pinned by a test that parses a row carrying nothing but a name and a URL, and another
+  carrying an unknown field.
+
+### The failure that cannot be fixed here, and now bites more often
+
+`loadStreamUrl` accepts a URL it cannot play and goes to `IDLE` without erroring - already recorded
+for `play_url`, and a directory makes it routine rather than rare, because now the URLs come from
+strangers. `x2rock stations --play` reports what it asked for, not what happened; the BBC Somali row
+above printed `Media Room — BBC Somali Radio` and produced silence. The skill therefore tells an
+agent to confirm with `x2rock now` and try the next result rather than trusting the play command's
+output, which is the honest instruction and the only one available.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

@@ -10,6 +10,7 @@ mod restart;
 mod session;
 mod sonos;
 mod state;
+mod stations;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -270,6 +271,35 @@ enum Command {
         /// tried first and a refusal falls back to streaming.
         #[arg(long)]
         kind: Option<String>,
+    },
+    /// Search the internet radio directory: stations from outside Sonos's
+    /// catalogue entirely.
+    ///
+    /// `search` reaches the 108 services the player knows about; this reaches
+    /// past them, into a community directory of ordinary HTTP streams. No
+    /// account, no key, no registration. `--play N` plays the Nth result the
+    /// same way `play-url` does, alongside the queue rather than in it.
+    ///
+    /// With no arguments it lists the most-voted stations, which is the
+    /// directory's nearest thing to a front page.
+    Stations {
+        /// Match on the station's name. Free text, and the directory matches
+        /// on a substring.
+        query: Option<String>,
+        /// Match on a tag instead - `jazz`, `news`, `ambient`. Community
+        /// assigned and free-form, so it is a guess that often pays off.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Two-letter country code, e.g. `GB`, `DE`, `US`.
+        #[arg(long)]
+        country: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Play the Nth result, 1-based, in --room.
+        #[arg(long)]
+        play: Option<usize>,
+        #[arg(long)]
+        json: bool,
     },
     /// Play an internet radio stream by its own URL, with no music service in
     /// the loop at all.
@@ -1627,6 +1657,92 @@ async fn stream_url(
         )
         .await?;
     Ok(target.name.clone())
+}
+
+/// `x2rock stations`: search the radio directory, and optionally play a hit.
+///
+/// **No player is needed to search**, only to `--play`, which is the same
+/// bargain `search` strikes: the directory is on the internet and has nothing
+/// to do with the household, so a listing works with every speaker off. The
+/// connection is therefore made lazily, after the directory has answered.
+#[allow(clippy::too_many_arguments)]
+async fn run_stations(
+    ip: Option<IpAddr>,
+    room: Option<&str>,
+    query: Option<&str>,
+    tag: Option<&str>,
+    country: Option<&str>,
+    limit: u32,
+    play: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let found = stations::search(query, tag, country, limit).await?;
+    if found.is_empty() {
+        let what = query.or(tag).unwrap_or("that");
+        bail!("nothing in the radio directory for {what:?}");
+    }
+
+    if let Some(n) = play {
+        let station = found
+            .get(n.checked_sub(1).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                anyhow!(
+                    "there is no result {n}: the directory returned {}",
+                    found.len()
+                )
+            })?;
+        let mut state = State::load()?;
+        let session = session::connect(ip, &mut state).await?;
+        let room_name =
+            stream_url(&session, room, &station.url_resolved, &station.name, None).await?;
+        println!("{room_name} — {}", station.name);
+        return Ok(());
+    }
+
+    if json {
+        let rows: Vec<_> = found
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    // The key is `url` because it is the one to play - the
+                    // directory's own `url` field is a playlist as often as not
+                    // and is not carried out of `stations::Station`.
+                    "url": s.url_resolved,
+                    "codec": (!s.codec.is_empty()).then_some(&s.codec),
+                    "bitrate": (s.bitrate > 0).then_some(s.bitrate),
+                    "country": (!s.countrycode.is_empty()).then_some(&s.countrycode),
+                    "tags": s.tags.split(',').filter(|t| !t.is_empty()).collect::<Vec<_>>(),
+                    "votes": s.votes,
+                    "hls": s.hls == 1,
+                    "homepage": (!s.homepage.is_empty()).then_some(&s.homepage),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    let width = found.iter().map(|s| s.format().len()).max().unwrap_or(0);
+    for (i, s) in found.iter().enumerate() {
+        // HLS is marked rather than hidden. Sonos plays some of it and this
+        // has not been surveyed, so the flag is passed on as the directory
+        // reports it instead of being turned into a promise either way.
+        let hls = if s.hls == 1 { "  [hls]" } else { "" };
+        let where_ = if s.countrycode.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", s.countrycode)
+        };
+        println!(
+            "{:>3}  {:<width$}{where_}  {}{hls}",
+            i + 1,
+            s.format(),
+            s.name
+        );
+    }
+    println!("\nPlay one with: x2rock stations --play <n>");
+    Ok(())
 }
 
 /// Check a URL is one a speaker could fetch, and decide what the room shows.
@@ -3155,6 +3271,7 @@ fn wants_json(command: &Command) -> bool {
             | Command::Queue { json, .. }
             | Command::Favorites { json, .. }
             | Command::PlayUrl { json, .. }
+            | Command::Stations { json, .. }
             | Command::Search { json, .. }
             | Command::Browse { json, .. }
             | Command::Accounts { json, .. }
@@ -3194,6 +3311,26 @@ async fn run(cli: Cli) -> Result<()> {
             ref kind,
         } => {
             return run_play_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref()).await;
+        }
+        Command::Stations {
+            ref query,
+            ref tag,
+            ref country,
+            limit,
+            play,
+            json,
+        } => {
+            return run_stations(
+                cli.ip,
+                room,
+                query.as_deref(),
+                tag.as_deref(),
+                country.as_deref(),
+                limit,
+                play,
+                json,
+            )
+            .await;
         }
         Command::PlayUrl {
             ref url,
@@ -4365,6 +4502,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Search { .. }
         | Command::PlayItem { .. }
         | Command::PlayUrl { .. }
+        | Command::Stations { .. }
         | Command::QueueItem { .. }
         | Command::Browse { .. }
         | Command::Link { .. }

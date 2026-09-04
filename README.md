@@ -388,6 +388,17 @@ you at it. `--play` plays the hit: a live stream opens a playback session and le
 the queue alone, while anything on-demand is added to the queue, because that is the only way the
 player will resolve a service's own media. See "Browsing a service" for why both exist.
 
+`x2rock stations` searches a community directory of internet radio — [Radio
+Browser](https://www.radio-browser.info), no key and no account — by name, `--tag` or `--country`,
+and `--play N` plays a hit:
+
+```
+$ x2rock stations --tag jazz --limit 3
+  1  MP3 320k  US  Classic Vinyl HD
+  2  MP3 320k  US  Adroit Jazz Underground
+  3  MP3 192k  US  101 SMOOTH JAZZ
+```
+
 And a stream needs no service at all. `x2rock play-url <http url>` hands the speaker an ordinary
 internet radio URL — an Icecast or SHOUTcast station, anything that serves audio over HTTP — which
 it fetches itself, with no account, no registration and no sid. It opens a playback session like a

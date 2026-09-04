@@ -226,6 +226,7 @@ see "Ask before you act".
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
 | Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
+| Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search -s <svc> <term> --play N -r "<Room>"` |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
@@ -238,6 +239,17 @@ see "Ask before you act".
 `playlist "<name>"` *replaces* the queue with it and plays - the analogue of `favorite`. Playing a
 playlist is idempotent: it replaces rather than appends, so running it twice does not double the
 queue.
+
+**`stations` is not a Sonos service and reaches past all of them.** `x2rock search` and
+`x2rock browse` cover the 108 services the household's player knows about; `x2rock stations`
+searches a community directory of internet radio (Radio Browser) that needs no account, key or
+registration, and `--play N` plays a hit alongside the queue. Reach for it when someone asks for a
+station by name or genre and `search` has nothing - "put on some jazz radio", "find me a station
+from Berlin". Rows are `{name, url, codec, bitrate, country, tags, votes, hls, homepage}`; `url` is
+already the playable stream, so it can be handed to `play-url` directly. Two cautions: it needs the
+internet (not just the LAN), and **a station that the directory lists can still fail to play** -
+the player accepts the URL and then goes to `IDLE` rather than erroring, so confirm with
+`x2rock now` and try the next result rather than reporting success from the play command's output.
 
 **`browse` reaches more services than `search` does.** `x2rock search` lists only the services that
 publish a search category; `x2rock browse` lists every service reachable at all, which on this
