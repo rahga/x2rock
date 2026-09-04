@@ -4515,6 +4515,35 @@ is the control that actually changes what volume 1 sounds like.
   told apart on a speaker that has one. **The experiment that would settle it needs the home
   household**, where some of the five rooms are calibrated and some are not: an uncalibrated
   speaker reporting `Available=0` would settle it as "stored", and `1` as "supported".
+
+  **There is no way to list or discard a calibration, and x2rock deliberately does not want one.**
+  `SetRoomCalibrationStatus` takes the boolean and nothing else; no clear, no delete. The service
+  declares `RoomCalibrationID`, `RoomCalibrationCoefficients` and `RoomCalibrationCalibrationMode`
+  but gives none of them a `Get` action - they reach a client only through the evented `LastChange`,
+  so "which curve is this, and what is in it" cannot be *asked*. `ResetBasicEQ` returns bass,
+  treble, loudness and the channel volumes, naming no calibration; `ResetExtEQ` wants an `EQType`,
+  and `SonarEnabled`, `SonarCalibrationAvailable`, `RoomCalibration` and `TrueplayEnabled` are all
+  UPnP 402 here. So the app uploads and replaces curves over a channel that is not in this SCPD.
+  That `RoomCalibrationID` is singular rather than a list fits the owner's reading: the app
+  overwrites one slot rather than keeping a library. **The scope decision (2026-09-04): x2rock wants
+  only the disable, so BasicEQ takes over. Management stays out until there is a control for it.**
+
+  Sonos Fabric is the thing that could change that - its Positioning Technology senses placement
+  with high-frequency sound, which is TruePlay's own measurement machinery, so per-role profiles
+  would plausibly arrive as new actions here. **Baseline for that diff, read 2026-09-04 from a One
+  SL on firmware 95.0-77060** - the 27 actions `RenderingControl:1` publishes today:
+
+  ```
+  GetBass, GetEQ, GetHeadphoneConnected, GetLoudness, GetMute, GetOutputFixed,
+  GetRoomCalibrationStatus, GetSupportsOutputFixed, GetTreble, GetVolume, GetVolumeDB,
+  GetVolumeDBRange, RampToVolume, ResetBasicEQ, ResetExtEQ, RestoreVolumePriorToRamp, SetBass,
+  SetChannelMap, SetEQ, SetLoudness, SetMute, SetOutputFixed, SetRelativeVolume,
+  SetRoomCalibrationStatus, SetTreble, SetVolume, SetVolumeDB
+  ```
+
+  Re-enumerate after the update and compare. Incidentally, the extended set is gated by hardware:
+  `GetEQ` answers `SubGain` = 0 on this speaker and 402s `NightMode`, `DialogLevel` and
+  `SurroundEnable`, so that surface only opens on the soundbar in the other household.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
