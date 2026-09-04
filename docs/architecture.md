@@ -4652,6 +4652,31 @@ Parsing is therefore the discriminator, and a good one: an opaque hash never rea
 *total* is deliberately absent - it would cost a UPnP browse per room on every snapshot, and
 `queue --json` already carries both halves for anyone who wants them.
 
+## The sleep timer, and how it says "none" (verified 2026-09-04)
+
+`AVTransport:1` on port 1400, group-scoped like the queue, and absent from the Control API
+entirely - `ConfigureSleepTimer(InstanceID, NewSleepTimerDuration)` and
+`GetRemainingSleepTimerDuration(InstanceID) -> RemainingSleepTimerDuration,
+CurrentSleepTimerGeneration`.
+
+- **`HH:MM:SS` and nothing else.** `NewSleepTimerDuration` is typed `A_ARG_TYPE_ISO8601Time`, and a
+  bare count of seconds (`900`) is refused with UPnP 402 - so the friendly forms have to be
+  converted before they reach the wire, which is what `parse_sleep` is for.
+- **Cancelling is an empty string to the same action.** There is no separate cancel, which is why
+  the setter takes an `Option` rather than having a sibling.
+- **An unset timer answers with an empty element**, not a zero, and
+  `CurrentSleepTimerGeneration` reads 0. Setting one takes the generation to 1, and cancelling puts
+  it back to 0. Either can be read as "is a timer armed", but the empty duration is the one that
+  cannot be confused with a timer about to fire.
+- **It counts from acceptance, not from the read.** Two seconds after arming 30m the player
+  reported 1798000 ms. So the honest answer is always the player's own, which is why the CLI reads
+  back after writing instead of echoing what was asked for - the same rule the tone controls follow
+  for a different reason (there the setters answer with an empty body).
+
+Worth noting for the alarms work, since they share this service: `RunAlarm`, `SnoozeAlarm` and
+`GetRunningAlarmProperties` live on `AVTransport` too, but the alarms themselves are the separate
+`AlarmClock:1` service - these three are only about one that is currently going off.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

@@ -112,6 +112,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or set the sleep timer: the room stops playing when it runs out.
+    ///
+    /// With no argument it reads what is left. Per group, like transport.
+    Sleep {
+        /// How long: `45` or `45m` for minutes, `2h`, `1h30m`, `90s`, or the
+        /// wire's own `HH:MM:SS`. `off` cancels a running timer.
+        duration: Option<String>,
+        /// The resulting `{room, sleep_ms}` as JSON, null when none is set.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or set crossfade: on or off.
     ///
     /// The third play mode beside repeat and shuffle - it overlaps the end of
@@ -2582,6 +2593,106 @@ async fn apply_eq(
     Ok(())
 }
 
+/// A sleep-timer duration as someone would type it; `None` means cancel.
+///
+/// The player accepts `HH:MM:SS` and nothing else, so this is where `30m`
+/// becomes something it will take. Bare digits are **minutes**, because that is
+/// what "sleep 30" means to everyone who types it.
+fn parse_sleep(text: &str) -> Result<Option<std::time::Duration>> {
+    let raw = text.trim().to_lowercase();
+    if matches!(raw.as_str(), "off" | "cancel" | "none" | "0") {
+        return Ok(None);
+    }
+    let bad = || anyhow!("{text:?} is not a duration - try 30m, 1h30m, 90s or 00:30:00");
+    let secs = if raw.contains(':') {
+        // The wire's own form, taken as-is so a value read back can be handed
+        // straight back without conversion.
+        let parts: Option<Vec<u64>> = raw.split(':').map(|p| p.parse().ok()).collect();
+        match parts.as_deref() {
+            Some([h, m, s]) => h * 3600 + m * 60 + s,
+            Some([m, s]) => m * 60 + s,
+            _ => return Err(bad()),
+        }
+    } else if raw.chars().all(|c| c.is_ascii_digit()) {
+        raw.parse::<u64>().map_err(|_| bad())? * 60
+    } else {
+        let mut total = 0u64;
+        let mut digits = String::new();
+        for c in raw.chars() {
+            if c.is_ascii_digit() {
+                digits.push(c);
+                continue;
+            }
+            let n: u64 = digits.parse().map_err(|_| bad())?;
+            total += n * match c {
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ => return Err(bad()),
+            };
+            digits.clear();
+        }
+        // A trailing number with no unit sits ambiguously next to the units
+        // before it, so it is refused rather than guessed at.
+        if !digits.is_empty() {
+            return Err(bad());
+        }
+        total
+    };
+    ensure!(secs > 0, "a timer of no time is `x2rock sleep off`");
+    // HH:MM:SS carries two digits of hours, and the player has no use for more.
+    ensure!(
+        secs < 24 * 3600,
+        "{text:?} is longer than a day, which the wire cannot carry"
+    );
+    Ok(Some(std::time::Duration::from_secs(secs)))
+}
+
+/// `H:MM:SS` past an hour, `M:SS` under it.
+fn hms_short(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+}
+
+/// The group's sleep timer, read or set.
+async fn apply_sleep(
+    target: &session::Target,
+    player_ip: IpAddr,
+    duration: Option<String>,
+    json: bool,
+) -> Result<()> {
+    // AVTransport answers for the group on its coordinator, the way the queue
+    // and the TV input do.
+    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player_ip));
+    let wanted = duration.as_deref().map(parse_sleep).transpose()?;
+    if let Some(after) = wanted {
+        upnp.set_sleep_timer(after).await?;
+    }
+    // Read back rather than echo what was asked: the player starts counting
+    // from the moment it accepted, so its own number is already the honest one.
+    let left = upnp.sleep_timer().await?;
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "room": target.name,
+                "sleep_ms": left.map(|d| d.as_millis()),
+            })
+        );
+    } else {
+        match left {
+            Some(d) => println!("{:<24} sleep {}", target.name, hms_short(d)),
+            None => println!("{:<24} no sleep timer", target.name),
+        }
+    }
+    Ok(())
+}
+
 /// Crossfade, which is a play mode like shuffle and set the same way.
 async fn apply_crossfade(
     session: &session::Session,
@@ -3724,6 +3835,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
+        Command::Sleep { duration, json } => {
+            apply_sleep(&target, player.ip(), duration, json).await?
+        }
         Command::Pause => player.playback(group, "pause").await?,
         Command::Toggle => player.playback(group, "togglePlayPause").await?,
         Command::Next => player.playback(group, "skipToNextTrack").await?,
@@ -3758,6 +3872,52 @@ async fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sleep_duration_is_read_the_way_people_type_it() {
+        let secs = |text: &str| parse_sleep(text).unwrap().map(|d| d.as_secs());
+        // Bare digits are minutes: "sleep 30" means half an hour to everyone
+        // who types it, and seconds to nobody.
+        assert_eq!(secs("30"), Some(1800));
+        assert_eq!(secs("45m"), Some(2700));
+        assert_eq!(secs("2h"), Some(7200));
+        assert_eq!(secs("1h30m"), Some(5400));
+        assert_eq!(secs("90s"), Some(90));
+        // The wire's own form goes through untouched, so a value read back can
+        // be handed straight back.
+        assert_eq!(secs("00:30:00"), Some(1800));
+        assert_eq!(secs("1:00:00"), Some(3600));
+        assert_eq!(secs("5:00"), Some(300));
+        // Cancelling has several spellings because all of them get typed.
+        for off in ["off", "cancel", "none", "0", " OFF "] {
+            assert_eq!(secs(off), None, "{off:?} should cancel");
+        }
+    }
+
+    #[test]
+    fn a_sleep_duration_refuses_what_it_cannot_mean() {
+        // A trailing number after units is ambiguous - is "1h30" thirty
+        // minutes or thirty seconds? - so it is refused rather than guessed.
+        assert!(parse_sleep("1h30").is_err());
+        assert!(parse_sleep("later").is_err());
+        assert!(parse_sleep("30x").is_err());
+        assert!(parse_sleep("").is_err());
+        // The cap is what HH:MM:SS can carry, so 23:59:59 is the last valid
+        // value and a whole day is already too long.
+        assert!(parse_sleep("1439").is_ok(), "23h59m fits");
+        assert!(parse_sleep("1440").is_err(), "24h exactly does not");
+        assert!(parse_sleep("25h").is_err());
+    }
+
+    #[test]
+    fn a_sleep_remaining_reads_as_a_clock() {
+        use std::time::Duration;
+        assert_eq!(hms_short(Duration::from_secs(1800)), "30:00");
+        assert_eq!(hms_short(Duration::from_secs(59)), "0:59");
+        // Past an hour it grows a field rather than counting to 90 minutes.
+        assert_eq!(hms_short(Duration::from_secs(5400)), "1:30:00");
+        assert_eq!(hms_short(Duration::from_secs(3600)), "1:00:00");
+    }
 
     #[test]
     fn ranges_cover_one_track_or_many() {

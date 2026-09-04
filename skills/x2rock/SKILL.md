@@ -112,6 +112,13 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
+**The sleep timer stops the room when it runs out**, and is per group like transport. `sleep`
+reads what is left, `sleep 30m` arms it, `sleep off` cancels. Bare digits are **minutes** (`sleep
+45`), and `2h`, `1h30m`, `90s` and `HH:MM:SS` all work; a trailing number after a unit (`1h30`) is
+refused as ambiguous rather than guessed at. `sleep --json` gives `{room, sleep_ms}`, null when
+none is set, and the number is what the player reports rather than what was asked for - it starts
+counting on acceptance, so a timer just set reads a second or two under.
+
 **`eq` is per speaker, like `vol --player` and unlike everything else.** Bass and treble run
 -10..10 (0 flat) and loudness is on/off; `-r` names the *speaker*, so a grouped room gets its own
 tone rather than its group's, and `--all` does not apply to it. **Loudness is on from the factory**,
@@ -147,6 +154,7 @@ see "Ask before you act".
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
+| Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

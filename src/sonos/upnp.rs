@@ -190,6 +190,53 @@ impl Upnp {
         Self { ip }
     }
 
+    /// What is left on the group's sleep timer, or `None` when none is set.
+    ///
+    /// An unset timer answers with an **empty** duration rather than a zero,
+    /// and the generation counter reads 0 - either is the signal, and the empty
+    /// element is the one that cannot be confused with a timer about to fire.
+    pub async fn sleep_timer(&self) -> Result<Option<Duration>> {
+        let text = self
+            .soap(
+                Service::AvTransport,
+                "GetRemainingSleepTimerDuration",
+                &[("InstanceID", "0")],
+            )
+            .await?;
+        let doc = Document::parse(&text)?;
+        Ok(text_of(&doc, "RemainingSleepTimerDuration")
+            .filter(|raw| !raw.trim().is_empty())
+            .and_then(parse_hms))
+    }
+
+    /// Arm the sleep timer, or cancel it with `None`.
+    ///
+    /// The duration goes on the wire as `HH:MM:SS` and nothing else: a bare
+    /// count of seconds comes back UPnP 402. Cancelling is an **empty string**
+    /// to the same action - there is no separate cancel, which is why this
+    /// takes an `Option` rather than having a sibling.
+    pub async fn set_sleep_timer(&self, after: Option<Duration>) -> Result<()> {
+        let value = match after {
+            Some(d) => {
+                let secs = d.as_secs();
+                format!(
+                    "{:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs / 60) % 60,
+                    secs % 60
+                )
+            }
+            None => String::new(),
+        };
+        self.soap(
+            Service::AvTransport,
+            "ConfigureSleepTimer",
+            &[("InstanceID", "0"), ("NewSleepTimerDuration", &value)],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Read all three tone controls.
     ///
     /// Three round trips because the service offers no combined read; they go
