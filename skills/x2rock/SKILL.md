@@ -112,6 +112,14 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
+**`accounts` is this machine's tokens, and `accounts --household` is not the household's account
+list either** - it reports the serials named by favorites and queue content, which is a *proxy*.
+Measured against the Sonos app in one household it recovered **three of eight accounts and named
+one that had been removed**: an account that has never played anything in the current favorites or
+queue is invisible, and a serial outlives the account in content that still names it. The real
+registry is not readable over the LAN. So treat it as evidence about content, never as "these are
+the household's services", and never tell a user an account is missing on this basis.
+
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
 --yes` deletes one. **x2rock cannot create an alarm** - that is the Sonos app's job - so removing

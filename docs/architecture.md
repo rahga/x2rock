@@ -4716,6 +4716,41 @@ own replay, so that is the natural way in, but it is a piece of work rather than
 then x2rock manages the alarms the app made, and `alarm remove` says so: nothing here can make a new
 one, which is why it demands `--yes`.
 
+## How good the serial proxy actually is (measured 2026-09-04)
+
+`accounts --household` reports the account serials named by the household's favorites and queue,
+and has always carried a disclaimer that this is not the registry. A screenshot of the Windows
+controller's Service Settings finally made that measurable, because the app *does* show the
+registry. Ground truth, eight accounts:
+
+> Audible ("Audible 2"), CBC Radio & Music, Mixcloud ("Rahga"), Sonos Radio, TuneIn,
+> TuneIn (New) ("TuneIn Work"), YouTube Music ("be84985f"), YouTube Music
+
+What the proxy recovered: `sn_2` and `sn_3` (both YouTube Music, sid 284), `sn_7` (CBC Radio &
+Music, sid 256) - and `sn_6`, **Virgin Radio UK, sid 336, which is not in the app's list at all**.
+
+**Three of eight, plus one phantom.** Audible, Mixcloud, Sonos Radio and both TuneIns are invisible
+because nothing in the current favorites or queue was played from them, which is precisely the
+failure the disclaimer describes. The phantom is the other half of it: a serial outlives the account
+in content that still names it.
+
+**And the serial-to-service mapping is not stable across readings.** The table taken on 2026-08-31
+recorded `sn_6` as sid 201 (Amazon Music) and `sn_7` as sid 151; four days later the same serials
+read as sid 336 and sid 256. Either serials are reused after an account is removed - which would
+contradict the monotonic allocation that let `sn_18` be predicted for TIDAL - or both readings are
+stale entries from different content, four days apart. **Unresolved**, and the reason to treat the
+proxy as evidence about *content* rather than about accounts.
+
+**The registry itself is not readable from the LAN on 95.0-77060.** Two doors were tried and both
+are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportInfo></ZPSupportInfo>`
+(the endpoint survives, its content does not), and `musicServiceAccounts:1` refuses
+`getAccounts`, `listAccounts`, `getMusicServiceAccounts` and `getAccountList` alike with
+`ERROR_UNSUPPORTED_COMMAND` - it takes `match` and nothing else. There is no `/status` index to
+enumerate what else might exist.
+
+So `accounts --household` stays as it is. It is the best available answer and its own output says
+what it is not; what changed here is that "not the account list" now has a number attached.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
