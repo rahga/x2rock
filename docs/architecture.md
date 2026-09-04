@@ -4289,6 +4289,105 @@ field an agent would read is missing or lying*:
 The through-line: the fixes were cheap; *finding* them needed an agent, because each is invisible
 until something parses the contract instead of reading it.
 
+## TuneIn (New): the first front-door AppLink completion (2026-09-04)
+
+`x2rock link "TuneIn (New)"` (sid 333, `Auth="AppLink"`) completed end-to-end: `getAppLink`
+answered with a `regUrl`/`linkCode` pair, the browser step was an ordinary consent page, and
+`getDeviceAuthToken` minted a token on the first poll after approval. **This is the first of the 62
+app-link services to fall through `getAppLink` itself** — Plex fell *around* it, through its own
+PIN flow — and it vindicates the ask-anyway design: the generic attempt that Plex refused and
+YouTube Music 403'd is exactly what linked here, unmodified.
+
+### The URL says how the flow actually works
+
+The post-approval confirm page was captured live, and its query string is the whole mechanism in
+one line:
+
+```
+https://tunein.com/authorize/confirm/?client_id=oVzZq8nb&pairauthflow=true
+  &redirect_uri=https%3A%2F%2Fsonos.platform.prod.us-west-2.tunein.com%2Faccount%2Flink
+  &response_type=code&serial=<householdId>&showupsell=true&state=<base64>
+```
+
+- `response_type=code`, `client_id=oVzZq8nb` — a textbook OAuth authorization-code grant, with
+  Sonos's client identity at TuneIn sitting in the open. What is *absent* matters most: no secret
+  gate before consent. This is the exact spot where YouTube Music demands its sealed `apiKey` —
+  TuneIn's client identity is a name tag, YTM's is a locked door.
+- `state` decodes (plain base64 JSON) to `{HouseholdId, LinkCode, RedirectUri: null}` — the pairing
+  nonce from `getAppLink` rides in the OAuth `state` parameter. The consent leg and the polling leg
+  are joined by nothing but that 32-hex nonce.
+- `redirect_uri` is **TuneIn's own Sonos-integration backend**
+  (`sonos.platform.prod.us-west-2.tunein.com/account/link`), not sonos.com and not any device. The
+  OAuth loop closes entirely server-side at TuneIn: browser consents → TuneIn issues the code to
+  its own backend → the backend exchanges it, reads the `LinkCode` out of `state`, and marks the
+  household's link approved → the `getDeviceAuthToken` poll flips from `NOT_LINKED_RETRY` to a
+  token. **x2rock never touches the OAuth leg at all.**
+
+TuneIn's success page reads "All set! Now use the Sonos app to listen to TuneIn — TuneIn account
+linked to your device." Its backend cannot tell x2rock from the Sonos app; the link is fully
+ordinary on their side. So "app-link expects the service's mobile app" is per-service *policy*,
+not tier structure — the PC-controller correction (2026-09-01) predicted this, and a Linux desktop
+browser has now demonstrated it. The flow-shape taxonomy grows to five: Bandcamp (code in
+`regUrl`), iHeartRadio (typed code), Mixcloud (OAuth, `linkCode` in `redirect_uri`), Plex (SMAPI
+link dead; own PIN flow), TuneIn (OAuth, `linkCode` in base64-JSON `state`, service-side redirect).
+
+### What worked, and the one loose end
+
+Search verified the same minute: `search -s "TuneIn (New)" "radio paradise"` returns the station
+and its Mellow/Rock/Global mixes (all hits `type: stream`, `queueable: false`). The loose end:
+**the `getDeviceAuthToken` reply carried no `userIdHashCode`**, so the household could not be told
+about the account (`link` says so at the end). Playback through the household is therefore
+untested — though these are streams, which go through the stream path rather than the enqueue
+path's credential substitution, so the missing registration may never bite. Tested the same day,
+from the office household: it does not bite for TuneIn. See the Radio Paradise section following.
+
+Two small observations for the file: `serial=` hands the household id to TuneIn *before* consent —
+a mild privacy leak inherent to the flow shape — and `showupsell=true` is TuneIn's, not Sonos's.
+
+Next probes, priced by this result: Radio Paradise (308) and iBroadcast (310) as the small-operator
+bets, Pocket Casts (233) for the podcast content type, and Spotify (12) as a one-call wall-pricing
+probe for the major-streamer class (does it 403 like YTM, or answer like TuneIn?).
+
+## Radio Paradise, and what plays without a household registration (2026-09-04)
+
+Radio Paradise (sid 308) linked minutes after TuneIn — the second front-door `getAppLink`
+completion — and it was linked **anonymously**: its consent page offers a "login anonymously"
+button, and the token minted behind it has no account at all. That is a third client posture for
+the taxonomy: TuneIn asks for a real account through ordinary OAuth, YouTube Music walls the
+endpoint on a sealed client key, and Radio Paradise hands a token to anyone who asks. (Two small
+practical notes: the catalogue's name is "Radio Paradise" — `link "Paradise Radio"` finds nothing —
+and the reply again carried no `userIdHashCode`.)
+
+It is also the first linked service where **search is impossible by design**: RP publishes no
+search categories, so `search -s "Radio Paradise"` correctly refuses with "publishes no search
+categories". The service is browse-only, and browse works fully: three bitrate containers (128k,
+320k, FLAC), each holding seven channels — The Main Mix, Mellow Mix, RockIt!, The Globe, Beyond…,
+Serenity, KFAT — `type: program`, `queueable: true`.
+
+### The office household answered the registration question, in both directions
+
+The laptop moved to the office the same morning — a *different* household, one that has certainly
+never been told about either new account — which made the `userIdHashCode` caveat testable
+directly. (The move itself was routine and worth a line: both gateway fingerprints were remembered,
+the daemon reconnected 8 seconds after resume, and its one transient failure logged as
+`no player: could not identify this network (no default gateway)` — correctly prefixed, since the
+wifi simply had no gateway yet. The per-controller SMAPI tokens travel with the laptop: search and
+browse for both services work from the office unchanged.)
+
+- **Radio Paradise (`program` item): fails both paths.** `AddURIToQueue` → UPnP 800 — the exact
+  signature of the disconnected-YouTube-Music case: no registration, so the player has no
+  credential to substitute. The stream fallback then dies harder: RP answers `getMediaURI` with
+  "Function 'getMediaURI' doesn't exist" — it implements no direct stream resolution, so its
+  programs are playable only by a player that can resolve them itself.
+- **TuneIn (`stream` item): plays.** `search -s "TuneIn (New)" "npr" --play 1 -r "Media Room"` went
+  BUFFERING → PLAYING with `position_ms` advancing — real sound, no registration anywhere.
+
+So the link-time warning "search works; playback through the household may not" resolves
+precisely: **playback without a household registration works iff the service implements
+`getMediaURI` and the item is a stream.** Anything the player must resolve itself needs the
+registration x2rock cannot yet create. The anonymous RP link buys browse-only until then; the
+TuneIn link is usable end to end.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -4337,9 +4436,10 @@ until something parses the contract instead of reading it.
    interface is defined and waiting, and an accepted identity for `sendRequest` is the whole of
    what stands in front of it.
 
-   What remains open under this heading is only the *rest* of the app-link tier: some services may
-   answer `getAppLink` with a browser page the way Plex answered its own PIN flow, and asking costs
-   nothing. YouTube Music is not one of them.
+   What remains open under this heading is only the *rest* of the app-link tier — and one of them
+   has now answered: **TuneIn (New) linked through `getAppLink` outright** (see "TuneIn (New): the
+   first front-door AppLink completion"), proving the tier is per-service policy rather than a wall.
+   Asking costs nothing. YouTube Music remains not one of them.
 
    Worth noting what is *not* a route, so it is not re-tried: the Control API has no content
    discovery anywhere in its 53 paths, UPnP `Search` reports empty `SearchCaps`,
