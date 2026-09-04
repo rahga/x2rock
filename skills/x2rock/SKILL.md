@@ -147,6 +147,12 @@ Three things about alarms that will otherwise surprise a user:
 - **An alarm sets the room's volume and leaves it there.** After one fires, the room stays at the
   alarm's level, not the level it had before. Say so if a user wonders why a room went quiet.
 - **Removing a running alarm does not stop it**, and neither does disarming it. Use `pause`.
+- **An alarm needs about two minutes of lead time.** One created less than that before its own
+  start misses its scheduling slot and fires roughly two minutes late, so setting an alarm "for one
+  minute from now" to demonstrate it will look broken. Its `--duration` also runs from the
+  scheduled time rather than from when it actually started, so a late alarm plays for less than
+  asked. When it ends the room is left `IDLE` on the program - unlike the sleep timer, which leaves
+  it `PAUSED` keeping its place in the queue.
 
 **The sleep timer stops the room when it runs out**, and is per group like transport. `sleep`
 reads what is left, `sleep 30m` arms it, `sleep off` cancels. Bare digits are **minutes** (`sleep

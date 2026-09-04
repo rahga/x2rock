@@ -4730,6 +4730,18 @@ played the chime at the alarm's volume - and four things came out of that which 
   is a lasting change to a room's volume, not a temporary one.
 - **Removing a running alarm does not stop it.** `DestroyAlarm` on the alarm that was playing left
   the chime playing. Only `pause` stopped it.
+- **A favorite works as the program, and lead time is what decides punctuality.** Tested with the
+  CBC "Unreserved" stream: created 10:13:44 for 10:16:00 and it fired at **10:16:08** - eight
+  seconds late, where the earlier chime alarm created 82 seconds before its time fired two minutes
+  fourteen late. Two lead times, two outcomes, and the difference is about two minutes: an alarm
+  created less than roughly that before it is due misses its scheduling slot and waits for the next
+  one. So `alarms add` for a time under two minutes away is not a reliable test of anything.
+- **The duration runs from the alarm's scheduled time, not from when it actually fired**, and it
+  leaves the room `IDLE`. The one-minute alarm above was scheduled for 10:16:00, started at
+  10:16:08 and stopped at 10:17:00 - fifty-two seconds of audio, not sixty. A late alarm therefore
+  plays for less than its duration, and one late by more than its duration would presumably not
+  play at all. Note the contrast with the sleep timer, which leaves the room `PAUSED` keeping its
+  place: an alarm ends `IDLE` on the program it was playing.
 - **`StartLocalTime` is local to the *household*.** `GetTimeZone` answers `Index -1` here - unset -
   and `GetTimeNow` reports a clock five hours ahead of the machine, i.e. UTC. So `alarms add 07:00`
   in this household means 07:00 UTC, 02:00 where the user is. The first attempt at a live test was
