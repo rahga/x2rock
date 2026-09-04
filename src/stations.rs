@@ -1,6 +1,6 @@
 //! The internet radio directory, which is deliberately not Sonos's.
 //!
-//! `search` and `browse` reach the 108 services the household's player knows
+//! `search` and `browse` reach the music services the household's player knows
 //! about. That list is Sonos's, and it is a ceiling. This module reaches past
 //! it: [Radio Browser](https://www.radio-browser.info) is a community catalogue
 //! of internet radio stations with no API key, no account and no registration,

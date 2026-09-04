@@ -271,9 +271,11 @@ and it works even when the household's own services have nothing.
 **Treat almost any description of music as a search you should just run.** A genre, a mood, a
 decade, a country, a city, a language, a format - all of it is a `stations` query or `--tag`. Do not
 answer "the household has no country station" without looking: the directory holds roughly 59,000
-stations under some 12,000 tags, and `country` alone is about 700 of them (measured 2026-09-04;
-`jazz` ~1200, `ambient` ~400, `classic country` ~70, `bluegrass` ~43). Tags are free-form, so a
-narrow guess that returns nothing is a reason to widen it, not to give up.
+stations under some 12,000 tags, and `--tag country` returns about **800** of them. Measured
+2026-09-04 by running the query this command runs - `jazz` ~1400, `ambient` ~450, `classic country`
+~65, `bluegrass` ~44. (A tag matches loosely, so these are larger than the count of stations
+carrying that exact tag; what matters is what the command returns.) Tags are free-form, so a narrow
+guess that comes back empty is a reason to widen it, not to give up.
 
 ```sh
 x2rock stations --tag country --limit 5        # a genre
@@ -314,25 +316,34 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
 
 ### Offer more than one, and keep going if one fails
 
-- **Two or three options beat one - but make them different stations.** The directory lists every
-  bitrate and codec as its own row, so a search for `SomaFM` returns 119 rows covering about thirty
-  actual channels, and `FIP` returns 90 rows for 53 names. Offering "three choices" that are one
-  station at 128k, 64k and 32k is not a choice. De-duplicate on the name before presenting.
-  `--json` gives `codec`, `bitrate`, `country`, `tags` and `votes`; `votes` is the directory's
-  popularity signal and a reasonable tiebreak, and naming why you picked one ("highest-voted, 320k,
-  from France") beats a bare confirmation.
+- **Two or three options beat one - but make them different stations, and the obvious way of doing
+  that does not work.** The directory lists every bitrate and codec as its own row *and puts them
+  in the name*, so `SomaFM Secret Agent (128k MP3)` and `SomaFM Secret Agent (32k AAC)` are two
+  names for one channel. Measured: `SomaFM` returns **122 rows, 119 distinct names, and 54 actual
+  channels**; `FIP` returns 90 rows, 53 names, 41 channels. **De-duplicating on the name collapses
+  122 to 119 and achieves nothing** - strip a trailing `(...)` qualifier first, then group. Also
+  raise `--limit` (it defaults to 20) before concluding a station has few variants, or you are
+  de-duplicating a page rather than the results. `--json` gives `codec`, `bitrate`, `country`,
+  `tags` and `votes`; `votes` is the directory's popularity signal and a reasonable tiebreak, and
+  naming why you picked one ("highest-voted, 320k, from France") beats a bare confirmation.
 - **A listed station can still fail to play, and the command now checks.** The player accepts a URL
   it cannot play and then sits at `IDLE` without erroring, so `play-url` and `stations --play` wait
-  for the room to reach `PLAYING` before saying anything. Three outcomes, and they are worded apart:
+  for the room to reach `PLAYING` before saying anything. **Four outcomes**, worded apart because
+  the right next move differs:
   - `Media Room — X` means it is playing. Believe it.
   - `Media Room — X (starting)` means it was still buffering when the wait ran out. Not a failure -
     re-check with `x2rock now` before deciding anything.
   - a `stream_did_not_play` error, exit non-zero, means the room is still idle. **Try the next
     result**; do not report success and do not conclude radio is broken. The room is fine.
+  - a `no_player` error from one of these commands means the room *stopped answering* mid-command,
+    so whether it is playing is unknown. **Do not try another station** - that is the room going
+    away, not a bad stream. Check the speaker.
 
-  A good station costs about four seconds of waiting and a dead one about ten - worth saying if
-  someone is watching a prompt. `--no-wait` skips the check and returns in milliseconds, but then
-  the confirmation means nothing: it reports `"started": "starting"` and you own the verifying.
+  With `--json`, both commands emit `{room, title, url, started}` on success (`started` is
+  `"playing"` or `"starting"`) and the standard `{error, code, fix}` on either failure. A good
+  station costs about four seconds of waiting and a dead one about ten - worth saying if someone is
+  watching a prompt. `--no-wait` skips the check and returns in milliseconds, but then the
+  confirmation means nothing: it reports `"started": "starting"` and you own the verifying.
 - **A null `stream_info` is normal, not a failure.** Many stations send no ICY metadata: `.977
   Country` plays perfectly and never names a track, so `title` is the station and `stream_info` is
   `null`. Others take a few seconds to send the first one, so a null immediately after starting
@@ -402,6 +413,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
+| `no_player` *from `play-url`/`stations --play`* | the room stopped answering mid-command, so whether it is playing is unknown — the room went away, not the stream | **null** (check the speaker; do *not* try another stream) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

@@ -276,7 +276,8 @@ enum Command {
     /// Search the internet radio directory: stations from outside Sonos's
     /// catalogue entirely.
     ///
-    /// `search` reaches the 108 services the player knows about; this reaches
+    /// `search` reaches the services the player knows about - about a hundred,
+    /// and Sonos's ceiling; this reaches
     /// past them, into a community directory of ordinary HTTP streams. No
     /// account, no key, no registration. `--play N` plays the Nth result the
     /// same way `play-url` does, alongside the queue rather than in it.
@@ -309,9 +310,9 @@ enum Command {
     /// Play an internet radio stream by its own URL, with no music service in
     /// the loop at all.
     ///
-    /// The other end of `search`/`browse`: those reach the 108 services the
-    /// household's player knows about, and this reaches anything else that
-    /// serves audio over HTTP - an Icecast or SHOUTcast station, a podcast
+    /// The other end of `search`/`browse`: those reach the hundred or so
+    /// services the household's player knows about, and this reaches anything
+    /// else that serves audio over HTTP - an Icecast or SHOUTcast station, a podcast
     /// enclosure, a stream a service does not carry. No account, no
     /// registration, no sid.
     ///
@@ -1681,6 +1682,15 @@ enum Started {
     /// Idle or stopped at the deadline. This is the silent failure: the player
     /// took a URL it cannot play and said nothing about it.
     Silent,
+    /// **Nothing answered.** Every status poll failed for the whole wait, so
+    /// nothing is known about the stream either way.
+    ///
+    /// Distinct from `Silent` on purpose, and the distinction is the remedy: a
+    /// silent stream means try another one, while this means the room stopped
+    /// answering and trying more streams at it is pointless. Folding the two
+    /// together also contradicted the loop's own rule - a failed poll is
+    /// evidence about the poll, not about the stream.
+    Unverified,
 }
 
 /// One wording for the three outcomes, shared by every caller that starts a
@@ -1708,7 +1718,51 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: Started) -
             )
             .into());
         }
+        // Reuses the established `no_player` code rather than minting a new
+        // one: this is the documented "speakers were known here but none
+        // answered" case, arrived at mid-command. No fix, as that code never
+        // carries one.
+        Started::Unverified => {
+            return Err(hint::Hint::new(
+                format!(
+                    "{room} took {title:?}, and then stopped answering for {}s - so whether it \
+                     is playing is unknown. This is the room going away rather than a bad \
+                     stream; check the speaker before trying another.",
+                    STREAM_START.as_secs()
+                ),
+                "no_player",
+                None,
+            )
+            .into());
+        }
     }
+    Ok(())
+}
+
+/// The `--json` form of [`report_started`], so the two commands that start a
+/// stream cannot describe success differently.
+///
+/// It exists because they did: `stations --play --json` printed a prose line on
+/// success while rendering failures as JSON, which is the worst of both - a
+/// caller told to branch on `code` could parse the failure and not the success.
+/// A failure still routes through `report_started`, so the error shape stays
+/// the standard `{error, code, fix}` rather than a second invented one.
+fn report_started_json(room: &str, title: &str, url: &str, started: Started) -> Result<()> {
+    if matches!(started, Started::Silent | Started::Unverified) {
+        return report_started(room, title, None, started);
+    }
+    // No `stream_info`: the player has often not read the station's metadata
+    // yet at this instant, so reporting it would report null and mean nothing.
+    // `x2rock now --json` is where to read it.
+    println!(
+        "{}",
+        serde_json::json!({
+            "room": room,
+            "title": title,
+            "url": url,
+            "started": if started == Started::Playing { "playing" } else { "starting" },
+        })
+    );
     Ok(())
 }
 
@@ -1786,11 +1840,16 @@ async fn stream_url(
 
     let deadline = tokio::time::Instant::now() + wait;
     let mut last = None;
+    // Whether *any* poll came back at all, which is a different question from
+    // what it said - and the one that separates a dead stream from a room that
+    // went away.
+    let mut answered = false;
     loop {
         // A failed poll is not evidence about the stream - it is evidence
         // about the poll. Keep asking until the deadline and let the last
         // reading that did arrive decide.
         if let Ok(status) = coordinator.playback_status(&target.group_id).await {
+            answered = true;
             match status.state() {
                 Some("PLAYING") => return Ok((target.name.clone(), Started::Playing)),
                 Some(state) => last = Some(state.to_string()),
@@ -1806,9 +1865,12 @@ async fn stream_url(
     // Decided on the *last* reading rather than the first: a room is briefly
     // IDLE between taking the URL and starting to buffer, so an early look
     // would condemn every stream.
-    let started = match last.as_deref() {
-        Some("IDLE") | Some("STOPPED") | None => Started::Silent,
-        Some(_) => Started::Starting,
+    let started = match (answered, last.as_deref()) {
+        (false, _) => Started::Unverified,
+        (true, Some("IDLE") | Some("STOPPED")) => Started::Silent,
+        // Answered, but never named a state. Not grounds for calling a stream
+        // dead, so it reads as still starting.
+        (true, _) => Started::Starting,
     };
     Ok((target.name.clone(), started))
 }
@@ -1865,6 +1927,9 @@ async fn run_stations(
             wait,
         )
         .await?;
+        if json {
+            return report_started_json(&room_name, &station.name, &station.url_resolved, started);
+        }
         return report_started(&room_name, &station.name, None, started);
     }
 
@@ -1981,25 +2046,7 @@ async fn run_play_url(
     };
     let (room_name, started) = stream_url(&session, room, url, &name, None, wait).await?;
     if json {
-        // `Silent` still goes through `report_started`, which turns it into a
-        // hinted error - so the JSON failure shape is the standard
-        // `{error, code, fix}` rather than a second invented one.
-        if started == Started::Silent {
-            return report_started(&room_name, &name, None, started);
-        }
-        // No `stream_info` here on purpose: the player has often not read the
-        // station's metadata yet at this instant, so reporting it would report
-        // null and mean nothing. `x2rock now --json` is where to read it.
-        println!(
-            "{}",
-            serde_json::json!({
-                "room": room_name,
-                "title": name,
-                "url": url,
-                "started": if started == Started::Playing { "playing" } else { "starting" },
-            })
-        );
-        return Ok(());
+        return report_started_json(&room_name, &name, url, started);
     }
     report_started(&room_name, &name, None, started)
 }
@@ -4979,7 +5026,7 @@ mod tests {
     }
 
     #[test]
-    fn the_three_stream_outcomes_are_told_apart() {
+    fn every_stream_outcome_is_told_apart_from_the_others() {
         // Playing and Starting are both successes - a stream still buffering
         // when the wait ran out has not failed, and must not be reported as
         // though it had.
@@ -5000,6 +5047,43 @@ mod tests {
             text.contains("nothing is wrong with the room"),
             "the room is not the fault and the message should say so: {text}"
         );
+
+        // And "nobody answered" is a *different* failure from "the stream is
+        // dead", because the remedy differs: trying more streams at a room
+        // that has gone away is pointless. It must not carry the
+        // stream_did_not_play code, and must not blame the stream.
+        let gone = report_started("Media Room", "SomaFM", None, Started::Unverified).unwrap_err();
+        assert_eq!(hint::of(&gone).0, "no_player");
+        assert!(hint::of(&gone).1.is_none());
+        let text = format!("{gone:#}");
+        assert!(text.contains("stopped answering"), "{text}");
+        assert!(
+            !text.contains("Try another"),
+            "must not send a caller after another stream: {text}"
+        );
+    }
+
+    #[test]
+    fn both_stream_commands_report_success_the_same_way() {
+        // The bug this closes: `stations --play --json` printed prose on
+        // success while rendering failure as JSON, so a caller could parse the
+        // failure and not the success. One helper now serves both.
+        assert!(
+            report_started_json("Media Room", "SomaFM", "http://x/s", Started::Playing).is_ok()
+        );
+        assert!(
+            report_started_json("Media Room", "SomaFM", "http://x/s", Started::Starting).is_ok()
+        );
+        // Failures keep the standard {error, code, fix} shape rather than a
+        // second invented one, for both failing outcomes.
+        for (outcome, code) in [
+            (Started::Silent, "stream_did_not_play"),
+            (Started::Unverified, "no_player"),
+        ] {
+            let err =
+                report_started_json("Media Room", "SomaFM", "http://x/s", outcome).unwrap_err();
+            assert_eq!(hint::of(&err).0, code);
+        }
     }
 
     #[test]
