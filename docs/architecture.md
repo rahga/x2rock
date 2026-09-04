@@ -4265,6 +4265,23 @@ Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_p
   a test pins that neither network error carries a runnable scan. The generic no-remedy code
   was also renamed `error` -> `unknown`, so `{"error": …, "code": "unknown"}` no longer reads a code
   named `error` inside a field named `error`.
+- **"Verbatim and runnable" was not true for most services (fixed 2026-09-04).** `needs_link` had
+  been emitting `fix: "x2rock link Classical Archives"` unquoted since it was written, which is two
+  positionals: clap answers `unexpected argument 'Archives'` and exits 2 before anything is
+  contacted. Roughly 76 of the 108 service names have a space in them, so the field was broken for
+  most of the tier it exists to serve - and broken in the worst direction, since an agent following
+  the run-it-and-retry contract gets a usage error rather than a link flow. Both quoted hints now
+  go through `hint::shell_arg`, which single-quotes only what needs it (`x2rock link Deezer` stays
+  bare, because that is what a person would type) and does the `'\''` dance for a name containing a
+  quote. Found while fixing the searchable list, whose own new hint was written quoted the same day
+  - which is how the older one came to look wrong by comparison.
+
+  The lesson worth keeping is about *how* it was found: nothing tested that a `fix` runs. The tests
+  asserted the string's content, and the string was exactly what its author intended - it was the
+  shell that disagreed. Now pinned by cases (`Classical Archives`, `TuneIn (New)`, `Rock'n'Roll`)
+  rather than by re-asserting the format, and verified by taking the emitted `fix` and running it:
+  `x2rock link 'Classical Archives' --no-open` now reaches the service and comes back with the
+  service's own refusal (`str3`), which is the failure of a command that arrived.
 
 ### The daemon stops narrating an unchanged state
 

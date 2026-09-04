@@ -60,6 +60,29 @@ impl fmt::Display for Hint {
 
 impl std::error::Error for Hint {}
 
+/// One shell argument, quoted only when it needs to be.
+///
+/// A `fix` is promised **verbatim and runnable**, and most music service names
+/// have a space in them: `x2rock link Classical Archives` is two positionals
+/// and dies at argument parsing - `unexpected argument 'Archives'` - before
+/// anything is contacted. An agent following "when `fix` is non-null, run it
+/// and retry" gets a usage error rather than a link flow, which is the one
+/// thing this field exists to prevent.
+///
+/// Single quotes rather than double, so nothing inside is expanded whatever a
+/// vendor puts in a name, with the usual `'\''` dance for a name containing
+/// one. Left bare when the whole argument is safe, because `x2rock link Deezer`
+/// is what a person would type and quoting it would only add noise.
+pub fn shell_arg(value: &str) -> String {
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '+' | ',')
+    };
+    if !value.is_empty() && value.chars().all(safe) {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// The `(code, fix)` an error carries, reading the first [`Hint`] in its chain.
 /// A plain error - most of them - is `("unknown", None)`.
 pub fn of(error: &Error) -> (&'static str, Option<String>) {
@@ -157,6 +180,29 @@ pub fn no_player_to_play(inner: &Error) -> Error {
 mod tests {
     use super::*;
     use anyhow::{Context, anyhow};
+
+    #[test]
+    fn a_shell_argument_is_quoted_only_when_it_has_to_be() {
+        // The whole point: a name with a space is one argument, not two.
+        assert_eq!(shell_arg("Classical Archives"), "'Classical Archives'");
+        assert_eq!(shell_arg("TuneIn (New)"), "'TuneIn (New)'");
+        assert_eq!(
+            shell_arg("80s80s - REAL 80s Radio"),
+            "'80s80s - REAL 80s Radio'"
+        );
+
+        // And a plain one is left as a person would type it.
+        assert_eq!(shell_arg("Bandcamp"), "Bandcamp");
+        assert_eq!(shell_arg("Piraten.FM"), "Piraten.FM");
+        assert_eq!(shell_arg("90s90s"), "90s90s");
+
+        // Single quotes, so nothing inside is ever expanded by the shell.
+        assert_eq!(shell_arg("a $HOME `b`"), "'a $HOME `b`'");
+        // The awkward one: closing, escaping, reopening.
+        assert_eq!(shell_arg("Rock'n'Roll"), r"'Rock'\''n'\''Roll'");
+        // Empty is quoted, so it stays an argument rather than vanishing.
+        assert_eq!(shell_arg(""), "''");
+    }
 
     #[test]
     fn a_hinted_error_yields_its_code_and_fix() {

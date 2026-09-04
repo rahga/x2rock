@@ -176,14 +176,16 @@ impl Service {
             Auth::DeviceLink => format!(
                 "{} needs a linked account. Run `x2rock link {}` once and it \
                  will work from then on.",
-                self.name, self.name
+                self.name,
+                crate::hint::shell_arg(&self.name)
             ),
             Auth::AppLink => format!(
                 "{} needs a linked account, and offers no code flow x2rock \
                  can drive. Some services in this tier answer with a browser \
                  page anyway: `x2rock link {}` asks, and a refusal costs \
                  nothing.",
-                self.name, self.name
+                self.name,
+                crate::hint::shell_arg(&self.name)
             ),
         }
     }
@@ -203,7 +205,10 @@ impl Service {
         );
         let fix = match self.auth {
             Auth::Anonymous => None,
-            _ => Some(format!("x2rock link {}", self.name)),
+            _ => Some(format!(
+                "x2rock link {}",
+                crate::hint::shell_arg(&self.name)
+            )),
         };
         crate::hint::Hint::new(self.needs_link(), "needs_link", fix)
     }
@@ -216,8 +221,8 @@ impl Service {
     /// hands it over runnable - Radio Paloma refuses `search` and answers
     /// `getMetadata` with eight streams.
     ///
-    /// The name is quoted because most of them have spaces in, and a `fix` is
-    /// promised verbatim and runnable.
+    /// The name goes through [`shell_arg`](crate::hint::shell_arg) because most
+    /// of them have spaces in, and a `fix` is promised verbatim and runnable.
     pub fn no_search_categories_hint(&self) -> crate::hint::Hint {
         crate::hint::Hint::new(
             format!(
@@ -226,7 +231,10 @@ impl Service {
                 self.name
             ),
             "no_search_categories",
-            Some(format!("x2rock browse -s {:?}", self.name)),
+            Some(format!(
+                "x2rock browse -s {}",
+                crate::hint::shell_arg(&self.name)
+            )),
         )
     }
 }
@@ -885,8 +893,8 @@ mod tests {
         let spaced = services.iter().find(|s| s.name == "YouTube Music").unwrap();
         assert_eq!(
             spaced.no_search_categories_hint().fix.as_deref(),
-            Some(r#"x2rock browse -s "YouTube Music""#),
-            "an unquoted name would resolve as an ambiguous prefix, or not at all"
+            Some("x2rock browse -s 'YouTube Music'"),
+            "an unquoted name would be two arguments and never reach the lookup"
         );
     }
 
@@ -903,13 +911,15 @@ mod tests {
 
         // Device link is a promise: x2rock can finish this one unaided.
         let bandcamp = by_name("Bandcamp");
-        assert!(bandcamp.contains("`x2rock link Bandcamp`"));
+        // One word needs no quotes, and adding them would only be noise.
+        assert!(bandcamp.contains("`x2rock link Bandcamp`"), "{bandcamp}");
         assert!(bandcamp.contains("will work from then on"));
 
         // App link is an invitation, not a promise - the service decides, and
         // the wording must not claim more than asking can deliver.
         let ytm = by_name("YouTube Music");
-        assert!(ytm.contains("`x2rock link YouTube Music`"));
+        // Quoted, because it is a command someone is meant to be able to run.
+        assert!(ytm.contains("`x2rock link 'YouTube Music'`"), "{ytm}");
         assert!(ytm.contains("a refusal costs nothing"));
         assert!(
             !ytm.contains("will work"),
