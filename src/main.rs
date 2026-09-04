@@ -815,23 +815,17 @@ async fn print_status(session: &session::Session, json: bool, full: bool) -> Res
     } else {
         (None, None, 0)
     };
-    let warnings: Vec<String> = unreachable
-        .iter()
-        .map(|room| format!("{room} unreachable"))
-        .collect();
-
     if json {
         if full {
             println!(
                 "{}",
-                serde_json::to_string(&json!({
-                    "household": household,
-                    "network": network,
-                    "total": total,
-                    "reachable": total - unreachable.len(),
-                    "warnings": warnings,
-                    "rooms": values,
-                }))?
+                serde_json::to_string(&status_envelope(
+                    household.as_deref(),
+                    network.as_deref(),
+                    total,
+                    &unreachable,
+                    values,
+                ))?
             );
         } else {
             // Bare array by default: the shape jq and existing callers expect.
@@ -905,6 +899,38 @@ fn room_value(
             "has_tv": facts.has_tv,
         }),
     }
+}
+
+/// The `--full` envelope: the household context wrapped around the room array.
+///
+/// Split out of [`print_status`], which gathers that context over the network
+/// and then prints in one breath - so the shape agents are promised,
+/// `{household, network, total, reachable, warnings, rooms}`, had nowhere a
+/// test could see it.
+fn status_envelope(
+    household: Option<&str>,
+    network: Option<&str>,
+    total: usize,
+    unreachable: &[String],
+    rooms: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    json!({
+        "household": household,
+        "network": network,
+        "total": total,
+        // `saturating_sub`, not `-`. The two counts are measured in different
+        // places - one per group as the snapshot fails, one off the topology
+        // afterwards - and nothing but an implicit invariant keeps `unreachable`
+        // the smaller of the two. A `usize` underflow here would not fail
+        // loudly: with overflow checks off it would report something near
+        // 1.8e19 reachable rooms to whoever is reading the JSON.
+        "reachable": total.saturating_sub(unreachable.len()),
+        "warnings": unreachable
+            .iter()
+            .map(|room| format!("{room} unreachable"))
+            .collect::<Vec<_>>(),
+        "rooms": rooms,
+    })
 }
 
 /// The text form of the same, one line per room.
@@ -3787,6 +3813,98 @@ mod tests {
                  an agent told to read fields cannot read this one"
             );
         }
+    }
+
+    /// The envelope's shape, which the skill promises as
+    /// `{household, network, total, reachable, warnings, rooms}` - the one
+    /// documented JSON shape nothing held until now.
+    #[test]
+    fn the_full_envelope_has_the_documented_shape() {
+        let rooms = vec![json!({"room": "Media Room"})];
+        let envelope =
+            status_envelope(Some("Sonos_abc123"), Some("gw:192.168.77.1"), 3, &[], rooms);
+        let mut keys: Vec<&str> = envelope
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "household",
+                "network",
+                "reachable",
+                "rooms",
+                "total",
+                "warnings"
+            ]
+        );
+        assert_eq!(envelope["household"], "Sonos_abc123");
+        assert_eq!(envelope["total"], json!(3));
+        assert_eq!(envelope["reachable"], json!(3));
+        assert_eq!(envelope["warnings"], json!([]));
+        // The rooms ride inside, rather than the envelope replacing them.
+        assert_eq!(envelope["rooms"][0]["room"], "Media Room");
+    }
+
+    #[test]
+    fn a_room_that_did_not_answer_is_counted_out_and_warned_about() {
+        let unreachable = vec!["Kitchen".to_string(), "Study".to_string()];
+        let envelope = status_envelope(None, None, 3, &unreachable, vec![]);
+        assert_eq!(envelope["total"], json!(3));
+        // `reachable` is what answered, not what exists.
+        assert_eq!(envelope["reachable"], json!(1));
+        assert_eq!(
+            envelope["warnings"],
+            json!(["Kitchen unreachable", "Study unreachable"])
+        );
+        // The household context is best-effort: null beats failing a snapshot
+        // that otherwise succeeded.
+        assert_eq!(envelope["household"], serde_json::Value::Null);
+        assert_eq!(envelope["network"], serde_json::Value::Null);
+    }
+
+    /// `reachable` subtracts two counts that are measured in different places.
+    /// It cannot go negative today; if it ever can, it must clamp rather than
+    /// wrap, because a `usize` underflow would report ~1.8e19 reachable rooms
+    /// into JSON an agent believes.
+    #[test]
+    fn reachable_clamps_instead_of_wrapping() {
+        let unreachable = vec!["Kitchen".to_string(), "Study".to_string()];
+        let envelope = status_envelope(None, None, 1, &unreachable, vec![]);
+        assert_eq!(envelope["reachable"], json!(0));
+    }
+
+    /// As with a status entry, both directions. The skill writes the envelope's
+    /// keys as a brace list rather than as JSON, so that list is parsed back out
+    /// and compared - a key added to either side without the other fails.
+    #[test]
+    fn the_envelope_and_the_skill_name_the_same_fields() {
+        let documented = SKILL
+            .split_once("wraps the array in `{")
+            .expect("the skill documents the --full envelope")
+            .1
+            .split_once("}`")
+            .expect("the brace list is closed")
+            .0;
+        let mut documented: Vec<&str> = documented.split(',').map(str::trim).collect();
+        documented.sort_unstable();
+
+        let envelope = status_envelope(None, None, 0, &[], vec![]);
+        let mut emitted: Vec<&str> = envelope
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        emitted.sort_unstable();
+
+        assert_eq!(
+            emitted, documented,
+            "the envelope and the skill's brace list have drifted"
+        );
     }
 
     #[test]
