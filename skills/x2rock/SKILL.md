@@ -1,6 +1,6 @@
 ---
 name: x2rock
-description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, grouping and party mode, soundbar TV input, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play everywhere / party", or switch a soundbar to TV.
+description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
 ---
 
 # Driving Sonos with the `x2rock` CLI
