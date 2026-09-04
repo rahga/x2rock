@@ -4541,9 +4541,60 @@ is the control that actually changes what volume 1 sounds like.
   SetRoomCalibrationStatus, SetTreble, SetVolume, SetVolumeDB
   ```
 
-  Re-enumerate after the update and compare. Incidentally, the extended set is gated by hardware:
-  `GetEQ` answers `SubGain` = 0 on this speaker and 402s `NightMode`, `DialogLevel` and
-  `SurroundEnable`, so that surface only opens on the soundbar in the other household.
+  Re-enumerate after the update and compare.
+
+### The extended EQ set, and what to probe at home
+
+`GetEQ`/`SetEQ` are one action pair over an `EQType` string, so the surface is whatever types a
+given speaker accepts - and it is gated by hardware. On the One SL here: `SubGain` answers `0`,
+while `NightMode`, `DialogLevel`, `SurroundEnable`, `SonarEnabled`, `SonarCalibrationAvailable`,
+`RoomCalibration` and `TrueplayEnabled` all return UPnP 402.
+
+**`SubGain` answering on a speaker that cannot have a Sub is the useful part**: presence of a type
+is *not* proof of capability, so a client must not read "GetEQ answered" as "this room has one".
+Whatever capability detection ends up looking like, it needs `capabilities` off the player or a
+bonded-device read, not an EQ probe.
+
+The owner's controller knowledge, for the household where this can actually be tested - a Sub
+and/or surrounds add tabs the standalone speaker does not have, and a **Sonos Amp** (not owned,
+untestable unless one turns up) exposes a Sub checkbox, Sub Level, Crossover Frequency and Phase
+Control in degrees. Phase in *degrees* is the interesting one, because a plain polarity flip would
+be a boolean; a range implies a numeric type. **Predicted type names, unverified** - the point of
+writing them down is to make the home session a checklist rather than a hunt:
+
+| Controller setting | Likely `EQType` | Expect |
+|---|---|---|
+| Sub on/off | `SubEnable` | boolean |
+| Sub level | `SubGain` | signed, answers even with no Sub |
+| Crossover frequency | `SubCrossover` | Hz, Amp only |
+| Phase control | `SubPolarity` | degrees, so possibly a range not a flip |
+| Surround on/off | `SurroundEnable` | boolean |
+| Surround level (TV) | `SurroundLevel` | signed |
+| Surround level (music) | `MusicSurroundLevel` | signed |
+| Night mode | `NightMode` | boolean, soundbar |
+| Speech enhancement | `DialogLevel` | boolean, soundbar |
+| Height channels | `HeightChannelLevel` | signed, Arc/Beam gen2 |
+
+x2rock has no CLI door to `GetEQ`, so the probe is a shell one-liner. Sweep a room and record what
+answers:
+
+```sh
+for t in SubEnable SubGain SubCrossover SubPolarity SurroundEnable SurroundLevel \
+         MusicSurroundLevel NightMode DialogLevel HeightChannelLevel; do
+  printf '%-20s ' "$t"
+  curl -s "http://<ip>:1400/MediaRenderer/RenderingControl/Control" \
+    -H 'Content-Type: text/xml; charset="utf-8"' \
+    -H 'SOAPACTION: "urn:schemas-upnp-org:service:RenderingControl:1#GetEQ"' \
+    -d "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetEQ xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID><EQType>$t</EQType></u:GetEQ></s:Body></s:Envelope>" \
+    | grep -oE '<CurrentValue>[^<]*<|<errorCode>[^<]*<'
+  echo
+done
+```
+
+Nothing is built on any of this until it answers on real hardware - the same rule the rest of this
+file follows. Two other experiments want the same trip: an **uncalibrated** speaker's
+`RoomCalibrationAvailable`, which settles what that field means, and the soundbar's `htInputFormat`
+against a surround source.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
