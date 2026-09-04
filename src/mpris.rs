@@ -129,6 +129,78 @@ const LIVE_STREAM: &str = "x2rock:isLiveStream";
 const STATION_NAME: &str = "x2rock:stationName";
 
 impl RoomState {
+    /// Fold a `playbackStatus` body into the room, returning what MPRIS has to
+    /// be told about.
+    ///
+    /// **Every field of the body is optional and every `None` means
+    /// *unchanged*.** A body that omits a field is not a body saying the field
+    /// is empty: the room keeps the state, position, actions and modes it had.
+    /// See `proto::PlaybackStatus::playback_state`.
+    ///
+    /// On `RoomState` rather than on [`RoomPlayer`] because none of it needs
+    /// the connection - which is also what lets it be tested.
+    fn apply_playback(&mut self, status: &proto::PlaybackStatus) -> Vec<Property> {
+        let mpris_status = status.state().map(|state| match state {
+            "PLAYING" | "BUFFERING" => PlaybackStatus::Playing,
+            "PAUSED" => PlaybackStatus::Paused,
+            _ => PlaybackStatus::Stopped,
+        });
+        if let Some(mpris_status) = mpris_status {
+            self.status = Some(mpris_status);
+        }
+        if let Some(position_millis) = status.position_millis {
+            self.position_millis = position_millis;
+            self.position_at = Some(Instant::now());
+        }
+        // The hints ride on Metadata, so it has to be re-announced when they move -
+        // which is on a change of source, not on every playback event.
+        let queue_moved = status
+            .queue_version
+            .as_deref()
+            .is_some_and(|version| version != self.queue_version);
+        if let Some(version) = status.queue_version.as_deref() {
+            self.queue_version = version.to_owned();
+        }
+        let hints_changed = status.available_playback_actions.is_some_and(|actions| {
+            (
+                self.actions.can_repeat,
+                self.actions.can_repeat_one,
+                self.actions.can_shuffle,
+            ) != (
+                actions.can_repeat,
+                actions.can_repeat_one,
+                actions.can_shuffle,
+            )
+        });
+        if let Some(actions) = status.available_playback_actions {
+            self.actions = actions;
+        }
+        if let Some(modes) = status.play_modes {
+            self.play_modes = modes;
+        }
+        // Read back off the state rather than the body, so a field the body
+        // left out re-announces what is still true instead of announcing that
+        // nothing is allowed.
+        let actions = self.actions;
+        let mut properties = vec![
+            Property::CanGoNext(actions.can_skip),
+            Property::CanGoPrevious(actions.can_skip_back),
+            Property::CanPlay(actions.can_play),
+            Property::CanPause(actions.can_pause),
+            Property::CanSeek(actions.can_seek),
+            Property::LoopStatus(self.loop_status()),
+            Property::Shuffle(self.play_modes.shuffle),
+        ];
+        if let Some(mpris_status) = mpris_status {
+            properties.push(Property::PlaybackStatus(mpris_status));
+        }
+        // Both ride on Metadata, so either moving means re-announcing it.
+        if hints_changed || queue_moved {
+            properties.push(Property::Metadata(self.with_hints()));
+        }
+        properties
+    }
+
     fn loop_status(&self) -> LoopStatus {
         match self.play_modes.repeat() {
             Repeat::Off => LoopStatus::None,
@@ -231,61 +303,7 @@ impl RoomPlayer {
 
     /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
     pub fn apply_playback(&self, status: &proto::PlaybackStatus) -> Vec<Property> {
-        // Both of these are `None` on a partial event, and `None` means
-        // unchanged - the room keeps the state and the position it already had,
-        // rather than being announced as stopped at zero. See
-        // `proto::PlaybackStatus::playback_state`.
-        let mpris_status = status.state().map(|state| match state {
-            "PLAYING" | "BUFFERING" => PlaybackStatus::Playing,
-            "PAUSED" => PlaybackStatus::Paused,
-            _ => PlaybackStatus::Stopped,
-        });
-        let actions = status.available_playback_actions;
-        let mut state = self.state.lock().unwrap();
-        if let Some(mpris_status) = mpris_status {
-            state.status = Some(mpris_status);
-        }
-        if let Some(position_millis) = status.position_millis {
-            state.position_millis = position_millis;
-            state.position_at = Some(Instant::now());
-        }
-        // The hints ride on Metadata, so it has to be re-announced when they move -
-        // which is on a change of source, not on every playback event.
-        let queue_moved = status
-            .queue_version
-            .as_deref()
-            .is_some_and(|version| version != state.queue_version);
-        if let Some(version) = status.queue_version.as_deref() {
-            state.queue_version = version.to_owned();
-        }
-        let hints_changed = (
-            state.actions.can_repeat,
-            state.actions.can_repeat_one,
-            state.actions.can_shuffle,
-        ) != (
-            actions.can_repeat,
-            actions.can_repeat_one,
-            actions.can_shuffle,
-        );
-        state.actions = actions;
-        state.play_modes = status.play_modes;
-        let mut properties = vec![
-            Property::CanGoNext(actions.can_skip),
-            Property::CanGoPrevious(actions.can_skip_back),
-            Property::CanPlay(actions.can_play),
-            Property::CanPause(actions.can_pause),
-            Property::CanSeek(actions.can_seek),
-            Property::LoopStatus(state.loop_status()),
-            Property::Shuffle(state.play_modes.shuffle),
-        ];
-        if let Some(mpris_status) = mpris_status {
-            properties.push(Property::PlaybackStatus(mpris_status));
-        }
-        // Both ride on Metadata, so either moving means re-announcing it.
-        if hints_changed || queue_moved {
-            properties.push(Property::Metadata(state.with_hints()));
-        }
-        properties
+        self.state.lock().unwrap().apply_playback(status)
     }
 
     /// Read the queue's real version over UPnP, and say so if it moved.
@@ -631,6 +649,91 @@ impl PlayerInterface for RoomPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug the raw-event capture of 2026-09-03/04 turned up. A body that
+    /// carries no `availablePlaybackActions` and no `playModes` used to be read
+    /// as a source that allows *nothing* - because both fields defaulted to
+    /// all-false and were assigned unconditionally. Every failed stream sent
+    /// one, so a `playbackError` blanked the room's capabilities and reported
+    /// its queue as neither repeating nor shuffling.
+    #[test]
+    fn a_body_that_omits_the_actions_leaves_the_capabilities_standing() {
+        let mut state = RoomState::default();
+        let full: proto::PlaybackStatus = serde_json::from_str(
+            r#"{"playbackState":"PLAYBACK_STATE_PLAYING","positionMillis":1000,
+                "availablePlaybackActions":{"canPlay":true,"canPause":true,"canSkip":true,
+                    "canSkipBack":true,"canSeek":true,"canRepeat":true,"canShuffle":true},
+                "playModes":{"repeat":true,"shuffle":true}}"#,
+        )
+        .unwrap();
+        state.apply_playback(&full);
+        assert!(state.actions.can_skip);
+        assert!(matches!(state.loop_status(), LoopStatus::Playlist));
+
+        // Now a body with neither field - a partial status, or the error body
+        // that parses as one.
+        let partial: proto::PlaybackStatus =
+            serde_json::from_str(r#"{"positionMillis":2000}"#).unwrap();
+        let properties = state.apply_playback(&partial);
+
+        // Kept, not reset: the source still allows what it allowed a moment ago.
+        assert!(state.actions.can_skip);
+        assert!(state.actions.can_pause);
+        assert!(state.play_modes.shuffle);
+        assert!(matches!(state.loop_status(), LoopStatus::Playlist));
+        // The position did move, since that field was there.
+        assert_eq!(state.position_millis, 2000);
+
+        // And MPRIS is told what is still true rather than all-false, which is
+        // the half a caller actually sees.
+        for property in &properties {
+            match property {
+                Property::CanGoNext(v)
+                | Property::CanGoPrevious(v)
+                | Property::CanPlay(v)
+                | Property::CanPause(v)
+                | Property::CanSeek(v)
+                | Property::Shuffle(v) => {
+                    assert!(v, "{property:?} was published as false");
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, Property::LoopStatus(LoopStatus::Playlist)))
+        );
+        // The hints did not move and the queue did not either, so Metadata is
+        // not re-announced.
+        assert!(
+            !properties
+                .iter()
+                .any(|p| matches!(p, Property::Metadata(_)))
+        );
+    }
+
+    #[test]
+    fn a_state_and_a_position_still_mean_unchanged_when_absent() {
+        let mut state = RoomState::default();
+        let playing: proto::PlaybackStatus = serde_json::from_str(
+            r#"{"playbackState":"PLAYBACK_STATE_PLAYING","positionMillis":5000}"#,
+        )
+        .unwrap();
+        state.apply_playback(&playing);
+
+        // A body with neither must not announce the room stopped at zero.
+        let quiet: proto::PlaybackStatus = serde_json::from_str("{}").unwrap();
+        let properties = state.apply_playback(&quiet);
+        assert_eq!(state.status, Some(PlaybackStatus::Playing));
+        assert_eq!(state.position_millis, 5000);
+        assert!(
+            !properties
+                .iter()
+                .any(|p| matches!(p, Property::PlaybackStatus(_))),
+            "an unchanged state is not re-announced"
+        );
+    }
 
     #[test]
     fn bus_suffix_matches_the_kotlin_convention() {

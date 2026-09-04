@@ -663,9 +663,9 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     {
         line.push_str(&format!("  [{}]", format.summary()));
     }
-    let repeat = status.play_modes.repeat();
+    let repeat = status.modes().repeat();
     let mut flags = Vec::new();
-    if status.play_modes.shuffle {
+    if status.modes().shuffle {
         flags.push("shuffle");
     }
     let repeating = format!("repeat {}", repeat.as_str());
@@ -729,8 +729,8 @@ fn now_json(
         "service_id": service_id,
         "position_ms": status.position_millis,
         "duration_ms": track.and_then(|t| t.duration_millis),
-        "repeat": status.play_modes.repeat().as_str(),
-        "shuffle": status.play_modes.shuffle,
+        "repeat": status.modes().repeat().as_str(),
+        "shuffle": status.modes().shuffle,
         // Answers "is this the TV input?" as a field rather than by matching the
         // "TV Audio" title. The audio format only exists on a soundbar's TV
         // stream, so its presence is the signal.
@@ -2298,7 +2298,7 @@ async fn apply_repeat(
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let status = player.playback_status(group).await?;
-    let before = status.play_modes.repeat();
+    let before = status.modes().repeat();
     let after = match mode.as_deref() {
         None => before,
         Some(text) => {
@@ -2306,7 +2306,7 @@ async fn apply_repeat(
                 bail!("repeat takes off, all or one");
             };
             ensure!(
-                status.available_playback_actions.allows(repeat),
+                status.actions().allows(repeat),
                 "what {} is playing cannot be {}",
                 target.name,
                 repeat.denied_as()
@@ -2337,13 +2337,13 @@ async fn apply_shuffle(
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let status = player.playback_status(group).await?;
-    let before = status.play_modes.shuffle;
+    let before = status.modes().shuffle;
     let after = match mode.as_deref() {
         None => before,
         Some(text @ ("on" | "off")) => {
             let shuffle = text == "on";
             ensure!(
-                !shuffle || status.available_playback_actions.can_shuffle,
+                !shuffle || status.actions().can_shuffle,
                 "what {} is playing cannot be shuffled",
                 target.name
             );

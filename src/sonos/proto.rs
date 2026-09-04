@@ -7,6 +7,7 @@
 //! deserialized before anything reads them.
 #![allow(dead_code)]
 
+use std::fmt;
 use std::net::IpAddr;
 
 use anyhow::{Result, bail};
@@ -264,10 +265,17 @@ pub struct PlaybackStatus {
     pub position_millis: Option<u64>,
     /// Bumps whenever the queue changes - the cue to re-read it over UPnP.
     pub queue_version: Option<String>,
-    #[serde(default)]
-    pub available_playback_actions: PlaybackActions,
-    #[serde(default)]
-    pub play_modes: PlayModes,
+    /// `None` means unchanged, for the same reason as the fields above.
+    ///
+    /// This used to be `#[serde(default)]`, which is all-false - "nothing is
+    /// allowed". A body that simply does not mention the actions was therefore
+    /// read as a source that cannot play, pause, skip or seek, and a consumer
+    /// tracking state across events published exactly that. A `playbackError`
+    /// carries none of these fields, so every failed stream did it.
+    pub available_playback_actions: Option<PlaybackActions>,
+    /// `None` means unchanged, as above: defaulting to all-false reported a
+    /// queue on repeat as a queue on nothing.
+    pub play_modes: Option<PlayModes>,
 }
 
 /// What the current source allows. A radio stream, for instance, cannot skip,
@@ -380,6 +388,65 @@ impl PlaybackStatus {
             .as_deref()
             .map(|state| state.strip_prefix("PLAYBACK_STATE_").unwrap_or(state))
     }
+
+    /// The actions the source allows, reading an absent set as all-false.
+    ///
+    /// For a one-shot reader - the CLI, off a `getPlaybackStatus` reply, which
+    /// has always carried them. Anything tracking state across events wants the
+    /// `Option` itself, because there "absent" means keep what you had.
+    pub fn actions(&self) -> PlaybackActions {
+        self.available_playback_actions.unwrap_or_default()
+    }
+
+    /// The play modes, reading an absent set as all-false. Same caveat as
+    /// [`Self::actions`].
+    pub fn modes(&self) -> PlayModes {
+        self.play_modes.unwrap_or_default()
+    }
+}
+
+/// The other body `playback:1` delivers: a failure to play something.
+///
+/// Every field is optional because the players do not send them all - a second
+/// error moments after the first arrived here with no `itemId` at all.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackError {
+    pub error_code: Option<String>,
+    pub reason: Option<String>,
+    pub track_name: Option<String>,
+    pub service_name: Option<String>,
+}
+
+impl fmt::Display for PlaybackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `reason` is the specific half (ERROR_CANT_REACH_SERVER) and
+        // `errorCode` the general one (ERROR_PLAYBACK_FAILED), so prefer the
+        // first and fall back rather than printing both.
+        let why = self
+            .reason
+            .as_deref()
+            .or(self.error_code.as_deref())
+            .unwrap_or("no reason given");
+        match self.track_name.as_deref() {
+            Some(track) => write!(f, "{why} on {track:?}"),
+            None => write!(f, "{why}"),
+        }
+    }
+}
+
+/// A `playback:1` body read as an error, or `None` if it is a status.
+///
+/// The namespace carries both shapes and only `_objectType` tells them apart.
+/// It matters because a `PlaybackError` deserializes *cleanly* into a
+/// `PlaybackStatus` - every field of one is optional and none of them appears
+/// in the other - so an error folds in silently as "nothing changed" unless it
+/// is caught here first.
+pub fn playback_error(body: &serde_json::Value) -> Option<PlaybackError> {
+    if body.get("_objectType")?.as_str()? != "playbackError" {
+        return None;
+    }
+    serde_json::from_value(body.clone()).ok()
 }
 
 /// `playbackMetadata:1 getMetadataStatus`, and the body of `metadataStatus` events.
@@ -601,8 +668,8 @@ mod tests {
             playback_state: Some("PLAYBACK_STATE_PLAYING".into()),
             position_millis: Some(0),
             queue_version: None,
-            available_playback_actions: PlaybackActions::default(),
-            play_modes: PlayModes::default(),
+            available_playback_actions: None,
+            play_modes: None,
         };
         assert_eq!(status.state(), Some("PLAYING"));
     }
@@ -620,8 +687,63 @@ mod tests {
         assert_eq!(status.position_millis, None);
         // The rest of the body is still read, which is the point of not
         // dropping the event.
-        assert!(status.available_playback_actions.can_skip);
-        assert!(status.play_modes.shuffle);
+        assert!(status.actions().can_skip);
+        assert!(status.modes().shuffle);
+    }
+
+    /// The two `playback:1` bodies captured on 2026-09-03/04 when a stream
+    /// failed. They must not be read as statuses: every field of a
+    /// `PlaybackStatus` is optional and none of them appears here, so one
+    /// parses perfectly and says "nothing changed" while carrying the only
+    /// notice that the music stopped.
+    #[test]
+    fn a_playback_error_is_told_apart_from_a_status() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"_objectType":"playbackError","errorCode":"ERROR_PLAYBACK_FAILED",
+                "itemId":"VXiDuCccgtRrXdIc81isYseHrI4=","reason":"ERROR_CANT_REACH_SERVER",
+                "serviceId":-1,"serviceName":"https:","trackName":"Apple Music Chill"}"#,
+        )
+        .unwrap();
+        let error = playback_error(&body).expect("an error body reads as an error");
+        // Reason before code: the specific half is the useful one.
+        assert_eq!(
+            error.to_string(),
+            "ERROR_CANT_REACH_SERVER on \"Apple Music Chill\""
+        );
+        // It would otherwise have parsed, which is exactly the trap.
+        let as_status: PlaybackStatus = serde_json::from_value(body).unwrap();
+        assert_eq!(as_status.state(), None);
+        assert_eq!(as_status.available_playback_actions, None);
+
+        // The second one arrived seconds later with no itemId at all.
+        let terse: serde_json::Value = serde_json::from_str(
+            r#"{"_objectType":"playbackError","errorCode":"ERROR_PLAYBACK_FAILED",
+                "reason":"ERROR_CANT_REACH_SERVER","serviceId":-1,"serviceName":"https:",
+                "trackName":"Apple Music Chill"}"#,
+        )
+        .unwrap();
+        assert!(playback_error(&terse).is_some());
+
+        // And a real status is not mistaken for an error.
+        let status: serde_json::Value = serde_json::from_str(
+            r#"{"_objectType":"playbackStatus","playbackState":"PLAYBACK_STATE_PLAYING"}"#,
+        )
+        .unwrap();
+        assert!(playback_error(&status).is_none());
+        // Nor is a body that names no type - the partial statuses seen in the
+        // wild carry no `_objectType` either.
+        assert!(playback_error(&serde_json::json!({"positionMillis": 1})).is_none());
+    }
+
+    #[test]
+    fn an_error_with_no_track_still_says_why() {
+        let error: PlaybackError =
+            serde_json::from_str(r#"{"errorCode":"ERROR_PLAYBACK_FAILED"}"#).unwrap();
+        // Falls back to the code when there is no reason, and says something
+        // rather than nothing when there is neither.
+        assert_eq!(error.to_string(), "ERROR_PLAYBACK_FAILED");
+        let bare: PlaybackError = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.to_string(), "no reason given");
     }
 
     #[test]

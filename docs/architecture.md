@@ -4388,6 +4388,58 @@ precisely: **playback without a household registration works iff the service imp
 registration x2rock cannot yet create. The anonymous RP link buys browse-only until then; the
 TuneIn link is usable end to end.
 
+## `playback:1` carries errors too, and they parsed as statuses (found 2026-09-04)
+
+`X2ROCK_LOG_EVENTS` was added to catch a partial `playbackStatus` in the act - a body with no
+`playbackState`, seen four times in a day on firmware 95.0-77060 and made harmless by treating the
+missing field as *unchanged*. Sixteen hours and 143 bodies later it has caught **none**. What it
+caught instead was a different body on the same namespace, and a worse bug.
+
+**`playback:1` delivers two shapes, and only `_objectType` tells them apart.** A stream failure
+sends a `playbackError`:
+
+```json
+{"_objectType":"playbackError","errorCode":"ERROR_PLAYBACK_FAILED","reason":"ERROR_CANT_REACH_SERVER",
+ "serviceId":-1,"serviceName":"https:","trackName":"Apple Music Chill","itemId":"VXiDuCcc…"}
+```
+
+Note `serviceId: -1` and `serviceName: "https:"` - a direct stream URL, not a linked service. A
+second error followed three seconds later carrying no `itemId` at all, so none of these fields can
+be relied on.
+
+**Why it mattered.** Every field of `PlaybackStatus` is optional and *none of them appears in an
+error body*, so a `playbackError` deserialized perfectly into a status full of `None`s. Making the
+event tolerant of a missing `playbackState` had therefore made it tolerant of a body that is not a
+status at all: the error folded in silently as "nothing changed", and the only notice that the
+music had stopped was discarded. Before that tolerance existed it at least failed serde loudly.
+
+**And it did more than lose the error.** `availablePlaybackActions` and `playModes` were
+`#[serde(default)]` - all-false - and were assigned *unconditionally*. All-false is not "unknown",
+it is "this source allows nothing": the room published `CanPlay(false)`, `CanPause(false)`,
+`CanGoNext(false)`, `CanSeek(false)`, and reported a repeating, shuffling queue as doing neither.
+Media keys and desktop applets went dead for that room on every failed stream. The fix for the
+missing `playbackState` had covered two fields of five and left these two resetting.
+
+So both halves are now `Option`, `None` means unchanged for all five, and `playback_error()` reads
+`_objectType` before anything tries to parse a status. The error is logged rather than published -
+MPRIS has no property for "that did not play", and the journal is where the answer to "why did the
+music stop overnight" belongs. The properties MPRIS is told about are read back off the room's
+state *after* the update rather than off the body, so a field the body omitted re-announces what is
+still true.
+
+**Severity was limited by luck rather than by design.** Both times, a full `playbackStatus` arrived
+in the same second, so the blanked window was under a second. Nothing guarantees that ordering, and
+in the 04:34 burst the error came *last* - which would have left the wrong capabilities standing
+until the next event.
+
+The original quarry is still unaccounted for: a partial `playbackStatus` has been reproduced only
+synthetically. The grep that hunts it needs the type filter too, or `playbackError` answers it:
+
+```sh
+journalctl --user -u x2rock.service --since today \
+  | grep 'playback:1 {"_objectType":"playbackStatus"' | grep -v '"playbackState"'
+```
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

@@ -594,6 +594,17 @@ async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
     }
     let properties = match event.namespace.as_str() {
         "playback:1" => {
+            // The namespace delivers failures as well as statuses, and a
+            // `playbackError` deserializes *cleanly* into a `PlaybackStatus`
+            // whose every field is `None` - so unless it is told apart here it
+            // folds in as "nothing changed" and the only notice that a stream
+            // died is thrown away. Logged rather than published: MPRIS has no
+            // property for "that did not play", and the journal is where the
+            // answer to "why did the music stop overnight" has to be.
+            if let Some(error) = proto::playback_error(&event.body) {
+                log(&format!("{}: playback failed: {error}", player.room));
+                return Ok(());
+            }
             let mut properties = player.apply_playback(&serde_json::from_value(body)?);
             // The queue's version has to be fetched rather than read off the
             // event, because the players do not send one - see
