@@ -8,7 +8,9 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::local::Connection;
-use super::proto::{FavoritesList, GroupInfo, MetadataStatus, PlaybackStatus, Repeat, Volume};
+use super::proto::{
+    FavoritesList, GroupInfo, MetadataStatus, PlaybackStatus, PlaylistsList, Repeat, Volume,
+};
 
 fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
     json!({
@@ -229,6 +231,45 @@ impl Connection {
             )
             .await?;
         Ok(account_id(&body))
+    }
+
+    /// Every saved queue in the household. Household-scoped, like favorites.
+    pub async fn playlists(&self, household_id: &str) -> Result<PlaylistsList> {
+        let body = self
+            .call(
+                json!({
+                    "namespace": "playlists:1",
+                    "command": "getPlaylists",
+                    "householdId": household_id,
+                }),
+                json!({}),
+            )
+            .await?;
+        Ok(serde_json::from_value(body)?)
+    }
+
+    /// Replace what a group is playing with a saved playlist, and start it.
+    ///
+    /// The playlist id must be the bare one `getPlaylists` reports, not the
+    /// `SQ:0` form UPnP uses - see [`super::proto::Playlist`].
+    ///
+    /// **`action` is not optional in practice.** Left out, the player defaults
+    /// to `APPEND`: the playlist is added to the end of the queue and playback
+    /// jumps there, so calling this twice on a four-track queue leaves twelve
+    /// tracks. `REPLACE` is what "play this playlist" means and what
+    /// `loadFavorite` does without being asked. `APPEND` and `INSERT_NEXT` are
+    /// the other two the player accepts; `queue add` already covers appending.
+    pub async fn load_playlist(&self, group_id: &str, playlist_id: &str) -> Result<()> {
+        self.call(
+            on_group("playlists:1", "loadPlaylist", group_id),
+            json!({
+                "playlistId": playlist_id,
+                "playOnCompletion": true,
+                "action": "REPLACE",
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Replace what a group is playing with a favorite, and start it.

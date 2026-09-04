@@ -449,6 +449,30 @@ pub fn playback_error(body: &serde_json::Value) -> Option<PlaybackError> {
     serde_json::from_value(body.clone()).ok()
 }
 
+/// `playlists:1 getPlaylists`: the household's saved queues.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistsList {
+    #[serde(default)]
+    pub playlists: Vec<Playlist>,
+}
+
+/// One saved queue - what the Sonos app calls a Sonos playlist.
+///
+/// **The id here is bare** (`"0"`), where UPnP's `SaveQueue` answers `SQ:0` and
+/// `queue sources` reports that form. They are not interchangeable:
+/// `loadPlaylist` refuses `SQ:0` with `ERROR_INVALID_OBJECT_ID`, so a caller
+/// holding the UPnP form has to resolve it through this list rather than
+/// trimming the prefix and hoping.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub track_count: Option<u32>,
+}
+
 /// `playbackMetadata:1 getMetadataStatus`, and the body of `metadataStatus` events.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

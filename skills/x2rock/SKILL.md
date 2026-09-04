@@ -109,7 +109,15 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 tone rather than its group's, and `--all` does not apply to it. **Loudness is on from the factory**,
 so a household nobody has adjusted is not flat - it is a low-frequency lift that does most of its
 work at low listening levels, which is worth knowing before concluding a room is simply too loud at
-volume 1. Reading takes three round trips and setting one per control; it is local either way.
+volume 1. Reading takes four round trips and setting one per control; it is local either way.
+
+**`--trueplay` is a fourth, different thing.** TruePlay is the room correction the iPhone app
+measures and stores per speaker, applied *underneath* bass and treble - so a room can read flat
+while it is being reshaped, and turning loudness off does not touch it. `eq --json` reports
+`trueplay` beside `trueplay_available`, and both are needed: `trueplay` alone is a toggle that
+reads on with nothing measured behind it. Turning it **on** when nothing is available is refused
+rather than silently accepted. Worth knowing that a speaker which has moved rooms since it was
+measured is applying a curve for the room it used to be in.
 
 `group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
 topology takes a second or two to settle — re-read `status` rather than assuming. These are
@@ -130,7 +138,8 @@ see "Ask before you act".
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
-| Tone: bass, treble, loudness | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off` |
+| Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
+| Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
@@ -141,6 +150,12 @@ see "Ask before you act".
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` |
 | Link an account | `x2rock link [service]` / `x2rock accounts --json` |
+
+**A saved playlist is not a favorite.** `queue sources` lists both (playlists carry `SQ:` ids),
+`queue save "<name>"` makes one from what is queued now, `queue add` appends one, and
+`playlist "<name>"` *replaces* the queue with it and plays - the analogue of `favorite`. Playing a
+playlist is idempotent: it replaces rather than appends, so running it twice does not double the
+queue.
 
 Two shapes worth noting because they are inconsistent: **`favorite` is name/id-addressed**
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).

@@ -4495,9 +4495,17 @@ is the control that actually changes what volume 1 sounds like.
   does not touch it. Owner's note (2026-09-04): TruePlay is set in much of the five-room home but
   believed unset on the standalone Media Room - **yet Media Room answers
   `RoomCalibrationEnabled=1`, `RoomCalibrationAvailable=1`**. Those two booleans are the whole of
-  the reply, so they cannot distinguish "a calibration is applied" from "the toggle is on and
-  nothing was ever measured". Unresolved, and worth settling before `eq` claims to describe a
-  room's sound.
+  the reply, so on their own they cannot distinguish "a calibration is applied" from "the toggle is
+  on and nothing was ever measured".
+
+  **Settled far enough to act on (2026-09-04).** `SetRoomCalibrationStatus` turned it off cleanly,
+  and `RoomCalibrationAvailable` stayed `1` afterwards - so a stored curve survives being
+  unapplied, and this speaker has one. Whether `Available` means "a calibration exists" or only
+  "this model supports one" is still not provable from the LAN, but the reading that fits is the
+  first: a One SL calibrated at home, carried to a new office room, still applying a curve measured
+  for a room it no longer sits in. That is worse than no correction, which is why `eq` reports both
+  booleans rather than one, and why enabling TruePlay where nothing is available is refused instead
+  of quietly accepted.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
@@ -4506,6 +4514,28 @@ is the control that actually changes what volume 1 sounds like.
 None of this is reachable from the office LAN in the interesting cases: the calibrated rooms and
 the soundbar are in the other household, which is why the question stays open rather than being
 probed. See "x2rock households" - only Media Room answers here.
+
+## `loadPlaylist` appends unless told otherwise (verified 2026-09-04)
+
+`playlists:1` is a real Control API namespace and answers on the LAN: `getPlaylists` lists the
+household's saved queues, `getPlaylist` returns one with its tracks (`name`, `artist`, `album`),
+and `loadPlaylist` starts one on a group. Three facts cost a queue four times its length to learn.
+
+- **The id is bare.** `getPlaylists` reports `id: "0"` where UPnP's `SaveQueue` answers
+  `AssignedObjectID: SQ:0`, and `queue sources` shows that second form. They are not
+  interchangeable: `loadPlaylist` refuses `SQ:0` with `ERROR_INVALID_OBJECT_ID`. A caller holding
+  the UPnP form must resolve it through `getPlaylists` rather than trimming the prefix and hoping.
+- **`action` defaults to `APPEND`, not `REPLACE`.** Omit it and the playlist is added to the end of
+  the queue with playback jumping there, so "play this playlist" twice on a four-track queue leaves
+  twelve tracks - observed, in exactly that way. `REPLACE`, `APPEND` and `INSERT_NEXT` are all
+  accepted. `loadFavorite` replaces without being asked, which is what made the default surprising:
+  the two sibling commands do not agree. `x2rock playlist` sends `REPLACE` explicitly, so playing
+  one is idempotent.
+- **`SaveQueue` takes `ObjectID` as an *input*** (`InstanceID`, `Title`, `ObjectID` ->
+  `AssignedObjectID`). Sent empty it means "what is queued now"; the assigned id comes back rather
+  than being derivable. `ContentDirectory::DestroyObject` on the `SQ:` form removes one, and the
+  ids increment rather than filling gaps - a saved queue destroyed as `SQ:0` does not free that id
+  for the next save.
 
 ## Open questions
 

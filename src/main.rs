@@ -129,6 +129,12 @@ enum Command {
         /// and on from the factory - a speaker nobody has touched is not flat.
         #[arg(long)]
         loudness: Option<String>,
+        /// TruePlay: on or off. The room correction the iPhone app measures,
+        /// applied underneath bass and treble rather than alongside them. Off
+        /// is the honest setting for a speaker that has moved rooms since it
+        /// was measured, since the stored curve describes the old one.
+        #[arg(long)]
+        trueplay: Option<String>,
         /// The resulting `{room, bass, treble, loudness}` as JSON.
         #[arg(long)]
         json: bool,
@@ -308,6 +314,14 @@ enum Command {
         /// Queue it after the current track instead of replacing what plays.
         #[arg(long)]
         next: bool,
+    },
+    /// Play a saved playlist - a "Sonos playlist" - by name or id.
+    ///
+    /// Replaces what the room is playing and starts it, the way `favorite`
+    /// does. `queue add` appends one to the queue instead, `queue save` creates
+    /// one from what is queued now, and `queue sources` lists them.
+    Playlist {
+        query: String,
     },
     /// Switch a soundbar to its TV input.
     Tv,
@@ -2410,6 +2424,17 @@ async fn apply_shuffle(
 }
 
 /// Apply one transport verb to a group, through its coordinator.
+/// What one `eq` invocation asked to change; `None` means leave it alone.
+///
+/// A struct rather than four more parameters: they arrive together, are
+/// consumed together, and travel from clap to the handler unchanged.
+struct ToneRequest {
+    bass: Option<i8>,
+    treble: Option<i8>,
+    loudness: Option<String>,
+    trueplay: Option<String>,
+}
+
 /// Bass, treble and loudness on one speaker.
 ///
 /// Addressed to a player, not a group: two rooms playing together each keep
@@ -2419,11 +2444,15 @@ async fn apply_eq(
     session: &session::Session,
     target: &session::Target,
     room: Option<&str>,
-    bass: Option<i8>,
-    treble: Option<i8>,
-    loudness: Option<String>,
+    want: ToneRequest,
     json: bool,
 ) -> Result<()> {
+    let ToneRequest {
+        bass,
+        treble,
+        loudness,
+        trueplay,
+    } = want;
     let speaker = match room {
         Some(name) => session.groups.player_named(name)?,
         // No room named, so the default group resolved; its coordinator is the
@@ -2452,11 +2481,13 @@ async fn apply_eq(
             );
         }
     }
-    let wanted_loudness = match loudness.as_deref() {
-        None => None,
-        Some(text @ ("on" | "off")) => Some(text == "on"),
-        Some(_) => bail!("loudness takes on or off"),
+    let on_off = |what: &str, text: Option<&str>| match text {
+        None => Ok(None),
+        Some(word @ ("on" | "off")) => Ok(Some(word == "on")),
+        Some(_) => bail!("{what} takes on or off"),
     };
+    let wanted_loudness = on_off("loudness", loudness.as_deref())?;
+    let wanted_trueplay = on_off("trueplay", trueplay.as_deref())?;
 
     let before = upnp.tone().await?;
     if let Some(level) = bass {
@@ -2468,9 +2499,22 @@ async fn apply_eq(
     if let Some(on) = wanted_loudness {
         upnp.set_loudness(on).await?;
     }
+    if let Some(on) = wanted_trueplay {
+        // Refused rather than silently ignored: enabling a correction that was
+        // never measured would report `trueplay on` and change nothing.
+        ensure!(
+            !on || before.trueplay_available,
+            "{} has no room calibration to enable - measure one in the Sonos app first",
+            speaker.name
+        );
+        upnp.set_trueplay(on).await?;
+    }
     // Read back rather than echo what was asked for: the setters answer with an
     // empty body, so what the speaker now holds is the only truthful report.
-    let changed = bass.is_some() || treble.is_some() || wanted_loudness.is_some();
+    let changed = bass.is_some()
+        || treble.is_some()
+        || wanted_loudness.is_some()
+        || wanted_trueplay.is_some();
     let after = if changed { upnp.tone().await? } else { before };
 
     if json {
@@ -2481,12 +2525,27 @@ async fn apply_eq(
                 "bass": after.bass,
                 "treble": after.treble,
                 "loudness": after.loudness,
+                "trueplay": after.trueplay,
+                // Whether there is a calibration at all. `trueplay` alone
+                // cannot be read as "this room is corrected".
+                "trueplay_available": after.trueplay_available,
             })
         );
     } else {
         let word = |on: bool| if on { "on" } else { "off" };
+        // "unavailable" rather than "off" when there is nothing measured: the
+        // two are different answers to "is this room corrected?".
+        let calibration = if after.trueplay_available {
+            format!(
+                "{}{}",
+                transition(word(before.trueplay), word(after.trueplay)),
+                word(after.trueplay)
+            )
+        } else {
+            "unavailable".to_string()
+        };
         println!(
-            "{:<24} bass {}{}  treble {}{}  loudness {}{}",
+            "{:<24} bass {}{}  treble {}{}  loudness {}{}  trueplay {calibration}",
             speaker.name,
             transition(&before.bass.to_string(), &after.bass.to_string()),
             after.bass,
@@ -3447,6 +3506,23 @@ async fn run(cli: Cli) -> Result<()> {
             player.load_favorite(group, &favorite.id).await?;
             println!("{:<24} {}", target.name, favorite.name);
         }
+        Command::Playlist { query } => {
+            let household = session.connection.household_id().await?;
+            let saved = session.connection.playlists(&household).await?;
+            let playlist = find_named(
+                &saved.playlists,
+                &query,
+                |p| &p.id,
+                |p| &p.name,
+                "playlist",
+                "x2rock queue sources",
+            )?;
+            // Household-scoped to find, group-scoped to play, as with a
+            // favorite. The id passed is the bare one this list reports: the
+            // `SQ:0` form `queue sources` shows is refused here.
+            player.load_playlist(group, &playlist.id).await?;
+            println!("{:<24} {}", target.name, playlist.name);
+        }
         Command::Tv => {
             // The soundbar is the player with the HDMI socket, which is not
             // necessarily the one coordinating the group it is in. The room
@@ -3487,7 +3563,16 @@ async fn run(cli: Cli) -> Result<()> {
             treble,
             loudness,
             json,
-        } => apply_eq(&session, &target, room, bass, treble, loudness, json).await?,
+            trueplay,
+        } => {
+            let want = ToneRequest {
+                bass,
+                treble,
+                loudness,
+                trueplay,
+            };
+            apply_eq(&session, &target, room, want, json).await?
+        }
         Command::Queue { action, json } => {
             let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
             let room = target.name.as_str();

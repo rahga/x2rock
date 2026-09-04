@@ -81,6 +81,17 @@ pub struct Tone {
     /// from the factory on every Sonos speaker**, so a household that has never
     /// touched it is not neutral.
     pub loudness: bool,
+    /// TruePlay: whether the stored room correction is being applied.
+    ///
+    /// A different mechanism from the three above, applied underneath them: the
+    /// iPhone app measures a room and stores a per-speaker curve. So a speaker
+    /// can report flat bass and treble while this is reshaping it, and turning
+    /// loudness off does not touch it.
+    pub trueplay: bool,
+    /// Whether there is a calibration to apply at all. `trueplay` is only a
+    /// toggle: it reads on with nothing measured behind it, which is why both
+    /// are reported rather than one.
+    pub trueplay_available: bool,
 }
 
 pub struct Upnp {
@@ -184,16 +195,54 @@ impl Upnp {
     /// Three round trips because the service offers no combined read; they go
     /// out together rather than in sequence, since none depends on the others.
     pub async fn tone(&self) -> Result<Tone> {
-        let (bass, treble, loudness) = tokio::try_join!(
+        let (bass, treble, loudness, calibration) = tokio::try_join!(
             self.tone_number("GetBass", "CurrentBass"),
             self.tone_number("GetTreble", "CurrentTreble"),
             self.loudness(),
+            self.calibration(),
         )?;
+        let (trueplay, trueplay_available) = calibration;
         Ok(Tone {
             bass,
             treble,
             loudness,
+            trueplay,
+            trueplay_available,
         })
+    }
+
+    /// TruePlay's two booleans: applied, and available to apply.
+    ///
+    /// One call answers both, and the pair is the whole of what the speaker
+    /// will say - there is no read for the curve itself, or for when or where
+    /// it was measured.
+    async fn calibration(&self) -> Result<(bool, bool)> {
+        let text = self
+            .soap(
+                Service::RenderingControl,
+                "GetRoomCalibrationStatus",
+                &[("InstanceID", "0")],
+            )
+            .await?;
+        let doc = Document::parse(&text)?;
+        let flag = |tag: &str| text_of(&doc, tag).map(|v| v.trim() == "1");
+        Ok((
+            flag("RoomCalibrationEnabled").unwrap_or(false),
+            flag("RoomCalibrationAvailable").unwrap_or(false),
+        ))
+    }
+
+    pub async fn set_trueplay(&self, on: bool) -> Result<()> {
+        self.soap(
+            Service::RenderingControl,
+            "SetRoomCalibrationStatus",
+            &[
+                ("InstanceID", "0"),
+                ("RoomCalibrationEnabled", if on { "1" } else { "0" }),
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     async fn tone_number(&self, action: &str, field: &str) -> Result<i8> {
