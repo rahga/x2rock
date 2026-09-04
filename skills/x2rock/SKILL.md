@@ -129,10 +129,21 @@ built-in chime, which is what `alarms add` uses unless `--program` names a favor
 
 Three things about alarms that will otherwise surprise a user:
 
-- **The time is the household's, not the user's.** `StartLocalTime` is local to the Sonos system,
-  and a household with no timezone set runs on UTC - so `alarms add 07:00` can mean 07:00 UTC. The
-  command prints the household's own clock on stderr for exactly this reason; read it back to the
-  user rather than assuming their morning.
+- **The time is the household's, not the user's, and not this machine's.** `StartLocalTime` is
+  local to the Sonos system. A household with no timezone configured runs on **UTC**, so
+  `alarms add 07:00` can mean 07:00 UTC - the middle of the night several hours from the person who
+  typed it. `alarms add` therefore prints the household's own clock on stderr:
+
+  - `note: alarm times are the household's; its clock reads <time>` - compare that to the user's
+    own clock. If they agree, the alarm is set for the hour they meant.
+  - `note: this household has no timezone set, so 07:00:00 is UTC. Its clock reads <time>` - **say
+    so plainly and do not silently convert.** The alarm will fire at that hour UTC. Setting the
+    timezone fixes it for every controller at once, and is done in the Sonos app; x2rock has no
+    command for it. Offer that rather than doing arithmetic on the user's behalf, because an alarm
+    an agent quietly shifted is worse than one that is honestly wrong.
+
+  Never relay "your alarm is set for 7" without having read that line: on an unset household it is
+  the one claim most likely to be hours out.
 - **An alarm sets the room's volume and leaves it there.** After one fires, the room stays at the
   alarm's level, not the level it had before. Say so if a user wonders why a room went quiet.
 - **Removing a running alarm does not stop it**, and neither does disarming it. Use `pause`.
