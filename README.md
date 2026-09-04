@@ -401,6 +401,11 @@ $ x2rock stations --tag jazz --limit 3
   3  MP3 192k  US  101 SMOOTH JAZZ
 ```
 
+Both `stations --play` and `play-url` **wait for the room to actually reach `PLAYING`** before they
+confirm anything, because the player accepts a stream URL it cannot play and then sits silently
+idle. A good stream costs about four seconds; a dead one says so and exits non-zero after ten.
+`--no-wait` returns immediately for scripts that would rather check for themselves.
+
 And a stream needs no service at all. `x2rock play-url <http url>` hands the speaker an ordinary
 internet radio URL — an Icecast or SHOUTcast station, anything that serves audio over HTTP — which
 it fetches itself, with no account, no registration and no sid. It opens a playback session like a

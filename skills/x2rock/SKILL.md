@@ -313,10 +313,18 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
 - **Two or three options beat one.** `--json` gives `codec`, `bitrate`, `country`, `tags` and
   `votes`; `votes` is the directory's popularity signal and a reasonable tiebreak. Naming why you
   picked one ("highest-voted, 320k, from France") is more useful than a bare confirmation.
-- **A listed station can still fail to play.** The player accepts the URL and then sits at `IDLE`
-  rather than erroring, so `--play` reports what it *asked for*, not what happened. Always confirm
-  with `x2rock now`, and if the room is `IDLE`, **try the next result** - do not report success, and
-  do not conclude radio is broken.
+- **A listed station can still fail to play, and the command now checks.** The player accepts a URL
+  it cannot play and then sits at `IDLE` without erroring, so `play-url` and `stations --play` wait
+  for the room to reach `PLAYING` before saying anything. Three outcomes, and they are worded apart:
+  - `Media Room — X` means it is playing. Believe it.
+  - `Media Room — X (starting)` means it was still buffering when the wait ran out. Not a failure -
+    re-check with `x2rock now` before deciding anything.
+  - a `stream_did_not_play` error, exit non-zero, means the room is still idle. **Try the next
+    result**; do not report success and do not conclude radio is broken. The room is fine.
+
+  A good station costs about four seconds of waiting and a dead one about ten. `--no-wait` skips
+  the check and returns in milliseconds, but then the confirmation means nothing - it reports
+  `"started": "starting"` and you own the verifying.
 - **A null `stream_info` is normal, not a failure.** Many stations send no ICY metadata: `.977
   Country` plays perfectly and never names a track, so `title` is the station and `stream_info` is
   `null`. Others take a few seconds to send the first one, so a null immediately after starting
@@ -357,8 +365,9 @@ $ x2rock -r "Media Room" now
 PLAYING  .977 Country
 ```
 
-`PLAYING` is the confirmation - without it, assume nothing and try `--play 2`. Then offer the
-neighbours rather than stopping: `--tag "classic country"`, `--tag bluegrass`,
+The `--play` line only prints after the room reaches `PLAYING`, so it *is* the confirmation - a
+dead stream errors with `stream_did_not_play` instead, and the answer to that is `--play 2`. Then
+offer the neighbours rather than stopping: `--tag "classic country"`, `--tag bluegrass`,
 `--tag "country pop"`, or `--country US --tag country` for American stations specifically.
 
 **"Turn it down everywhere."** One call, no room names to derive:
@@ -384,6 +393,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `needs_link` | the music service needs an account | `x2rock link <service>` |
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
+| `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

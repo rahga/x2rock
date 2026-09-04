@@ -14,6 +14,7 @@ mod stations;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -298,6 +299,10 @@ enum Command {
         /// Play the Nth result, 1-based, in --room.
         #[arg(long)]
         play: Option<usize>,
+        /// With `--play`, return as soon as the player takes the URL instead
+        /// of waiting to see whether it plays.
+        #[arg(long)]
+        no_wait: bool,
         #[arg(long)]
         json: bool,
     },
@@ -320,10 +325,16 @@ enum Command {
         /// the most recognisable part of a stream URL.
         #[arg(long)]
         title: Option<String>,
+        /// Return as soon as the player takes the URL, without waiting to see
+        /// whether it plays. Faster, and dishonest by design - for scripts that
+        /// will check for themselves.
+        #[arg(long)]
+        no_wait: bool,
         /// Unlike the other play commands this one takes `--json`, because its
-        /// one refusal is about the *argument*: `bad_stream_url` is a code a
-        /// caller can act on, and a code that only ever prints as prose is a
-        /// contract with nobody on the other end.
+        /// refusals are about the *argument* and the *stream*:
+        /// `bad_stream_url` and `stream_did_not_play` are codes a caller can
+        /// act on, and a code that only ever prints as prose is a contract
+        /// with nobody on the other end.
         #[arg(long)]
         json: bool,
     },
@@ -1591,8 +1602,74 @@ async fn stream_item(
     title: &str,
 ) -> Result<()> {
     let uri = sonos::smapi::media_uri(service, token, id).await?;
-    let room_name = stream_url(session, room, &uri, title, Some(service)).await?;
-    println!("{room_name} — {title} on {}", service.name);
+    // **Deliberately does not wait**, unlike `play-url` and `stations`. This is
+    // the path the bar widget takes through `play-item`, where up to ten
+    // seconds before the button responds would be a worse bug than the one
+    // being fixed - and the URL here was resolved by the service that owns the
+    // content, so the silent failure is rare rather than routine. Revisit if
+    // that turns out to be wrong; the capability is one argument away.
+    let (room_name, started) =
+        stream_url(session, room, &uri, title, Some(service), Duration::ZERO).await?;
+    report_started(&room_name, title, Some(&service.name), started)
+}
+
+/// How long to wait for a loaded stream to actually reach `PLAYING`.
+///
+/// Measured rather than picked: a stream sits in `TRANSITIONING`/`BUFFERING`
+/// for several seconds first - about four for SomaFM over https, longer for
+/// others - so anything under five would report a working station as broken.
+/// Ten is comfortably past that. Only a *failure* spends the whole budget; the
+/// happy path returns the moment it sees `PLAYING`.
+const STREAM_START: Duration = Duration::from_secs(10);
+
+/// How often to ask. Cheap - it is one Control API call to a player on the LAN.
+const STREAM_POLL: Duration = Duration::from_millis(500);
+
+/// What became of a stream after the player accepted it.
+///
+/// **Three outcomes, because there are three.** `loadStreamUrl` returning
+/// success means only that the URL was taken, so collapsing this to
+/// worked/failed would have to guess which of the other two a buffering room
+/// is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Started {
+    /// Reached `PLAYING`. Real sound.
+    Playing,
+    /// Still buffering when the wait ran out. **Not a failure** - a slow
+    /// stream on its way to playing looks exactly like this, and calling it
+    /// broken would be the same lie in the other direction.
+    Starting,
+    /// Idle or stopped at the deadline. This is the silent failure: the player
+    /// took a URL it cannot play and said nothing about it.
+    Silent,
+}
+
+/// One wording for the three outcomes, shared by every caller that starts a
+/// stream so they cannot describe the same result differently.
+///
+/// `Silent` is an error rather than a warning: the caller asked for sound and
+/// there is none, and an agent driving this needs a non-zero exit and a code to
+/// branch on rather than a cheerful line it has to go and disprove. No `fix` -
+/// nothing here can mint a stream that plays.
+fn report_started(room: &str, title: &str, on: Option<&str>, started: Started) -> Result<()> {
+    let on = on.map(|svc| format!(" on {svc}")).unwrap_or_default();
+    match started {
+        Started::Playing => println!("{room} — {title}{on}"),
+        Started::Starting => println!("{room} — {title}{on} (starting)"),
+        Started::Silent => {
+            return Err(hint::Hint::new(
+                format!(
+                    "{room} took {title:?} and is still idle {}s later. The player accepts a \
+                     stream URL it cannot play without complaining, so this stream most likely \
+                     does not work - nothing is wrong with the room. Try another.",
+                    STREAM_START.as_secs()
+                ),
+                "stream_did_not_play",
+                None,
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -1616,7 +1693,8 @@ async fn stream_url(
     url: &str,
     title: &str,
     service: Option<&sonos::smapi::Service>,
-) -> Result<String> {
+    wait: Duration,
+) -> Result<(String, Started)> {
     let target = session::target(&session.groups, room)?;
     let coordinator = session::coordinator(session, &target).await?;
 
@@ -1656,7 +1734,44 @@ async fn stream_url(
             }),
         )
         .await?;
-    Ok(target.name.clone())
+
+    // **The load succeeding is not the stream playing.** `loadStreamUrl`
+    // accepts a URL it cannot play and then leaves the room idle without ever
+    // erroring, so a confirmation printed here would be a guess. The same
+    // reasoning as `use_tv_input`, which waits and then goes and looks: a
+    // lost - or in this case meaningless - answer is checked rather than
+    // believed.
+    if wait.is_zero() {
+        return Ok((target.name.clone(), Started::Starting));
+    }
+
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut last = None;
+    loop {
+        // A failed poll is not evidence about the stream - it is evidence
+        // about the poll. Keep asking until the deadline and let the last
+        // reading that did arrive decide.
+        if let Ok(status) = coordinator.playback_status(&target.group_id).await {
+            match status.state() {
+                Some("PLAYING") => return Ok((target.name.clone(), Started::Playing)),
+                Some(state) => last = Some(state.to_string()),
+                None => {}
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(STREAM_POLL).await;
+    }
+
+    // Decided on the *last* reading rather than the first: a room is briefly
+    // IDLE between taking the URL and starting to buffer, so an early look
+    // would condemn every stream.
+    let started = match last.as_deref() {
+        Some("IDLE") | Some("STOPPED") | None => Started::Silent,
+        Some(_) => Started::Starting,
+    };
+    Ok((target.name.clone(), started))
 }
 
 /// `x2rock stations`: search the radio directory, and optionally play a hit.
@@ -1674,6 +1789,7 @@ async fn run_stations(
     country: Option<&str>,
     limit: u32,
     play: Option<usize>,
+    no_wait: bool,
     json: bool,
 ) -> Result<()> {
     let found = stations::search(query, tag, country, limit).await?;
@@ -1693,10 +1809,24 @@ async fn run_stations(
             })?;
         let mut state = State::load()?;
         let session = session::connect(ip, &mut state).await?;
-        let room_name =
-            stream_url(&session, room, &station.url_resolved, &station.name, None).await?;
-        println!("{room_name} — {}", station.name);
-        return Ok(());
+        let wait = if no_wait {
+            Duration::ZERO
+        } else {
+            STREAM_START
+        };
+        // A directory row is a stranger's URL and the directory's own liveness
+        // check is stale, so this is the one place the silent failure is
+        // routine rather than exotic. That is why waiting is the default here.
+        let (room_name, started) = stream_url(
+            &session,
+            room,
+            &station.url_resolved,
+            &station.name,
+            None,
+            wait,
+        )
+        .await?;
+        return report_started(&room_name, &station.name, None, started);
     }
 
     if json {
@@ -1799,25 +1929,40 @@ async fn run_play_url(
     room: Option<&str>,
     url: &str,
     title: Option<&str>,
+    no_wait: bool,
     json: bool,
 ) -> Result<()> {
     let name = stream_display_name(url, title)?;
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state).await?;
-    let room_name = stream_url(&session, room, url, &name, None).await?;
+    let wait = if no_wait {
+        Duration::ZERO
+    } else {
+        STREAM_START
+    };
+    let (room_name, started) = stream_url(&session, room, url, &name, None, wait).await?;
     if json {
-        // No `stream_info` here on purpose: the player has not read the
-        // station's metadata yet at this instant - it arrives a few seconds
-        // in - so reporting it would report null and mean nothing. `x2rock
-        // now --json` is where to read it.
+        // `Silent` still goes through `report_started`, which turns it into a
+        // hinted error - so the JSON failure shape is the standard
+        // `{error, code, fix}` rather than a second invented one.
+        if started == Started::Silent {
+            return report_started(&room_name, &name, None, started);
+        }
+        // No `stream_info` here on purpose: the player has often not read the
+        // station's metadata yet at this instant, so reporting it would report
+        // null and mean nothing. `x2rock now --json` is where to read it.
         println!(
             "{}",
-            serde_json::json!({ "room": room_name, "title": name, "url": url })
+            serde_json::json!({
+                "room": room_name,
+                "title": name,
+                "url": url,
+                "started": if started == Started::Playing { "playing" } else { "starting" },
+            })
         );
-    } else {
-        println!("{room_name} — {name}");
+        return Ok(());
     }
-    Ok(())
+    report_started(&room_name, &name, None, started)
 }
 
 /// `x2rock play-item`: play a hit whose id is already known.
@@ -3318,6 +3463,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref country,
             limit,
             play,
+            no_wait,
             json,
         } => {
             return run_stations(
@@ -3328,6 +3474,7 @@ async fn run(cli: Cli) -> Result<()> {
                 country.as_deref(),
                 limit,
                 play,
+                no_wait,
                 json,
             )
             .await;
@@ -3335,9 +3482,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::PlayUrl {
             ref url,
             ref title,
+            no_wait,
             json,
         } => {
-            return run_play_url(cli.ip, room, url, title.as_deref(), json).await;
+            return run_play_url(cli.ip, room, url, title.as_deref(), no_wait, json).await;
         }
         Command::QueueItem {
             ref service,
@@ -4727,6 +4875,30 @@ mod tests {
         )
         .unwrap();
         (status, meta)
+    }
+
+    #[test]
+    fn the_three_stream_outcomes_are_told_apart() {
+        // Playing and Starting are both successes - a stream still buffering
+        // when the wait ran out has not failed, and must not be reported as
+        // though it had.
+        assert!(report_started("Media Room", "SomaFM", None, Started::Playing).is_ok());
+        assert!(report_started("Media Room", "Jazz", Some("TuneIn"), Started::Starting).is_ok());
+
+        // Silent is the one that used to print a cheerful line. It is an error,
+        // it carries a code to branch on, and it names the stream.
+        let err = report_started("Media Room", ".977 Country", None, Started::Silent).unwrap_err();
+        assert_eq!(hint::of(&err).0, "stream_did_not_play");
+        assert!(
+            hint::of(&err).1.is_none(),
+            "no fix: nothing here can mint a stream that plays"
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains(".977 Country"), "{text}");
+        assert!(
+            text.contains("nothing is wrong with the room"),
+            "the room is not the fault and the message should say so: {text}"
+        );
     }
 
     #[test]
