@@ -4484,6 +4484,29 @@ work at low listening levels, which is exactly where this household listens - th
 was whether a room could go quieter than volume 1. It cannot, in Sonos steps; turning loudness off
 is the control that actually changes what volume 1 sounds like.
 
+### What `eq` does *not* cover, and the surface still unread
+
+`RenderingControl:1` publishes more than the three tone controls, and none of the rest is wired up:
+
+- **`GetRoomCalibrationStatus` / `SetRoomCalibrationStatus`** - TruePlay. This is a *separate*
+  mechanism from bass/treble/loudness: the iPhone app measures a room and stores a per-speaker
+  correction curve, which the speaker applies underneath whatever tone settings are set. So
+  `x2rock eq` can report a room as flat while TruePlay is reshaping it, and turning loudness off
+  does not touch it. Owner's note (2026-09-04): TruePlay is set in much of the five-room home but
+  believed unset on the standalone Media Room - **yet Media Room answers
+  `RoomCalibrationEnabled=1`, `RoomCalibrationAvailable=1`**. Those two booleans are the whole of
+  the reply, so they cannot distinguish "a calibration is applied" from "the toggle is on and
+  nothing was ever measured". Unresolved, and worth settling before `eq` claims to describe a
+  room's sound.
+- **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
+  speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
+  not a soundbar (`has_tv` false), so the types it would answer for are unknown.
+- **`ResetBasicEQ` / `ResetExtEQ`** - the app's "Reset" button, for the two tiers respectively.
+
+None of this is reachable from the office LAN in the interesting cases: the calibrated rooms and
+the soundbar are in the other household, which is why the question stays open rather than being
+probed. See "x2rock households" - only Media Room answers here.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
