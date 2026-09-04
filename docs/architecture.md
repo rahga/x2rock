@@ -4737,6 +4737,33 @@ played the chime at the alarm's volume - and four things came out of that which 
   prints the household's own clock on stderr, and says outright that times are UTC when no timezone
   is set.
 
+### The timezone table, and the sign that is backwards (settled 2026-09-04)
+
+The household's timezone *is* settable over the LAN - `SetTimeZone(Index, AutoAdjustDst)` - so the
+UTC problem above was fixable from here rather than needing the app. Finding the right index took a
+wrong turn worth recording, because the obvious reading of the table is inverted.
+
+`GetTimeZoneRule(Index)` answers with a hex string, e.g. `01680b000102000003000202ffc4`:
+
+- **The first four hex digits are a signed 16-bit offset in minutes, POSIX-style: positive is
+  *west* of Greenwich.** So `0168` (+360) is **UTC-6** and `fe98` (-360) is **UTC+6**. Reading it as
+  a plain UTC offset gets every zone backwards. That was not a theory: index 50 decodes as `fe98`,
+  was picked as "UTC-06:00", and setting it moved the household clock from 14:49 UTC to 20:49 -
+  twelve hours the wrong way. The clock is what settled it.
+- **The next twenty digits are the DST rule**, or zeros for none. `0b000102000003000202` reads as
+  end in month 11 week 1 Sunday 02:00, start in month 03 week 2 Sunday 02:00 - the current US rule.
+- **Indices ascend eastward**: index 0 is UTC-12, index 25 is UTC+0, index 72 is UTC+12.
+- **Several indices share an offset and the DST rule is what separates them.** UTC-6 appears at 8,
+  9, 10 and 11; only **9** carries the US rule, which makes it America/Chicago, while the others are
+  the non-observing zones at the same offset. Likewise 13 and 14 are US Eastern.
+
+So: **index 9, `AutoAdjustDst=1`** for Central Time. Verified by reading the clock back -
+`CurrentUTCTime` 14:50:26, `CurrentLocalTime` 09:50:26, and the machine agreeing to the second.
+
+This household ran with `Index -1` until then, which is why every alarm it had was on UTC. There is
+no x2rock command for this yet; it was set with a direct SOAP call, and whether it deserves one
+depends on whether a second household ever turns up unset.
+
 ## How good the serial proxy actually is (measured 2026-09-04)
 
 `accounts --household` reports the account serials named by the household's favorites and queue,
