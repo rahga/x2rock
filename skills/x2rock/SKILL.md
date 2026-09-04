@@ -123,8 +123,11 @@ the household's services", and never tell a user an account is missing on this b
 **`update` reads firmware and never applies it.** It reports each speaker's installed version, the
 version being offered and whether anything is pending - `up_to_date` comes from `download_bytes`
 being 0 rather than from comparing version strings, because a current player is offered its own
-version back. **x2rock cannot install an update and must not claim to**: that reboots speakers, and
-the Sonos app gates it behind a dialog warning against unplugging anything. Point a user at the app.
+version back. **x2rock will never install an update and must not claim it might**: that reboots
+speakers, and the Sonos app gates it behind a dialog warning against unplugging anything - a warning
+no command line carries. This is a permanent decision rather than a missing feature, so do not offer
+to find a way round it and do not suggest `raw`, which speaks the Control API and cannot reach a
+UPnP action anyway. Point the user at the Sonos app.
 
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
