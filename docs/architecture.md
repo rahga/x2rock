@@ -1095,8 +1095,11 @@ What has to be settled first, in order:
 1. Does an enqueued service track actually **play**? Cheap, needs one queue add and a `play 2`.
 2. Can a **synthesized** `EnqueuedURIMetaData` restore the titles, given there is no `r:resMD` to
    copy? This is the one that decides whether the feature is usable or merely possible.
-3. Does `createSession` with `accountId: "sn_3"` plus `loadCloudQueue` work as an alternative that
-   sidesteps the queue entirely — at the cost of x2rock serving HTTP the players can reach?
+3. ~~Does `createSession` with `accountId: "sn_3"` plus `loadCloudQueue` work as an alternative that
+   sidesteps the queue entirely — at the cost of x2rock serving HTTP the players can reach?~~
+   **Closed 2026-09-05: cloud queue is declined outright** - x2rock will not serve HTTP the players
+   reach inbound. See "`loadCloudQueue` is a permanent no". This leaves items 1 and 2, the
+   UPnP-enqueue path, as the only routes considered.
 
 
 ## `FV:2` carries shortcuts; `getFavorites` does not (settled 2026-08-31)
@@ -2630,11 +2633,30 @@ give x2rock the ability to play an arbitrary stream URL in any room — the thin
 and `favorite` can only approximate. Worth doing before search, not after, because it is the half
 of "find something and play it" that has no open questions in it.
 
-`loadCloudQueue` is the larger version and needs x2rock to serve HTTP the player can reach, which
-the firewall section makes awkward. Not now.
-
 One gap this exposed in `x2rock raw`: session commands are addressed by `sessionId`, which
 `--scope` has no case for. Add `--session <id>` when the first session command is written for real.
+
+### `loadCloudQueue` is a permanent no, not a backlog item (decided 2026-09-05)
+
+Earlier this was "not now". It is now "not ever", and the reason is architectural rather than a
+matter of effort. `loadCloudQueue` requires the player to fetch its track list from an HTTP server
+**x2rock hosts and the player reaches inbound**, and to keep fetching as the queue advances. That
+inverts the one property every other capability here is built on: x2rock is a client - one outbound
+connection, zero inbound, working behind Omarchy's default-deny ufw (see "Firewall"). Cloud queue
+would make it a *server*, and a long-lived, stateful one that only the daemon could host, listening
+on a port the platform blocks inbound by default - the same wall UPnP GENA eventing runs into.
+
+**x2rock will not become a queue server.** That is the line. The cost is not the code; it is the
+category change and the firewall hole the whole design exists to avoid, bought for a capability the
+existing pieces already cover the everyday shape of: `loadStreamUrl` plays an arbitrary stream in
+any room, `audioClip` overlays a clip, `favorite`/`playlist` drive the household's own queue. What
+cloud queue would add - a multi-track queue of x2rock-chosen content, advanced by the player - is
+real but not worth inverting the architecture for, and serving *service* content that way would
+reopen the account question on top. So this is closed the way `BeginSoftwareUpdate` and Control-API
+search are closed: a decision, not a gap waiting on someone's afternoon.
+
+`createSession` + `loadStreamUrl` stay - they need no server of our own, which is exactly why they
+were the half worth building and cloud queue is the half declined.
 
 
 ## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
