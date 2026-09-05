@@ -2638,22 +2638,37 @@ One gap this exposed in `x2rock raw`: session commands are addressed by `session
 
 ### `loadCloudQueue` is a permanent no, not a backlog item (decided 2026-09-05)
 
-Earlier this was "not now". It is now "not ever", and the reason is architectural rather than a
-matter of effort. `loadCloudQueue` requires the player to fetch its track list from an HTTP server
-**x2rock hosts and the player reaches inbound**, and to keep fetching as the queue advances. That
-inverts the one property every other capability here is built on: x2rock is a client - one outbound
-connection, zero inbound, working behind Omarchy's default-deny ufw (see "Firewall"). Cloud queue
-would make it a *server*, and a long-lived, stateful one that only the daemon could host, listening
-on a port the platform blocks inbound by default - the same wall UPnP GENA eventing runs into.
+Earlier this was "not now". It is now "not ever", for two reasons, and the first one is decisive on
+its own.
 
-**x2rock will not become a queue server.** That is the line. The cost is not the code; it is the
-category change and the firewall hole the whole design exists to avoid, bought for a capability the
-existing pieces already cover the everyday shape of: `loadStreamUrl` plays an arbitrary stream in
-any room, `audioClip` overlays a clip, `favorite`/`playlist` drive the household's own queue. What
-cloud queue would add - a multi-track queue of x2rock-chosen content, advanced by the player - is
-real but not worth inverting the architecture for, and serving *service* content that way would
-reopen the account question on top. So this is closed the way `BeginSoftwareUpdate` and Control-API
-search are closed: a decision, not a gap waiting on someone's afternoon.
+**Sonos scopes the Cloud Queue API to content integrations, which x2rock is not.** The official
+docs are explicit (Cloud Queue API v2.3): "The Sonos Cloud Queue API defines the interface between
+a player and your cloud queue server. The player will make calls to your server, via this API, to
+retrieve a window of track URLs to play. **The Sonos Cloud Queue API is available for content
+integrations only.**" A content integration is a registered music-service partner with a Sonos
+developer account and a service manifest - the exact Sonos-side identity x2rock refuses to have.
+x2rock is a local *control* client, not a content source, so this API is out of scope by Sonos's
+own definition, not merely by our preference. That is the same reason `musicService:1` search and
+the sealed YouTube Music key are out of scope: they belong to the partner-integration surface, and
+x2rock lives entirely on the account-less control surface.
+
+**And even if it were offered to us, the shape is wrong.** `loadCloudQueue` requires the player to
+fetch its track list from an HTTP server **x2rock hosts and the player reaches inbound**, and to
+keep fetching as the queue advances. That inverts the one property every other capability here is
+built on: x2rock is a client - one outbound connection, zero inbound, working behind Omarchy's
+default-deny ufw (see "Firewall"). Cloud queue would make it a *server*, and a long-lived, stateful
+one that only the daemon could host, listening on a port the platform blocks inbound by default -
+the same wall UPnP GENA eventing runs into.
+
+**x2rock is not a content integration and will not become a queue server.** That is the line, and
+either half of it is enough. Were the API somehow open to us, the cost would still be the category
+change and the firewall hole the whole design exists to avoid, bought for a capability the existing
+pieces already cover the everyday shape of: `loadStreamUrl` plays an arbitrary stream in any room,
+`audioClip` overlays a clip, `favorite`/`playlist` drive the household's own queue. What cloud queue
+would add - a multi-track queue of x2rock-chosen content, advanced by the player - is real but not
+worth inverting the architecture for, and serving *service* content that way would reopen the
+account question on top. So this is closed the way `BeginSoftwareUpdate` and Control-API search are
+closed: a decision, not a gap waiting on someone's afternoon.
 
 `createSession` + `loadStreamUrl` stay - they need no server of our own, which is exactly why they
 were the half worth building and cloud queue is the half declined.
