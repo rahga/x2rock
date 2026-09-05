@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 
 use super::local::Connection;
 use super::proto::{
-    FavoritesList, GroupInfo, MetadataStatus, PlaybackStatus, PlaylistsList, Repeat, Volume,
+    FavoritesList, GroupInfo, MetadataStatus, PlaybackStatus, PlayerSettings, PlaylistsList,
+    Repeat, Volume,
 };
 
 fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
@@ -406,6 +407,23 @@ impl Connection {
         )
         .await?;
         Ok(())
+    }
+
+    /// A player's settings, read-only, over the Control API.
+    ///
+    /// `getPlayerSettings` - not `getSettings`, which wants a `userId` this
+    /// account-less model has no way to supply. Player-scoped, and the only
+    /// Control-API read of night mode and dialog enhancement, which
+    /// `playerVolume:1` does not carry. Writing them is `ERROR_NO_PERMISSION`
+    /// here, so it stays on UPnP.
+    pub async fn player_settings(&self, player_id: &str) -> Result<PlayerSettings> {
+        let body = self
+            .call(
+                on_player("settings:1", "getPlayerSettings", player_id),
+                json!({}),
+            )
+            .await?;
+        Ok(serde_json::from_value(body)?)
     }
 
     /// Play a short clip over whatever the player is doing, then hand it back.

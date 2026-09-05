@@ -690,6 +690,36 @@ pub struct Volume {
     pub fixed: bool,
 }
 
+/// The soundbar half of `settings:1 getPlayerSettings`.
+///
+/// Only the two fields x2rock reports are kept - night mode and dialog
+/// enhancement - which are the home-theatre settings the Control API exposes on
+/// the read side (writing them stays on UPnP; see the EQ section of
+/// docs/architecture.md). The block is present on every player, but its values
+/// are inert on anything that is not a soundbar, so callers read it only for a
+/// soundbar.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeTheaterOptions {
+    #[serde(default)]
+    pub night_mode: bool,
+    #[serde(default)]
+    pub enhance_dialog: bool,
+    #[serde(default)]
+    pub enhance_dialog_level: i32,
+}
+
+/// `settings:1 getPlayerSettings` - player-scoped, and answered without an
+/// account, unlike `getSettings`, which wants a `userId`. Only the home-theatre
+/// block is deserialized; the object carries more (room name, volume mode,
+/// spatial audio) that x2rock does not report - see docs/architecture.md on why
+/// spatial audio and volume mode are deliberately left out.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerSettings {
+    pub home_theater: Option<HomeTheaterOptions>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +858,27 @@ mod tests {
         assert!(radio.allows(Repeat::Off));
         assert!(!radio.allows(Repeat::All));
         assert!(!radio.allows(Repeat::One));
+    }
+
+    #[test]
+    fn player_settings_reads_the_home_theatre_block() {
+        // Trimmed from a real getPlayerSettings body, 2026-09-05: the nested
+        // homeTheater block is the only part x2rock keeps, and its camelCase
+        // fields must map through.
+        let wire = r#"{"_objectType":"playerSettings","roomName":"Living Room",
+            "volumeMode":"VARIABLE","enableSpatialAudio":true,
+            "homeTheater":{"_objectType":"homeTheaterOptions","nightMode":true,
+            "enhanceDialog":true,"enhanceDialogLevel":2,"enableTrueRoom":false}}"#;
+        let settings: PlayerSettings = serde_json::from_str(wire).unwrap();
+        let ht = settings.home_theater.expect("has a home theatre block");
+        assert!(ht.night_mode);
+        assert!(ht.enhance_dialog);
+        assert_eq!(ht.enhance_dialog_level, 2);
+
+        // A player that returns no block (or an unparseable one) is not an
+        // error - it is a non-soundbar, and the caller reports nothing for it.
+        let bare: PlayerSettings = serde_json::from_str(r#"{"roomName":"Kitchen"}"#).unwrap();
+        assert!(bare.home_theater.is_none());
     }
 
     #[test]

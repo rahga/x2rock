@@ -3516,20 +3516,46 @@ async fn apply_eq(
         || wanted_trueplay.is_some();
     let after = if changed { upnp.tone().await? } else { before };
 
+    // Night mode and dialog enhancement, read over the Control API - the one
+    // path that carries them (writing is refused there, so `eq` cannot set them
+    // and does not offer to). Soundbars only: the block is returned on every
+    // player but inert on anything without a TV input, and reporting `night off`
+    // on a One SL would imply a control it does not have. Best-effort: a tone
+    // read must not fail because this secondary read did.
+    let home_theater = if speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK") {
+        let control = if ip == session.connection.ip() {
+            session.connection.clone()
+        } else {
+            Connection::open(ip).await?
+        };
+        control
+            .player_settings(&speaker.id)
+            .await
+            .ok()
+            .and_then(|s| s.home_theater)
+    } else {
+        None
+    };
+
     if json {
-        println!(
-            "{}",
-            json!({
-                "room": speaker.name,
-                "bass": after.bass,
-                "treble": after.treble,
-                "loudness": after.loudness,
-                "trueplay": after.trueplay,
-                // Whether there is a calibration at all. `trueplay` alone
-                // cannot be read as "this room is corrected".
-                "trueplay_available": after.trueplay_available,
-            })
-        );
+        let mut out = json!({
+            "room": speaker.name,
+            "bass": after.bass,
+            "treble": after.treble,
+            "loudness": after.loudness,
+            "trueplay": after.trueplay,
+            // Whether there is a calibration at all. `trueplay` alone
+            // cannot be read as "this room is corrected".
+            "trueplay_available": after.trueplay_available,
+        });
+        // Present only for a soundbar, so their absence is "not a soundbar"
+        // rather than "off" - the same reason the prose omits them.
+        if let Some(ht) = &home_theater {
+            out["night_mode"] = json!(ht.night_mode);
+            out["dialog_enhancement"] = json!(ht.enhance_dialog);
+            out["dialog_level"] = json!(ht.enhance_dialog_level);
+        }
+        println!("{out}");
     } else {
         let word = |on: bool| if on { "on" } else { "off" };
         // "unavailable" rather than "off" when there is nothing measured: the
@@ -3543,8 +3569,22 @@ async fn apply_eq(
         } else {
             "unavailable".to_string()
         };
+        // Night mode and dialog only for a soundbar, appended so the tone line
+        // reads the same everywhere else. Dialog shows its level when enhanced,
+        // since the setting is a level and "on" alone loses it.
+        let ht = match &home_theater {
+            Some(ht) => {
+                let dialog = if ht.enhance_dialog && ht.enhance_dialog_level > 0 {
+                    format!("on ({})", ht.enhance_dialog_level)
+                } else {
+                    word(ht.enhance_dialog).to_string()
+                };
+                format!("  night {}  dialog {dialog}", word(ht.night_mode))
+            }
+            None => String::new(),
+        };
         println!(
-            "{:<24} bass {}{}  treble {}{}  loudness {}{}  trueplay {calibration}",
+            "{:<24} bass {}{}  treble {}{}  loudness {}{}  trueplay {calibration}{ht}",
             speaker.name,
             transition(&before.bass.to_string(), &after.bass.to_string()),
             after.bass,
