@@ -4810,6 +4810,16 @@ is the control that actually changes what volume 1 sounds like.
   decisive, since a set-wide measurement could still be written to each member. **Still open**, and
   it now needs either a speaker whose history is certain or a factory-reset one.
 
+  **`RoomCalibrationState` is not the disambiguator - checked and ruled out (2026-09-05).** The
+  topology carries a `RoomCalibrationState` per player with more than two values, which looked like
+  it might separate "stored" from "supported" where the two RenderingControl booleans cannot. It
+  does not: read across all eleven players, it is **1 for every room primary and standalone, 5 for
+  every bonded secondary** - all three Living Room satellites, both Bedroom surrounds, and the
+  invisible half of the Dining pair. It tracks a player's *role* in a bond, not whether a curve is
+  stored, and it does not vary between a calibrated and an uncalibrated standalone (there is only
+  the one, Kitchen, at 1). So it adds nothing to the question; the factory-reset or known-history
+  speaker is still what it takes.
+
   **Do not reach for the Kitchen One SL as the control.** It is the obvious candidate - the one
   standalone, un-bonded speaker in the household - and it is a bad one. Owner's recollection,
   offered with some uncertainty and not verifiable from the LAN, is that it **used to be half of a
@@ -4918,8 +4928,11 @@ Three things fall out of that grid, and two of them sharpen rules this file alre
   `SubCrossover` was predicted "Amp only" and does answer on a Beam — with `0`, which is consistent
   with the setting simply not applying rather than the type being absent.
 
-x2rock has no CLI door to `GetEQ`, so the probe is a shell one-liner. Sweep a room and record what
-answers:
+There is no CLI door to `GetEQ` as a generic probe, so exploring the full type list is still a
+shell one-liner - but two of the types now have a first-class home: **`NightMode` and `DialogLevel`
+are set by `eq --night on|off` / `--dialog on|off`** on a soundbar (built 2026-09-05, over `SetEQ`;
+`eq` reads them back through `getPlayerSettings`, which reflects a `SetEQ` write at once). The rest
+of the extended set stays a probe. Sweep a room and record what answers:
 
 ```sh
 for t in SubEnable SubGain SubCrossover SubPolarity SurroundEnable SurroundLevel \

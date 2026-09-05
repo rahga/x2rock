@@ -221,6 +221,14 @@ enum Command {
         /// was measured, since the stored curve describes the old one.
         #[arg(long)]
         trueplay: Option<String>,
+        /// Night mode: on or off. Soundbars only - a room with a TV input. Evens
+        /// out loud and quiet so late viewing does not wake the house.
+        #[arg(long)]
+        night: Option<String>,
+        /// Dialog / speech enhancement: on or off. Soundbars only. Lifts voices
+        /// out of the mix.
+        #[arg(long)]
+        dialog: Option<String>,
         /// The resulting `{room, bass, treble, loudness}` as JSON.
         #[arg(long)]
         json: bool,
@@ -3432,6 +3440,8 @@ struct ToneRequest {
     treble: Option<i8>,
     loudness: Option<String>,
     trueplay: Option<String>,
+    night: Option<String>,
+    dialog: Option<String>,
 }
 
 /// Bass, treble and loudness on one speaker.
@@ -3451,6 +3461,8 @@ async fn apply_eq(
         treble,
         loudness,
         trueplay,
+        night,
+        dialog,
     } = want;
     let speaker = match room {
         Some(name) => session.groups.player_named(name)?,
@@ -3487,6 +3499,20 @@ async fn apply_eq(
     };
     let wanted_loudness = on_off("loudness", loudness.as_deref())?;
     let wanted_trueplay = on_off("trueplay", trueplay.as_deref())?;
+    let wanted_night = on_off("night", night.as_deref())?;
+    let wanted_dialog = on_off("dialog", dialog.as_deref())?;
+
+    // Night mode and dialog are soundbar-only over UPnP - a non-soundbar answers
+    // SetEQ with UPnP 402. Refuse up front with the reason rather than relaying
+    // that opaque code, and only when actually setting one: reading them on a
+    // non-soundbar already just omits them.
+    let is_soundbar = speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK");
+    if (wanted_night.is_some() || wanted_dialog.is_some()) && !is_soundbar {
+        bail!(
+            "{} has no TV input, so night mode and dialog do not apply - they are soundbar settings",
+            speaker.name
+        );
+    }
 
     let before = upnp.tone().await?;
     if let Some(level) = bass {
@@ -3508,6 +3534,14 @@ async fn apply_eq(
         );
         upnp.set_trueplay(on).await?;
     }
+    // Night and dialog over UPnP SetEQ - the Control API reads them but refuses
+    // to write them. Gated to a soundbar above.
+    if let Some(on) = wanted_night {
+        upnp.set_eq("NightMode", on).await?;
+    }
+    if let Some(on) = wanted_dialog {
+        upnp.set_eq("DialogLevel", on).await?;
+    }
     // Read back rather than echo what was asked for: the setters answer with an
     // empty body, so what the speaker now holds is the only truthful report.
     let changed = bass.is_some()
@@ -3517,12 +3551,13 @@ async fn apply_eq(
     let after = if changed { upnp.tone().await? } else { before };
 
     // Night mode and dialog enhancement, read over the Control API - the one
-    // path that carries them (writing is refused there, so `eq` cannot set them
-    // and does not offer to). Soundbars only: the block is returned on every
-    // player but inert on anything without a TV input, and reporting `night off`
-    // on a One SL would imply a control it does not have. Best-effort: a tone
-    // read must not fail because this secondary read did.
-    let home_theater = if speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK") {
+    // path that carries them, and it reflects a UPnP SetEQ write immediately
+    // (verified 2026-09-05), so the read-back after a write is truthful.
+    // Soundbars only: the block is returned on every player but inert on
+    // anything without a TV input, and reporting `night off` on a One SL would
+    // imply a control it does not have. Best-effort: a tone read must not fail
+    // because this secondary read did.
+    let home_theater = if is_soundbar {
         let control = if ip == session.connection.ip() {
             session.connection.clone()
         } else {
@@ -5071,12 +5106,16 @@ async fn run(cli: Cli) -> Result<()> {
             loudness,
             json,
             trueplay,
+            night,
+            dialog,
         } => {
             let want = ToneRequest {
                 bass,
                 treble,
                 loudness,
                 trueplay,
+                night,
+                dialog,
             };
             apply_eq(&session, &target, room, want, json).await?
         }
@@ -5410,6 +5449,19 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn eq_takes_the_soundbar_night_and_dialog_flags() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "x2rock", "-r", "Guest TV", "eq", "--night", "on", "--dialog", "off",
+        ])
+        .expect("--night/--dialog are valid eq flags");
+        assert!(matches!(
+            cli.command,
+            Command::Eq { night: Some(ref n), dialog: Some(ref d), .. } if n == "on" && d == "off"
+        ));
     }
 
     #[test]

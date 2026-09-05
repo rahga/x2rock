@@ -226,13 +226,14 @@ reads on with nothing measured behind it. Turning it **on** when nothing is avai
 rather than silently accepted. Worth knowing that a speaker which has moved rooms since it was
 measured is applying a curve for the room it used to be in.
 
-**On a soundbar, `eq` also reports night mode and dialog enhancement** - `night_mode`,
-`dialog_enhancement` and `dialog_level` in `--json`, `night` and `dialog` in the prose line. These
-are **read-only here**: they come over the Control API (`settings:1 getPlayerSettings`), which is
-the only path that carries them, but that path refuses to *write* them, so `eq` shows them and
-cannot set them. They appear only for a room with a TV input; a non-soundbar omits them entirely
-(their absence means "not a soundbar", not "off"). So `eq` answers "is night mode on in the living
-room?" but not "turn it on" - there is no command for that yet.
+**On a soundbar, `eq` also reads and sets night mode and dialog enhancement.** They show as
+`night_mode`, `dialog_enhancement` and `dialog_level` in `--json`, and `night` / `dialog` in the
+prose line; `-r "Living Room" eq --night on` and `--dialog on|off` set them. Reads come over the
+Control API (`settings:1 getPlayerSettings`) and writes go over UPnP `SetEQ` - the Control API
+carries these but refuses to write them, so the two halves use different transports, which agree.
+Both are on/off here. They apply **only to a room with a TV input**: a non-soundbar omits them from
+the read and *refuses* `--night`/`--dialog` with a clear message rather than an opaque UPnP error.
+So `eq` both answers "is night mode on in the living room?" and turns it on.
 
 `group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
 topology takes a second or two to settle — re-read `status` rather than assuming. These are
@@ -260,7 +261,7 @@ see "Ask before you act".
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off]` |
-| Tone: bass, treble, loudness, TruePlay (+ night/dialog read-only on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |
+| Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |

@@ -710,6 +710,25 @@ impl Upnp {
         Ok(())
     }
 
+    /// One of the extended-EQ toggles, over `SetEQ` - `NightMode` and
+    /// `DialogLevel`, the soundbar settings the Control API reads but refuses to
+    /// write (see docs/architecture.md). Boolean on the hardware here (0/1). A
+    /// soundbar accepts it; a non-soundbar answers UPnP 402, so callers gate on
+    /// the TV-input capability first and this is the write once that holds.
+    pub async fn set_eq(&self, eq_type: &str, on: bool) -> Result<()> {
+        self.soap(
+            Service::RenderingControl,
+            "SetEQ",
+            &[
+                ("InstanceID", "0"),
+                ("EQType", eq_type),
+                ("DesiredValue", if on { "1" } else { "0" }),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// One HTTP/1.1 POST, returning `(status, body)`.
     async fn post(&self, path: &str, soap_action: &str, body: &str) -> Result<(u16, String)> {
         let endpoint = http::Endpoint::Lan {
