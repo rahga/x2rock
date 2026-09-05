@@ -626,31 +626,41 @@ systemctl --user daemon-reload && systemctl --user restart x2rock.service
 
 ## Tested devices
 
-Everything here was developed against these, on one household:
+Everything here was developed against these — one household, nine players in
+five rooms (re-read off the speakers themselves 2026-09-05):
 
 | Device | Firmware | Notes |
 |---|---|---|
-| Sonos Beam ×3 | 95.1-78010 | TV input and the HDMI audio format were verified on these |
-| Sonos One SL | 95.1-78010 | the original test speaker |
-| IKEA SYMFONISK Bookshelf | 86.7-77050 | a third-party Sonos player, behaving identically on markedly older firmware |
+| Sonos Beam (S14) ×3 | 96.1-79270 | TV input and the HDMI audio format were verified on these. First-generation Beam, so no Atmos |
+| Sonos One SL (S22) ×3 | 96.1-79270 | one standalone, two bonded as surrounds |
+| Sonos Play:1 (S12) ×2 | 86.8-78270 | bonded as surrounds |
+| Sonos Sub | 86.8-78270 | bonded into the 5.1 room |
+| IKEA SYMFONISK Bookshelf (S21) ×2 | 86.8-78270 | a third-party Sonos player behaving identically, bonded as a stereo pair |
+
+Three of the five rooms are bonded sets: a 5.1 home theatre (Beam + Sub + two
+surrounds), a 5.0 one (Beam + two surrounds), and a stereo pair. Volume and tone
+reach every member of a bond without x2rock doing anything special. Note the
+firmware split is by hardware generation rather than by vendor — Sub, Play:1 and
+SYMFONISK all sit on the older line, and one room runs both at once.
 
 Reports from anything else are welcome — open an issue. Two would be especially
 useful, because they are the places the code is written for a case it has never
 actually met:
 
-- **An Arc, Arc Ultra, or anything doing Atmos.** The audio-format display
-  handles height channels and would show `5.1.2`, but no speaker here has ever
-  reported a height channel, so that path is untried. A soundbar that does is
-  the one report that would confirm it.
+- **An Arc, Arc Ultra, or a Beam gen 2 — anything doing Atmos.** The audio-format
+  display handles height channels and would show `5.1.2`, but every soundbar here
+  is a first-generation Beam, which has no Atmos support at all. This is a
+  hardware ceiling rather than a matter of playing the right content, so no
+  amount of testing in this household can confirm that path.
 - **A Port or an Amp**, which have real analog line-in. `playback:1 loadLineIn`
   refuses a Beam outright — "player does not have line-in" — so switching input
   goes over UPnP instead. On a Port or Amp that Control API command presumably
   does work, which would be worth knowing before anyone else designs around the
-  refusal.
+  refusal. An Amp would also settle `SubCrossover`, the one extended EQ type
+  predicted to be Amp-only.
 
-Era, Move, Roam, Sub, and the older Play:1/3/5, Playbar and Playbase are all
-untested rather than known-bad; nothing in the design expects a particular
-model.
+Era, Move, Roam, Playbar and Playbase are untested rather than known-bad, as are
+the Play:3 and Play:5; nothing in the design expects a particular model.
 
 **Sonos Ace headphones are not a target.** They are Bluetooth headphones rather
 than players on the network, and everything here starts from a speaker with an

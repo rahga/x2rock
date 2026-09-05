@@ -283,20 +283,47 @@ as reconnaissance on corporate gear.
   rest was split only as files actually got unwieldy, per the project's "no unnecessary
   abstractions" preference.
 
-## What this was actually tested on (2026-08-29)
+## What this was actually tested on (rewritten 2026-09-05 from the household itself)
 
-One household: three Sonos Beams and a One SL on firmware 95.1-78010, and an
-IKEA SYMFONISK Bookshelf on 86.7-77050. Worth recording for two reasons. The
-SYMFONISK is a third-party player and behaves identically, on firmware nearly a
-decade of version numbers behind the rest — so nothing here depends on being
-first-party or current. And every "verified" note in this file means *these*
-devices, which is a real limit on some of them.
+Read off `/status/zp`, `/xml/device_description.xml` and `GetZoneGroupState`
+rather than from memory, because the earlier version of this section was wrong
+in a way that mattered: it said "three Sonos Beams and a One SL on firmware
+95.1-78010, and an IKEA SYMFONISK Bookshelf on 86.7-77050", which undercounted
+the household and missed **every bonded set in it**. Nine players, five rooms:
+
+| Room | Players | Models | Firmware |
+|---|---|---|---|
+| Kitchen | 1 | One SL (S22) | 96.1-79270 |
+| Living Room | 4 | Beam (S14) + **Sub** + two Play:1 (S12) surrounds | 96.1 / **86.8** |
+| Bedroom | 3 | Beam (S14) + two One SL (S22) surrounds | 96.1-79270 |
+| Guest TV | 1 | Beam (S14) | 96.1-79270 |
+| Dining Room | 2 | two SYMFONISK Bookshelf (S21), **stereo pair** | 86.8-78270 |
+
+So the household has a genuine 5.1 home theatre (Living Room), a second bonded
+home-theatre set without a Sub (Bedroom), and a stereo pair (Dining Room) —
+three bonded configurations the file previously did not know existed. What
+"verified" means in this file is *these* devices, which is a real limit on some
+of them.
+
+**The firmware split is by hardware platform, not by vendor.** The previous
+version of this section read the SYMFONISK's much older version string as a
+third-party quirk. It is not: Sub, Play:1 and SYMFONISK Bookshelf all carry
+**86.8-78270**, while Beam and One SL carry **96.1-79270** — and Living Room
+runs both at once, a 96.1 Beam coordinating 86.8 satellites. The older line is a
+hardware generation, and a first-party Sub sits on it just as squarely as the
+IKEA speaker does. The useful conclusion is unchanged and now better founded:
+nothing here depends on a player being first-party or current, and a single
+*room* may not be on a single firmware.
 
 Two gaps are known and specific rather than general:
 
-- **No height channels have ever been seen.** `HomeTheaterFormat` handles them
-  and would render `5.1.2`, but no speaker here does Atmos, so that branch has
-  never run against hardware. An Arc would settle it.
+- **No height channels have ever been seen, and this household cannot ever see
+  them.** `HomeTheaterFormat` handles them and would render `5.1.2`, but all
+  three soundbars are **Beam (S14), which is the first-generation Beam and has
+  no Dolby Atmos support at all** — so this is not "no Atmos content has been
+  played yet", it is a hardware ceiling. Feeding it Atmos content cannot settle
+  the branch. An Arc, or a Beam gen 2 (S50), is required. Recorded this
+  precisely because "an Arc would settle it" read as a content problem.
 - **No player with analog line-in.** `playback:1 loadLineIn` was found to refuse
   a Beam - "player does not have line-in" - which is why TV input goes over UPnP.
   A Port or an Amp would very likely accept that same command, so the conclusion
@@ -3100,7 +3127,20 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   source looked like plain stereo to `is_surround`.
 - **With the television off it reports `streamDescription: "No Signal"` and no
   channels**, which is worth rendering as "No Signal" rather than "No Signal
-  0.0".
+  0.0". Re-confirmed 2026-09-05 on the 5.1 Living Room set, which is the first
+  time this path has run on a soundbar with a Sub and real surrounds bonded to
+  it: `x2rock now` printed `PLAYING  TV Audio  [No Signal]` and the JSON gave
+  `input_format: "No Signal"`, `surround: false`, `on_tv: true`. Bonded surround
+  hardware does not make the player invent channels while the source is dark.
+- **`pause` cannot get a soundbar back off its TV input.** `x2rock pause` on a
+  room showing TV Audio fails with `playback:1 pause failed:
+  ERROR_PLAYBACK_NO_CONTENT` - correctly, since the TV input is not content that
+  can be paused. The way back is any command that sets the transport to
+  something else. Worth knowing that this happens *before* content resolution:
+  a `favorites:1 loadFavorite` that itself failed with `ERROR_PLAYBACK_NO_CONTENT
+  ("No tracks added to queue")` still took the room off TV input and left it
+  `IDLE`. So "switch to TV and back" is not symmetrical - `x2rock tv` is one
+  command and the return trip is a different one.
 - **Ask `x2rock:onTvInput` whether a room is on TV; never `x2rock:inputFormat`.**
   The format is display text and nothing else: it is empty off the TV input, but
   it is also empty *on* it whenever the player names no codec and no channels, so
@@ -3161,6 +3201,43 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   daemon must reconnect, but one flaky portable must never tear down the whole
   household. A member `LOST` that appears to vanish is that rule working, not a
   dropped event.
+
+## Bonded sets: stereo pairs and home theatre (verified 2026-09-05)
+
+The file assumed one player per room everywhere except ad-hoc grouping, because
+the household it was written against had no bonded sets. It now has three — a
+5.1 Living Room, a 5.0 Bedroom, and a Dining Room stereo pair — and the good
+news is that **the assumption held for the wrong reason, and holds anyway**.
+
+- **Topology spells the two bonds differently.** A stereo pair is two ordinary
+  `ZoneGroupMember`s sharing a `ChannelMapSet`
+  (`RINCON_…AF74:LF,LF;RINCON_…D8DC:RF,RF`), with the second carrying
+  `Invisible="1"`. A home-theatre bond is one member carrying `HTSatChanMapSet`
+  plus nested `<Satellite>` elements, one per Sub or surround
+  (`…:LF,RF;…:SW;…:LR;…:RR`). So "is this room several speakers" has two
+  different answers depending on which kind of bond it is, and neither looks
+  like an ad-hoc group.
+- **x2rock already hides all of it correctly.** `x2rock rooms` lists five rooms
+  for nine players; satellites and the invisible pair half never appear as rooms
+  and never need to.
+- **The firmware keeps bonded members in lockstep, so x2rock does not have to.**
+  This was the open worry — whether per-room volume and tone reach one physical
+  unit or the whole bond. Measured both ways on the Dining Room pair: `x2rock eq
+  --room "Dining Room" --bass 4` moved the invisible RF half to `4` as well as
+  the visible LF coordinator, and `x2rock vol --room "Dining Room" 12` moved both
+  halves to 12. Living Room's Beam, Sub and both surrounds all read the same
+  volume. Addressing the visible player is addressing the bond; there is no
+  satellite handling to write.
+- **Satellites do not answer `GetBass` at all** - the Sub and the Play:1
+  surrounds return an empty `CurrentBass` where the pair halves return a number.
+  Tone belongs to the bond's primary, which is consistent with the app, and is
+  another reason nothing here needs a per-satellite door.
+- **A room is not necessarily on one firmware.** Living Room is a 96.1-79270
+  Beam coordinating 86.8-78270 satellites. `x2rock update` reports per *room*,
+  so it prints one line and one version for Living Room and silently speaks only
+  for the coordinator. That is a real blind spot: a satellite stuck on old
+  firmware would not show up. Not worth fixing until something depends on it, but
+  worth not being surprised by.
 
 ## Queue mutation over UPnP (verified 2026-08-29)
 
@@ -4617,6 +4694,27 @@ is the control that actually changes what volume 1 sounds like.
   the reply, so on their own they cannot distinguish "a calibration is applied" from "the toggle is
   on and nothing was ever measured".
 
+  **Swept the whole home household 2026-09-05, and it did not settle.**
+  `GetRoomCalibrationStatus` was read on all nine players - every room coordinator, both halves of
+  the Dining Room stereo pair, the Sub and all four surrounds - and *every one* answered
+  `Enabled=1, Available=1`. The experiment wanted a speaker known never to have been TruePlay'd, and
+  the sweep found no candidate.
+
+  What it does add is a thumb on the scale for **"supported"** rather than "stored": `Available=1`
+  comes back from the Sub, and from the invisible half of the stereo pair, and neither of those is a
+  thing anyone calibrates on its own - TruePlay measures a bonded set as one unit. Suggestive, not
+  decisive, since a set-wide measurement could still be written to each member. **Still open**, and
+  it now needs either a speaker whose history is certain or a factory-reset one.
+
+  **Do not reach for the Kitchen One SL as the control.** It is the obvious candidate - the one
+  standalone, un-bonded speaker in the household - and it is a bad one. Owner's recollection,
+  offered with some uncertainty and not verifiable from the LAN, is that it **used to be half of a
+  stereo pair**, whose other half is the One SL now standing alone in the office as Media Room. If
+  that is right then both of the two speakers that look like clean controls are in fact ex-pair
+  members carrying a curve measured for a bond neither is in any more, which is the same trap Media
+  Room was already recorded as. Treat a lone speaker's history as unknown unless someone remembers
+  it clearly; "it is standalone now" says nothing about what it was when it was measured.
+
   **Settled far enough to act on (2026-09-04).** `SetRoomCalibrationStatus` turned it off cleanly,
   and `RoomCalibrationAvailable` stayed `1` afterwards - so a stored curve survives being
   unapplied, and this speaker has one. Whether `Available` means "a calibration exists" or only
@@ -4678,21 +4776,43 @@ The owner's controller knowledge, for the household where this can actually be t
 and/or surrounds add tabs the standalone speaker does not have, and a **Sonos Amp** (not owned,
 untestable unless one turns up) exposes a Sub checkbox, Sub Level, Crossover Frequency and Phase
 Control in degrees. Phase in *degrees* is the interesting one, because a plain polarity flip would
-be a boolean; a range implies a numeric type. **Predicted type names, unverified** - the point of
-writing them down is to make the home session a checklist rather than a hunt:
+be a boolean; a range implies a numeric type.
 
-| Controller setting | Likely `EQType` | Expect |
-|---|---|---|
-| Sub on/off | `SubEnable` | boolean |
-| Sub level | `SubGain` | signed, answers even with no Sub |
-| Crossover frequency | `SubCrossover` | Hz, Amp only |
-| Phase control | `SubPolarity` | degrees, so possibly a range not a flip |
-| Surround on/off | `SurroundEnable` | boolean |
-| Surround level (TV) | `SurroundLevel` | signed |
-| Surround level (music) | `MusicSurroundLevel` | signed |
-| Night mode | `NightMode` | boolean, soundbar |
-| Speech enhancement | `DialogLevel` | boolean, soundbar |
-| Height channels | `HeightChannelLevel` | signed, Arc/Beam gen2 |
+**Probed at home 2026-09-05, and every predicted name was right.** All ten types were swept with
+the `GetEQ` one-liner below against three configurations: the Living Room Beam (bonded to a Sub and
+two Play:1 surrounds), the standalone Kitchen One SL, and the Dining Room SYMFONISK stereo pair.
+Not one guess had to be corrected, so the table below is now a reading rather than a prediction:
+
+| Controller setting | `EQType` | Beam + Sub + surrounds | One SL | SYMFONISK pair |
+|---|---|---|---|---|
+| Sub on/off | `SubEnable` | `1` | `1` | `1` |
+| Sub level | `SubGain` | **`5`** | `0` | `0` |
+| Crossover frequency | `SubCrossover` | `0` | `0` | `0` |
+| Phase control | `SubPolarity` | `0` | `0` | `0` |
+| Surround on/off | `SurroundEnable` | `1` | UPnP 402 | UPnP 402 |
+| Surround level (TV) | `SurroundLevel` | `0` | UPnP 402 | UPnP 402 |
+| Surround level (music) | `MusicSurroundLevel` | `0` | UPnP 402 | UPnP 402 |
+| Night mode | `NightMode` | `0` | UPnP 402 | UPnP 402 |
+| Speech enhancement | `DialogLevel` | `0` | UPnP 402 | UPnP 402 |
+| Height channels | `HeightChannelLevel` | `0` | `0` | `0` |
+
+Three things fall out of that grid, and two of them sharpen rules this file already had.
+
+- **The "answering is not capability" rule is wider than one type.** It was recorded from `SubGain`
+  alone. In fact the whole Sub family — `SubEnable`, `SubGain`, `SubCrossover`, `SubPolarity` — and
+  `HeightChannelLevel` answer on *every* speaker here, including a One SL and a SYMFONISK that can
+  have neither a Sub nor a height channel. `SubEnable` reads `1` on a speaker with no Sub at all.
+  So five of the ten types carry no capability information whatsoever.
+- **The other five are a clean discriminator.** `SurroundEnable`, `SurroundLevel`,
+  `MusicSurroundLevel`, `NightMode` and `DialogLevel` answer on the soundbar and return UPnP 402 on
+  both non-soundbars. That is a sharper result than "an EQ probe cannot detect capability": it
+  cannot for the Sub/height types, but these five separate a soundbar from a non-soundbar exactly.
+  `capabilities` off `getGroups` is still the right door because it costs no probe and already
+  distinguishes `HT_PLAYBACK`, but the EQ surface is not uniformly uninformative.
+- **`SubGain` is the one type that read a real configured value.** It answered `5` on the only room
+  with a physical Sub and `0` everywhere else. Presence proves nothing; the *value* tracked reality.
+  `SubCrossover` was predicted "Amp only" and does answer on a Beam — with `0`, which is consistent
+  with the setting simply not applying rather than the type being absent.
 
 x2rock has no CLI door to `GetEQ`, so the probe is a shell one-liner. Sweep a room and record what
 answers:
@@ -4711,9 +4831,25 @@ done
 ```
 
 Nothing is built on any of this until it answers on real hardware - the same rule the rest of this
-file follows. Two other experiments want the same trip: an **uncalibrated** speaker's
-`RoomCalibrationAvailable`, which settles what that field means, and the soundbar's `htInputFormat`
-against a surround source.
+file follows. The two other experiments that wanted the same trip both ran on 2026-09-05, and
+neither closed:
+
+- **The uncalibrated speaker's `RoomCalibrationAvailable` did not settle it, for want of an
+  uncalibrated speaker.** `GetRoomCalibrationStatus` was read on all nine players in the household
+  — every room coordinator, both halves of the stereo pair, the Sub and all four surrounds — and
+  *every one* answered `RoomCalibrationEnabled=1, RoomCalibrationAvailable=1`. The experiment
+  needed a speaker known never to have been TruePlay'd, to see whether `Available` read `0`
+  ("a curve is stored") or `1` ("this model supports one"), and no reading here is known to be that
+  speaker. What the sweep does add is a thumb on the scale for **"supported"**: `Available=1` comes
+  back from the Sub and from the invisible half of the stereo pair, and neither is a thing anyone
+  calibrates on its own — TruePlay measures a bonded set as one unit. That is suggestive, not
+  decisive, because a set-wide measurement could still be stored per device. Settling it needs the
+  owner to name a room that has definitely never been calibrated.
+- **`htInputFormat` against a surround source is blocked on hardware, not on opportunity.** See the
+  rewritten "What this was actually tested on": all three soundbars are Beam (S14), first
+  generation, with no Atmos, so the height branch is unreachable here at any content. The
+  television was off during the session, so even the 5.1 ground/LFE reading had to wait — what was
+  confirmed instead is the **No Signal** path, below.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
