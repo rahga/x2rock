@@ -106,7 +106,7 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
             // panics when more than one provider is compiled in and none has been
             // installed as the default - which is exactly this binary, since
             // tokio-tungstenite and tokio-rustls each bring their own.
-            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
             Arc::new(
                 rustls::ClientConfig::builder_with_provider(provider)
                     .with_safe_default_protocol_versions()
