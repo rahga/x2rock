@@ -2683,9 +2683,21 @@ Sent `subscribe` to each namespace at all four scopes and recorded which one the
 | `household` | `groups:1`, `favorites:1`, `playlists:1`, `musicServiceAccounts:1` |
 
 The wrong scope always answers `ERROR_MISSING_PARAMETERS` naming the key it wanted — `Missing
-groupId`, `Missing playerId`, `Missing householdId` — so the error says which scope to use. Two
-namespaces answer `ERROR_MISSING_PARAMETERS` at *every* scope: `playbackSession:1`, which wants
-`--session`, and `settings:1`, whose required parameter is still unidentified.
+groupId`, `Missing playerId`, `Missing householdId` — so the error says which scope to use.
+`playbackSession:1` answers `ERROR_MISSING_PARAMETERS` at every scope because it wants `--session`.
+
+**`settings:1`'s "unidentified required parameter" is identified now (2026-09-05), and it was the
+wrong command being probed.** The namespace is **player**-scoped. `getSettings` wants `userId` - a
+Sonos account identity x2rock does not have and will not get - so that command is closed to this
+model. But **`getPlayerSettings` needs no parameter at all and answers `success`**, returning a
+`playerSettings` object: `roomName`, `volumeMode` (VARIABLE/FIXED), `monoMode`,
+`enableSpatialAudio`, `gainTrimDB`, `volumeScalingFactor`, a bluetooth/wifi/sonosnet policy block,
+and - the surprise - an `eq` block (`bass`, `treble`, `loudness`) and a `homeTheater` block
+(`nightMode`, `enhanceDialog`, `enhanceDialogLevel`, `enableTrueRoom`). So the Control API *can*
+read tone and home-theatre state (see the EQ correction below). Writing them is a different story:
+`setPlayerSettings` exists but answers **`ERROR_NO_PERMISSION`** to this anonymous LAN connection -
+the command shape is fine, the authority is not - so configuration writes stay on UPnP.
+`setSettings` is `ERROR_UNSUPPORTED_COMMAND`.
 
 The target key lives in the **header**, so putting `groupId` in `PARAMS` does nothing; the body is
 only ever the command's own parameters. This is now in `raw --help`, with the table and five
@@ -4683,12 +4695,20 @@ Media Room showed **Loudness ticked**, bass and treble centred. The speaker agre
 answers `1` - so it has been on since the day it was unboxed, which is the factory default and not
 something anyone here chose.
 
-**The Control API cannot reach any of this.** The namespaces verified against real players are
-`playback:1`, `playbackMetadata:1`, `groupVolume:1` (group-scoped), `playerVolume:1`,
-`homeTheater:1`, `audioClip:1` (player), and `groups:1`, `favorites:1`, `playlists:1`,
-`musicServiceAccounts:1` (household). There is no EQ namespace among them, and `playerVolume:1`
-carries only volume, muted and fixed. The one door is UPnP `RenderingControl:1` on port 1400 -
-touched once before, for the TV audio format, and found not to carry that either.
+**The Control API cannot *write* any of this - but it can read it, which this section first got
+wrong (corrected 2026-09-05).** `playerVolume:1` carries only volume, muted and fixed, and there is
+no EQ *namespace*. But `settings:1 getPlayerSettings` (player-scoped, no account, no parameter -
+see "settings:1's unidentified parameter is identified now") returns an `eq` block with `bass`,
+`treble` and `loudness` and a `homeTheater` block with `nightMode`, `enhanceDialog` and
+`enhanceDialogLevel`. So the earlier flat claim "the Control API cannot reach any of this" was
+false on the read side: the tone and home-theatre state is right there. What the Control API
+cannot do is *set* them - `settings:1 setPlayerSettings` answers `ERROR_NO_PERMISSION` to an
+anonymous LAN connection - so the **write** door is still UPnP `RenderingControl:1` on port 1400
+alone, and every `SetBass`/`SetEQ`/loudness write below goes there. Reading, x2rock uses UPnP too,
+for symmetry with those writes and because it predates finding the Control API read;
+`getPlayerSettings` is the
+alternative read path, and the one that also exposes night mode and dialog, which UPnP only reaches
+through the extended `GetEQ` types.
 
 **The service publishes its own contract, so nothing here was guessed.**
 `http://<ip>:1400/xml/RenderingControl1.xml` gives the argument names and the ranges:
