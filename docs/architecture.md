@@ -3189,6 +3189,10 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
     "numHeightChannels": 0, "streamDescription": "Dolby Digital Surround" }
   ```
 
+  (A real capture, not illustrative: the Living Room 5.1 set on Dolby Digital
+  content, 2026-09-05 - see the confirmation under "The extended EQ set, and
+  what to probe at home".)
+
   So "what is the TV actually sending" needs no polling and no new subscription.
   It is also the only place this is visible: `GetPositionInfo` returns
   `NOT_IMPLEMENTED` for everything on an HT stream, `HTControl:1` is only IR and
@@ -4983,11 +4987,26 @@ neither closed:
   calibrates on its own — TruePlay measures a bonded set as one unit. That is suggestive, not
   decisive, because a set-wide measurement could still be stored per device. Settling it needs the
   owner to name a room that has definitely never been calibrated.
-- **`htInputFormat` against a surround source is blocked on hardware, not on opportunity.** See the
-  rewritten "What this was actually tested on": all three soundbars are Beam (S14), first
-  generation, with no Atmos, so the height branch is unreachable here at any content. The
-  television was off during the session, so even the 5.1 ground/LFE reading had to wait — what was
-  confirmed instead is the **No Signal** path, below.
+- **`htInputFormat` against a surround source: confirmed live 2026-09-05.** The hardware-session
+  entry above had this blocked on the television being off; with the Living Room TV on and playing
+  Dolby Digital 5.1 content, the Beam reported it end to end. Raw event:
+  `{numGroundChannels: 5, numLFEChannels: 1, numHeightChannels: 0, streamDescription: "Dolby Digital
+  Surround"}`; x2rock rendered `Dolby Digital Surround 5.1`, `surround: true`, `on_tv: true`. Three
+  things it proves on the actual 5.1 bonded set (Beam + Sub + two surrounds), not on a fixture:
+  - **The `.1` survives with a real LFE channel.** `numLFEChannels: 1` came through, so the
+    `rename_all = camelCase`-would-derive-`numLfeChannels` bug the LFE note below warns about is
+    genuinely fixed against live data - it read `5.1`, not `5.0`.
+  - **`surround` is correct** - `numGroundChannels > 2` plus LFE → `is_surround()` true.
+  - **`numHeightChannels: 0` holds even on real surround** - the Beam (S14) has no Atmos, so the
+    height branch stays zero regardless of content. That is the hardware ceiling, not a content
+    gap: nothing here can push it above 0, and an Arc or Beam gen 2 is still what a `5.1.2` reading
+    would need.
+  So the whole `HomeTheaterFormat` path - channel math, LFE rename, surround flag, summary string -
+  is now confirmed against real 5.1 hardware. The **No Signal** path (below) was already confirmed;
+  the transition itself was watched too: pulling the HDMI reads identical to a dark TV (`No Signal`,
+  `signalDetected: false`, and the Beam holds TV input), and on replug `signalDetected` flips
+  `false → true` with the format moving `No Signal → Silence 2.0 → Dolby Digital Surround 5.1` as a
+  real signal, then real audio, arrived.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
   speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
   not a soundbar (`has_tv` false), so the types it would answer for are unknown.
