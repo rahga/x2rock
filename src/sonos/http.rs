@@ -101,12 +101,9 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
             let roots = rustls::RootCertStore {
                 roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
             };
-            // The provider is named rather than taken from the process default,
-            // and it is the same one `local.rs` names. `ClientConfig::builder()`
-            // panics when more than one provider is compiled in and none has been
-            // installed as the default - which is exactly this binary, since
-            // tokio-tungstenite and tokio-rustls each bring their own.
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            // The shared provider, named rather than taken from the process
+            // default; see `sonos::crypto_provider` for why.
+            let provider = super::crypto_provider();
             Arc::new(
                 rustls::ClientConfig::builder_with_provider(provider)
                     .with_safe_default_protocol_versions()

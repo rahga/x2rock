@@ -91,7 +91,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 fn tls_connector() -> Connector {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     let config = CONFIG.get_or_init(|| {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = super::crypto_provider();
         Arc::new(
             rustls::ClientConfig::builder_with_provider(provider.clone())
                 .with_safe_default_protocol_versions()
