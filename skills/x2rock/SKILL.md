@@ -113,6 +113,14 @@ This is the highest-stakes thing to get right. When rooms are grouped:
   `x2rock -r Kitchen -r "Dining Room" vol --player`. `--player` does **not** apply to `mute` — it is
   refused always (code `unknown`), grouped or not: group mute is what people mean, and on a lone room
   plain `vol mute` already is that one speaker.
+- **`--each` sets every speaker in one group individually** — `-r "Living Room" vol 30 --each`
+  puts every grouped room at 30, flat. The plain group `vol 30` scales instead, preserving the
+  members' balance the way the Sonos app does, so `--each` is the way to *erase* that balance in one
+  call (the manual equivalent is setting the group to 0 and back up, which the flag replaces). It
+  reads the members from the current grouping, takes one group only (no `--all`, one `-r`), is
+  exclusive with `--player`, and is refused for `mute`. Distinct from `--all`, which is per-group
+  across the household, and from repeating `-r … --player`, which is the same effect but needs every
+  member named.
 - **`--all` fans over groups, not raw rooms**, so a grouped pair is moved **once**, correctly:
   `--all vol -10` takes each group down 10, not each member (a grouped Kitchen+Dining does not go
   down 20). Read "every room" as "every group". `--all` is exclusive with `-r` (clap rejects both),
@@ -235,6 +243,7 @@ see "Ask before you act".
 | Play queue track N | `x2rock play N` |
 | Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
+| Flatten a group: every member to one level | `x2rock -r <Room> vol 30 --each` |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |

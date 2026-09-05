@@ -95,6 +95,16 @@ enum Command {
         /// together and this is the balance between them.
         #[arg(long)]
         player: bool,
+        /// Every speaker in the group, each set to this level directly, rather
+        /// than through the group slider. The slider preserves the members'
+        /// balance - the same scaling the Sonos app shows - so `--each 30`
+        /// is the way to *erase* that balance, setting everyone to 30 in one
+        /// call, without the set-to-zero-then-raise the slider otherwise needs.
+        /// Reads the members from the current grouping, so it always covers
+        /// exactly who is grouped now. Exclusive with `--player` (one speaker
+        /// vs every speaker), and not for mute - group mute is what mute means.
+        #[arg(long, conflicts_with = "player")]
+        each: bool,
         /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
         /// or for confirming a change.
         #[arg(long)]
@@ -3618,6 +3628,7 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
                 change,
                 player: one_room,
                 json,
+                ..
             } => {
                 apply_vol(
                     session,
@@ -4649,6 +4660,55 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // `vol --each` sets every speaker in one group individually - the flatten
+    // the group slider cannot do, because the slider preserves the members'
+    // balance to match the Sonos app. It desugars to fanning `--player` over
+    // the group's own members, read from the current topology, so all the
+    // per-player machinery (per-speaker connection, clamp, fixed-volume
+    // refusal, json) is reused rather than duplicated.
+    if let Command::Vol {
+        each: true,
+        change,
+        json,
+        ..
+    } = &cli.command
+    {
+        // One group only: --each already means "every member here", so
+        // spreading it over --all's groups or several --room is a second axis
+        // that would only muddy what it does.
+        ensure!(!cli.all, "--each acts on one group; drop --all");
+        ensure!(
+            cli.room.len() <= 1,
+            "--each acts on one group; name a single --room"
+        );
+        // Refused up front, not left to surface per member as a confusing
+        // "--player does not apply to mute": muting each speaker is not what
+        // --each is for, and group mute is what mute means.
+        if matches!(
+            change.as_deref().map(parse_volume).transpose()?,
+            Some(VolumeChange::Mute(_))
+        ) {
+            bail!("--each does not apply to mute; mute is group-wide");
+        }
+        let target = session::target(&session.groups, room)?;
+        let members: Vec<String> = session
+            .groups
+            .group_of(&target.coordinator_id)
+            .map(|g| session.groups.members(g))
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        // Each member addressed as its own speaker: `--player`, not the group.
+        let per_member = Command::Vol {
+            change: change.clone(),
+            player: true,
+            each: false,
+            json: *json,
+        };
+        return fan_out(&session, &members, &per_member).await;
+    }
+
     // --all fans a per-room command across every group, resolved by each
     // group's coordinator name (a real room name; the composite group name is
     // not addressable). Already vetted against fans_out at the top of run().
@@ -4984,6 +5044,7 @@ async fn run(cli: Cli) -> Result<()> {
             change,
             player: one_room,
             json,
+            ..
         } => apply_vol(&session, &target, room, change, one_room, json).await?,
         Command::Rooms { .. }
         | Command::Status { .. }
@@ -5180,6 +5241,35 @@ mod tests {
     }
 
     #[test]
+    fn each_parses_and_will_not_pair_with_player() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["x2rock", "-r", "Living Room", "vol", "30", "--each"])
+            .expect("--each is a valid flag");
+        assert!(matches!(
+            cli.command,
+            Command::Vol {
+                each: true,
+                player: false,
+                ..
+            }
+        ));
+        // One speaker vs every speaker: clap refuses the pair rather than
+        // letting the two per-speaker modes both claim the command.
+        assert!(
+            Cli::try_parse_from([
+                "x2rock",
+                "-r",
+                "Living Room",
+                "vol",
+                "30",
+                "--each",
+                "--player"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn only_the_per_room_commands_fan_out() {
         // These act on one room's state, so several --room fan them out.
         assert!(fans_out(&Command::Pause));
@@ -5189,6 +5279,7 @@ mod tests {
         assert!(fans_out(&Command::Vol {
             change: None,
             player: false,
+            each: false,
             json: false
         }));
         assert!(fans_out(&Command::Repeat {

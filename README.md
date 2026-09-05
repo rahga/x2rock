@@ -133,6 +133,7 @@ x2rock vol 30            # set it
 x2rock vol +5            # nudge it
 x2rock vol mute | unmute
 x2rock vol 30 --player   # this room's own speaker, not the group it plays with
+x2rock -r "Living Room" vol 30 --each  # every speaker in the group to 30, flat (undo group scaling)
 x2rock --all vol -10     # every room at once (per-room commands only)
 x2rock repeat            # show repeat mode  (--json for {room, repeat})
 x2rock repeat all | one | off
