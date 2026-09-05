@@ -155,9 +155,9 @@ Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`,
   so a Sub or surround left behind by an update is invisible to `x2rock update`, which walks rooms
   and reports only the coordinator. If someone asks why a room sounds wrong after an update, this
   is the command that can see it.
-- **`serial` and `ip` identify hardware.** Before putting this output anywhere public - a bug
-  report, an issue, a paste site - use `--redact`, which masks both. The household id is never
-  printed either way.
+- **`serial`, `ip` and `uuid` identify hardware** - a RINCON uuid embeds the speaker's MAC
+  verbatim. Before putting this output anywhere public - a bug report, an issue, a paste site -
+  use `--redact`, which masks all three. The household id is never printed either way.
 
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
@@ -357,11 +357,12 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
     re-check with `x2rock now` before deciding anything.
   - a `stream_did_not_play` error, exit non-zero, means the room is still idle. **Try the next
     result**; do not report success and do not conclude radio is broken. The room is fine.
-  - a `stream_unverified` error means the room's state could not be read at all, so whether it is
+  - a `stream_unverified` error means the room's state could not be established, so whether it is
     playing is unknown. **Do not try another station** - this is not a verdict on the stream, and
-    swapping it wastes another ten seconds. Find out why the room is not answering; the message
-    carries what the last attempt said. (Distinct from a plain `no_player`, which means no speaker
-    answered *before* anything was loaded.)
+    swapping it wastes another ten seconds. The message says which of two things happened: the room
+    never answered (find out why before anything else), or it answered every poll without naming a
+    state (the room is reachable - just re-check with `x2rock now`). (Distinct from a plain
+    `no_player`, which means no speaker answered *before* anything was loaded.)
 
   With `--json`, both commands emit `{room, title, url, started}` on success (`started` is
   `"playing"` or `"starting"`) and the standard `{error, code, fix}` on either failure. A good
@@ -437,7 +438,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
-| `stream_unverified` | the stream was loaded but the room's state could not be read for 10s — unknown, and *not* a verdict on the stream | **null** (find out why the room is silent; do *not* try another stream) |
+| `stream_unverified` | the stream was loaded but the room's state could not be established for 10s — unknown, and *not* a verdict on the stream | **null** (the message says whether the room answered; act on that, do *not* try another stream) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

@@ -105,9 +105,8 @@ Two things bite here, both quietly:
 - **`apt`'s Rust is too old.** x2rock needs 1.88; no current Ubuntu packages it — 24.04 LTS is on
   1.75, and the interim releases are behind as well, so `apt install cargo` is a dead end rather
   than a maybe. Cargo at least refuses in one plain line naming the version it wants. Install a
-  current toolchain from [rustup.rs](https://rustup.rs) and build again — and do not answer the
-  refusal by editing `rust-version` or `edition` down in `Cargo.toml`, which replaces it with a
-  page of syntax errors.
+  current toolchain from [rustup.rs](https://rustup.rs) and build again. The fix is only ever a
+  newer toolchain, never editing `Cargo.toml` down — [Requirements](#requirements) says why.
 - **`~/.local/bin` may not be on `PATH` yet.** Ubuntu's `.profile` adds it only if it already
   exists when the shell starts, so the `install` above creates it too late for the session you ran
   it in. `x2rock` is then "not found", and the daemon and the service both fail with nothing

@@ -188,13 +188,15 @@ impl SystemPlayer {
 /// diagnostic page and no second call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
-    /// `Sonos One SL`, `Sonos Beam`, `SYMFONISK Bookshelf`.
+    /// `Sonos One SL`, `Sonos Beam`, `SYMFONISK Bookshelf`. The document also
+    /// carries a short `displayName` (`One SL`, `Beam`) and a `roomName`, and
+    /// neither is kept: the apps themselves mix the two model spellings
+    /// per-model, so one consistent full name beats copying that, and the room
+    /// is already on [`SystemPlayer`], where the topology - not the player's
+    /// cached self-description - is the authority.
     pub model_name: String,
-    /// The short form: `One SL`, `Beam`, `Bookshelf`.
-    pub display_name: String,
     /// `S22`, `S14`, `S21`.
     pub model_number: String,
-    pub room: String,
     /// MAC-derived, with the app's trailing check character: `48-A6-…-38:E`.
     pub serial: String,
     /// `2` for an S2 household.
@@ -427,9 +429,7 @@ impl Upnp {
         let field = |tag: &str| text_of(&doc, tag).unwrap_or("").trim().to_owned();
         Ok(DeviceInfo {
             model_name: field("modelName"),
-            display_name: field("displayName"),
             model_number: field("modelNumber"),
-            room: field("roomName"),
             serial: field("serialNum"),
             sw_gen: field("swGen"),
             display_version: field("displayVersion"),
@@ -1311,7 +1311,7 @@ fn channels_for(uuid: &str, map: &str) -> Vec<String> {
 ///
 /// The satellites are the point. `getGroups` speaks in rooms and never mentions
 /// the Sub or the surrounds behind one, nor the hidden half of a stereo pair, so
-/// a household of nine players looks like five. Here they all appear: a
+/// a household of eleven players looks like five. Here they all appear: a
 /// `<Satellite>` is a home-theatre member, and a `ZoneGroupMember` carrying
 /// `Invisible="1"` is the other half of a pair.
 fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
@@ -1344,22 +1344,32 @@ fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
         });
     }
     // A satellite is also listed under the group it belongs to, so the same
-    // UUID can arrive twice; the first mention wins and the duplicate is dropped
-    // rather than counted as a tenth speaker.
-    let mut seen = BTreeSet::new();
-    out.retain(|p| seen.insert(p.uuid.clone()));
-    Ok(out)
+    // UUID can arrive more than once - and nothing documents which mention
+    // comes first, so "first wins" would be a bet on ordering rather than a
+    // rule. The mention that knows the most wins instead: the `<Satellite>`
+    // row carries the channel map, the satellite tag and the firmware where a
+    // bare member row may carry none of them, and losing the map turns a Sub
+    // into what prints as a room of its own.
+    let knows = |p: &SystemPlayer| {
+        u8::from(!p.channels.is_empty()) * 4
+            + u8::from(p.satellite) * 2
+            + u8::from(!p.software_version.is_empty())
+    };
+    let mut merged: Vec<SystemPlayer> = Vec::new();
+    for candidate in out {
+        match merged.iter_mut().find(|p| p.uuid == candidate.uuid) {
+            None => merged.push(candidate),
+            Some(kept) if knows(&candidate) > knows(kept) => *kept = candidate,
+            Some(_) => {}
+        }
+    }
+    Ok(merged)
 }
 
 /// The address out of a `Location` URL, which is where a player's own IP is
 /// published - `http://192.168.86.26:1400/xml/device_description.xml`.
 fn ip_in_location(location: &str) -> Option<IpAddr> {
-    location
-        .strip_prefix("http://")?
-        .split(':')
-        .next()?
-        .parse()
-        .ok()
+    super::host_ip(location)
 }
 
 /// An `<UpdateItem>` document, leaving `installed` for the caller to fill.
@@ -1633,16 +1643,26 @@ mod tests {
     }
 
     /// Satellites are listed under their group as well as in their own right, so
-    /// the same speaker arrives twice and must not be counted twice.
+    /// the same speaker arrives twice and must not be counted twice - and
+    /// nothing documents which mention comes first, so the merge must not care.
+    /// The bare mention carries no channel map, no satellite tag and no
+    /// firmware; keeping it would print the Sub as a lone room primary and lose
+    /// the one place a satellite's firmware is visible.
     #[test]
-    fn a_player_named_twice_is_still_one_player() {
-        let doubled = TOPOLOGY.replace(
-            "</ZoneGroups>",
-            r#"<ZoneGroup Coordinator="RINCON_BEAM" ID="RINCON_BEAM:9"><ZoneGroupMember UUID="RINCON_SUB" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup></ZoneGroups>"#,
-        );
-        let players = players_in(&doubled).unwrap();
-        assert_eq!(players.len(), 7);
-        assert_eq!(players.iter().filter(|p| p.uuid == "RINCON_SUB").count(), 1);
+    fn a_player_named_twice_is_still_one_player_whichever_mention_comes_first() {
+        let bare = r#"<ZoneGroup Coordinator="RINCON_SUB" ID="RINCON_SUB:9"><ZoneGroupMember UUID="RINCON_SUB" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup>"#;
+        let poor_last = TOPOLOGY.replace("</ZoneGroups>", &format!("{bare}</ZoneGroups>"));
+        let poor_first = TOPOLOGY.replace("<ZoneGroups>", &format!("<ZoneGroups>{bare}"));
+        for doc in [poor_last, poor_first] {
+            let players = players_in(&doc).unwrap();
+            assert_eq!(players.len(), 7);
+            let sub: Vec<_> = players.iter().filter(|p| p.uuid == "RINCON_SUB").collect();
+            assert_eq!(sub.len(), 1);
+            // The informative mention won, in both orders.
+            assert!(sub[0].satellite);
+            assert_eq!(sub[0].channels, ["SW"]);
+            assert_eq!(sub[0].software_version, "86.8-78270");
+        }
     }
 
     #[test]
@@ -1662,9 +1682,7 @@ mod tests {
     fn the_build_number_is_the_wire_version_without_punctuation() {
         let info = DeviceInfo {
             model_name: "Sonos One SL".into(),
-            display_name: "One SL".into(),
             model_number: "S22".into(),
-            room: "Kitchen".into(),
             serial: "48-A6-B8-18-D1-38:E".into(),
             sw_gen: "2".into(),
             display_version: "18.7".into(),

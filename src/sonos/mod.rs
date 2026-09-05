@@ -6,7 +6,26 @@ pub mod proto;
 pub mod smapi;
 pub mod upnp;
 
+use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
+
+/// The host address out of a player-published URL, whatever the scheme.
+///
+/// Two documents hand these out - `getGroups` gives `wss://<ip>:1443/…` per
+/// player and the topology gives `http://<ip>:1400/xml/…` - and both parsers
+/// used to carry their own copy of this, which had already drifted (one split
+/// on `:` alone, the other on `:` and `/`) and shared a bug: a bracketed IPv6
+/// host splits at the colon *inside* the brackets. Sonos publishes IPv4 today,
+/// so the v6 arm is untrodden - handled anyway, because the failure would be a
+/// reachable player silently reported as having no address.
+pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
+    let rest = url.split_once("://")?.1;
+    let host = match rest.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => rest.split([':', '/']).next()?,
+    };
+    host.parse().ok()
+}
 
 /// The one rustls crypto backend in this binary, named in one place.
 ///

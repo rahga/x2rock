@@ -109,9 +109,7 @@ pub struct Player {
 impl Player {
     /// The player's address, taken from its own `wss://<ip>:1443/...` URL.
     pub fn ip(&self) -> Option<IpAddr> {
-        let rest = self.websocket_url.strip_prefix("wss://")?;
-        let host = rest.split([':', '/']).next()?;
-        host.parse().ok()
+        super::host_ip(&self.websocket_url)
     }
 }
 

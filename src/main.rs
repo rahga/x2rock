@@ -141,8 +141,10 @@ enum Command {
         /// `serial`, `display_version`, `build`, `hardware_version` and `ip`.
         #[arg(long)]
         json: bool,
-        /// Mask serial numbers and addresses, for pasting somewhere public.
-        /// The household id is never printed either way.
+        /// Mask serial numbers, addresses and uuids - everything that
+        /// identifies hardware, since a RINCON uuid embeds the MAC verbatim -
+        /// for pasting somewhere public. The household id is never printed
+        /// either way.
         #[arg(long)]
         redact: bool,
     },
@@ -358,8 +360,9 @@ enum Command {
         /// `bad_stream_url`, `stream_did_not_play` and `stream_unverified` are
         /// codes a caller can act on, and a code that only ever prints as
         /// prose is a contract with nobody on the other end. The third is not
-        /// a verdict on the stream - the room stopped answering, so retry or
-        /// investigate the room rather than swapping the URL.
+        /// a verdict on the stream - the room's state could not be read, so
+        /// look at the room (the message says whether it answered at all)
+        /// rather than swapping the URL.
         #[arg(long)]
         json: bool,
     },
@@ -1322,6 +1325,17 @@ fn group_line(group: &Group, groups: &Groups) -> String {
 /// character, so `…C` would collapse most of a household onto the same label
 /// and lose the only thing the tail was kept for.
 fn masked(value: &str) -> String {
+    // An IPv6 address is full of ':' but its tail can embed the MAC (EUI-64),
+    // so the two-segment rule would keep three octets of it; one group is
+    // plenty to compare. Unreachable today - players publish IPv4 Locations -
+    // but guarded anyway, so a future v6 household does not leak through the
+    // one flag that promises masking.
+    if value.parse::<std::net::Ipv6Addr>().is_ok() {
+        return match value.rsplit_once(':') {
+            Some((_, tail)) if !tail.is_empty() => format!("…{tail}"),
+            _ => "…".to_owned(),
+        };
+    }
     let cuts: Vec<_> = value
         .match_indices(['-', '.', ':'])
         .map(|(i, _)| i)
@@ -1335,32 +1349,61 @@ fn masked(value: &str) -> String {
     }
 }
 
+/// The mask for a `RINCON_…` uuid, which embeds the speaker's MAC verbatim -
+/// the very identifier the serial mask withholds, so it cannot be printed raw
+/// under `--redact`. It has no separators for [`masked`] to cut on; the kept
+/// tail is the last MAC octet plus the fixed suffix, the same exposure the
+/// masked serial gives.
+fn masked_uuid(uuid: &str) -> String {
+    match uuid.char_indices().rev().nth(6) {
+        Some((i, _)) => format!("…{}", &uuid[i..]),
+        None => "…".to_owned(),
+    }
+}
+
 /// The household by player, grouped under the room each one belongs to.
 fn print_system(
     rows: &[(&upnp::SystemPlayer, Result<upnp::DeviceInfo>)],
     json: bool,
     redact: bool,
 ) {
+    // The one policy `--redact` enforces, written once. Every identifier goes
+    // through here, so a new field cannot forget the flag - which is exactly
+    // how the raw uuid once slipped into output the flag promised was safe.
+    let show = |value: &str| {
+        if redact {
+            masked(value)
+        } else {
+            value.to_owned()
+        }
+    };
+    let show_uuid = |uuid: &str| {
+        if redact {
+            masked_uuid(uuid)
+        } else {
+            uuid.to_owned()
+        }
+    };
+    let show_ip = |ip: Option<IpAddr>| ip.map(|ip| show(&ip.to_string()));
     if json {
         let items: Vec<_> = rows
             .iter()
             .map(|(player, found)| {
                 let mut entry = json!({
                     "room": player.room,
-                    "uuid": player.uuid,
+                    "uuid": show_uuid(&player.uuid),
                     "role": player.role(),
                     "channels": player.channels,
                     "bonded": player.bonded(),
                     "satellite": player.satellite,
                     "hidden": player.invisible,
-                    "ip": player.ip.map(|ip| if redact { masked(&ip.to_string()) } else { ip.to_string() }),
+                    "ip": show_ip(player.ip),
                 });
                 match found {
                     Ok(info) => {
                         entry["model"] = json!(info.model_name);
                         entry["model_number"] = json!(info.model_number);
-                        entry["serial"] =
-                            json!(if redact { masked(&info.serial) } else { info.serial.clone() });
+                        entry["serial"] = json!(show(&info.serial));
                         entry["sonos_os"] = json!(format!("S{}", info.sw_gen));
                         entry["display_version"] = json!(info.display_version);
                         entry["build"] = json!(info.build());
@@ -1396,21 +1439,7 @@ fn print_system(
         };
         match found {
             Ok(info) => {
-                let serial = if redact {
-                    masked(&info.serial)
-                } else {
-                    info.serial.clone()
-                };
-                let addr = player
-                    .ip
-                    .map(|ip| {
-                        if redact {
-                            masked(&ip.to_string())
-                        } else {
-                            ip.to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| "no address".to_owned());
+                let addr = show_ip(player.ip).unwrap_or_else(|| "no address".to_owned());
                 println!(
                     "  {:<22} {:<5} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}",
                     info.model_name,
@@ -1420,7 +1449,7 @@ fn print_system(
                     info.hardware_version,
                     info.model_number,
                     addr,
-                    serial,
+                    show(&info.serial),
                 );
             }
             Err(e) => println!("  {:<22} {label:<5} unreachable ({e:#})", "?"),
@@ -1827,17 +1856,23 @@ enum Started {
     /// *unchanged*, and therefore nothing.
     ///
     /// Distinct from `Silent` on purpose, and the distinction is the remedy: a
-    /// silent stream means try another one, while this means stop and find out
-    /// why the room is not answering. Folding the two together also
-    /// contradicted the loop's own rule - a failed poll is evidence about the
-    /// poll, not about the stream.
+    /// silent stream means try another one, while this means stop and look at
+    /// the room. Folding the two together also contradicted the loop's own
+    /// rule - a failed poll is evidence about the poll, not about the stream.
     ///
-    /// Carries what the last failed poll said, where one failed at all. The
-    /// polls do not only fail because a room went away: an API error body or a
-    /// stale `groupId` fails deterministically for the whole wait and looks
-    /// identical from here, so the message reports the cause it has instead of
-    /// asserting one it does not.
-    Unverified(Option<String>),
+    /// `answered` says which of the two ways it was: `false` means no poll got
+    /// an answer at all, so the room is not talking to us; `true` means the
+    /// room answered every poll and simply never named a state, so nothing is
+    /// wrong with the connection and "the room is not answering" would be a
+    /// lie. The two need different sentences, which is why the flag is carried
+    /// rather than folded into the message here.
+    ///
+    /// `why` carries what the last failed poll said, where one failed at all.
+    /// The polls do not only fail because a room went away: an API error body
+    /// or a stale `groupId` fails deterministically for the whole wait and
+    /// looks identical from here, so the message reports the cause it has
+    /// instead of asserting one it does not.
+    Unverified { answered: bool, why: Option<String> },
 }
 
 /// One wording for the three outcomes, shared by every caller that starts a
@@ -1871,22 +1906,37 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: &Started) 
         // tell "no speakers answered, nothing was loaded" from "the stream was
         // loaded and then the room went quiet on us", which are different
         // situations with different remedies.
-        Started::Unverified(why) => {
-            let because = why
-                .as_deref()
-                .map(|e| format!(" The last attempt said: {e}."))
-                .unwrap_or_default();
-            return Err(hint::Hint::new(
+        // One code, two sentences: a room that never answered and a room that
+        // answered without naming a state are the same unknown to a caller
+        // branching on `code`, but telling the second one to "find out why the
+        // room is not answering" sends a person to debug a connection that is
+        // demonstrably fine.
+        Started::Unverified { answered, why } => {
+            let message = if *answered {
+                let because = why
+                    .as_deref()
+                    .map(|e| format!(" One poll along the way did fail, saying: {e}."))
+                    .unwrap_or_default();
+                format!(
+                    "{room} took {title:?} and answered every poll for {}s without ever naming \
+                     a playback state, so whether it is playing is unknown.{because} This is \
+                     not a verdict on the stream and the room is reachable: check again with \
+                     `x2rock now` before swapping the stream for another.",
+                    STREAM_START.as_secs()
+                )
+            } else {
+                let because = why
+                    .as_deref()
+                    .map(|e| format!(" The last attempt said: {e}."))
+                    .unwrap_or_default();
                 format!(
                     "{room} took {title:?}, but its state could not be read for {}s, so whether \
                      it is playing is unknown.{because} This is not a verdict on the stream: do \
                      not swap it for a different one, find out why the room is not answering.",
                     STREAM_START.as_secs()
-                ),
-                "stream_unverified",
-                None,
-            )
-            .into());
+                )
+            };
+            return Err(hint::Hint::new(message, "stream_unverified", None).into());
         }
     }
     Ok(())
@@ -1901,7 +1951,7 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: &Started) 
 /// A failure still routes through `report_started`, so the error shape stays
 /// the standard `{error, code, fix}` rather than a second invented one.
 fn report_started_json(room: &str, title: &str, url: &str, started: &Started) -> Result<()> {
-    if matches!(started, Started::Silent | Started::Unverified(_)) {
+    if matches!(started, Started::Silent | Started::Unverified { .. }) {
         return report_started(room, title, None, started);
     }
     // No `stream_info`: the player has often not read the station's metadata
@@ -2036,8 +2086,17 @@ async fn stream_url(
         // `last_err` is carried here too, not just in the arm below: polls can
         // be mixed, some erroring while the ones that answer never name a
         // state, and that error is then the only evidence there is about why.
-        (true, None) => Started::Unverified(last_err),
-        (false, _) => Started::Unverified(last_err),
+        // `answered` rides along so the message can say which of the two this
+        // was - a room that answered without a state must not be described as
+        // "not answering".
+        (true, None) => Started::Unverified {
+            answered: true,
+            why: last_err,
+        },
+        (false, _) => Started::Unverified {
+            answered: false,
+            why: last_err,
+        },
     };
     Ok((target.name.clone(), started))
 }
@@ -4056,14 +4115,19 @@ async fn run(cli: Cli) -> Result<()> {
             .find_map(|p| p.ip())
             .ok_or_else(|| anyhow!("no player has an address to ask for the topology"))?;
         let players = Upnp::new(any).system_players().await?;
-        let mut rows = Vec::new();
-        for player in &players {
-            let found = match player.ip {
-                Some(ip) => Upnp::new(ip).device_info().await,
-                None => Err(anyhow!("no address to reach it on")),
-            };
-            rows.push((player, found));
-        }
+        // All at once, not one after another: the fetches are independent, and
+        // sequentially each unreachable player would stack its whole 8s timeout
+        // onto a read-only command - three dark satellites made it half a
+        // minute. Together they cost one timeout at worst.
+        let mut rows: Vec<_> =
+            futures_util::future::join_all(players.iter().map(|player| async move {
+                let found = match player.ip {
+                    Some(ip) => Upnp::new(ip).device_info().await,
+                    None => Err(anyhow!("no address to reach it on")),
+                };
+                (player, found)
+            }))
+            .await;
         // By room, and within a room the primary before its satellites, which is
         // the order the apps print and the order the bonding is legible in.
         rows.sort_by(|(a, _), (b, _)| {
@@ -4969,6 +5033,20 @@ mod tests {
         assert_eq!(masked(""), "…");
         // One separator only: the tail is already the last two segments.
         assert_eq!(masked("a-b"), "…b");
+        // An IPv6 tail can embed the MAC (EUI-64), so it keeps one group where
+        // everything else keeps two. Unreachable today - players publish IPv4 -
+        // but the flag's promise must not depend on that staying true.
+        assert_eq!(masked("fe80::4aa6:b8ff:fe18:d138"), "…d138");
+
+        // The RINCON uuid is the MAC verbatim plus a suffix - the exact
+        // identifier the serial mask withholds - so it has its own mask, and
+        // what it keeps matches the serial's exposure: one MAC octet.
+        assert_eq!(masked_uuid("RINCON_542A1B83318001400"), "…8001400");
+        assert_ne!(
+            masked_uuid("RINCON_48A6B8A3BA5201400"),
+            masked_uuid("RINCON_48A6B8A3B93601400")
+        );
+        assert_eq!(masked_uuid("short"), "…");
     }
 
     #[test]
@@ -5273,8 +5351,16 @@ mod tests {
         // "Could not be read" is a *third* thing, not a dead stream: its own
         // code, because these commands already emit `no_player` before a
         // stream is loaded and a caller must be able to tell those apart.
-        let gone =
-            report_started("Media Room", "SomaFM", None, &Started::Unverified(None)).unwrap_err();
+        let gone = report_started(
+            "Media Room",
+            "SomaFM",
+            None,
+            &Started::Unverified {
+                answered: false,
+                why: None,
+            },
+        )
+        .unwrap_err();
         assert_eq!(hint::of(&gone).0, "stream_unverified");
         assert!(hint::of(&gone).1.is_none());
         let text = format!("{gone:#}").to_lowercase();
@@ -5293,10 +5379,35 @@ mod tests {
             "Media Room",
             "SomaFM",
             None,
-            &Started::Unverified(Some("connection refused".into())),
+            &Started::Unverified {
+                answered: false,
+                why: Some("connection refused".into()),
+            },
         )
         .unwrap_err();
         assert!(format!("{why:#}").contains("connection refused"), "{why:#}");
+
+        // The *answered* flavour is the same code but must not tell anyone the
+        // room is not answering - it answered every poll. It carries its mixed
+        // evidence too, and points at re-checking rather than at connectivity.
+        let mixed = report_started(
+            "Media Room",
+            "SomaFM",
+            None,
+            &Started::Unverified {
+                answered: true,
+                why: Some("stale groupId".into()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(hint::of(&mixed).0, "stream_unverified");
+        let text = format!("{mixed:#}");
+        assert!(text.contains("stale groupId"), "{text}");
+        assert!(text.contains("answered every poll"), "{text}");
+        assert!(
+            !text.to_lowercase().contains("not answering"),
+            "a room that answered must not be described as not answering: {text}"
+        );
     }
 
     #[test]
@@ -5314,7 +5425,13 @@ mod tests {
         // second invented one, for both failing outcomes.
         for (outcome, code) in [
             (Started::Silent, "stream_did_not_play"),
-            (Started::Unverified(None), "stream_unverified"),
+            (
+                Started::Unverified {
+                    answered: false,
+                    why: None,
+                },
+                "stream_unverified",
+            ),
         ] {
             let err =
                 report_started_json("Media Room", "SomaFM", "http://x/s", &outcome).unwrap_err();
