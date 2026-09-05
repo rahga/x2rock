@@ -42,6 +42,33 @@ fn repeat_body(repeat: Repeat) -> Value {
     }})
 }
 
+/// The options object for an `audioClip:1 loadAudioClip`.
+///
+/// Split out to build - and test - without a socket. `clipType` is `CUSTOM`
+/// exactly when a `stream_url` is given and `CHIME` otherwise; the optional keys
+/// are added only when set, because a null `streamUrl` would be a different
+/// request from an absent one (a custom clip with no source) rather than the
+/// built-in chime.
+fn audio_clip_options(
+    app_id: &str,
+    name: &str,
+    stream_url: Option<&str>,
+    volume: Option<u8>,
+) -> Value {
+    let mut options = json!({
+        "appId": app_id,
+        "name": name,
+        "clipType": if stream_url.is_some() { "CUSTOM" } else { "CHIME" },
+    });
+    if let Some(url) = stream_url {
+        options["streamUrl"] = json!(url);
+    }
+    if let Some(level) = volume {
+        options["volume"] = json!(level);
+    }
+    options
+}
+
 /// The options for a `musicServiceAccounts:1 match`.
 ///
 /// `linkCode` is sent only when there is one: the field is optional, and a null
@@ -380,6 +407,31 @@ impl Connection {
         .await?;
         Ok(())
     }
+
+    /// Play a short clip over whatever the player is doing, then hand it back.
+    ///
+    /// Player-scoped, and independent of everything else: it ducks the current
+    /// playback rather than replacing it, leaves the queue untouched, and its
+    /// `volume` neither reads from nor persists into the room's own level (all
+    /// verified on hardware 2026-09-05). `stream_url` present makes it a
+    /// `CUSTOM` clip - the player fetches that URL, so it must be reachable from
+    /// the speaker - and absent makes it the built-in `CHIME`. `app_id` is
+    /// required by the player: an absent one is `ERROR_INVALID_PARAMETER`.
+    pub async fn load_audio_clip(
+        &self,
+        player_id: &str,
+        app_id: &str,
+        name: &str,
+        stream_url: Option<&str>,
+        volume: Option<u8>,
+    ) -> Result<()> {
+        self.call(
+            on_player("audioClip:1", "loadAudioClip", player_id),
+            audio_clip_options(app_id, name, stream_url, volume),
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +474,24 @@ mod tests {
             repeat_body(Repeat::One),
             json!({"playModes": {"repeat": false, "repeatOne": true}})
         );
+    }
+
+    #[test]
+    fn a_chime_and_a_custom_clip_differ_only_by_clip_type_and_the_url() {
+        // No stream_url: the built-in chime. clipType CHIME and no streamUrl
+        // key - a null one would be a custom clip with no source, not a chime.
+        let chime = audio_clip_options("app", "x2rock chime", None, None);
+        assert_eq!(chime["clipType"], "CHIME");
+        assert!(chime.get("streamUrl").is_none());
+        assert!(chime.get("volume").is_none());
+        assert_eq!(chime["appId"], "app");
+
+        // A stream_url flips it to CUSTOM and carries the URL; volume is added
+        // only when set.
+        let clip = audio_clip_options("app", "x2rock notify", Some("http://x/s.mp3"), Some(20));
+        assert_eq!(clip["clipType"], "CUSTOM");
+        assert_eq!(clip["streamUrl"], "http://x/s.mp3");
+        assert_eq!(clip["volume"], 20);
     }
 
     #[test]

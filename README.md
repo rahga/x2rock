@@ -152,6 +152,8 @@ x2rock favorite "80s Flash"   # play one, by name or id
 x2rock -r "Living Room" group Kitchen   # Kitchen joins Living Room, playing what it plays
 x2rock ungroup Kitchen   # Kitchen leaves, on its own again
 x2rock -r "Living Room" tv   # switch a soundbar to its TV input
+x2rock -r Kitchen chime  # play the built-in chime over whatever is on
+x2rock -r Kitchen notify "https://host/announce.mp3"  # a clip of your own, ducked over playback
 x2rock -r Kitchen party  # party mode: every room joins Kitchen
 x2rock party off         # break it up, every room on its own
 x2rock system            # every speaker: model, firmware, hardware, bonding

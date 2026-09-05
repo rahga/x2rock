@@ -480,6 +480,34 @@ enum Command {
     },
     /// Switch a soundbar to its TV input.
     Tv,
+    /// Play a short chime on a room, over whatever it is doing.
+    ///
+    /// The player's built-in notification sound, ducked over the current
+    /// playback and gone in a second - the queue and the room's own volume are
+    /// left exactly as they were. `notify` is the same mechanism with a sound
+    /// of your own. It addresses the room's *own* player, so a chime lands on
+    /// the room named rather than its whole group.
+    Chime {
+        /// How loud the chime plays, 0-100. Independent of the room's volume
+        /// and not remembered after. Defaults to the player's own setting.
+        #[arg(long)]
+        volume: Option<u8>,
+    },
+    /// Play a sound from a URL on a room, over whatever it is doing.
+    ///
+    /// An announcement, a doorbell, any short clip. Like `chime` it ducks
+    /// rather than replaces: the queue and the room's volume survive it. The
+    /// *player* fetches the URL, so it must be reachable from the speaker (a
+    /// public `http`/`https` address), not merely from this machine - the same
+    /// rule `play-url` follows.
+    Notify {
+        /// The clip's URL, `http` or `https`. The player fetches it.
+        url: String,
+        /// How loud it plays, 0-100. Independent of the room's volume and not
+        /// remembered after. Defaults to the player's own setting.
+        #[arg(long)]
+        volume: Option<u8>,
+    },
     /// Group rooms into --room's group, so they play what it plays.
     Group {
         #[arg(required = true)]
@@ -2253,6 +2281,74 @@ fn bad_stream_url(url: &str) -> anyhow::Error {
         None,
     )
     .into()
+}
+
+/// Whether a URL is one the speaker can fetch: `http` or `https` with a host.
+/// The same rule `play-url` enforces, since an audio clip is fetched the same
+/// way, by the player rather than by this machine.
+fn require_http_url(url: &str) -> Result<()> {
+    match url.split_once("://") {
+        Some((scheme, rest))
+            if matches!(scheme.to_lowercase().as_str(), "http" | "https") && !rest.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(bad_stream_url(url)),
+    }
+}
+
+/// The reverse-DNS id every audio clip is tagged with. `loadAudioClip` requires
+/// one - an absent `appId` is `ERROR_INVALID_PARAMETER` - and the player groups
+/// a caller's clips under it.
+const APP_ID: &str = "com.github.rahga.x2rock";
+
+/// Play a clip on the room's *own* player - the shared body of `chime` (the
+/// built-in sound, `stream_url` None) and `notify` (a URL). Player-scoped, so it
+/// resolves the named room to its own speaker the way `vol --player` does rather
+/// than to the group's coordinator: a chime should land on the room asked for,
+/// not the whole group it happens to be playing with.
+async fn play_audio_clip(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    stream_url: Option<&str>,
+    volume: Option<u8>,
+) -> Result<()> {
+    let this = match room {
+        Some(name) => session.groups.player_named(name)?,
+        None => session
+            .groups
+            .player(&target.coordinator_id)
+            .ok_or_else(|| anyhow!("no player for {}", target.name))?,
+    };
+    let ip = this
+        .ip()
+        .ok_or_else(|| anyhow!("no address for {}", this.name))?;
+    // Player-scoped, so it must ride the player's own socket, not a
+    // coordinator's - the same rule the per-player volume path follows.
+    let speaker = if ip == session.connection.ip() {
+        session.connection.clone()
+    } else {
+        Connection::open(ip).await?
+    };
+    let name = if stream_url.is_some() {
+        "x2rock notify"
+    } else {
+        "x2rock chime"
+    };
+    speaker
+        .load_audio_clip(&this.id, APP_ID, name, stream_url, volume)
+        .await?;
+    // The clip is accepted, not measured - the player returns before it sounds,
+    // and unlike a stream there is no state to poll, so this reports what was
+    // sent rather than claiming it was heard.
+    let what = if stream_url.is_some() {
+        "clip"
+    } else {
+        "chime"
+    };
+    println!("{:<24} {what}", this.name);
+    Ok(())
 }
 
 /// `x2rock play-url`: play a stream URL with no service behind it.
@@ -4922,6 +5018,13 @@ async fn run(cli: Cli) -> Result<()> {
             upnp.use_tv_input(&room.id, bar).await?;
             println!("{:<24} TV input", room.name);
         }
+        Command::Chime { volume } => {
+            play_audio_clip(&session, &target, room, None, volume).await?;
+        }
+        Command::Notify { url, volume } => {
+            require_http_url(&url)?;
+            play_audio_clip(&session, &target, room, Some(&url), volume).await?;
+        }
         Command::Eq {
             bass,
             treble,
@@ -5571,6 +5674,18 @@ mod tests {
             assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
             // No fix: nothing here can mint a working URL for the caller.
             assert!(hint::of(&err).1.is_none(), "{bad} handed out a fix");
+        }
+    }
+
+    #[test]
+    fn notify_accepts_only_a_url_the_player_can_fetch() {
+        // `notify` fetches the clip from the player, so it holds the stream-URL
+        // rule: http/https with a host, and the same `bad_stream_url` code.
+        assert!(require_http_url("http://x/s.mp3").is_ok());
+        assert!(require_http_url("https://EXAMPLE.test/clip.wav").is_ok());
+        for bad in ["file:///tmp/x.mp3", "x.mp3", "http://", "spotify:track:1"] {
+            let err = require_http_url(bad).unwrap_err();
+            assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
         }
     }
 

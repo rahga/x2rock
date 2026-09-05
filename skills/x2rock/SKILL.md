@@ -264,6 +264,7 @@ see "Ask before you act".
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
+| Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` |
 | Link an account | `x2rock link [service]` / `x2rock accounts --json` |
 
@@ -388,6 +389,29 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
   network with working speakers usually means no route out.
 - **A stream plays alongside the queue and leaves it alone**, so putting radio on does not disturb
   what was queued. Stopping the radio is `x2rock pause`.
+
+## Chimes and announcements: `chime` and `notify`
+
+Different from playing a stream: these **overlay** a short sound on a room and then hand it back.
+`chime` plays the player's built-in notification sound; `notify "<url>"` plays a clip of your own -
+an announcement, a doorbell, anything short. Use them for "chime the kitchen", "announce dinner",
+"play this sound in the bedroom", not for putting music on.
+
+- **They duck rather than replace.** The current playback dips under the clip and resumes, the queue
+  is untouched, and the room returns to exactly what it was doing. So they are safe over music a
+  stream command would interrupt.
+- **They are per *speaker*, not per group.** `-r` names the room, and the clip lands on that room's
+  own player - `-r Kitchen chime` chimes the kitchen even while it is grouped into a party. There is
+  no `--all` and no repeated `-r`; one room at a time.
+- **`--volume` is the clip's own level, 0-100.** It is independent of the room's volume and is *not*
+  remembered after - the room's normal level is unchanged. Omit it to use the player's own setting.
+  This is the safe way to make an announcement audible without leaving the room turned up.
+- **`notify`'s URL is fetched by the player**, so it must be a public `http`/`https` address the
+  speaker can reach, not a file on this machine - the same rule as `play-url`, and the same
+  `bad_stream_url` refusal for anything else.
+- **The confirmation is that it was *sent*, not heard.** Like a fire-and-forget: the player accepts
+  the clip and returns before it sounds, and there is no state to poll (unlike a stream). A success
+  line means it was accepted; it does not prove audio came out.
 
 ## Worked examples
 
