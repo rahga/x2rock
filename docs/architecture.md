@@ -3164,14 +3164,19 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   `loadHomeTheaterPlayback` on empty flipped Guest TV from paused-on-its-queue
   to TV input within ~2s. The precise rule, since an earlier draft over-stated
   it: an empty body is unsafe only for a command that takes **no required
-  parameter and performs an action** - `loadHomeTheaterPlayback` is the one seen
-  here. A command that requires a parameter refuses the empty body harmlessly:
-  `createSession`, `loadStreamUrl`, `loadAudioClip` and `setTvPowerState` all
-  answer `ERROR_INVALID_PARAMETER`/`MISSING_PARAMETERS` rather than acting. And
-  even some parameterless setters no-op: `setOptions` on empty answered `success`
-  and changed nothing observable. So "setters are unsafe to probe empty" is
-  wrong; the test is "does it need a parameter" - if not, and it acts, an empty
-  body runs it. Probe those with `--scope none` or reason first.)
+  parameter and performs an action**. Confirmed across five, each with a
+  before/after: `loadHomeTheaterPlayback` (off-TV → TV input), and `playback:1`'s
+  `togglePlayPause` (paused → playing), `pause` (playing → paused),
+  `skipToNextTrack` and `skipToPreviousTrack` (queue position ±1) - all ran on an
+  empty body. (`skip*` while paused advanced the queue *without* starting
+  playback - a silent, purely observable confirmation.) The other side is
+  equally firm: a command that requires a parameter refuses the empty body
+  harmlessly - `createSession`, `loadStreamUrl`, `loadAudioClip` and
+  `setTvPowerState` all answer `ERROR_INVALID_PARAMETER`/`MISSING_PARAMETERS`
+  rather than acting - and even the parameterless `setOptions` no-op'd
+  (`success`, nothing changed). So "setters are unsafe to probe empty" is wrong;
+  the test is "does it need a parameter" - if not, and it acts, an empty body
+  runs it. Probe those with `--scope none` or reason first.)
 - **x2rock uses UPnP for it anyway**, and keeps doing so: `SetAVTransportURI` to
   `x-sonos-htastream:<playerId>:spdif`, exactly what the device reports as its
   own `CurrentURI` while on TV. `spdif` covers HDMI-ARC as well as optical, and
