@@ -5270,6 +5270,42 @@ player without asking x2rock's permission; they will simply not be handed a one-
 does it by accident. A read-only `update` command would be worth having with Sonos 27 rolling out,
 and would be exactly `CheckForUpdate` and nothing else.
 
+### What stays with the Sonos app (the scope boundary, one place)
+
+`BeginSoftwareUpdate` is one of a family, and the family has a rule: **x2rock controls speakers; it
+does not provision, reconfigure, or physically re-shape the household.** Those are the Sonos app's
+own jobs - most of them gated behind a confirmation dialog, a phone microphone, or the setup flow,
+none of which a shell reproduces - and the line is drawn on purpose, not for want of an action.
+Recorded here as one list so a reader (or an agent) does not re-derive it item by item:
+
+- **Installing firmware** - `BeginSoftwareUpdate`; see the decision just above. `update` reads and
+  never writes.
+- **Pairing or onboarding a new speaker** - Sonos's private, secure setup flow; no public Control
+  API or UPnP action exists for it (`RegisterMobileDevice` registers a controller app, not a
+  player). x2rock drives speakers already on the LAN.
+- **Removing a speaker from the household**, and **factory reset** - a physical button or an app
+  menu. Not in the Control API; no factory-reset action in any UPnP service the player advertises.
+- **Editing bonds** - `RemoveBondedZones` (stereo pairs) and `RemoveHTSatellite` (a soundbar's Sub
+  or surrounds) exist as UPnP actions, but they *reconfigure* the household rather than control it,
+  with a real blast radius if fumbled. Out of scope for the same reason as the rest. `x2rock system`
+  *reports* the bonds; it does not edit them.
+- **Running TruePlay** - the measurement itself needs the app and a phone microphone. x2rock's
+  interest is narrower and settled (see "What `eq` does not cover"): **know whether TruePlay is
+  enabled, and turn it off** so BasicEQ takes over. It reads `trueplay`/`trueplay_available` and
+  disables via `SetRoomCalibrationStatus`; it does not measure, store, or manage curves. The disable
+  earns its place on a real case: a speaker carried from one room to another is still applying the
+  curve measured for the room it left, which is worse than none - and if the owner has lost app
+  access for a while, x2rock (LAN-only, no account) is the one tool that can switch that stale
+  correction off until the app is back to remeasure. Disabling a bad curve is control; measuring a
+  new one is the app's job.
+- **Content discovery / search** - closed separately as a Control-API limit, not an app-only job;
+  see "the Control API will never search". **Cloud queue** likewise - declined, see
+  "`loadCloudQueue` is a permanent no".
+
+The through-line: x2rock's surface is *operating* the speakers - playback, volume, grouping,
+tone, TruePlay on/off, chimes, TV input, the queue - and reading their state. Anything that
+creates, destroys, or re-wires a speaker or its bonds belongs to the app.
+
 ### What the speaker actually listens on (scanned 2026-09-04)
 
 A TCP connect scan of the One SL, against Sonos's own firewall guidance. Their published list of
