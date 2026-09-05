@@ -1090,16 +1090,23 @@ again**, referencing
 content by `objectId` and letting the player resolve the credential it already holds. Discovery
 stays with the Sonos app; repetition moves to the bar.
 
-What has to be settled first, in order:
+What had to be settled first - **all three now closed** (this list predates the closures below it;
+kept struck rather than deleted so the order of discovery still reads):
 
-1. Does an enqueued service track actually **play**? Cheap, needs one queue add and a `play 2`.
-2. Can a **synthesized** `EnqueuedURIMetaData` restore the titles, given there is no `r:resMD` to
-   copy? This is the one that decides whether the feature is usable or merely possible.
+1. ~~Does an enqueued service track actually **play**?~~ **Closed 2026-08-31** - it does; `play 2`
+   moved the cursor and `positionMillis` advanced across four seconds. See "Both open questions
+   closed", and it is shipped as `keep`/`bookmark` (`src/bookmarks.rs`).
+2. ~~Can a **synthesized** `EnqueuedURIMetaData` restore the titles, given there is no `r:resMD` to
+   copy?~~ **Closed 2026-08-31** - a from-scratch DIDL carrying the derived cdudn brought the title
+   back and the player used it to reach the service. Same section; same shipped feature.
 3. ~~Does `createSession` with `accountId: "sn_3"` plus `loadCloudQueue` work as an alternative that
    sidesteps the queue entirely — at the cost of x2rock serving HTTP the players can reach?~~
    **Closed 2026-09-05: cloud queue is declined outright** - x2rock will not serve HTTP the players
-   reach inbound. See "`loadCloudQueue` is a permanent no". This leaves items 1 and 2, the
-   UPnP-enqueue path, as the only routes considered.
+   reach inbound. See "`loadCloudQueue` is a permanent no".
+
+So nothing under this heading is still open. The remaining YouTube Music thread is *discovery* - the
+`GetSessionId` search credential (see "Where this leaves the three questions"), a separate question
+from enqueue, which works today.
 
 
 ## `FV:2` carries shortcuts; `getFavorites` does not (settled 2026-08-31)
