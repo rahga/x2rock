@@ -614,32 +614,37 @@ Media Room — Deep Space One on SomaFM Radio
 
 ### Things worth knowing, learned building it
 
-- **One crypto provider, named explicitly.** `rustls::ClientConfig::builder()` panics at runtime
-  when more than one provider is compiled in and none is installed as the process default. Both
-  `local.rs` and `http.rs` name the provider through `builder_with_provider`, and both name the
-  same one (`ring`, since the swap below). Today only one provider is compiled in, so `builder()`
-  would happen to work — the explicit naming stays because it is what keeps this binary correct
-  the day some dependency re-enables `rustls`'s default `aws_lc_rs` feature and a second provider
-  is silently linked back in. That failure would not show up until the first TLS handshake.
+- **One crypto provider, named explicitly, in one place.** `rustls::ClientConfig::builder()` panics
+  at runtime when more than one provider is compiled in and none is installed as the process
+  default. Both `local.rs` and `http.rs` build through `builder_with_provider`, but neither names a
+  backend: they call `sonos::crypto_provider()`, which is the single site that names `ring`. Today
+  only one provider is compiled in, so `builder()` would happen to work — the explicit naming stays
+  because it is what keeps this binary correct the day some dependency re-enables `rustls`'s
+  default `aws_lc_rs` feature and a second provider is silently linked back in. That failure would
+  not show up until the first TLS handshake.
 - **`ring` over `aws-lc-rs`, deliberately.** rustls's default crypto backend is `aws-lc-rs`, a
   compiled-C BoringSSL fork. It was the single largest crate in the binary (1.3MiB of `.text`
   plus its `.rodata` tables) and the long pole of a clean build (`cc`/`cmake`). Swapping the
   backend to `ring` — `default-features = false` on `rustls` and `tokio-rustls` in `Cargo.toml`,
-  `ring` named at both `builder_with_provider` sites — took the stripped binary from 9.3MB to
-  7.2MB and a clean build from 2m15s to 1m36s, with identical cipher suites. Two things were
-  knowingly given up. First, `prefer-post-quantum`: `ring` has no ML-KEM, so the client no longer
-  offers X25519MLKEM768 hybrid key exchange, and the internet-facing SMAPI/radio traffic keys
-  classically. The threat that guards against is harvest-now-decrypt-later — an adversary
-  archiving ciphertext today to decrypt with a future quantum computer — and everything this
-  program sends is worthless on that horizon: revocable music-service session tokens and
+  plus `ring` named in `sonos::crypto_provider`, the one site in the code that names a backend at
+  all — took the stripped binary from 9.3MB to 7.2MB and a clean build from 2m15s to 1m36s, with
+  identical cipher suites. Those three places are the whole swap, and they have to move together.
+  Two things were knowingly given up. First, `prefer-post-quantum`: `ring` has no ML-KEM, so the
+  client no longer offers X25519MLKEM768 hybrid key exchange, and the internet-facing SMAPI/radio
+  traffic keys classically. The threat that guards against is harvest-now-decrypt-later — an
+  adversary archiving ciphertext today to decrypt with a future quantum computer — and everything
+  this program sends is worthless on that horizon: revocable music-service session tokens and
   listening metadata, while the LAN path already concedes active MITM by accepting any
-  certificate. Second, ECDSA P-521: `ring` advertises no P-521 signature schemes, so a
-  hypothetical P-521 certificate fails the handshake *before* `AcceptAnyCert` is consulted — an
-  opaque alert the "we don't check certs" mental model points away from. Sonos ships RSA-2048 and
-  public CAs do not issue P-521, so this is a latent edge, recorded here so the alert is
-  recognisable if it ever fires. If x2rock ever carries a durable secret — a payment detail, a
-  cloud password — the post-quantum half of this decision should be revisited; until then the
-  2MB was buying nothing this program needs.
+  certificate. Second, P-521 in both of its roles: `ring` advertises no P-521 signature schemes,
+  so a hypothetical P-521 certificate fails the handshake *before* `AcceptAnyCert` is consulted —
+  an opaque alert the "we don't check certs" mental model points away from — and `ring`'s provider
+  also drops the `secp521r1` key-exchange group, so a peer that would only agree on that curve
+  fails at connect for a second, separate reason. Sonos ships RSA-2048, negotiates a P-256 or
+  X25519 group, and public CAs do not issue P-521, so this is a latent edge, recorded here so the
+  alert is recognisable if it ever fires. Checked after the swap against real hardware: three
+  rooms, including one playing a live stream, handshake and answer under `ring`. If x2rock ever
+  carries a durable secret — a payment detail, a cloud password — the post-quantum half of this
+  decision should be revisited; until then the 2MB was buying nothing this program needs.
 - **Certificates are validated here, unlike the player socket.** `local.rs` accepts any
   certificate because a player presents a self-signed one for its own IP and the transport never
   leaves the LAN. A music service is a public host with a real chain, and this call does leave the

@@ -333,9 +333,11 @@ enum Command {
         no_wait: bool,
         /// Unlike the other play commands this one takes `--json`, because its
         /// refusals are about the *argument* and the *stream*:
-        /// `bad_stream_url` and `stream_did_not_play` are codes a caller can
-        /// act on, and a code that only ever prints as prose is a contract
-        /// with nobody on the other end.
+        /// `bad_stream_url`, `stream_did_not_play` and `stream_unverified` are
+        /// codes a caller can act on, and a code that only ever prints as
+        /// prose is a contract with nobody on the other end. The third is not
+        /// a verdict on the stream - the room stopped answering, so retry or
+        /// investigate the room rather than swapping the URL.
         #[arg(long)]
         json: bool,
     },
@@ -1894,7 +1896,11 @@ async fn stream_url(
         // evidence of nothing - which makes this unknown rather than either a
         // success or a dead stream. Reporting it as `Starting` would have been
         // a false success on a stream that may well be dead.
-        (true, None) => Started::Unverified(None),
+        //
+        // `last_err` is carried here too, not just in the arm below: polls can
+        // be mixed, some erroring while the ones that answer never name a
+        // state, and that error is then the only evidence there is about why.
+        (true, None) => Started::Unverified(last_err),
         (false, _) => Started::Unverified(last_err),
     };
     Ok((target.name.clone(), started))

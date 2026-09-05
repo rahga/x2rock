@@ -15,7 +15,8 @@ futures-util = "0.3.34"
 if-addrs = "0.15.0"
 mpris-server = { version = "0.10.0", features = ["tokio"] }
 roxmltree = "0.21.1"
-# ring, not the aws-lc-rs default: 2MB smaller, no cc/cmake build step. See
+# ring, not the aws-lc-rs default: 2MB smaller, and no cmake step - a C
+# compiler is still needed, since ring's build script compiles C and asm. See
 # "ring over aws-lc-rs, deliberately" in docs/architecture.md for what that
 # trades away. `default-features = false` is load-bearing - the default
 # `prefer-post-quantum` feature would pull aws_lc_rs back in - and the backend

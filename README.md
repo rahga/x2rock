@@ -105,7 +105,9 @@ Two things bite here, both quietly:
 - **`apt`'s Rust is too old.** x2rock needs 1.88; no current Ubuntu packages it — 24.04 LTS is on
   1.75, and the interim releases are behind as well, so `apt install cargo` is a dead end rather
   than a maybe. Cargo at least refuses in one plain line naming the version it wants. Install a
-  current toolchain from [rustup.rs](https://rustup.rs) and build again.
+  current toolchain from [rustup.rs](https://rustup.rs) and build again — and do not answer the
+  refusal by editing `rust-version` or `edition` down in `Cargo.toml`, which replaces it with a
+  page of syntax errors.
 - **`~/.local/bin` may not be on `PATH` yet.** Ubuntu's `.profile` adds it only if it already
   exists when the shell starts, so the `install` above creates it too late for the session you ran
   it in. `x2rock` is then "not found", and the daemon and the service both fail with nothing
@@ -328,8 +330,10 @@ On any Linux with systemd and a session D-Bus:
 
 Worth knowing before installing:
 
-- **Rust 1.88 or newer** — often newer than the version a distribution packages, so `rustup` is
-  the reliable route. [Install](#install) has the build; [Requirements](#requirements) has the why.
+- **Rust 1.88 or newer** — rolling and recent distributions already package something newer, so
+  their own Rust is usually enough; `rustup` is the fallback for long-term releases, which are the
+  ones that fall short. [Install](#install) has the build; [Requirements](#requirements) has the
+  why.
 - **logind and NetworkManager are optional.** They are how the daemon learns it woke from suspend
   or landed on a different network. Without either it still recovers, just more slowly — the
   keepalive finds the dead socket instead — and says so once at startup: *"not watching for resume
@@ -657,9 +661,16 @@ address to talk to.
 - Linux, and a Sonos **S2** speaker on the same network. S1 is not supported.
 - **Rust 1.88 or newer** to build it (`edition = "2024"`, and let-chains). This is declared as
   `rust-version` in `Cargo.toml`, so an older toolchain is refused by Cargo with a plain message
-  naming the version it wants rather than a page of syntax errors. Distribution packages are often
-  behind; `rustup` is the reliable route. Nothing here chases the newest thing for its own sake —
-  it is simply not held back either.
+  naming the version it wants rather than a page of syntax errors. Rolling and recent distributions
+  are well past it — 1.88 is from mid-2025 — so their packaged Rust is usually enough and `rustup`
+  is the fallback rather than the first move. The versions that are genuinely too old are the
+  long-term releases; see [On Ubuntu](#on-ubuntu). Nothing here chases the newest thing for its own
+  sake — it is simply not held back either.
+
+  **The fix is a newer toolchain, not a smaller number.** Lowering `rust-version` or reverting
+  `edition` to 2021 in `Cargo.toml` does not work: the code is edition-2024, so that trades one
+  clear refusal for a page of syntax errors. Worth stating outright because an agent building this
+  will otherwise try it.
 - For the queue commands (`x2rock queue`, `x2rock play N`): the Sonos **UPnP** setting enabled
   (Sonos app → Settings → Privacy & Security → UPnP). Playback control needs nothing.
 
@@ -689,6 +700,7 @@ Informed by prior reverse-engineering of the Sonos protocols by the community, i
 
 [0BSD](LICENSE) — public-domain-equivalent. Use it for anything, no attribution required.
 
-That extends to packaging: nobody needs to ask. The only build constraint is the Rust version
-above, and there is nothing else unusual — no build scripts, no vendored code, no network access at
-build time beyond fetching crates.
+That extends to packaging: nobody needs to ask. The build constraints are the Rust version above
+and a C compiler — `ring` vendors C and assembly and compiles them in its build script, so `cc`
+must be present, though `cmake` is not needed. Beyond that there is nothing unusual, and no network
+access at build time beyond fetching crates.
