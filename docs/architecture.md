@@ -289,7 +289,7 @@ Read off `/status/zp`, `/xml/device_description.xml` and `GetZoneGroupState`
 rather than from memory, because the earlier version of this section was wrong
 in a way that mattered: it said "three Sonos Beams and a One SL on firmware
 95.1-78010, and an IKEA SYMFONISK Bookshelf on 86.7-77050", which undercounted
-the household and missed **every bonded set in it**. Nine players, five rooms:
+the household and missed **every bonded set in it**. Eleven players, five rooms:
 
 | Room | Players | Models | Firmware |
 |---|---|---|---|
@@ -3218,7 +3218,7 @@ news is that **the assumption held for the wrong reason, and holds anyway**.
   different answers depending on which kind of bond it is, and neither looks
   like an ad-hoc group.
 - **x2rock already hides all of it correctly.** `x2rock rooms` lists five rooms
-  for nine players; satellites and the invisible pair half never appear as rooms
+  for eleven players; satellites and the invisible pair half never appear as rooms
   and never need to.
 - **The firmware keeps bonded members in lockstep, so x2rock does not have to.**
   This was the open worry — whether per-room volume and tone reach one physical
@@ -3238,6 +3238,46 @@ news is that **the assumption held for the wrong reason, and holds anyway**.
   for the coordinator. That is a real blind spot: a satellite stuck on old
   firmware would not show up. Not worth fixing until something depends on it, but
   worth not being surprised by.
+
+## `x2rock system`: the player view, and why it had to exist (built 2026-09-05)
+
+Everything else here speaks in rooms, deliberately - a room is a room whether
+one speaker or four back it. The cost of that only became visible when this
+file's own hardware record turned out to have been wrong for months: it
+undercounted the household and missed every bonded set, and **nothing in the CLI
+could have caught it**. Answering "what is this household made of" meant leaving
+x2rock for `curl`. So `system` is the deliberate inverse of `rooms` and
+`status`: the one command that speaks in players.
+
+- **It is the Sonos apps' "About My System", field for field.** Checked against
+  a capture of the PC app's own readout: all eleven players, and every model,
+  role, version, build, hardware revision, series id and address matched. That
+  is the bar it was built to, so a divergence from the app is a bug here.
+- **One document does almost all of it.** `device_description.xml` - already
+  fetched for `firmware_version` and then thrown away - carries `modelName`,
+  `serialNum`, `hardwareVersion`, `seriesid`, `swGen` and, the one that mattered,
+  **`displayVersion`**: the human-facing `18.7` the apps print beside the build.
+  The `/status/zp` diagnostic page carries the same serial and hardware strings,
+  but it is an HTML debug view rather than an API, so nothing here reads it.
+- **The build number is not a field.** The apps' `build 96179270` is the wire
+  version `96.1-79270` with its punctuation removed; deriving it beats hunting
+  for a field that does not exist.
+- **`GetZoneGroupState` is the only view that admits a satellite exists.**
+  `getGroups`, which the rest of x2rock is built on, has no word for a Sub. The
+  topology carries every player, a `<Satellite>` for each home-theatre member
+  and `Invisible="1"` on the hidden half of a pair - and a `SoftwareVersion` per
+  player, which is how a satellite's firmware becomes readable at all.
+- **Roles come from the channel map, not the model.** The same One SL is a left
+  surround in one room and a whole speaker in another. `LR`/`RR` are `LS`/`RS`;
+  a pair half carries its own side twice (`LF,LF`) where a soundbar carries both
+  (`LF,RF`), which is the whole distinction behind the `L`/`R` labels. The Sub
+  gets no suffix because its model name is already the word.
+- **Satellites are listed twice** - once under their group and once in their own
+  right - so the same UUID arrives more than once and the parse de-duplicates
+  rather than counting a tenth speaker.
+- **Serials and addresses are the reason for `--redact`.** The obvious use for
+  this output is pasting it into a bug report, which is exactly where a MAC-derived
+  serial should not go. The household control id is never printed at all.
 
 ## Queue mutation over UPnP (verified 2026-08-29)
 
@@ -4695,7 +4735,7 @@ is the control that actually changes what volume 1 sounds like.
   on and nothing was ever measured".
 
   **Swept the whole home household 2026-09-05, and it did not settle.**
-  `GetRoomCalibrationStatus` was read on all nine players - every room coordinator, both halves of
+  `GetRoomCalibrationStatus` was read on all eleven players - every room coordinator, both halves of
   the Dining Room stereo pair, the Sub and all four surrounds - and *every one* answered
   `Enabled=1, Available=1`. The experiment wanted a speaker known never to have been TruePlay'd, and
   the sweep found no candidate.
@@ -4835,7 +4875,7 @@ file follows. The two other experiments that wanted the same trip both ran on 20
 neither closed:
 
 - **The uncalibrated speaker's `RoomCalibrationAvailable` did not settle it, for want of an
-  uncalibrated speaker.** `GetRoomCalibrationStatus` was read on all nine players in the household
+  uncalibrated speaker.** `GetRoomCalibrationStatus` was read on all eleven players in the household
   — every room coordinator, both halves of the stereo pair, the Sub and all four surrounds — and
   *every one* answered `RoomCalibrationEnabled=1, RoomCalibrationAvailable=1`. The experiment
   needed a speaker known never to have been TruePlay'd, to see whether `Available` read `0`

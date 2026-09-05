@@ -154,6 +154,8 @@ x2rock ungroup Kitchen   # Kitchen leaves, on its own again
 x2rock -r "Living Room" tv   # switch a soundbar to its TV input
 x2rock -r Kitchen party  # party mode: every room joins Kitchen
 x2rock party off         # break it up, every room on its own
+x2rock system            # every speaker: model, firmware, hardware, bonding
+x2rock system --redact   # ...with serials and addresses masked, to paste somewhere
 x2rock daemon            # every room as an MPRIS2 player, until stopped
 ```
 
@@ -626,7 +628,7 @@ systemctl --user daemon-reload && systemctl --user restart x2rock.service
 
 ## Tested devices
 
-Everything here was developed against these — one household, nine players in
+Everything here was developed against these — one household, eleven players in
 five rooms (re-read off the speakers themselves 2026-09-05):
 
 | Device | Firmware | Notes |

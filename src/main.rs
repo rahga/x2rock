@@ -124,6 +124,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Every speaker in the household: model, firmware, hardware and bonding.
+    ///
+    /// The Sonos apps' "About My System", and the one command that speaks in
+    /// *players* rather than rooms. Everything else here hides bonding on
+    /// purpose - a room is a room whether one speaker or four back it - which
+    /// leaves no way to ask what a household is actually made of. A Sub, a
+    /// surround and the hidden half of a stereo pair appear nowhere else,
+    /// firmware included, so a satellite left behind by an update is invisible
+    /// to `x2rock update` and visible here.
+    ///
+    /// **Read-only**, and local: the household's own topology plus each
+    /// player's self-description, no account and nothing sent anywhere.
+    System {
+        /// One object per player, with `room`, `model`, `role`, `channels`,
+        /// `serial`, `display_version`, `build`, `hardware_version` and `ip`.
+        #[arg(long)]
+        json: bool,
+        /// Mask serial numbers and addresses, for pasting somewhere public.
+        /// The household id is never printed either way.
+        #[arg(long)]
+        redact: bool,
+    },
     /// List the household's alarms.
     ///
     /// Alarms are household-wide - one list, each entry naming its room - so
@@ -1289,6 +1311,120 @@ fn group_line(group: &Group, groups: &Groups) -> String {
         format!("{:<24} [{}]", group.name, names.join(" + "))
     } else {
         format!("{:<24} on its own", group.name)
+    }
+}
+
+/// Mask an identifier down to something still comparable but not publishable.
+///
+/// A serial and an address both matter in a bug report only as "are these two
+/// lines the same speaker", so the tail is what gets kept - the last two
+/// segments of it. One segment is not enough: a serial ends in a single check
+/// character, so `…C` would collapse most of a household onto the same label
+/// and lose the only thing the tail was kept for.
+fn masked(value: &str) -> String {
+    let cuts: Vec<_> = value
+        .match_indices(['-', '.', ':'])
+        .map(|(i, _)| i)
+        .collect();
+    match cuts.len() {
+        0 => "…".to_owned(),
+        // Only one separator, so the whole tail is already the last two
+        // segments and masking it further would leave nothing to compare.
+        1 => format!("…{}", &value[cuts[0] + 1..]),
+        n => format!("…{}", &value[cuts[n - 2] + 1..]),
+    }
+}
+
+/// The household by player, grouped under the room each one belongs to.
+fn print_system(
+    rows: &[(&upnp::SystemPlayer, Result<upnp::DeviceInfo>)],
+    json: bool,
+    redact: bool,
+) {
+    if json {
+        let items: Vec<_> = rows
+            .iter()
+            .map(|(player, found)| {
+                let mut entry = json!({
+                    "room": player.room,
+                    "uuid": player.uuid,
+                    "role": player.role(),
+                    "channels": player.channels,
+                    "bonded": player.bonded(),
+                    "satellite": player.satellite,
+                    "hidden": player.invisible,
+                    "ip": player.ip.map(|ip| if redact { masked(&ip.to_string()) } else { ip.to_string() }),
+                });
+                match found {
+                    Ok(info) => {
+                        entry["model"] = json!(info.model_name);
+                        entry["model_number"] = json!(info.model_number);
+                        entry["serial"] =
+                            json!(if redact { masked(&info.serial) } else { info.serial.clone() });
+                        entry["sonos_os"] = json!(format!("S{}", info.sw_gen));
+                        entry["display_version"] = json!(info.display_version);
+                        entry["build"] = json!(info.build());
+                        entry["software_version"] = json!(info.software_version);
+                        entry["hardware_version"] = json!(info.hardware_version);
+                        entry["series_id"] = json!(info.series_id);
+                    }
+                    // Reported rather than dropped: the topology knows this
+                    // player exists, so silence about it would be a lie.
+                    Err(e) => entry["error"] = json!(format!("{e:#}")),
+                }
+                entry
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&items).expect("serializable"));
+        return;
+    }
+    if rows.is_empty() {
+        println!("No players answered.");
+        return;
+    }
+    let mut room = None;
+    for (player, found) in rows {
+        if room != Some(&player.room) {
+            let count = rows.iter().filter(|(p, _)| p.room == player.room).count();
+            let plural = if count == 1 { "player" } else { "players" };
+            println!("{}  ({count} {plural})", player.room);
+            room = Some(&player.room);
+        }
+        let label = match player.role() {
+            Some(role) => format!("({role})"),
+            None => String::new(),
+        };
+        match found {
+            Ok(info) => {
+                let serial = if redact {
+                    masked(&info.serial)
+                } else {
+                    info.serial.clone()
+                };
+                let addr = player
+                    .ip
+                    .map(|ip| {
+                        if redact {
+                            masked(&ip.to_string())
+                        } else {
+                            ip.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "no address".to_owned());
+                println!(
+                    "  {:<22} {:<5} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}",
+                    info.model_name,
+                    label,
+                    info.display_version,
+                    info.build(),
+                    info.hardware_version,
+                    info.model_number,
+                    addr,
+                    serial,
+                );
+            }
+            Err(e) => println!("  {:<22} {label:<5} unreachable ({e:#})", "?"),
+        }
     }
 }
 
@@ -3909,6 +4045,38 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Players, not rooms - so this reads the topology rather than `getGroups`,
+    // which has no word for a Sub. One player answers for the whole household,
+    // and each one is then asked to describe itself.
+    if let Command::System { json, redact } = &cli.command {
+        let any = session
+            .groups
+            .players
+            .iter()
+            .find_map(|p| p.ip())
+            .ok_or_else(|| anyhow!("no player has an address to ask for the topology"))?;
+        let players = Upnp::new(any).system_players().await?;
+        let mut rows = Vec::new();
+        for player in &players {
+            let found = match player.ip {
+                Some(ip) => Upnp::new(ip).device_info().await,
+                None => Err(anyhow!("no address to reach it on")),
+            };
+            rows.push((player, found));
+        }
+        // By room, and within a room the primary before its satellites, which is
+        // the order the apps print and the order the bonding is legible in.
+        rows.sort_by(|(a, _), (b, _)| {
+            a.room
+                .cmp(&b.room)
+                .then(a.satellite.cmp(&b.satellite))
+                .then(a.invisible.cmp(&b.invisible))
+                .then(a.role().unwrap_or("").cmp(b.role().unwrap_or("")))
+        });
+        print_system(&rows, *json, *redact);
+        return Ok(());
+    }
+
     // Household-wide, and addressed by id rather than by room, so these run
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
@@ -4759,6 +4927,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Alarms { .. }
         | Command::Alarm { .. }
         | Command::Update { .. }
+        | Command::System { .. }
         | Command::Group { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }
@@ -4783,6 +4952,24 @@ async fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--redact` has to leave the output still readable *as a household*: two
+    /// lines for the same speaker must match and two speakers must not collide.
+    #[test]
+    fn redaction_keeps_enough_tail_to_tell_two_speakers_apart() {
+        // A serial ends in a one-character check digit, so keeping a single
+        // segment would render most of a household as the same label.
+        assert_eq!(masked("54-2A-1B-83-31-80:C"), "…80:C");
+        assert_eq!(masked("48-A6-B8-A3-BA-52:3"), "…52:3");
+        assert_ne!(masked("48-A6-B8-A3-BA-52:3"), masked("48-A6-B8-A3-B9-36:8"));
+        assert_eq!(masked("192.168.86.24"), "…86.24");
+        assert_ne!(masked("192.168.86.24"), masked("192.168.86.35"));
+        // Nothing to cut on, so nothing is revealed.
+        assert_eq!(masked("opaque"), "…");
+        assert_eq!(masked(""), "…");
+        // One separator only: the tail is already the last two segments.
+        assert_eq!(masked("a-b"), "…b");
+    }
 
     #[test]
     fn a_time_of_day_is_padded_to_what_the_player_takes() {

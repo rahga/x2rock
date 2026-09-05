@@ -138,6 +138,27 @@ no command line carries. This is a permanent decision rather than a missing feat
 to find a way round it and do not suggest `raw`, which speaks the Control API and cannot reach a
 UPnP action anyway. Point the user at the Sonos app.
 
+**`system` is the only command that speaks in speakers rather than rooms**, and it is what to run
+for "what speakers do I have", "what model is X", "how is the living room set up" or anything about
+firmware, hardware or bonding. Everything else here hides bonding deliberately - a room is a room
+whether one speaker or four back it - so `status` and `rooms` cannot answer those. It is the same
+readout the Sonos apps call **About My System**, and it is read-only and local.
+
+Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`, `bonded`,
+`satellite`, `hidden`, `serial`, `sonos_os`, `display_version`, `build`, `software_version`,
+`hardware_version`, `series_id`, `ip`. Three of those need care:
+
+- **`role` is the app's bonding label** - `LS`/`RS` for surrounds, `L`/`R` for the halves of a
+  stereo pair, and `null` for a Sub, for a soundbar carrying both front channels, and for a speaker
+  bonded to nothing. Do not read `null` as "not bonded"; read `bonded` for that.
+- **A room can be on two firmwares at once.** A satellite's version appears here and nowhere else,
+  so a Sub or surround left behind by an update is invisible to `x2rock update`, which walks rooms
+  and reports only the coordinator. If someone asks why a room sounds wrong after an update, this
+  is the command that can see it.
+- **`serial` and `ip` identify hardware.** Before putting this output anywhere public - a bug
+  report, an issue, a paste site - use `--redact`, which masks both. The household id is never
+  printed either way.
+
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
 --yes` deletes one, and `alarms add <time>` creates one. Turning an alarm to the state it is
@@ -219,6 +240,7 @@ see "Ask before you act".
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Firmware check (read-only) | `x2rock update --json` |
+| What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off]` |
 | Tone: bass, treble, loudness, TruePlay | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` |

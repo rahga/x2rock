@@ -132,6 +132,94 @@ impl SoftwareUpdate {
     }
 }
 
+/// One player as the household's own topology describes it.
+///
+/// This is the *player* view, deliberately: everything else in x2rock speaks in
+/// rooms, and a room can be four speakers. Only here do the Sub, the surrounds
+/// and the hidden half of a stereo pair get to exist on their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPlayer {
+    pub uuid: String,
+    pub room: String,
+    pub ip: Option<IpAddr>,
+    /// The channels this player carries inside its bond - `LF,RF` for a
+    /// soundbar or a pair half, `SW` for a Sub, `LR`/`RR` for surrounds. Empty
+    /// when the player is bonded to nothing.
+    pub channels: Vec<String>,
+    /// The household hides this one: the second speaker of a stereo pair.
+    pub invisible: bool,
+    /// A Sub or surround behind a home-theatre primary.
+    pub satellite: bool,
+    /// Carried by the topology for every player, satellites included - which is
+    /// the one place a satellite's firmware is visible at all.
+    pub software_version: String,
+}
+
+impl SystemPlayer {
+    /// How the Sonos apps label a bonded player: `(LS)`, `(RS)`, `(L)`, `(R)`.
+    ///
+    /// Derived from the channel map rather than from the model, because the same
+    /// One SL is a left surround in one room and a whole speaker in another.
+    pub fn role(&self) -> Option<&'static str> {
+        match self.channels.as_slice() {
+            [c] if c == "LR" => Some("LS"),
+            [c] if c == "RR" => Some("RS"),
+            // No suffix for a Sub, the way the apps print it: the model name is
+            // already the word "Sub", so `Sonos Sub (Sub)` would say it twice.
+            [c] if c == "SW" => None,
+            // A pair half carries its own side twice (`LF,LF`); a soundbar or a
+            // lone speaker carries both sides and is not a half of anything.
+            [a, b] if a == b && a == "LF" => Some("L"),
+            [a, b] if a == b && a == "RF" => Some("R"),
+            _ => None,
+        }
+    }
+
+    /// Whether this player is bonded into a room with others at all.
+    pub fn bonded(&self) -> bool {
+        !self.channels.is_empty()
+    }
+}
+
+/// A player's own description of itself, read from `device_description.xml`.
+///
+/// This one document carries every field the Sonos apps' "About My System"
+/// prints for a player, `displayVersion` included - so the readout needs no
+/// diagnostic page and no second call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// `Sonos One SL`, `Sonos Beam`, `SYMFONISK Bookshelf`.
+    pub model_name: String,
+    /// The short form: `One SL`, `Beam`, `Bookshelf`.
+    pub display_name: String,
+    /// `S22`, `S14`, `S21`.
+    pub model_number: String,
+    pub room: String,
+    /// MAC-derived, with the app's trailing check character: `48-A6-…-38:E`.
+    pub serial: String,
+    /// `2` for an S2 household.
+    pub sw_gen: String,
+    /// The human-facing version the apps show, e.g. `18.7`.
+    pub display_version: String,
+    /// The build the wire uses, e.g. `96.1-79270`.
+    pub software_version: String,
+    pub hardware_version: String,
+    pub series_id: String,
+}
+
+impl DeviceInfo {
+    /// The build number the apps print beside the version.
+    ///
+    /// It is `software_version` with the punctuation taken out - `96.1-79270`
+    /// is build `96179270` - rather than a separate field to read.
+    pub fn build(&self) -> String {
+        self.software_version
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect()
+    }
+}
+
 /// One alarm, exactly as `ListAlarms` reports it.
 ///
 /// Every field is carried even where the CLI does nothing with it, because
@@ -319,15 +407,57 @@ impl Upnp {
     /// The same string the HTTP `SERVER` header carries, read from the
     /// description because `soap` hands back a body and not the headers.
     pub async fn firmware_version(&self) -> Result<String> {
+        Ok(self.device_info().await?.software_version)
+    }
+
+    /// Everything the player says about itself, from one document.
+    ///
+    /// `device_description.xml` is fetched already for the firmware alone; it
+    /// also carries the model, the serial, the hardware revision, the series and
+    /// the human-facing `displayVersion`, which together are exactly what the
+    /// Sonos apps' "About My System" prints. Reading them all costs the same one
+    /// request that reading the version alone did.
+    pub async fn device_info(&self) -> Result<DeviceInfo> {
         let url = format!("http://{}:{PORT}/xml/device_description.xml", self.ip);
-        let (status, body) = http::get(&url, Duration::from_secs(8)).await?;
+        let (status, body) = http::get(&url, TIMEOUT).await?;
         if status != 200 {
             bail!("the player answered {status} for its own description");
         }
         let doc = Document::parse(&body)?;
-        Ok(text_of(&doc, "softwareVersion")
-            .unwrap_or("unknown")
-            .to_string())
+        let field = |tag: &str| text_of(&doc, tag).unwrap_or("").trim().to_owned();
+        Ok(DeviceInfo {
+            model_name: field("modelName"),
+            display_name: field("displayName"),
+            model_number: field("modelNumber"),
+            room: field("roomName"),
+            serial: field("serialNum"),
+            sw_gen: field("swGen"),
+            display_version: field("displayVersion"),
+            software_version: match text_of(&doc, "softwareVersion") {
+                Some(v) => v.trim().to_owned(),
+                None => "unknown".to_owned(),
+            },
+            hardware_version: field("hardwareVersion"),
+            series_id: field("seriesid"),
+        })
+    }
+
+    /// Every player in the household, satellites and hidden pair halves too.
+    ///
+    /// One call to any player answers for all of them - the topology is
+    /// household-wide - and it is the only view that admits a Sub or a surround
+    /// exists. `getGroups`, which everything else here is built on, speaks in
+    /// rooms and cannot.
+    pub async fn system_players(&self) -> Result<Vec<SystemPlayer>> {
+        let text = self
+            .soap(Service::ZoneGroupTopology, "GetZoneGroupState", &[])
+            .await?;
+        let outer = Document::parse(&text)?;
+        // Escaped XML nested in the reply, the same shape the alarm list and
+        // `UpdateItem` arrive in; roxmltree hands back the decoded text.
+        let inner = text_of(&outer, "ZoneGroupState")
+            .ok_or_else(|| anyhow!("no ZoneGroupState in the reply"))?;
+        players_in(inner)
     }
 
     /// The household's own clock, and whether it knows what timezone it is in.
@@ -1156,6 +1286,82 @@ impl Upnp {
     }
 }
 
+/// The channels one player carries inside a bond, out of a channel map.
+///
+/// Both maps are the same shape - `UUID:CH[,CH];UUID:CH[,CH]` - though they are
+/// spelled by different attributes: `ChannelMapSet` on a stereo pair,
+/// `HTSatChanMapSet` on a home theatre. A player that is not named in the map
+/// carries nothing, which is how an unbonded speaker reads.
+fn channels_for(uuid: &str, map: &str) -> Vec<String> {
+    map.split(';')
+        .filter_map(|entry| entry.split_once(':'))
+        .find(|(who, _)| *who == uuid)
+        .map(|(_, chans)| {
+            chans
+                .split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every player in a `<ZoneGroupState>` document, satellites included.
+///
+/// The satellites are the point. `getGroups` speaks in rooms and never mentions
+/// the Sub or the surrounds behind one, nor the hidden half of a stereo pair, so
+/// a household of nine players looks like five. Here they all appear: a
+/// `<Satellite>` is a home-theatre member, and a `ZoneGroupMember` carrying
+/// `Invisible="1"` is the other half of a pair.
+fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
+    let doc = Document::parse(xml)?;
+    let mut out = Vec::new();
+    for node in doc.descendants() {
+        let tag = node.tag_name().name();
+        let satellite = tag == "Satellite";
+        if tag != "ZoneGroupMember" && !satellite {
+            continue;
+        }
+        let attr = |name: &str| node.attribute(name).unwrap_or("");
+        let uuid = attr("UUID");
+        if uuid.is_empty() {
+            continue;
+        }
+        // Either map may be present; a player is named in at most one.
+        let map = match attr("HTSatChanMapSet") {
+            "" => attr("ChannelMapSet"),
+            ht => ht,
+        };
+        out.push(SystemPlayer {
+            uuid: uuid.to_owned(),
+            room: attr("ZoneName").to_owned(),
+            ip: ip_in_location(attr("Location")),
+            channels: channels_for(uuid, map),
+            invisible: attr("Invisible") == "1",
+            satellite,
+            software_version: attr("SoftwareVersion").to_owned(),
+        });
+    }
+    // A satellite is also listed under the group it belongs to, so the same
+    // UUID can arrive twice; the first mention wins and the duplicate is dropped
+    // rather than counted as a tenth speaker.
+    let mut seen = BTreeSet::new();
+    out.retain(|p| seen.insert(p.uuid.clone()));
+    Ok(out)
+}
+
+/// The address out of a `Location` URL, which is where a player's own IP is
+/// published - `http://192.168.86.26:1400/xml/device_description.xml`.
+fn ip_in_location(location: &str) -> Option<IpAddr> {
+    location
+        .strip_prefix("http://")?
+        .split(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// An `<UpdateItem>` document, leaving `installed` for the caller to fill.
 ///
 /// Empty is not an error: a player with nothing cached answers with an empty
@@ -1330,6 +1536,152 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ZoneGroupState` trimmed from the one an eleven-player household
+    /// produced, 2026-09-05, keeping the attributes that decide anything: a
+    /// home theatre with a Sub and two surrounds, a stereo pair whose right
+    /// half is hidden, and a speaker bonded to nothing.
+    const TOPOLOGY: &str = r#"<ZoneGroups>
+<ZoneGroup Coordinator="RINCON_BEAM" ID="RINCON_BEAM:1">
+  <ZoneGroupMember UUID="RINCON_BEAM" Location="http://192.168.86.25:1400/xml/device_description.xml" ZoneName="Living Room" SoftwareVersion="96.1-79270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW;RINCON_LS:LR;RINCON_RS:RR">
+    <Satellite UUID="RINCON_SUB" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW"/>
+    <Satellite UUID="RINCON_LS" Location="http://192.168.86.44:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_LS:LR"/>
+    <Satellite UUID="RINCON_RS" Location="http://192.168.86.39:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_RS:RR"/>
+  </ZoneGroupMember>
+</ZoneGroup>
+<ZoneGroup Coordinator="RINCON_PAIRL" ID="RINCON_PAIRL:2">
+  <ZoneGroupMember UUID="RINCON_PAIRR" Location="http://192.168.86.28:1400/xml/device_description.xml" ZoneName="Dining Room" Invisible="1" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
+  <ZoneGroupMember UUID="RINCON_PAIRL" Location="http://192.168.86.32:1400/xml/device_description.xml" ZoneName="Dining Room" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
+</ZoneGroup>
+<ZoneGroup Coordinator="RINCON_ONE" ID="RINCON_ONE:3">
+  <ZoneGroupMember UUID="RINCON_ONE" Location="http://192.168.86.26:1400/xml/device_description.xml" ZoneName="Kitchen" SoftwareVersion="96.1-79270"/>
+</ZoneGroup>
+</ZoneGroups>"#;
+
+    /// The whole point of reading the topology rather than `getGroups`: three
+    /// rooms are seven speakers, and four of them are reachable no other way.
+    #[test]
+    fn the_topology_finds_the_players_that_rooms_hide() {
+        let players = players_in(TOPOLOGY).unwrap();
+        assert_eq!(players.len(), 7);
+        let living: Vec<_> = players.iter().filter(|p| p.room == "Living Room").collect();
+        assert_eq!(living.len(), 4);
+        assert_eq!(
+            players.iter().filter(|p| p.room == "Dining Room").count(),
+            2
+        );
+        assert_eq!(players.iter().filter(|p| p.room == "Kitchen").count(), 1);
+
+        // A satellite's own firmware is here and nowhere else, which is why
+        // `update` - which walks rooms - cannot see one left behind.
+        let sub = players.iter().find(|p| p.uuid == "RINCON_SUB").unwrap();
+        assert_eq!(sub.software_version, "86.8-78270");
+        assert!(sub.satellite);
+        let beam = players.iter().find(|p| p.uuid == "RINCON_BEAM").unwrap();
+        assert_eq!(beam.software_version, "96.1-79270");
+        // The primary is not a satellite of itself, and the room can therefore
+        // sit on two firmwares at once.
+        assert!(!beam.satellite);
+    }
+
+    /// The labels the Sonos apps print, derived from the channel map because the
+    /// same One SL is a left surround in one room and a whole speaker in another.
+    #[test]
+    fn a_bonded_player_is_labelled_the_way_the_apps_label_it() {
+        let players = players_in(TOPOLOGY).unwrap();
+        let role = |uuid: &str| {
+            players
+                .iter()
+                .find(|p| p.uuid == uuid)
+                .unwrap()
+                .role()
+                .unwrap_or("")
+        };
+        assert_eq!(role("RINCON_LS"), "LS");
+        assert_eq!(role("RINCON_RS"), "RS");
+        assert_eq!(role("RINCON_PAIRL"), "L");
+        assert_eq!(role("RINCON_PAIRR"), "R");
+        // No suffix for the Sub - its model name is already the word - nor for a
+        // primary carrying both front channels, nor for a speaker bonded to
+        // nothing at all.
+        assert_eq!(role("RINCON_SUB"), "");
+        assert_eq!(role("RINCON_BEAM"), "");
+        assert_eq!(role("RINCON_ONE"), "");
+
+        let one = players.iter().find(|p| p.uuid == "RINCON_ONE").unwrap();
+        assert!(!one.bonded());
+        assert!(
+            players
+                .iter()
+                .find(|p| p.uuid == "RINCON_LS")
+                .unwrap()
+                .bonded()
+        );
+    }
+
+    /// A pair half carries its own side twice (`LF,LF`) while a soundbar carries
+    /// both sides (`LF,RF`) - the distinction the `L`/`R` labels rest on.
+    #[test]
+    fn a_channel_map_is_read_per_player() {
+        let map = "RINCON_BEAM:LF,RF;RINCON_SUB:SW";
+        assert_eq!(channels_for("RINCON_BEAM", map), ["LF", "RF"]);
+        assert_eq!(channels_for("RINCON_SUB", map), ["SW"]);
+        // A player the map does not name carries nothing, which is how an
+        // unbonded speaker reads rather than an error.
+        assert!(channels_for("RINCON_ELSEWHERE", map).is_empty());
+        assert!(channels_for("RINCON_BEAM", "").is_empty());
+    }
+
+    /// Satellites are listed under their group as well as in their own right, so
+    /// the same speaker arrives twice and must not be counted twice.
+    #[test]
+    fn a_player_named_twice_is_still_one_player() {
+        let doubled = TOPOLOGY.replace(
+            "</ZoneGroups>",
+            r#"<ZoneGroup Coordinator="RINCON_BEAM" ID="RINCON_BEAM:9"><ZoneGroupMember UUID="RINCON_SUB" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup></ZoneGroups>"#,
+        );
+        let players = players_in(&doubled).unwrap();
+        assert_eq!(players.len(), 7);
+        assert_eq!(players.iter().filter(|p| p.uuid == "RINCON_SUB").count(), 1);
+    }
+
+    #[test]
+    fn an_address_comes_off_the_location_url() {
+        assert_eq!(
+            ip_in_location("http://192.168.86.26:1400/xml/device_description.xml")
+                .map(|ip| ip.to_string()),
+            Some("192.168.86.26".to_owned())
+        );
+        assert_eq!(ip_in_location(""), None);
+        assert_eq!(ip_in_location("not a url"), None);
+    }
+
+    /// The apps print `18.7 (build 96179270)`; the build is the wire version
+    /// with its punctuation removed rather than a field of its own.
+    #[test]
+    fn the_build_number_is_the_wire_version_without_punctuation() {
+        let info = DeviceInfo {
+            model_name: "Sonos One SL".into(),
+            display_name: "One SL".into(),
+            model_number: "S22".into(),
+            room: "Kitchen".into(),
+            serial: "48-A6-B8-18-D1-38:E".into(),
+            sw_gen: "2".into(),
+            display_version: "18.7".into(),
+            software_version: "96.1-79270".into(),
+            hardware_version: "1.28.1.6-1.1".into(),
+            series_id: "A100".into(),
+        };
+        assert_eq!(info.build(), "96179270");
+        assert_eq!(
+            DeviceInfo {
+                software_version: "86.8-78270".into(),
+                ..info
+            }
+            .build(),
+            "86878270"
+        );
+    }
 
     /// Replies captured off the Media Room speaker, 2026-09-04.
     const GET_BASS: &str = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetBassResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentBass>0</CurrentBass></u:GetBassResponse></s:Body></s:Envelope>"#;
