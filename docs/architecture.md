@@ -3159,13 +3159,19 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   **`homeTheater:1 loadHomeTheaterPlayback` (player-scoped, no parameters)
   switches a soundbar to its TV input** and answers `success`. So the TV input
   is not, after the queue, a second thing the Control API cannot touch -
-  `loadLineIn` was simply the wrong door. (Found by accident, and the accident
-  is its own lesson: an empty-body *probe* of a parameterless action **runs**
-  it. `loadHomeTheaterPlayback` needs no arguments, so probing it switched a
-  live room onto TV input. Probe parameterless action commands with `--scope
-  none` and expect the shape error, or reason first about which commands act on
-  an empty body - `createSession` and `loadStreamUrl` refuse without params;
-  `loadHomeTheaterPlayback` and `loadAudioClip`'s chime do not.)
+  `loadLineIn` was simply the wrong door. (Found by an empty-body probe that
+  **executed**, and confirmed deliberately afterward with a before/after:
+  `loadHomeTheaterPlayback` on empty flipped Guest TV from paused-on-its-queue
+  to TV input within ~2s. The precise rule, since an earlier draft over-stated
+  it: an empty body is unsafe only for a command that takes **no required
+  parameter and performs an action** - `loadHomeTheaterPlayback` is the one seen
+  here. A command that requires a parameter refuses the empty body harmlessly:
+  `createSession`, `loadStreamUrl`, `loadAudioClip` and `setTvPowerState` all
+  answer `ERROR_INVALID_PARAMETER`/`MISSING_PARAMETERS` rather than acting. And
+  even some parameterless setters no-op: `setOptions` on empty answered `success`
+  and changed nothing observable. So "setters are unsafe to probe empty" is
+  wrong; the test is "does it need a parameter" - if not, and it acts, an empty
+  body runs it. Probe those with `--scope none` or reason first.)
 - **x2rock uses UPnP for it anyway**, and keeps doing so: `SetAVTransportURI` to
   `x-sonos-htastream:<playerId>:spdif`, exactly what the device reports as its
   own `CurrentURI` while on TV. `spdif` covers HDMI-ARC as well as optical, and
@@ -3196,12 +3202,14 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   used by whoever wants it, without x2rock vouching for it.
 - **`getOptions`/`setOptions` on `homeTheater:1` - a lead, not built.**
   `getOptions` reads the home-theatre block (night mode, dialog, virtual
-  height, grouping latency); `setOptions` answered a call, which *hints* at a
-  Control-API **write** path for night/dialog that `settings:1 setPlayerSettings`
-  refused with `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog
-  writes off UPnP. Not probed with real parameters (a setter's empty-body probe
-  is not safe - see the `loadHomeTheaterPlayback` lesson above), so it stays a
-  lead. x2rock writes night/dialog over UPnP `SetEQ` today, which works.
+  height, grouping latency); `setOptions` on an empty body answered `success`
+  and changed nothing, which *hints* at a Control-API **write** path for
+  night/dialog that `settings:1 setPlayerSettings` refused with
+  `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog writes off
+  UPnP. Left unprobed not because the empty body is dangerous (it no-op'd) but
+  because settling it means a **real-parameter** `setOptions`, and that *would*
+  write - a state change worth doing on purpose, not as a probe. x2rock writes
+  night/dialog over UPnP `SetEQ` today, which works, so this stays a lead.
 - **The audio format arrives as a push event, in a namespace already
   subscribed.** `playbackMetadata:1` carries `container.htInputFormat` on a
   soundbar:
