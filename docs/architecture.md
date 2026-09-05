@@ -175,10 +175,12 @@ that the traditional Sonos desktop app — which handles queues well — is UPnP
 | Content enumeration | UPnP SOAP `:1400`, **calls only** | same path, free once queue works |
 | Remote (off-LAN) control | cloud OAuth | cut from v1 |
 
-The neat part: `playback:1` events carry a **`queueVersion`** field. So the WebSocket tells you
-*that* the queue changed — push, no polling — and you re-`Browse Q:0` over UPnP only when the
-version actually bumps. You get push semantics for a resource UPnP would otherwise make you poll,
-without ever needing GENA eventing.
+The intended neat part was that `playback:1` events carry a **`queueVersion`** field, giving push
+semantics for a resource UPnP would otherwise make you poll. **That turned out false on the
+firmware here (see "`queueVersion` does not exist" below): the field is sent neither in
+`getPlaybackStatus` nor in any event.** The push-not-poll shape survived, but the trigger is a
+different field — the UPnP `UpdateID` on a `Q:0` browse — not this one. Left here as written, with
+this pointer, because the design intent still explains the shape; only the field name was wrong.
 
 ### Music search: harder than the rest, but not closed
 
@@ -326,9 +328,12 @@ Two gaps are known and specific rather than general:
   precisely because "an Arc would settle it" read as a content problem.
 - **No player with analog line-in.** `playback:1 loadLineIn` was found to refuse
   a Beam - "player does not have line-in" - which is why TV input goes over UPnP.
-  A Port or an Amp would very likely accept that same command, so the conclusion
-  "the Control API cannot switch inputs" is really "cannot switch a *soundbar's*
-  HDMI input", and should not be generalised further than that.
+  A Port or an Amp would very likely accept that same command. This is only
+  about `loadLineIn` (analog line-in), though - switching a *soundbar* to its TV
+  input over the Control API **does** work, via `homeTheater:1
+  loadHomeTheaterPlayback` (see "Soundbars: the TV input", corrected 2026-09-05).
+  So the honest statement is narrow: `loadLineIn` refuses on a player that has no
+  analog line-in - not "the Control API cannot switch inputs", which is false.
 
 ## Portability, and where the Omarchy dependency actually is
 
@@ -2518,8 +2523,10 @@ no extra work. Notes from doing it:
 - `stationMetadata` is optional but worth sending: it is where the title the room displays comes
   from. Without it the stream plays with nothing to show.
 - The session survives the CLI process exiting — it belongs to the group, not to the connection.
-- Playback did **not** disturb the queue: `queueVersion` bumped, but this is a session source
-  rather than a queue entry, which is the whole point of the mechanism.
+- Playback did **not** disturb the queue: a session source plays alongside it rather than as a
+  queue entry, which is the whole point of the mechanism. (This entry originally credited a
+  `queueVersion` bump; that field turned out not to be sent on this firmware - see "`queueVersion`
+  does not exist" - so the observation stands but the field named for it was wrong.)
 
 **A gotcha that cost a request:** sending the envelope with an XML declaration produced
 `s:Client / Expecting state 'Element'.. Encountered 'Text'`, which reads like a malformed-request
@@ -4846,7 +4853,9 @@ is the control that actually changes what volume 1 sounds like.
 
 ### What `eq` does *not* cover, and the surface still unread
 
-`RenderingControl:1` publishes more than the three tone controls, and none of the rest is wired up:
+`RenderingControl:1` publishes more than the three tone controls. Some of the rest is wired up now -
+TruePlay disable (`SetRoomCalibrationStatus`) and night mode / dialog (`SetEQ`, via `eq --night` /
+`--dialog`), both below - and the remainder is what this section walks through:
 
 - **`GetRoomCalibrationStatus` / `SetRoomCalibrationStatus`** - TruePlay. This is a *separate*
   mechanism from bass/treble/loudness: the iPhone app measures a room and stores a per-speaker
@@ -5043,8 +5052,11 @@ neither closed:
   `false → true` with the format moving `No Signal → Silence 2.0 → Dolby Digital Surround 5.1` as a
   real signal, then real audio, arrived.
 - **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
-  speech enhancement, sub gain and surround level live on a soundbar. Untried here: Media Room is
-  not a soundbar (`has_tv` false), so the types it would answer for are unknown.
+  speech enhancement, sub gain and surround level live on a soundbar. Since probed in full (2026-09-05,
+  see "The extended EQ set, and what to probe at home"): all ten predicted types answer, and
+  `NightMode`/`DialogLevel` are now set through `eq --night`/`--dialog`. The Media-Room caveat this
+  bullet once carried - a non-soundbar, so its types were unknown - is settled: a non-soundbar
+  answers UPnP 402 for the soundbar-only types.
 - **`ResetBasicEQ` / `ResetExtEQ`** - the app's "Reset" button, for the two tiers respectively.
 
 None of this is reachable from the office LAN in the interesting cases: the calibrated rooms and
