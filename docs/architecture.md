@@ -45,6 +45,42 @@ the logind and NetworkManager mechanisms are not.
 
 A concrete porting guide is under "Porting to Android TV" below.
 
+## Superseded claims — check here before trusting an early section
+
+This file grows by appending findings in the order they were made, so a foundational claim near the
+top can be quietly overturned by a section thousands of lines later. Each reversal is corrected in
+place with a dated pointer, but a reader who lands on the early claim and stops might miss it. This
+is the "do not trust the old version" list - not the changelog (the inline dated notes hold the
+detail), just the set of early statements a later finding overturned, and where the truth now lives.
+**When a later finding overturns an earlier claim, add a line here.**
+
+- **`queueVersion` is not the queue-change signal.** The Integration-path intro presents
+  `playback:1`'s `queueVersion` as the push trigger; this firmware sends no such field, in status or
+  events. The real trigger is the UPnP `UpdateID` on a `Q:0` browse. See "`queueVersion` does not
+  exist".
+- **The Control API *can* switch a soundbar to its TV input.** Early notes say it cannot; that was
+  only true of `loadLineIn` (analog line-in). `homeTheater:1 loadHomeTheaterPlayback` does it -
+  though x2rock still uses UPnP for the group-preserving handoff. See "Soundbars: the TV input".
+- **The Control API *can read* tone and home-theatre state, just not write it.** The flat "the
+  Control API cannot reach any of this" about EQ/tone was wrong on the read side: `settings:1
+  getPlayerSettings` returns bass/treble/loudness and night/dialog. Writes are `ERROR_NO_PERMISSION`
+  and go over UPnP `SetEQ`. See "What `eq` does not cover".
+- **Night mode and dialog are settable, not read-only.** `eq --night on|off` / `--dialog on|off`
+  write them over UPnP. Any "read-only" or "no command yet" framing is superseded.
+- **`settings:1` has a working no-parameter reader.** The "required parameter unidentified" was the
+  wrong command: `getPlayerSettings` needs none; `getSettings` wants a `userId` (an account) x2rock
+  lacks. See the `settings:1` note in the raw-scope discussion.
+- **The test household is eleven players in five rooms** - not the "three Beams and a One SL and a
+  SYMFONISK" an early draft gave - and the firmware split is by hardware platform, not vendor; the
+  Living Room surrounds are Play:1, not One SL. See "What this was actually tested on".
+- **`loadCloudQueue` is a permanent no, not "not now".** It is content-integration-only per Sonos,
+  and would make x2rock a server. See "`loadCloudQueue` is a permanent no".
+- **An empty-body probe is unsafe only for a parameterless *action* command**, not for setters as a
+  class - a command that needs a parameter refuses harmlessly. See the empty-body note in
+  "Soundbars: the TV input".
+- **The 5.1 `htInputFormat` reading is confirmed on real hardware**, no longer pending on the TV
+  being off. See "The extended EQ set, and what to probe at home".
+
 ## Scope
 
 ### The axiom, stated precisely (sharpened 2026-09-04)
