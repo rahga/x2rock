@@ -3171,15 +3171,37 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   own `CurrentURI` while on TV. `spdif` covers HDMI-ARC as well as optical, and
   the group-preserving handoff (below) is already worked out here. The Control
   API command is a known alternative, not a reason to rewrite a working path.
-- **`homeTheater:1` carries two more, characterized 2026-09-05.**
-  `setTvPowerState` exists and wants a parameter - TV power over HDMI-CEC, a
-  capability x2rock has no other route to and does not yet offer (turn the TV
-  on/off through the soundbar). `getOptions`/`setOptions` both answer; `setOptions`
-  accepting a call hints at a Control-API **write** path for the home-theatre
-  options (night mode, dialog) that `settings:1 setPlayerSettings` refused with
-  `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog *writes*
-  off UPnP. Neither is probed with real parameters yet; both are left as leads,
-  not built. `getTvPowerState` is `ERROR_UNSUPPORTED_COMMAND` - no power read.
+- **`setTvPowerState`: TV power over HDMI-CEC - `raw`-only, deliberately not a
+  built command (probed 2026-09-05).** The field is `tvPowerState`; the values
+  are **`ON`** and **`STANDBY`** (case-insensitive), *not* "OFF" - that answers
+  "power state is not valid". The command is **accepted but fire-and-forget and
+  unconfirmable**: `getTvPowerState` is `ERROR_UNSUPPORTED_COMMAND`, there is no
+  power field in `getOptions`, and no power event in the `homeTheater:1`
+  subscription - the only readable proxy is `tvAudioSignalStatus.signalDetected`
+  (is a TV audio signal arriving), which is signal presence, not TV power. And
+  it is **configuration-dependent to the point of not working here**: sent
+  `STANDBY` to the Living Room Beam while it was on and playing 5.1, got
+  `success`, and the TV stayed on - `signalDetected` never dropped. The reason
+  is CEC topology: the Beam is on the TV's **ARC** port, an *audio* device, and
+  TV power is conventionally driven by *source* devices (a player, a console)
+  asserting active-source or broadcasting standby; a soundbar-initiated power
+  command is honored inconsistently and was ignored by this TV. So `success`
+  here means "the Beam queued a CEC message", never "the TV obeyed".
+  **Decision:** this stays reachable only through `raw` -
+  `x2rock raw homeTheater:1 setTvPowerState --scope player -r "<Room>"
+  '{"tvPowerState":"STANDBY"}'` - and is *not* promoted to a first-class
+  command. A blessed `tv-power` would report `success` and let a caller (or an
+  agent) tell the user the TV is off while it is still on, which is worse than
+  not offering it. It is the `raw` escape hatch's whole purpose: the wide API,
+  used by whoever wants it, without x2rock vouching for it.
+- **`getOptions`/`setOptions` on `homeTheater:1` - a lead, not built.**
+  `getOptions` reads the home-theatre block (night mode, dialog, virtual
+  height, grouping latency); `setOptions` answered a call, which *hints* at a
+  Control-API **write** path for night/dialog that `settings:1 setPlayerSettings`
+  refused with `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog
+  writes off UPnP. Not probed with real parameters (a setter's empty-body probe
+  is not safe - see the `loadHomeTheaterPlayback` lesson above), so it stays a
+  lead. x2rock writes night/dialog over UPnP `SetEQ` today, which works.
 - **The audio format arrives as a push event, in a namespace already
   subscribed.** `playbackMetadata:1` carries `container.htInputFormat` on a
   soundbar:
