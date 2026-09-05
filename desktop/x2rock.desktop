@@ -1,0 +1,17 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=x2rock
+GenericName=Sonos control
+Comment=Control Sonos speakers on the local network, no account
+Exec=x2rock
+Icon=x2rock
+Terminal=true
+# Not a GUI app to launch from a menu - it is a CLI and a daemon. This entry
+# exists so MPRIS clients (GNOME and KDE media controls, playerctl UIs) can
+# resolve each room player's app name and icon from the DesktopEntry property
+# the daemon publishes (`mpris.rs`, `desktop_entry` -> "x2rock"). NoDisplay
+# keeps it out of the launcher while staying readable for that lookup.
+NoDisplay=true
+Categories=AudioVideo;Audio;Player;
+Keywords=sonos;speaker;mpris;music;

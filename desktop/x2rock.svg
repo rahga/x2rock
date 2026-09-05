@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="x2rock">
+  <title>x2rock</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3f5c"/>
+      <stop offset="1" stop-color="#23263a"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <g fill="none" stroke="#eef0f6" stroke-width="8" stroke-linecap="round">
+    <!-- speaker driver: surround ring and, below, the filled dust cap -->
+    <circle cx="46" cy="64" r="24"/>
+    <!-- sound waves opening to the right -->
+    <path d="M71.4 35.8 A38 38 0 0 1 71.4 92.2" stroke-width="7"/>
+    <path d="M79.5 26.8 A50 50 0 0 1 79.5 101.2" stroke-width="7"/>
+  </g>
+  <circle cx="46" cy="64" r="8" fill="#eef0f6"/>
+</svg>

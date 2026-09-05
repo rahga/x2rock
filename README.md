@@ -55,6 +55,10 @@ git clone https://github.com/rahga/x2rock
 cd x2rock
 cargo build --release
 install -Dm755 target/release/x2rock ~/.local/bin/x2rock
+# So GNOME, KDE and other MPRIS clients label each room player with a name and
+# icon instead of a generic fallback. Optional; the CLI does not need it.
+install -Dm644 desktop/x2rock.desktop ~/.local/share/applications/x2rock.desktop
+install -Dm644 desktop/x2rock.svg ~/.local/share/icons/hicolor/scalable/apps/x2rock.svg
 ```
 
 Find the speakers next, once per network — every other command reconnects to what this remembers:

@@ -506,6 +506,11 @@ impl RootInterface for RoomPlayer {
     async fn identity(&self) -> fdo::Result<String> {
         Ok(self.room.clone())
     }
+    /// The basename of the desktop file an MPRIS client reads for this player's
+    /// app name and icon. It must match a `x2rock.desktop` installed on the
+    /// machine (shipped in `desktop/`); without it GNOME and KDE fail the
+    /// lookup and render every room player generically. `identity` gives the
+    /// per-room label; this gives the shared app identity.
     async fn desktop_entry(&self) -> fdo::Result<String> {
         Ok("x2rock".into())
     }
