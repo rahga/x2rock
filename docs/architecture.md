@@ -3151,14 +3151,35 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   Beams carry `PLAYBACK,CLOUD,HT_PLAYBACK,HT_POWER_STATE,AIRPLAY,AUDIO_CLIP,
   VOICE,HDMI`, and one adds `IR_CONTROL`. No probing needed to know which rooms
   have a TV input.
-- **The Control API cannot switch to it.** `playback:1 loadLineIn` is for analog
-  line-in and answers `ERROR_NOT_CAPABLE`, "player does not have line-in", on a
-  Beam - with or without a `deviceId`. This is the second thing after the queue
-  that the Control API simply has no reach into.
-- **UPnP does it**: `SetAVTransportURI` to `x-sonos-htastream:<playerId>:spdif`,
-  which is exactly what the device reports as its own `CurrentURI` while on TV.
-  `spdif` covers HDMI-ARC as well as optical. Verified by switching a soundbar
-  off a radio stream onto TV and back.
+- **`playback:1 loadLineIn` cannot switch to it - but the Control API can, and
+  this section first said otherwise (corrected 2026-09-05).** `loadLineIn` is
+  for analog line-in and answers `ERROR_NOT_CAPABLE`, "player does not have
+  line-in", on a Beam, with or without a `deviceId`. The wrong-command mistake
+  was reading that as "the Control API has no reach into the TV input". It has:
+  **`homeTheater:1 loadHomeTheaterPlayback` (player-scoped, no parameters)
+  switches a soundbar to its TV input** and answers `success`. So the TV input
+  is not, after the queue, a second thing the Control API cannot touch -
+  `loadLineIn` was simply the wrong door. (Found by accident, and the accident
+  is its own lesson: an empty-body *probe* of a parameterless action **runs**
+  it. `loadHomeTheaterPlayback` needs no arguments, so probing it switched a
+  live room onto TV input. Probe parameterless action commands with `--scope
+  none` and expect the shape error, or reason first about which commands act on
+  an empty body - `createSession` and `loadStreamUrl` refuse without params;
+  `loadHomeTheaterPlayback` and `loadAudioClip`'s chime do not.)
+- **x2rock uses UPnP for it anyway**, and keeps doing so: `SetAVTransportURI` to
+  `x-sonos-htastream:<playerId>:spdif`, exactly what the device reports as its
+  own `CurrentURI` while on TV. `spdif` covers HDMI-ARC as well as optical, and
+  the group-preserving handoff (below) is already worked out here. The Control
+  API command is a known alternative, not a reason to rewrite a working path.
+- **`homeTheater:1` carries two more, characterized 2026-09-05.**
+  `setTvPowerState` exists and wants a parameter - TV power over HDMI-CEC, a
+  capability x2rock has no other route to and does not yet offer (turn the TV
+  on/off through the soundbar). `getOptions`/`setOptions` both answer; `setOptions`
+  accepting a call hints at a Control-API **write** path for the home-theatre
+  options (night mode, dialog) that `settings:1 setPlayerSettings` refused with
+  `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog *writes*
+  off UPnP. Neither is probed with real parameters yet; both are left as leads,
+  not built. `getTvPowerState` is `ERROR_UNSUPPORTED_COMMAND` - no power read.
 - **The audio format arrives as a push event, in a namespace already
   subscribed.** `playbackMetadata:1` carries `container.htInputFormat` on a
   soundbar:
