@@ -7,16 +7,18 @@ description: Control Sonos speakers from the command line with the `x2rock` CLI 
 
 `x2rock` controls Sonos speakers on the local network, with **no Sonos account**. Control never
 leaves the LAN; `search`, `browse` and `stations` do reach out to music services and a radio
-directory, none of which want a Sonos login. Every command is a one-shot subprocess. A **background
-daemon may also be running** (it publishes now-playing to the Linux desktop over MPRIS) — it is
-*not* needed for anything you do from the CLI. When speakers seem
-missing, `x2rock status` diagnoses it (see "When no speakers are available"). Two contracts hold
-everything together:
+directory, none of which want a Sonos login. Every command is a one-shot subprocess. 
+
+When speakers seem missing, `x2rock status` diagnoses it (see "When no speakers are available"). 
+Two contracts hold everything together:
 
 1. **Run `x2rock status --json` first.** It is the whole household in one call, and you cannot write
    a correct room- or group-aware response without it.
 2. **Read fields, never prose.** Every data command takes `--json`; a failure prints a JSON
    `{error, code, fix}` on stderr. The wording changes; the JSON shape does not.
+
+x2rock typically installs with a **background daemon that may be running**, used to publish 
+'now-playing' to the Linux desktop over MPRIS. It is *not* needed for anything you do from the CLI. 
 
 `x2rock --version` prints the version. This skill ships embedded in that binary, so it matches the
 CLI it came from — if the version has moved since you installed the skill, re-run `x2rock skill`.
@@ -399,6 +401,22 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
 - **A stream plays alongside the queue and leaves it alone**, so putting radio on does not disturb
   what was queued. Stopping the radio is `x2rock pause`.
 
+## Addressing a room
+
+- `-r "<Room>"` names the room, **case-insensitively**; names come from `status`/`rooms`, and on a
+  grouped entry use a `members`/`coordinator` name, not the composite label.
+- **Always pass `-r` when the user named a room**; omit only for the whole house (unambiguous only
+  in a single-group household — otherwise `--all`). x2rock does no natural-language mapping: resolve
+  "the kitchen", "downstairs" to a room name yourself.
+- A wrong room means loud music in the wrong place — accept a single high-confidence `did_you_mean`,
+  confirm when unsure.
+- **`-r` is repeatable** (per-room commands); **`--all`** does every room; any other command rejects
+  several `-r` (`too_many_rooms`). A fan-out stops at the first failure, naming it — **the rooms
+  before it already applied**, the ones after did not. Never re-run the whole batch after a partial
+  failure (a relative `vol -10` would hit the finished rooms twice); redo only the rooms not reached.
+- Volume is **relative** (`vol +5`/`-10`) or absolute (`vol 30`); a relative change **clamps at
+  0/100**, never errors.
+
 ## Chimes and announcements: `chime` and `notify`
 
 Different from playing a stream: these **overlay** a short sound on a room and then hand it back.
@@ -560,22 +578,6 @@ inference from a vague request:
 - **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`link` and `stations`
   reach the internet — seconds, not instant, and a dead stream costs `play-url` ten. Everything
   local (transport, volume, status, queue) is fast.
-
-## Addressing a room
-
-- `-r "<Room>"` names the room, **case-insensitively**; names come from `status`/`rooms`, and on a
-  grouped entry use a `members`/`coordinator` name, not the composite label.
-- **Always pass `-r` when the user named a room**; omit only for the whole house (unambiguous only
-  in a single-group household — otherwise `--all`). x2rock does no natural-language mapping: resolve
-  "the kitchen", "downstairs" to a room name yourself.
-- A wrong room means loud music in the wrong place — accept a single high-confidence `did_you_mean`,
-  confirm when unsure.
-- **`-r` is repeatable** (per-room commands); **`--all`** does every room; any other command rejects
-  several `-r` (`too_many_rooms`). A fan-out stops at the first failure, naming it — **the rooms
-  before it already applied**, the ones after did not. Never re-run the whole batch after a partial
-  failure (a relative `vol -10` would hit the finished rooms twice); redo only the rooms not reached.
-- Volume is **relative** (`vol +5`/`-10`) or absolute (`vol 30`); a relative change **clamps at
-  0/100**, never errors.
 
 ## What is safe to repeat
 
