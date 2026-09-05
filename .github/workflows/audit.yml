@@ -45,6 +45,7 @@ jobs:
       # `unmaintained`/`yanked` notices are reported without failing it. A
       # dependency going unmaintained is real information but it is not a
       # vulnerability, and failing on it trains you to ignore a red build.
-      # Clean as of 2026-09-03: 173 crates, zero of either.
+      # Clean as of 2026-09-05: 166 crates, zero of either (the ring swap
+      # removed aws-lc-sys and six other transitive crates).
       - name: Audit
         run: cargo audit
