@@ -80,6 +80,11 @@ detail), just the set of early statements a later finding overturned, and where 
   "Soundbars: the TV input".
 - **The 5.1 `htInputFormat` reading is confirmed on real hardware**, no longer pending on the TV
   being off. See "The extended EQ set, and what to probe at home".
+- **The player TLS cert is not "self-signed for its own IP".** It is a leaf-only chain, `CN=<MAC>`
+  signed by "Sonos Device Authentication Root CA" (root not sent), with SAN `sonos-<MAC>.local` and
+  no IP - so it is CA-signed, and connecting by the `.local` name would validate. x2rock relaxes
+  verification anyway, but the old reason was wrong. Corrected 2026-09-07 from x2rocktv's hardware
+  capture; see "Certificates are validated here".
 
 ## Scope
 
@@ -147,7 +152,9 @@ URL        wss://<player-ip>:1443/websocket/api
 Headers    X-Sonos-Api-Key: 123e4567-e89b-12d3-a456-426655440000
            Sec-WebSocket-Protocol: v1.api.smartspeaker.audio
            (send NO Origin header)
-TLS        self-signed — certificate verification must be disabled
+TLS        leaf-only chain: CN=<MAC> signed by "Sonos Device Authentication Root
+           CA" (root not sent), SAN sonos-<MAC>.local, no IP — NOT self-signed.
+           x2rock disables verification; validating via the .local name is possible.
 Wire       2-element JSON array: [command, options]  — responses and events likewise
 ```
 
@@ -438,7 +445,7 @@ control - so verify on the transport the device actually uses, not on an emulato
 
 | This implementation | Android TV equivalent | Note |
 |---|---|---|
-| `rustls` verifier accepting a self-signed cert | custom `X509TrustManager` + hostname verifier | the cert never matches the IP; both have to be relaxed, and only for the players |
+| `rustls` verifier accepting any cert | custom `X509TrustManager` (the Sonos root is not in the handshake), and the **default** hostname verifier via the `sonos-<MAC>.local` name | the cert is CA-signed (Sonos root), SAN `sonos-<MAC>.local` with no IP — so only the trust anchor needs supplying, not the hostname check; connect by the `.local` name (derivable from the RINCON id) with a name→IP mapping. x2rocktv verified this on device 2026-09-07 |
 | `tokio-tungstenite` on `wss://ip:1443` | OkHttp `WebSocket` | `Sec-WebSocket-Protocol: v1.api.smartspeaker.audio` and **no `Origin` header**; confirm the client library lets you control both before building on it |
 | MPRIS2 over D-Bus, one bus name per group | `MediaSession` per room, or one session plus a room switcher | this is the biggest design decision in the port and has no obvious right answer |
 | `x2rock:*` MPRIS metadata keys | `MediaMetadata` / `MediaSession` extras | same idea: the standard has no notion of "which rooms are grouped", "is this on TV", or "what channels is the TV sending", so they ride as custom keys |
@@ -454,8 +461,10 @@ control - so verify on the transport the device actually uses, not on an emulato
   network security config permits it. Get this wrong and the whole queue layer fails - possibly
   quietly, which is the worst kind. It is the first thing to prove on device, before writing any
   SOAP.
-- **Two different trust relaxations, for two different ports.** 1443 needs a self-signed
-  certificate accepted; 1400 needs cleartext allowed. They are configured in different places and
+- **Two different trust relaxations, for two different ports.** 1443's cert is CA-signed (Sonos
+  root) but the root is not sent in the handshake, so it needs *either* the Sonos root supplied as
+  a trust anchor - after which it validates normally by the `sonos-<MAC>.local` name - *or*
+  verification relaxed; 1400 needs cleartext allowed. They are configured in different places and
   neither implies the other.
 - **Scope both narrowly.** These are local speakers on a home LAN; a blanket "trust everything"
   config is a real weakness in a shipped app, not a shortcut.
@@ -714,9 +723,18 @@ Media Room — Deep Space One on SomaFM Radio
   carries a durable secret — a payment detail, a cloud password — the post-quantum half of this
   decision should be revisited; until then the 2MB was buying nothing this program needs.
 - **Certificates are validated here, unlike the player socket.** `local.rs` accepts any
-  certificate because a player presents a self-signed one for its own IP and the transport never
-  leaves the LAN. A music service is a public host with a real chain, and this call does leave the
-  LAN, so it gets real roots.
+  certificate on the player socket, and the transport never leaves the LAN, so that is safe - but
+  the *reason* recorded here was wrong, corrected 2026-09-07 from x2rocktv's on-hardware capture.
+  The player cert is **not self-signed and carries no IP**: it is a leaf-only chain, `CN=<MAC>`
+  signed by `CN=Sonos Device Authentication Root CA`, with the root not sent in the handshake, and
+  its SAN is `sonos-<MAC>.local`. So a public trust store rejects it because the *root is absent*,
+  not because it is self-signed, and IP-based verification fails because there is *no IP in the
+  cert* - the name it does carry, `sonos-<MAC>.local` (derivable from the RINCON id: strip
+  `RINCON_` and the trailing `01400`), would verify fine if connected to by that name. x2rock could
+  therefore validate properly - the default hostname verifier via the `.local` name, plus the Sonos
+  root as a trust anchor - and accepts any cert only because on a LAN that already concedes active
+  MITM it buys nothing. A music service, by contrast, is a public host with a real chain, and this
+  call does leave the LAN, so it gets real roots.
 - **No XML declaration, no BOM.** Already recorded, and the client now strips a leading BOM from
   every response too, because services send one and every XML parser then rejects it as content
   before the declaration.
@@ -3639,7 +3657,9 @@ rediscover these the hard way:
 ## Rust ecosystem notes
 
 - **WebSocket client**: `tokio-tungstenite`, with a `rustls` certificate verifier that accepts the
-  speaker's self-signed cert. This is the main new dependency the revised design needs.
+  speaker's cert (leaf-only chain, CA-signed by the Sonos root but with the root not sent - see
+  "Certificates are validated here" for the real shape). This is the main new dependency the
+  revised design needs.
 - **MPRIS server**: use **`mpris-server`** (built on `zbus`) — the modern, maintained crate for
   *exposing* an MPRIS interface (server-side, which is what x2rock needs). Don't use
   `mpris`/`mpris-player` — those are client-side and/or unmaintained.

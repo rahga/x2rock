@@ -1,8 +1,12 @@
 //! LAN transport: a WebSocket straight to a player, no cloud and no OAuth.
 //!
 //! Players expose the Control API on `wss://<ip>:1443/websocket/api`. The only
-//! credential is a well-known API key; the certificate is self-signed, so it is
-//! deliberately not verified.
+//! credential is a well-known API key. The player cert is *not* self-signed - it
+//! is a leaf-only chain, `CN=<MAC>` signed by "Sonos Device Authentication Root
+//! CA" with the root not sent, SAN `sonos-<MAC>.local` and no IP (verified on
+//! hardware by x2rocktv, 2026-09-07). It is deliberately not verified here anyway:
+//! the transport never leaves the LAN, which already concedes MITM. See
+//! [`AcceptAnyCert`].
 //!
 //! One reader task owns the receiving half. Replies are matched to callers by the
 //! `cmdId` the player echoes back; everything else is an event and is fanned out
@@ -47,8 +51,14 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(90);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Reply = (Header, Value);
 
-/// Accepts any certificate. Players present a self-signed cert for their own IP,
-/// so there is nothing to validate against; the transport is confined to the LAN.
+/// Accepts any certificate - but not because there is nothing to validate. The
+/// player cert is a leaf-only chain, `CN=<MAC>` signed by "Sonos Device
+/// Authentication Root CA", SAN `sonos-<MAC>.local` and no IP, so connecting by
+/// that `.local` name (derivable from the RINCON id) with the Sonos root as a
+/// trust anchor would validate normally. It is accepted blindly only because the
+/// transport is confined to the LAN, which already concedes active MITM, so
+/// proper validation would buy nothing. (Cert shape verified by x2rocktv on
+/// hardware, 2026-09-07.)
 #[derive(Debug)]
 struct AcceptAnyCert(Arc<rustls::crypto::CryptoProvider>);
 
