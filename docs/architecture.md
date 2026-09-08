@@ -5269,7 +5269,7 @@ enqueues - so "wake me with this favorite" is that resolution reused, and the de
 `x-rincon-buzzer:0`, the built-in chime, which needs neither.
 
 An alarm was then created 82 seconds before its own start time and watched. It **fired** - the room
-played the chime at the alarm's volume - and four things came out of that which no document says:
+played the chime at the alarm's volume - and this came out of it, none of which any document says:
 
 - **A just-created alarm fires late.** Set for 14:34:00 and created at 14:32:38, it went off at
   14:36:14: two minutes and fourteen seconds after its time. Alarms are presumably scheduled off a
@@ -5279,6 +5279,13 @@ played the chime at the alarm's volume - and four things came out of that which 
 - **It sets the room's volume and leaves it there.** The room was at 2; the alarm's volume was 1;
   afterwards the room was at 1. The journal shows it go 0 then 1 as the alarm took over. So an alarm
   is a lasting change to a room's volume, not a temporary one.
+- **That 0-then-1 is a ramp, not a step (measured again 2026-09-08).** At a target of 1 the
+  distinction is invisible - one increment either way. Repeating it with `--volume 16` on a Bedroom
+  showed the room at **6 four seconds after firing and 16 by fourteen seconds**, climbing in
+  between. So the alarm ramps to its volume over ten-odd seconds, and the earlier `0 then 1` was
+  the same behavior seen at a volume too low to show it. The consequence is for readers, not
+  listeners: anything that asserts the alarm's volume immediately after it fires reads a number
+  lower than what was set and will look like `--volume` was ignored. Re-read once it settles.
 - **Removing a running alarm does not stop it.** `DestroyAlarm` on the alarm that was playing left
   the chime playing. Only `pause` stopped it.
 - **A favorite works as the program, and lead time is what decides punctuality.** Tested with the
