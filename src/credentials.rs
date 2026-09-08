@@ -122,10 +122,8 @@ impl Credentials {
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        let Some(text) = store::read_optional(path)? else {
+            return Ok(Self::default());
         };
         // Tighten rather than warn and carry on. A secret readable by the rest
         // of the machine is worth fixing at the first opportunity, and the fix

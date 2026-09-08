@@ -34,13 +34,29 @@ pub fn path(file: &str) -> Result<PathBuf> {
     Ok(dir.join(file))
 }
 
-/// `<file>.<pid>.tmp` beside `path`: this process's scratch file, and no other's.
-fn scratch(path: &Path) -> PathBuf {
+/// `<file>.<ext>` beside `path`.
+fn sibling(path: &Path, ext: &str) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    path.with_file_name(format!("{name}.{}.tmp", std::process::id()))
+    path.with_file_name(format!("{name}.{ext}"))
+}
+
+/// `<file>.<pid>.tmp` beside `path`: this process's scratch file, and no other's.
+fn scratch(path: &Path) -> PathBuf {
+    sibling(path, &format!("{}.tmp", std::process::id()))
+}
+
+/// The file's text, or `None` for a file that does not exist yet. Every
+/// "missing means empty" loader reads through this; what it makes of the text
+/// - refuse a corrupt file, migrate it, tighten its mode - stays its own.
+pub fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Write `text` to `path` atomically: a crash mid-write leaves the old file,
@@ -80,18 +96,17 @@ pub fn write_atomically(path: &Path, text: &str, mode: u32) -> Result<()> {
 /// moment a rename landed. Advisory, which binds exactly the writers that take
 /// it - the daemon and the CLI, which is all of them. Blocks until free; the
 /// holders keep it for the microseconds between a read and a rename.
-pub struct Lock(#[allow(dead_code)] fs::File);
+pub struct Lock {
+    /// Held for its `Drop`, which is the unlock.
+    _file: fs::File,
+}
 
 impl Lock {
     pub fn exclusive(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let lock = path.with_file_name(format!("{name}.lock"));
+        let lock = sibling(path, "lock");
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -103,7 +118,7 @@ impl Lock {
         // std, and the alternative was a crate for one call.
         file.lock()
             .with_context(|| format!("locking {}", lock.display()))?;
-        Ok(Self(file))
+        Ok(Self { _file: file })
     }
 }
 

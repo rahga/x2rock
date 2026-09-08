@@ -14,7 +14,6 @@
 //! catalogue. Regenerable in principle - everything here can be re-kept from the
 //! app - but losing it would be a real annoyance, so it is written atomically.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -239,12 +238,11 @@ impl Bookmarks {
     }
 
     fn load_from(path: &Path) -> Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(text) => {
+        match store::read_optional(path)? {
+            Some(text) => {
                 serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+            None => Ok(Self::default()),
         }
     }
 

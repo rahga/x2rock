@@ -21,7 +21,7 @@ use crate::sonos::upnp::Upnp;
 
 /// `org.mpris.MediaPlayer2.<suffix>`. "Media Room" becomes `x2rock-media-room`,
 /// the same convention the Kotlin daemon used, so existing bar configs carry over.
-pub fn bus_suffix(room: &str) -> String {
+fn bus_suffix(room: &str) -> String {
     let mut suffix = String::from("x2rock-");
     let mut pending_dash = false;
     for c in room.chars() {

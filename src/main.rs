@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use sonos::local::Connection;
@@ -174,7 +174,10 @@ enum Command {
         action: Option<AlarmsAction>,
         /// The list as JSON: `{id, room, start, duration_ms, recurrence,
         /// enabled, volume, play_mode, program, include_grouped}` per alarm.
-        #[arg(long)]
+        /// With `add`, the created alarm as one such object - its `id` is what
+        /// `x2rock alarm <id> off` wants later.
+        // Global, so `alarms add --json` is this flag and not a usage error.
+        #[arg(long, global = true)]
         json: bool,
     },
     /// Turn an alarm on or off, or remove it, by id from `x2rock alarms`.
@@ -243,7 +246,10 @@ enum Command {
     Queue {
         #[command(subcommand)]
         action: Option<QueueAction>,
-        #[arg(long)]
+        /// The queue, or `sources`, as JSON.
+        // Global to the queue subcommands, so `queue sources --json` is this
+        // same flag rather than a second one `queue --json sources` would miss.
+        #[arg(long, global = true)]
         json: bool,
     },
     /// List saved favorites, or only those whose name matches a query.
@@ -504,7 +510,7 @@ enum Command {
     Chime {
         /// How loud the chime plays, 0-100. Independent of the room's volume
         /// and not remembered after. Defaults to the player's own setting.
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
         volume: Option<u8>,
     },
     /// Play a sound from a URL on a room, over whatever it is doing.
@@ -519,7 +525,7 @@ enum Command {
         url: String,
         /// How loud it plays, 0-100. Independent of the room's volume and not
         /// remembered after. Defaults to the player's own setting.
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
         volume: Option<u8>,
     },
     /// Group rooms into --room's group, so they play what it plays.
@@ -674,7 +680,7 @@ enum AlarmsAction {
         recurrence: String,
         /// 0-100. Loud enough to wake someone is the point, so this does not
         /// inherit the room's current level.
-        #[arg(long, default_value_t = 25)]
+        #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u8).range(0..=100))]
         volume: u8,
         /// What it plays: a favorite or saved playlist, by name or id. Left
         /// out, it is the speaker's built-in chime.
@@ -721,11 +727,7 @@ enum QueueAction {
     /// Save the queue as a Sonos playlist.
     Save { name: String },
     /// List what `queue add` can draw on: saved playlists and favorites.
-    Sources {
-        query: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
+    Sources { query: Option<String> },
     /// Add a saved playlist or favorite to the queue, by name or id.
     Add {
         query: String,
@@ -1562,27 +1564,28 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
 /// `RoomUUID` is resolved against the topology for a name, and left as the id
 /// when it does not resolve - an alarm survives its room being switched off, and
 /// hiding it would be worse than showing a raw id.
+/// One alarm as the JSON object `alarms --json` lists and `alarms add --json`
+/// returns, so the id an agent reads off a creation is the id it lists by.
+fn alarm_json(a: &upnp::Alarm, groups: &Groups) -> serde_json::Value {
+    json!({
+        "id": a.id,
+        "room": groups.player(&a.room_uuid).map(|p| p.name.clone()),
+        "room_id": a.room_uuid,
+        "start": a.start,
+        "duration_ms": a.duration_ms(),
+        "recurrence": a.recurrence,
+        "enabled": a.enabled,
+        "volume": a.volume,
+        "play_mode": a.play_mode,
+        "program": a.program_uri,
+        "include_grouped": a.include_linked_zones,
+    })
+}
+
 fn print_alarms(alarms: &[upnp::Alarm], groups: &Groups, json: bool) {
     let room_of = |uuid: &str| groups.player(uuid).map(|p| p.name.clone());
     if json {
-        let items: Vec<_> = alarms
-            .iter()
-            .map(|a| {
-                json!({
-                    "id": a.id,
-                    "room": room_of(&a.room_uuid),
-                    "room_id": a.room_uuid,
-                    "start": a.start,
-                    "duration_ms": a.duration_ms(),
-                    "recurrence": a.recurrence,
-                    "enabled": a.enabled,
-                    "volume": a.volume,
-                    "play_mode": a.play_mode,
-                    "program": a.program_uri,
-                    "include_grouped": a.include_linked_zones,
-                })
-            })
-            .collect();
+        let items: Vec<_> = alarms.iter().map(|a| alarm_json(a, groups)).collect();
         println!("{}", serde_json::to_string(&items).expect("serializable"));
         return;
     }
@@ -1699,7 +1702,7 @@ async fn discover_and_remember(state: &mut State) -> Result<()> {
     // per responder, not to stop looking. Stopping at the first hit made a
     // player that answers on 1400 but will not complete a WebSocket - mid
     // reboot, host firewall - the end of the whole command.
-    let scan = discover::scan_local_subnet(false).await?;
+    let scan = discover::scan_local_subnet().await?;
     if let Some(prefix) = scan.narrowed_from {
         eprintln!(
             "Network is a /{prefix}, too large to sweep; scanned {} addresses in the local /24 only.",
@@ -1715,25 +1718,14 @@ async fn discover_and_remember(state: &mut State) -> Result<()> {
     if fingerprint.is_none() {
         eprintln!("Could not identify this network; results will not be remembered.");
     }
-    // Reaching any one player is enough: getGroups reports every other player's
-    // address. So try them in turn and stop at the first that actually talks,
-    // rather than printing the same household once per responder.
-    let mut session = None;
-    for ip in &scan.found {
-        match session::attach(IpAddr::V4(*ip), state, fingerprint.as_deref()).await {
-            Ok(reached) => {
-                session = Some(reached);
-                break;
-            }
-            Err(e) => eprintln!("{ip}: {e:#}"),
-        }
-    }
-    let Some(session) = session else {
-        bail!(
-            "found {} player(s) but none would talk; see the errors above",
-            scan.found.len()
-        );
-    };
+    let session = session::attach_any(&scan.found, state, fingerprint.as_deref())
+        .await
+        .with_context(|| {
+            format!(
+                "found {} player(s) but none would talk; see the errors above",
+                scan.found.len()
+            )
+        })?;
 
     let mut players: Vec<_> = session.groups.players.iter().collect();
     players.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2328,9 +2320,6 @@ async fn play_audio_clip(
     stream_url: Option<&str>,
     volume: Option<u8>,
 ) -> Result<()> {
-    if let Some(volume) = volume {
-        ensure!(volume <= 100, "volume is 0-100, not {volume}");
-    }
     let this = match room {
         Some(name) => session.groups.player_named(name)?,
         None => session
@@ -3230,11 +3219,8 @@ async fn run_search(
 
 #[tokio::main]
 async fn main() {
-    let matches = <Cli as clap::CommandFactory>::command().get_matches();
-    let mut cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
-        Ok(cli) => cli,
-        Err(e) => e.exit(),
-    };
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // `X2ROCK_ROOM` is the default room, and `--all` means every room: the
     // default has nothing to add to that, so it is set aside rather than
     // fought over. A `-r` someone typed alongside `--all` is a contradiction,
@@ -3814,40 +3800,27 @@ async fn apply_transport(
 /// stops the run - a half-applied "set them all to 10" is worse than a clear
 /// stop naming the room that failed.
 async fn fan_out(session: &session::Session, rooms: &[String], command: &Command) -> Result<()> {
+    let Some(action) = per_room(command) else {
+        return Err(too_many_rooms());
+    };
     for name in rooms {
         let target = session::target(&session.groups, Some(name))?;
-        let outcome = match command {
-            Command::Vol {
+        let outcome = match action {
+            PerRoom::Vol {
                 change,
-                player: one_room,
+                one_room,
                 json,
-                ..
-            } => {
-                apply_vol(
-                    session,
-                    &target,
-                    Some(name),
-                    change.clone(),
-                    *one_room,
-                    *json,
-                )
-                .await
+            } => apply_vol(session, &target, Some(name), change.clone(), one_room, json).await,
+            PerRoom::Repeat { mode, json } => {
+                apply_repeat(session, &target, mode.clone(), json).await
             }
-            Command::Repeat { mode, json } => {
-                apply_repeat(session, &target, mode.clone(), *json).await
+            PerRoom::Shuffle { mode, json } => {
+                apply_shuffle(session, &target, mode.clone(), json).await
             }
-            Command::Shuffle { mode, json } => {
-                apply_shuffle(session, &target, mode.clone(), *json).await
+            PerRoom::Crossfade { mode, json } => {
+                apply_crossfade(session, &target, mode.clone(), json).await
             }
-            Command::Crossfade { mode, json } => {
-                apply_crossfade(session, &target, mode.clone(), *json).await
-            }
-            Command::Play { track: None } => apply_transport(session, &target, "play").await,
-            Command::Pause => apply_transport(session, &target, "pause").await,
-            Command::Toggle => apply_transport(session, &target, "togglePlayPause").await,
-            Command::Next => apply_transport(session, &target, "skipToNextTrack").await,
-            Command::Prev => apply_transport(session, &target, "skipToPreviousTrack").await,
-            _ => Err(too_many_rooms()),
+            PerRoom::Transport(verb) => apply_transport(session, &target, verb).await,
         };
         // Name the room the batch stopped on: a fan-out that halts silently on
         // the third of five rooms is a debugging puzzle. The rooms before it
@@ -3870,24 +3843,64 @@ fn too_many_rooms() -> anyhow::Error {
     .into()
 }
 
-/// Whether a command applies per room, so several `--room` fan it out. The
-/// read/whole-household and single-target commands do not. Every variant here
-/// needs an arm in [`fan_out`]: admitting one without was how `--all
-/// crossfade on` came to fail with "several --room were given" on a command
-/// line that gave none.
+/// What a per-room command does to one room. Borrowed from the `Command`, so
+/// [`fan_out`] can apply it to each room in turn without re-matching.
+#[derive(Clone, Copy)]
+enum PerRoom<'a> {
+    Vol {
+        change: &'a Option<String>,
+        one_room: bool,
+        json: bool,
+    },
+    Repeat {
+        mode: &'a Option<String>,
+        json: bool,
+    },
+    Shuffle {
+        mode: &'a Option<String>,
+        json: bool,
+    },
+    Crossfade {
+        mode: &'a Option<String>,
+        json: bool,
+    },
+    /// A `playback:1` verb.
+    Transport(&'static str),
+}
+
+/// The per-room reading of a command, or `None` for the read, whole-household
+/// and single-target commands, which several `--room` do not fan out. The one
+/// list: [`fans_out`] asks whether a command is on it and [`fan_out`] applies
+/// what it finds, so a command cannot be admitted by one and missed by the
+/// other - which is how `--all crossfade on` came to fail with "several --room
+/// were given" on a command line that gave none.
+fn per_room(command: &Command) -> Option<PerRoom<'_>> {
+    Some(match command {
+        Command::Vol {
+            change,
+            player,
+            json,
+            ..
+        } => PerRoom::Vol {
+            change,
+            one_room: *player,
+            json: *json,
+        },
+        Command::Repeat { mode, json } => PerRoom::Repeat { mode, json: *json },
+        Command::Shuffle { mode, json } => PerRoom::Shuffle { mode, json: *json },
+        Command::Crossfade { mode, json } => PerRoom::Crossfade { mode, json: *json },
+        Command::Play { track: None } => PerRoom::Transport("play"),
+        Command::Pause => PerRoom::Transport("pause"),
+        Command::Toggle => PerRoom::Transport("togglePlayPause"),
+        Command::Next => PerRoom::Transport("skipToNextTrack"),
+        Command::Prev => PerRoom::Transport("skipToPreviousTrack"),
+        _ => return None,
+    })
+}
+
+/// Whether a command applies per room, so several `--room` fan it out.
 fn fans_out(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Vol { .. }
-            | Command::Repeat { .. }
-            | Command::Shuffle { .. }
-            | Command::Crossfade { .. }
-            | Command::Play { track: None }
-            | Command::Pause
-            | Command::Toggle
-            | Command::Next
-            | Command::Prev
-    )
+    per_room(command).is_some()
 }
 
 /// The agent skill, embedded so it ships with the binary and cannot drift from
@@ -3953,11 +3966,8 @@ impl Command {
             | Command::Stations { json, .. }
             | Command::PlayUrl { json, .. }
             | Command::Accounts { json, .. }
-            | Command::Bookmarks { json, .. } => *json,
-            // `queue sources --json` carries its own flag, one level down.
-            Command::Queue { action, json } => {
-                *json || matches!(action, Some(QueueAction::Sources { json: true, .. }))
-            }
+            | Command::Bookmarks { json, .. }
+            | Command::Queue { json, .. } => *json,
             _ => false,
         }
     }
@@ -4406,7 +4416,6 @@ async fn run(cli: Cli) -> Result<()> {
                 let start = parse_time_of_day(time)?;
                 let plays = parse_sleep(duration)?
                     .ok_or_else(|| anyhow!("an alarm that plays for no time is not an alarm"))?;
-                ensure!(*volume <= 100, "volume is 0-100, not {volume}");
                 // The program: a favorite or playlist resolved to the same
                 // (uri, metadata) pair `queue add` uses, or the built-in chime.
                 let (uri, metadata) = match program {
@@ -4424,7 +4433,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 };
                 let secs = plays.as_secs();
-                let alarm = upnp::Alarm {
+                let mut alarm = upnp::Alarm {
                     id: 0,
                     start,
                     duration: format!(
@@ -4442,7 +4451,7 @@ async fn run(cli: Cli) -> Result<()> {
                     volume: *volume,
                     include_linked_zones: *grouped,
                 };
-                let id = upnp.create_alarm(&alarm).await?;
+                alarm.id = upnp.create_alarm(&alarm).await?;
                 // The time is local *to the household*, which is not
                 // necessarily local to whoever typed it. Said on stderr so it
                 // stays out of anything reading the result, and always - a
@@ -4460,15 +4469,20 @@ async fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-                println!(
-                    "alarm {id} created  {:<16} {}  {}  for {}  vol {}  {}",
-                    speaker.name,
-                    alarm.start,
-                    alarm.recurrence,
-                    alarm.duration,
-                    alarm.volume,
-                    if alarm.enabled { "on" } else { "off" },
-                );
+                if *json {
+                    println!("{}", alarm_json(&alarm, &session.groups));
+                } else {
+                    println!(
+                        "alarm {} created  {:<16} {}  {}  for {}  vol {}  {}",
+                        alarm.id,
+                        speaker.name,
+                        alarm.start,
+                        alarm.recurrence,
+                        alarm.duration,
+                        alarm.volume,
+                        if alarm.enabled { "on" } else { "off" },
+                    );
+                }
             }
         }
         return Ok(());
@@ -5199,7 +5213,7 @@ async fn run(cli: Cli) -> Result<()> {
                     upnp.move_track(from, to).await?;
                     println!("{room:<24} moved track {from} to {to}");
                 }
-                Some(QueueAction::Sources { query, json }) => {
+                Some(QueueAction::Sources { query }) => {
                     let mut sources = upnp.browse_content("SQ:").await?;
                     sources.extend(upnp.browse_content("FV:2").await?);
                     // Shortcuts are not sources: they have no resource, so they
@@ -5551,11 +5565,8 @@ mod tests {
             if cmd.get_arguments().any(|a| a.get_id() == "json") {
                 let mut argv = vec!["x2rock".to_string()];
                 argv.extend(path.iter().cloned());
-                // Required arguments get a placeholder that reads as any type.
-                for arg in cmd.get_arguments().filter(|a| a.is_required_set()) {
-                    if !arg.is_positional() {
-                        argv.push(format!("--{}", arg.get_long().expect("a long flag")));
-                    }
+                // A required positional gets a placeholder that reads as any type.
+                for _ in cmd.get_arguments().filter(|a| a.is_required_set()) {
                     argv.push("1".to_string());
                 }
                 argv.push("--json".to_string());
@@ -5579,7 +5590,6 @@ mod tests {
     #[test]
     fn a_default_room_yields_to_all_but_a_typed_one_does_not() {
         use clap::parser::ValueSource;
-        use clap::{CommandFactory, FromArgMatches};
 
         // What `main` does with the matches, without the environment: a room
         // from the env var is set aside for `--all`, a typed one is kept for

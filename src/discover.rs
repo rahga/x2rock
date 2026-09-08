@@ -110,9 +110,10 @@ pub struct Scan {
 
 /// Sweep the local subnet for anything listening on the Sonos LAN API port.
 ///
-/// `stop_early` returns after the first hit, which is all that is needed to
-/// bootstrap - the rest come from `getGroups`.
-pub async fn scan_local_subnet(stop_early: bool) -> Result<Scan> {
+/// The whole of it, every time: reaching one player is enough to bootstrap
+/// (`getGroups` reports the rest), but the first address to answer is not
+/// reliably a player that will talk, so the callers want them all to try.
+pub async fn scan_local_subnet() -> Result<Scan> {
     let network = local_network()?;
     let full_prefix = network.prefix_len();
 
@@ -131,13 +132,6 @@ pub async fn scan_local_subnet(stop_early: bool) -> Result<Scan> {
         for probe in probes {
             if let Ok(Some(ip)) = probe.await {
                 found.push(ip);
-                if stop_early {
-                    return Ok(Scan {
-                        found,
-                        scanned,
-                        narrowed_from,
-                    });
-                }
             }
         }
     }

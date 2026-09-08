@@ -337,7 +337,16 @@ async fn follow(
         .subscribe_household("groups:1", &household)
         .await?;
 
-    let mut rooms = publish(connection, groups, pool, &tx, &mut forwarders).await?;
+    let mut rooms = publish(
+        &mut Wiring {
+            primary: connection,
+            pool,
+            tx: &tx,
+            forwarders: &mut forwarders,
+        },
+        groups,
+    )
+    .await?;
 
     loop {
         let event = tokio::select! {
@@ -397,7 +406,16 @@ async fn follow(
                 forwarders.push(spawn_forwarder(connection, tx.clone(), Loss::Fatal));
                 // Dropping the old servers releases their bus names first.
                 drop(rooms);
-                rooms = publish(connection, &groups, pool, &tx, &mut forwarders).await?;
+                rooms = publish(
+                    &mut Wiring {
+                        primary: connection,
+                        pool,
+                        tx: &tx,
+                        forwarders: &mut forwarders,
+                    },
+                    &groups,
+                )
+                .await?;
             }
             // Player-scoped, so it is matched by player rather than by group.
             ("playerVolume:1", _) => {
@@ -451,26 +469,13 @@ async fn follow(
 /// [`same_topology`] reads as a change, so the next groups event (the player
 /// coming back is one) republishes and tries it again. Only nothing publishing
 /// at all is an error, since then there is nothing for the daemon to keep alive.
-async fn publish(
-    connection: &Connection,
-    groups: &Groups,
-    pool: &mut HashMap<IpAddr, Connection>,
-    tx: &mpsc::UnboundedSender<Arc<Event>>,
-    forwarders: &mut Vec<JoinHandle<()>>,
-) -> Result<Vec<Server<RoomPlayer>>> {
+async fn publish(wiring: &mut Wiring<'_>, groups: &Groups) -> Result<Vec<Server<RoomPlayer>>> {
     let mut servers = Vec::with_capacity(groups.groups.len());
     let mut names = HashSet::new();
     for group in &groups.groups {
-        let room = groups
-            .player(&group.coordinator_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| group.name.clone());
+        let room = room_of(groups, group);
         let suffix = bus_suffix_among(&room, &names);
-        match publish_group(
-            connection, groups, group, &room, &suffix, pool, tx, forwarders,
-        )
-        .await
-        {
+        match publish_group(wiring, groups, group, &suffix).await {
             Ok(server) => {
                 log(&format!("{room} -> org.mpris.MediaPlayer2.{suffix}"));
                 names.insert(suffix);
@@ -487,29 +492,36 @@ async fn publish(
     Ok(servers)
 }
 
+/// A group goes by its coordinator's room name; the group's own name is the
+/// composite ("Dining Room + 1"), which no player answers to.
+fn room_of(groups: &Groups, group: &proto::Group) -> String {
+    groups
+        .player(&group.coordinator_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| group.name.clone())
+}
+
+/// What every connection opened for the household is wired into: the primary
+/// it falls back to, the pool it joins, the channel its events flow up, and
+/// the list its forwarder is kept on. One bundle, since the three functions
+/// that open connections all need all four.
+struct Wiring<'a> {
+    primary: &'a Connection,
+    pool: &'a mut HashMap<IpAddr, Connection>,
+    tx: &'a mpsc::UnboundedSender<Arc<Event>>,
+    forwarders: &'a mut Vec<JoinHandle<()>>,
+}
+
 /// One group's player: seeded from its coordinator, named `suffix` on the bus,
 /// subscribed to what keeps it current.
-#[allow(clippy::too_many_arguments)]
 async fn publish_group(
-    connection: &Connection,
+    wiring: &mut Wiring<'_>,
     groups: &Groups,
     group: &proto::Group,
-    room: &str,
     suffix: &str,
-    pool: &mut HashMap<IpAddr, Connection>,
-    tx: &mpsc::UnboundedSender<Arc<Event>>,
-    forwarders: &mut Vec<JoinHandle<()>>,
 ) -> Result<Server<RoomPlayer>> {
     let coordinator_ip = groups.player(&group.coordinator_id).and_then(Player::ip);
-    let conn = connection_to(
-        coordinator_ip,
-        connection,
-        pool,
-        tx,
-        forwarders,
-        Loss::Fatal,
-    )
-    .await?;
+    let conn = connection_to(wiring, coordinator_ip, Loss::Fatal).await?;
 
     let members: Vec<(String, String)> = groups
         .members(group)
@@ -526,7 +538,7 @@ async fn publish_group(
     let player = RoomPlayer::new(
         conn.clone(),
         group.id.clone(),
-        room.to_string(),
+        room_of(groups, group),
         members.clone(),
         has_tv_input,
     );
@@ -552,16 +564,7 @@ async fn publish_group(
             log(&format!("{name}: no address, so no per-room volume for it"));
             continue;
         };
-        match connection_to(
-            Some(member_ip),
-            connection,
-            pool,
-            tx,
-            forwarders,
-            Loss::Tolerated,
-        )
-        .await
-        {
+        match connection_to(wiring, Some(member_ip), Loss::Tolerated).await {
             Ok(member) => {
                 if let Err(e) = member.subscribe_player("playerVolume:1", id).await {
                     log(&format!("{name}: no per-room volume ({e:#})"));
@@ -578,30 +581,31 @@ async fn publish_group(
 /// `loss` applies to a socket opened here; a pooled one keeps the terms it was
 /// opened on, which is safe because coordinators are reached before members.
 async fn connection_to(
+    wiring: &mut Wiring<'_>,
     ip: Option<IpAddr>,
-    primary: &Connection,
-    pool: &mut HashMap<IpAddr, Connection>,
-    tx: &mpsc::UnboundedSender<Arc<Event>>,
-    forwarders: &mut Vec<JoinHandle<()>>,
     loss: Loss,
 ) -> Result<Connection> {
-    let Some(ip) = ip.filter(|ip| *ip != primary.ip()) else {
-        return Ok(primary.clone());
+    let Some(ip) = ip.filter(|ip| *ip != wiring.primary.ip()) else {
+        return Ok(wiring.primary.clone());
     };
-    if let Some(existing) = pool.get(&ip) {
+    if let Some(existing) = wiring.pool.get(&ip) {
         return Ok(existing.clone());
     }
     let opened = Connection::open(ip).await?;
-    forwarders.push(spawn_forwarder(&opened, tx.clone(), loss));
-    pool.insert(ip, opened.clone());
+    wiring
+        .forwarders
+        .push(spawn_forwarder(&opened, wiring.tx.clone(), loss));
+    wiring.pool.insert(ip, opened.clone());
     Ok(opened)
 }
 
 /// The initial `groups` snapshot describes what we just published; republishing
 /// for it would flap every bus name once per connection.
 fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
-    // Fewer players than groups is a group `publish` skipped, so any groups
-    // event republishes - which is the retry for it.
+    // A group `publish` skipped has no server carrying its id, so the `all`
+    // below fails and any groups event republishes - which is the retry for
+    // it. The length check guards the other direction: a server whose group
+    // has gone.
     rooms.len() == groups.groups.len()
         && groups.groups.iter().all(|g| {
             rooms
@@ -705,10 +709,14 @@ fn remember(status: &proto::MetadataStatus) {
         .unwrap_or(0);
 
     // Under the file's lock: `x2rock keep` may be writing the same file at
-    // this very moment, and without the lock one of the two was lost.
-    if let Err(e) = crate::bookmarks::Bookmarks::update(|list| Ok(list.note(bookmark, now))) {
-        log(&format!("not recording history: {e:#}"));
-    }
+    // this very moment, and without the lock one of the two was lost. Off the
+    // event loop, since the lock can wait on that other process and the
+    // events of every room would wait with it; nothing here reports back.
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::bookmarks::Bookmarks::update(|list| Ok(list.note(bookmark, now))) {
+            log(&format!("not recording history: {e:#}"));
+        }
+    });
 }
 
 #[cfg(test)]

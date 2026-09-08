@@ -6,7 +6,6 @@
 //! meaningful on the network it was found on.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -38,12 +37,11 @@ impl State {
     /// Load, treating a missing file as empty state.
     pub fn load() -> Result<Self> {
         let path = path()?;
-        match fs::read_to_string(&path) {
-            Ok(text) => {
+        match store::read_optional(&path)? {
+            Some(text) => {
                 serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+            None => Ok(Self::default()),
         }
     }
 

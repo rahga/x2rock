@@ -156,6 +156,23 @@ pub fn unregistered_network(fingerprint: &str) -> Error {
 /// discover/retry loop, not a resolution. The speakers are most likely powered
 /// off; the message says so, and names `discover` only as the later,
 /// deliberate re-check.
+/// A rescan found devices on the Sonos port, but none would complete a session:
+/// players mid-reboot, or a Boost, which listens there and is not a player.
+/// The same code as [`no_players_answered`], since to the caller it is the
+/// same state - no player to talk to - with the same remedy.
+pub fn none_completed_a_session(found: usize, last: &Error) -> Error {
+    Hint::new(
+        format!(
+            "{found} device(s) answer on the Sonos port but none completed a session (last: \
+             {last:#}); they may be mid-reboot, or not players at all. `x2rock discover` \
+             re-checks once they should be back."
+        ),
+        "no_player",
+        None,
+    )
+    .into()
+}
+
 pub fn no_players_answered(previously: &[&str]) -> Error {
     Hint::new(
         format!(

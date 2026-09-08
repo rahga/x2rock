@@ -2,7 +2,7 @@
 //!
 //! Shared by the CLI and the daemon, so both find players the same way.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{Result, bail};
 
@@ -62,19 +62,32 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
     }
 
     // A known network where nothing answers: addresses have most likely moved.
-    // Sweep it all and try each responder in turn, as `discover` does. Stopping
-    // at the first address to accept TCP on the port made that address the end
-    // of every command when it was a player mid-reboot, or a Boost, which
-    // answers on the port and never completes a session.
     eprintln!("Remembered players did not answer; rescanning...");
-    let scan = discover::scan_local_subnet(false).await?;
+    let scan = discover::scan_local_subnet().await?;
     if scan.found.is_empty() {
         let names: Vec<_> = known.iter().map(|p| p.name.as_str()).collect();
         return Err(crate::hint::no_players_answered(&names));
     }
+    attach_any(&scan.found, state, Some(fingerprint))
+        .await
+        .map_err(|last| crate::hint::none_completed_a_session(scan.found.len(), &last))
+}
+
+/// The first of a scan's responders that completes a session, trying each in
+/// turn and naming the ones that do not. Reaching any one player is enough:
+/// `getGroups` reports the rest. Shared by `discover` and the rescan, which
+/// once stopped at the first address to accept TCP on the port - the end of
+/// every command when that was a player mid-reboot, or a Boost, which listens
+/// there and never completes a session. The error is the last one seen; the
+/// caller says what it means.
+pub async fn attach_any(
+    found: &[Ipv4Addr],
+    state: &mut State,
+    fingerprint: Option<&str>,
+) -> Result<Session> {
     let mut last = None;
-    for ip in &scan.found {
-        match attach(IpAddr::V4(*ip), state, Some(fingerprint)).await {
+    for ip in found {
+        match attach(IpAddr::V4(*ip), state, fingerprint).await {
             Ok(session) => return Ok(session),
             Err(e) => {
                 eprintln!("{ip}: {e:#}");
@@ -82,20 +95,7 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
             }
         }
     }
-    // The same code as "found nothing": to the caller it is the same state,
-    // no player to talk to, and the same remedy - come back once they are up.
-    Err(crate::hint::Hint::new(
-        format!(
-            "{} device(s) answer on the Sonos port but none completed a session (last: {:#}); \
-             they may be mid-reboot, or not players at all. `x2rock discover` re-checks once \
-             they should be back.",
-            scan.found.len(),
-            last.expect("a non-empty scan has a last error"),
-        ),
-        "no_player",
-        None,
-    )
-    .into())
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no addresses to try")))
 }
 
 /// The group a command applies to.

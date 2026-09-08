@@ -263,7 +263,7 @@ see "Ask before you act".
 | Firmware check (read-only) | `x2rock update --json` |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
-| Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off]` |
+| Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

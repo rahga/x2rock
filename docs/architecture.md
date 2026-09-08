@@ -407,8 +407,9 @@ one costs only its own speed, which was built that way for laptops and turns out
 a machine without either work at all.
 
 Two things that would trip a non-Omarchy install, both worth stating rather than discovering:
-`edition = "2024"` needs Rust 1.88 and `File::lock` needs 1.89, which is newer than several distributions package; and the
-systemd unit is `WantedBy=graphical-session.target`, which never fires on a headless machine.
+`edition = "2024"` needs Rust 1.88 and `File::lock` needs 1.89, which is newer than several
+distributions package; and the systemd unit is `WantedBy=graphical-session.target`, which never
+fires on a headless machine.
 
 This is not a promise to support other desktops. It is a note that the CLI and the MPRIS daemon
 cost nothing to use elsewhere, and that MPRIS is where most of the widget's value already lives -
