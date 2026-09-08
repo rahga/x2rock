@@ -158,6 +158,21 @@ TLS        leaf-only chain: CN=<MAC> signed by "Sonos Device Authentication Root
 Wire       2-element JSON array: [command, options]  — responses and events likewise
 ```
 
+Two handshake details x2rocktv nailed on Android hardware (2026-09-07), worth pinning here:
+
+- **The header rules are enforced, and asymmetrically.** An `Origin` header *present* gets `403
+  Forbidden`; the API key *missing* gets `400 Bad Request`. `tokio-tungstenite` sends no `Origin`,
+  so x2rock is never bitten - but it is why a browser or WebView client cannot connect at all: the
+  browser WebSocket API forces an `Origin` header that cannot be removed. Hence "send NO Origin"
+  above.
+- **A player's `.local` name is derivable from its id - no mDNS lookup needed.** The RINCON id
+  carries the MAC: `RINCON_48A6B818D13801400` → strip the `RINCON_` prefix and the trailing
+  `01400` → `sonos-48A6B818D138.local`. That is exactly the name in the cert's SAN (above), which
+  is what makes validating the player socket possible rather than blanket-accepting it; and
+  `getGroups` already returns each player's id *and* its `websocketUrl` (carrying the IP), so one
+  call yields both the name and the address a name→IP mapping would need. Verified against all five
+  players in the household.
+
 Confirmed working **unauthenticated**, reads *and* writes: `groups:1`, `playback:1`,
 `playbackMetadata:1`, `groupVolume:1`, `playerVolume:1`, `favorites:1`, `playlists:1`,
 `settings:1`, `audioClip:1`. A `setVolume` write succeeded. `subscribe` returns an immediate state
