@@ -24,12 +24,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::Credentials;
 use crate::sonos::smapi::{self, Category, Service};
 use crate::sonos::upnp::Upnp;
+use crate::store;
 
 /// Bumped whenever the *shape* of what is cached changes.
 ///
@@ -63,12 +64,7 @@ pub struct Catalogue {
 }
 
 fn path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    let dir = dirs
-        .state_dir()
-        .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
-    Ok(dir.join("services.json"))
+    store::path("services.json")
 }
 
 impl Catalogue {
@@ -91,13 +87,7 @@ impl Catalogue {
 
     /// Write atomically, so a crash mid-write cannot leave a truncated file.
     pub fn save(&self) -> Result<()> {
-        let path = path()?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+        store::write_atomically(&path()?, &serde_json::to_string_pretty(self)?, store::PLAIN)
     }
 
     /// Every service the player knows about, from cache where the version agrees.

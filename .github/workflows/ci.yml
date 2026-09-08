@@ -40,15 +40,15 @@ jobs:
         run: cargo test --locked
 
   msrv:
-    name: builds on 1.88
+    name: builds on 1.89
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      # Cargo.toml claims rust-version = "1.88". Nothing checked that claim
+      # Cargo.toml claims rust-version = "1.89". Nothing checked that claim
       # until now, and a dependency bump can raise it without saying so.
-      - name: Install 1.88
-        run: rustup toolchain install 1.88 --profile minimal
+      - name: Install 1.89
+        run: rustup toolchain install 1.89 --profile minimal
 
       - name: Check
-        run: cargo +1.88 check --all-targets --locked
+        run: cargo +1.89 check --all-targets --locked

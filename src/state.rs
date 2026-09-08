@@ -10,10 +10,11 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::proto::Groups;
+use crate::store;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
@@ -30,12 +31,7 @@ pub struct KnownPlayer {
 }
 
 fn path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    let dir = dirs
-        .state_dir()
-        .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
-    Ok(dir.join("networks.json"))
+    store::path("networks.json")
 }
 
 impl State {
@@ -52,14 +48,13 @@ impl State {
     }
 
     /// Write atomically, so a crash mid-write cannot leave a truncated file.
+    ///
+    /// No lock, unlike bookmarks: the daemon and the CLI both write this, but
+    /// each writes what a player just told it about the household, so two
+    /// writers moments apart agree, and the loser of the race loses nothing
+    /// the next `attach` will not put back.
     pub fn save(&self) -> Result<()> {
-        let path = path()?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+        store::write_atomically(&path()?, &serde_json::to_string_pretty(self)?, store::PLAIN)
     }
 
     /// Record what a household reported about itself. Returns whether anything changed,

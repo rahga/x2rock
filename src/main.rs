@@ -11,6 +11,7 @@ mod session;
 mod sonos;
 mod state;
 mod stations;
+mod store;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -39,8 +40,13 @@ struct Cli {
 
     /// Apply a per-room command to every room, topology resolved once - "turn
     /// it down everywhere" as `--all vol -10`. Only the per-room commands
-    /// (volume, transport, repeat, shuffle); exclusive with `--room`.
-    #[arg(long, global = true, conflicts_with = "room")]
+    /// (volume, transport, repeat, shuffle); exclusive with a typed `--room`,
+    /// while an exported X2ROCK_ROOM is simply set aside.
+    // Not `conflicts_with = "room"`: clap fires that on the env var exactly as
+    // on a typed `-r`, which made `--all vol -10` a usage error in every shell
+    // that had taken `x2rock rooms` up on its `export`. `main` tells the two
+    // apart and `run` refuses the typed one.
+    #[arg(long, global = true)]
     all: bool,
 
     /// Address of a player, bypassing what is remembered for this network.
@@ -2322,6 +2328,9 @@ async fn play_audio_clip(
     stream_url: Option<&str>,
     volume: Option<u8>,
 ) -> Result<()> {
+    if let Some(volume) = volume {
+        ensure!(volume <= 100, "volume is 0-100, not {volume}");
+    }
     let this = match room {
         Some(name) => session.groups.player_named(name)?,
         None => session
@@ -3221,9 +3230,22 @@ async fn run_search(
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let mut cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
+    // `X2ROCK_ROOM` is the default room, and `--all` means every room: the
+    // default has nothing to add to that, so it is set aside rather than
+    // fought over. A `-r` someone typed alongside `--all` is a contradiction,
+    // and `run` refuses it.
+    if cli.all && matches.value_source("room") == Some(clap::parser::ValueSource::EnvVariable) {
+        cli.room.clear();
+    }
+    // An exported-but-empty `X2ROCK_ROOM=` is no default, not a room named "".
+    cli.room.retain(|room| !room.is_empty());
     // Decided before the command runs, so a failure knows how to report itself.
-    let json = wants_json(&cli.command);
+    let json = cli.command.json();
     if let Err(e) = run(cli).await {
         if json {
             // Structured for an agent: the message it always printed, plus a
@@ -3817,6 +3839,9 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
             Command::Shuffle { mode, json } => {
                 apply_shuffle(session, &target, mode.clone(), *json).await
             }
+            Command::Crossfade { mode, json } => {
+                apply_crossfade(session, &target, mode.clone(), *json).await
+            }
             Command::Play { track: None } => apply_transport(session, &target, "play").await,
             Command::Pause => apply_transport(session, &target, "pause").await,
             Command::Toggle => apply_transport(session, &target, "togglePlayPause").await,
@@ -3846,7 +3871,10 @@ fn too_many_rooms() -> anyhow::Error {
 }
 
 /// Whether a command applies per room, so several `--room` fan it out. The
-/// read/whole-household and single-target commands do not.
+/// read/whole-household and single-target commands do not. Every variant here
+/// needs an arm in [`fan_out`]: admitting one without was how `--all
+/// crossfade on` came to fail with "several --room were given" on a command
+/// line that gave none.
 fn fans_out(command: &Command) -> bool {
     matches!(
         command,
@@ -3899,28 +3927,40 @@ fn install_skill(dir: Option<&std::path::Path>, print: bool) -> Result<()> {
     Ok(())
 }
 
-/// Whether the invoked command was asked for `--json`, so an error can match the
-/// output the caller expected. Only the data commands carry the flag.
-fn wants_json(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Rooms { json, .. }
+impl Command {
+    /// Whether the command was asked for `--json`, so an error can match the
+    /// output the caller expected. Every variant with the flag is here - a test
+    /// walks clap's tree to hold it to that, because the list drifted once and
+    /// `system --json` against a dead address printed a prose error an agent
+    /// branching on `code` could not read.
+    fn json(&self) -> bool {
+        match self {
+            Command::Rooms { json, .. }
             | Command::Now { json, .. }
             | Command::Status { json, .. }
-            | Command::Queue { json, .. }
-            | Command::Favorites { json, .. }
-            | Command::PlayUrl { json, .. }
-            | Command::Stations { json, .. }
-            | Command::Search { json, .. }
-            | Command::Browse { json, .. }
-            | Command::Accounts { json, .. }
-            | Command::Bookmarks { json, .. }
             | Command::Vol { json, .. }
             | Command::Repeat { json, .. }
             | Command::Shuffle { json, .. }
+            | Command::Update { json, .. }
+            | Command::System { json, .. }
+            | Command::Alarms { json, .. }
+            | Command::Sleep { json, .. }
             | Command::Crossfade { json, .. }
-        if *json
-    )
+            | Command::Eq { json, .. }
+            | Command::Favorites { json, .. }
+            | Command::Search { json, .. }
+            | Command::Browse { json, .. }
+            | Command::Stations { json, .. }
+            | Command::PlayUrl { json, .. }
+            | Command::Accounts { json, .. }
+            | Command::Bookmarks { json, .. } => *json,
+            // `queue sources --json` carries its own flag, one level down.
+            Command::Queue { action, json } => {
+                *json || matches!(action, Some(QueueAction::Sources { json: true, .. }))
+            }
+            _ => false,
+        }
+    }
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -3935,6 +3975,10 @@ async fn run(cli: Cli) -> Result<()> {
     // own `-a/--all` ("include daemon history") shares clap's arg id with this
     // flag, so setting either sets both.
     if cli.all && !matches!(cli.command, Command::Bookmarks { .. }) {
+        ensure!(
+            cli.room.is_empty(),
+            "--all already means every room; drop the -r (an exported X2ROCK_ROOM is set aside on its own)"
+        );
         ensure!(
             fans_out(&cli.command),
             "--all applies only to the per-room commands (volume, transport, repeat, shuffle)"
@@ -4613,9 +4657,7 @@ async fn run(cli: Cli) -> Result<()> {
         // Removing needs no household either, and has to happen before the
         // listing below reads the file it is about to change.
         if let Some(BookmarksAction::Remove { query }) = action {
-            let mut list = bookmarks::Bookmarks::load()?;
-            let gone = list.forget(query)?;
-            list.save()?;
+            let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
             println!("Forgot {}.", gone.name);
             return Ok(());
         }
@@ -4981,9 +5023,7 @@ async fn run(cli: Cli) -> Result<()> {
                 .find(|s| s.id == bookmark.service_id)
                 .map(|s| s.name.clone());
 
-            let mut list = bookmarks::Bookmarks::load()?;
-            let replaced = list.keep(bookmark);
-            list.save()?;
+            let replaced = bookmarks::Bookmarks::update(|list| Ok(list.keep(bookmark)))?;
             println!("{} {title}", if replaced { "Updated" } else { "Kept" });
         }
         Command::Bookmark { query, next } => {
@@ -5485,6 +5525,10 @@ mod tests {
             mode: None,
             json: false
         }));
+        assert!(fans_out(&Command::Crossfade {
+            mode: None,
+            json: false
+        }));
         // Playing a specific queue position is per-queue, not a broadcast.
         assert!(!fans_out(&Command::Play { track: Some(3) }));
         // Reads and whole-household commands are not fanned out.
@@ -5494,6 +5538,59 @@ mod tests {
             full: false
         }));
         assert!(!fans_out(&Command::Rooms { json: false }));
+    }
+
+    #[test]
+    fn every_command_that_takes_json_reports_it() {
+        use clap::CommandFactory;
+
+        // Walk clap's own tree, so a `--json` cannot be added to a command
+        // without `Command::json` learning of it: the hand-kept list is what
+        // let `system --json` print its failures as prose.
+        fn walk(cmd: &clap::Command, path: &mut Vec<String>) {
+            if cmd.get_arguments().any(|a| a.get_id() == "json") {
+                let mut argv = vec!["x2rock".to_string()];
+                argv.extend(path.iter().cloned());
+                // Required arguments get a placeholder that reads as any type.
+                for arg in cmd.get_arguments().filter(|a| a.is_required_set()) {
+                    if !arg.is_positional() {
+                        argv.push(format!("--{}", arg.get_long().expect("a long flag")));
+                    }
+                    argv.push("1".to_string());
+                }
+                argv.push("--json".to_string());
+                let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                assert!(
+                    cli.command.json(),
+                    "{argv:?} takes --json, but Command::json says no"
+                );
+            }
+            for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+                path.push(sub.get_name().to_string());
+                walk(sub, path);
+                path.pop();
+            }
+        }
+        let mut root = Cli::command();
+        root.build();
+        walk(&root, &mut Vec::new());
+    }
+
+    #[test]
+    fn a_default_room_yields_to_all_but_a_typed_one_does_not() {
+        use clap::parser::ValueSource;
+        use clap::{CommandFactory, FromArgMatches};
+
+        // What `main` does with the matches, without the environment: a room
+        // from the env var is set aside for `--all`, a typed one is kept for
+        // `run` to refuse. (`conflicts_with` could not tell them apart.)
+        let matches = Cli::command()
+            .try_get_matches_from(["x2rock", "--all", "-r", "Kitchen", "vol", "-10"])
+            .expect("no longer a clap conflict");
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        assert!(cli.all);
+        assert_eq!(matches.value_source("room"), Some(ValueSource::CommandLine));
+        assert_eq!(cli.room, ["Kitchen"]);
     }
 
     #[test]

@@ -23,15 +23,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::smapi::{DeviceAuth, Token};
+use crate::store;
 
 /// The shape of the file. As with bookmarks and *unlike* the catalogue, a
 /// mismatch here would be migrated rather than discarded - re-linking means
@@ -107,12 +107,7 @@ pub fn now() -> u64 {
 }
 
 fn path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    let dir = dirs
-        .state_dir()
-        .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
-    Ok(dir.join("credentials.json"))
+    store::path("credentials.json")
 }
 
 impl Credentials {
@@ -159,33 +154,19 @@ impl Credentials {
     ///
     /// The mode is set when the temporary file is *created*, not after it is
     /// written: a `chmod` afterwards leaves a window in which the token exists
-    /// on disk at the umask's mercy.
+    /// on disk at the umask's mercy. `store` creates it fresh for the same
+    /// reason - a mode on `open` binds only a file that did not exist, and a
+    /// leftover at 0644 would otherwise have kept its bits under the secret.
     pub fn save(&self) -> Result<()> {
-        let path = path()?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        self.save_to(&path)
+        self.save_to(&path()?)
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("json.tmp");
         let copy = Self {
             schema: SCHEMA,
             services: self.services.clone(),
         };
-        let text = serde_json::to_string_pretty(&copy)?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(text.as_bytes())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        drop(file);
-        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+        store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
     }
 
     pub fn get(&self, service_id: &str) -> Option<&Account> {

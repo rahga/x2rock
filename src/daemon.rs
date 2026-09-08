@@ -4,7 +4,7 @@
 //! The speaker being unreachable is a normal state for a laptop that moves between
 //! networks, not an error: back off, stay quiet, try again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::mpris::{RoomPlayer, bus_suffix};
+use crate::mpris::{RoomPlayer, bus_suffix_among};
 use crate::netid;
 use crate::restart::{Restart, Restarts};
 use crate::session::{self, Session};
@@ -441,6 +441,16 @@ async fn follow(
 /// to the events that will keep it current. Each group's calls and
 /// subscriptions go to that group's coordinator (opening a new connection and
 /// forwarder the first time a coordinator is seen, reused after that).
+///
+/// Best effort per group, deliberately. A coordinator that cannot be reached
+/// (unplugged, mid-reboot, still listed by `getGroups` for a while after
+/// either) costs its own room; it must not cost the household its players,
+/// which is what a `?` per group did: one bad coordinator failed publish,
+/// which tore down every socket and reconnected into the same failure,
+/// indefinitely. A skipped group leaves fewer players than groups, which
+/// [`same_topology`] reads as a change, so the next groups event (the player
+/// coming back is one) republishes and tries it again. Only nothing publishing
+/// at all is an error, since then there is nothing for the daemon to keep alive.
 async fn publish(
     connection: &Connection,
     groups: &Groups,
@@ -449,88 +459,118 @@ async fn publish(
     forwarders: &mut Vec<JoinHandle<()>>,
 ) -> Result<Vec<Server<RoomPlayer>>> {
     let mut servers = Vec::with_capacity(groups.groups.len());
+    let mut names = HashSet::new();
     for group in &groups.groups {
-        let coordinator_ip = groups.player(&group.coordinator_id).and_then(Player::ip);
-        let conn = connection_to(
-            coordinator_ip,
-            connection,
-            pool,
-            tx,
-            forwarders,
-            Loss::Fatal,
-        )
-        .await?;
-
         let room = groups
             .player(&group.coordinator_id)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| group.name.clone());
-        let members: Vec<(String, String)> = groups
-            .members(group)
-            .iter()
-            .map(|p| (p.id.clone(), p.name.clone()))
-            .collect();
-        // The TV socket belongs to a player, which need not be the one
-        // coordinating: a soundbar that joined a Play:5's group still has its
-        // HDMI, and `x2rock tv` finds it among the members the same way.
-        let has_tv_input = groups
-            .members(group)
-            .iter()
-            .any(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
-        let player = RoomPlayer::new(
-            conn.clone(),
-            group.id.clone(),
-            room.clone(),
-            members.clone(),
-            has_tv_input,
-        );
-        player.apply_playback(&conn.playback_status(&group.id).await?);
-        player.apply_metadata(&conn.metadata(&group.id).await?);
-        player.apply_volume(&conn.group_volume(&group.id).await?);
-
-        let suffix = bus_suffix(&room);
-        let server = Server::new(&suffix, player)
-            .await
-            .with_context(|| format!("publishing org.mpris.MediaPlayer2.{suffix}"))?;
-        for namespace in ["playback:1", "playbackMetadata:1", "groupVolume:1"] {
-            conn.subscribe_group(namespace, &group.id).await?;
-        }
-        // Per-member volume is player-scoped, not group-scoped: a group shares
-        // one volume, and this is the balance underneath it. Player-scoped
-        // commands are refused by anyone but that player - ERROR_INVALID_OBJECT_ID,
-        // "Incorrect playerId" - so each member is subscribed on its own socket
-        // rather than the coordinator's.
-        // Best effort, deliberately. A member that cannot be reached costs its
-        // own balance slider; it must not cost the whole household its MPRIS
-        // players, which is what a `?` here did - one bad member failed publish,
-        // which tore down every socket and reconnected into the same failure.
-        for (id, name) in &members {
-            let Some(member_ip) = groups.player(id).and_then(Player::ip) else {
-                log(&format!("{name}: no address, so no per-room volume for it"));
-                continue;
-            };
-            match connection_to(
-                Some(member_ip),
-                connection,
-                pool,
-                tx,
-                forwarders,
-                Loss::Tolerated,
-            )
-            .await
-            {
-                Ok(member) => {
-                    if let Err(e) = member.subscribe_player("playerVolume:1", id).await {
-                        log(&format!("{name}: no per-room volume ({e:#})"));
-                    }
-                }
-                Err(e) => log(&format!("{name}: could not be reached ({e:#})")),
+        let suffix = bus_suffix_among(&room, &names);
+        match publish_group(
+            connection, groups, group, &room, &suffix, pool, tx, forwarders,
+        )
+        .await
+        {
+            Ok(server) => {
+                log(&format!("{room} -> org.mpris.MediaPlayer2.{suffix}"));
+                names.insert(suffix);
+                servers.push(server);
             }
+            Err(e) => log(&format!(
+                "{room}: not published ({e:#}); the rest of the household carries on"
+            )),
         }
-        log(&format!("{room} -> org.mpris.MediaPlayer2.{suffix}"));
-        servers.push(server);
+    }
+    if servers.is_empty() && !groups.groups.is_empty() {
+        bail!("no group could be published; reconnecting");
     }
     Ok(servers)
+}
+
+/// One group's player: seeded from its coordinator, named `suffix` on the bus,
+/// subscribed to what keeps it current.
+#[allow(clippy::too_many_arguments)]
+async fn publish_group(
+    connection: &Connection,
+    groups: &Groups,
+    group: &proto::Group,
+    room: &str,
+    suffix: &str,
+    pool: &mut HashMap<IpAddr, Connection>,
+    tx: &mpsc::UnboundedSender<Arc<Event>>,
+    forwarders: &mut Vec<JoinHandle<()>>,
+) -> Result<Server<RoomPlayer>> {
+    let coordinator_ip = groups.player(&group.coordinator_id).and_then(Player::ip);
+    let conn = connection_to(
+        coordinator_ip,
+        connection,
+        pool,
+        tx,
+        forwarders,
+        Loss::Fatal,
+    )
+    .await?;
+
+    let members: Vec<(String, String)> = groups
+        .members(group)
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+    // The TV socket belongs to a player, which need not be the one
+    // coordinating: a soundbar that joined a Play:5's group still has its
+    // HDMI, and `x2rock tv` finds it among the members the same way.
+    let has_tv_input = groups
+        .members(group)
+        .iter()
+        .any(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+    let player = RoomPlayer::new(
+        conn.clone(),
+        group.id.clone(),
+        room.to_string(),
+        members.clone(),
+        has_tv_input,
+    );
+    player.apply_playback(&conn.playback_status(&group.id).await?);
+    player.apply_metadata(&conn.metadata(&group.id).await?);
+    player.apply_volume(&conn.group_volume(&group.id).await?);
+
+    let server = Server::new(suffix, player)
+        .await
+        .with_context(|| format!("publishing org.mpris.MediaPlayer2.{suffix}"))?;
+    for namespace in ["playback:1", "playbackMetadata:1", "groupVolume:1"] {
+        conn.subscribe_group(namespace, &group.id).await?;
+    }
+    // Per-member volume is player-scoped, not group-scoped: a group shares
+    // one volume, and this is the balance underneath it. Player-scoped
+    // commands are refused by anyone but that player - ERROR_INVALID_OBJECT_ID,
+    // "Incorrect playerId" - so each member is subscribed on its own socket
+    // rather than the coordinator's.
+    // Best effort, like the group itself: a member that cannot be reached costs
+    // its own balance slider and nothing more.
+    for (id, name) in &members {
+        let Some(member_ip) = groups.player(id).and_then(Player::ip) else {
+            log(&format!("{name}: no address, so no per-room volume for it"));
+            continue;
+        };
+        match connection_to(
+            Some(member_ip),
+            connection,
+            pool,
+            tx,
+            forwarders,
+            Loss::Tolerated,
+        )
+        .await
+        {
+            Ok(member) => {
+                if let Err(e) = member.subscribe_player("playerVolume:1", id).await {
+                    log(&format!("{name}: no per-room volume ({e:#})"));
+                }
+            }
+            Err(e) => log(&format!("{name}: could not be reached ({e:#})")),
+        }
+    }
+    Ok(server)
 }
 
 /// A connection to one player, reusing the pool and opening only what is new.
@@ -560,6 +600,8 @@ async fn connection_to(
 /// The initial `groups` snapshot describes what we just published; republishing
 /// for it would flap every bus name once per connection.
 fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
+    // Fewer players than groups is a group `publish` skipped, so any groups
+    // event republishes - which is the retry for it.
     rooms.len() == groups.groups.len()
         && groups.groups.iter().all(|g| {
             rooms
@@ -662,18 +704,10 @@ fn remember(status: &proto::MetadataStatus) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut list = match crate::bookmarks::Bookmarks::load() {
-        Ok(list) => list,
-        Err(e) => {
-            log(&format!("not recording history: {e:#}"));
-            return;
-        }
-    };
-    if !list.note(bookmark, now) {
-        return;
-    }
-    if let Err(e) = list.save() {
-        log(&format!("could not write history: {e:#}"));
+    // Under the file's lock: `x2rock keep` may be writing the same file at
+    // this very moment, and without the lock one of the two was lost.
+    if let Err(e) = crate::bookmarks::Bookmarks::update(|list| Ok(list.note(bookmark, now))) {
+        log(&format!("not recording history: {e:#}"));
     }
 }
 

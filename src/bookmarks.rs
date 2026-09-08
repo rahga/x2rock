@@ -15,12 +15,13 @@
 //! app - but losing it would be a real annoyance, so it is written atomically.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::proto::MusicObjectId;
+use crate::store;
 
 /// How many unpinned entries the history keeps. Pinned ones never count.
 const RECENT_CAP: usize = 50;
@@ -224,12 +225,7 @@ fn encode_object_id(id: &str) -> String {
 }
 
 fn path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    let dir = dirs
-        .state_dir()
-        .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
-    Ok(dir.join("bookmarks.json"))
+    store::path("bookmarks.json")
 }
 
 impl Bookmarks {
@@ -239,8 +235,11 @@ impl Bookmarks {
     /// be refetched in a second, and this is the only copy of something a person
     /// deliberately saved. Better to say so than to silently start over.
     pub fn load() -> Result<Self> {
-        let path = path()?;
-        match fs::read_to_string(&path) {
+        Self::load_from(&path()?)
+    }
+
+    fn load_from(path: &Path) -> Result<Self> {
+        match fs::read_to_string(path) {
             Ok(text) => {
                 serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
             }
@@ -249,19 +248,38 @@ impl Bookmarks {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// Change the file: load it, apply `change`, write back whatever changed.
+    /// The one way to write it, so every writer takes the lock.
+    ///
+    /// The daemon notes each track as it plays and the CLI keeps, forgets and
+    /// renames, and they run at the same time. Each used to load, change and
+    /// save on its own, so of two changes moments apart only the second
+    /// survived - a `keep` landing as the daemon noted the same track was
+    /// exactly the one to go missing. The lock spans the read to the rename
+    /// and is held for microseconds; the write is skipped when `change`
+    /// changed nothing, which for the daemon is most events.
+    pub fn update<T>(change: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let path = path()?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+        let _lock = store::Lock::exclusive(&path)?;
+        let mut list = Self::load_from(&path)?;
+        let before = list.serialized()?;
+        let outcome = change(&mut list)?;
+        let after = list.serialized()?;
+        if after != before {
+            store::write_atomically(&path, &after, store::PLAIN)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        Ok(outcome)
+    }
+
+    /// The file's text: sorted by id so two saves of the same set are the same
+    /// bytes, which is also what lets `update` see that nothing changed.
+    fn serialized(&self) -> Result<String> {
         let mut copy = Self {
             schema: SCHEMA,
             items: self.items.clone(),
         };
         copy.items.sort_by(|a, b| a.object_id.cmp(&b.object_id));
-        fs::write(&tmp, serde_json::to_string_pretty(&copy)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+        Ok(serde_json::to_string_pretty(&copy)?)
     }
 
     /// Pin something, adding it if it is not already known.

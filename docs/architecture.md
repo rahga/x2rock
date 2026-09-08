@@ -407,7 +407,7 @@ one costs only its own speed, which was built that way for laptops and turns out
 a machine without either work at all.
 
 Two things that would trip a non-Omarchy install, both worth stating rather than discovering:
-`edition = "2024"` needs Rust 1.88, which is newer than several distributions package; and the
+`edition = "2024"` needs Rust 1.88 and `File::lock` needs 1.89, which is newer than several distributions package; and the
 systemd unit is `WantedBy=graphical-session.target`, which never fires on a headless machine.
 
 This is not a promise to support other desktops. It is a note that the CLI and the MPRIS daemon
@@ -1104,11 +1104,20 @@ and deliberately: `pinned` defaults to *true* when absent, because anything writ
 existed got there by someone running `keep`. Discarding a file this program no longer understands
 is right for something refetchable in a second and wrong for the only copy of what a person saved.
 
-Several daemons write this file if a household runs one unit per room, as the home one does. The
-window is smaller than it first looks — `remember()` loads, notes and saves each time rather than
-holding a copy — so two writers must interleave inside a few milliseconds, and the atomic rename
-means the worst case is a lost timestamp rather than a corrupt file. Not worth a lock on that
-evidence; worth revisiting if entries actually go missing.
+Several daemons write this file if a household runs one unit per room, as the home one does, and
+the CLI writes it on `keep`. The first version reasoned that the atomic rename bounded the damage to
+a lost timestamp, and declined a lock on that evidence. The 2026-09-08 review found the reasoning
+wrong on one point: every writer used the *same* scratch name, `bookmarks.json.tmp`, so two of them
+overlapping opened one inode with `O_TRUNC`, wrote into it together, and one renamed the mixture
+into place — where `load()`, which refuses a corrupt file on purpose, then refused it for good.
+The rename was atomic; the shared scratch file was not. So now (`store.rs`): every state file's
+scratch is named for the writing process, and bookmarks alone also take a `flock` (std's
+`File::lock`, which is what moved the MSRV from 1.88 to 1.89) on a sibling
+`bookmarks.json.lock` from the read to the rename (`Bookmarks::update`, the only write path), since
+a `keep` landing as the daemon noted the same track was exactly the entry that went missing. The
+lock file is a sibling because the rename replaces the data file's inode. The player list keeps no
+lock: both its writers write what a player just said, and the loser of that race loses nothing the
+next `attach` does not put back.
 
 ### Two things learned keeping an album (2026-08-31)
 

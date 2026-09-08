@@ -62,15 +62,40 @@ pub async fn connect(explicit: Option<IpAddr>, state: &mut State) -> Result<Sess
     }
 
     // A known network where nothing answers: addresses have most likely moved.
+    // Sweep it all and try each responder in turn, as `discover` does. Stopping
+    // at the first address to accept TCP on the port made that address the end
+    // of every command when it was a player mid-reboot, or a Boost, which
+    // answers on the port and never completes a session.
     eprintln!("Remembered players did not answer; rescanning...");
-    let scan = discover::scan_local_subnet(true).await?;
-    match scan.found.first() {
-        Some(ip) => attach(IpAddr::V4(*ip), state, Some(fingerprint)).await,
-        None => {
-            let names: Vec<_> = known.iter().map(|p| p.name.as_str()).collect();
-            Err(crate::hint::no_players_answered(&names))
+    let scan = discover::scan_local_subnet(false).await?;
+    if scan.found.is_empty() {
+        let names: Vec<_> = known.iter().map(|p| p.name.as_str()).collect();
+        return Err(crate::hint::no_players_answered(&names));
+    }
+    let mut last = None;
+    for ip in &scan.found {
+        match attach(IpAddr::V4(*ip), state, Some(fingerprint)).await {
+            Ok(session) => return Ok(session),
+            Err(e) => {
+                eprintln!("{ip}: {e:#}");
+                last = Some(e);
+            }
         }
     }
+    // The same code as "found nothing": to the caller it is the same state,
+    // no player to talk to, and the same remedy - come back once they are up.
+    Err(crate::hint::Hint::new(
+        format!(
+            "{} device(s) answer on the Sonos port but none completed a session (last: {:#}); \
+             they may be mid-reboot, or not players at all. `x2rock discover` re-checks once \
+             they should be back.",
+            scan.found.len(),
+            last.expect("a non-empty scan has a last error"),
+        ),
+        "no_player",
+        None,
+    )
+    .into())
 }
 
 /// The group a command applies to.

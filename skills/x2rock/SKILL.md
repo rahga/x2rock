@@ -125,9 +125,10 @@ This is the highest-stakes thing to get right. When rooms are grouped:
   member named.
 - **`--all` fans over groups, not raw rooms**, so a grouped pair is moved **once**, correctly:
   `--all vol -10` takes each group down 10, not each member (a grouped Kitchen+Dining does not go
-  down 20). Read "every room" as "every group". `--all` is exclusive with `-r` (clap rejects both),
-  and on a command that does not fan out it errors (code `unknown`) — except `bookmarks`, where
-  `--all` means "include daemon-noticed history" instead.
+  down 20). Read "every room" as "every group". `--all` refuses a typed `-r` (code `unknown`), but
+  an exported `X2ROCK_ROOM` is set aside rather than fought, so `--all vol -10` works in a shell
+  that took `x2rock rooms` up on its `export`. On a command that does not fan out it errors (code
+  `unknown`) — except `bookmarks`, where `--all` means "include daemon-noticed history" instead.
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 

@@ -106,7 +106,7 @@ widget](#omarchy-bar-widget).
 
 Two things bite here, both quietly:
 
-- **`apt`'s Rust is too old.** x2rock needs 1.88; no current Ubuntu packages it — 24.04 LTS is on
+- **`apt`'s Rust is too old.** x2rock needs 1.89; no current Ubuntu packages it — 24.04 LTS is on
   1.75, and the interim releases are behind as well, so `apt install cargo` is a dead end rather
   than a maybe. Cargo at least refuses in one plain line naming the version it wants. Install a
   current toolchain from [rustup.rs](https://rustup.rs) and build again. The fix is only ever a
@@ -338,7 +338,7 @@ On any Linux with systemd and a session D-Bus:
 
 Worth knowing before installing:
 
-- **Rust 1.88 or newer** — rolling and recent distributions already package something newer, so
+- **Rust 1.89 or newer** — rolling and recent distributions already package something newer, so
   their own Rust is usually enough; `rustup` is the fallback for long-term releases, which are the
   ones that fall short. [Install](#install) has the build; [Requirements](#requirements) has the
   why.
@@ -677,13 +677,14 @@ address to talk to.
 ## Requirements
 
 - Linux, and a Sonos **S2** speaker on the same network. S1 is not supported.
-- **Rust 1.88 or newer** to build it (`edition = "2024"`, and let-chains). This is declared as
-  `rust-version` in `Cargo.toml`, so an older toolchain is refused by Cargo with a plain message
-  naming the version it wants rather than a page of syntax errors. Rolling and recent distributions
-  are well past it — 1.88 is from mid-2025 — so their packaged Rust is usually enough and `rustup`
-  is the fallback rather than the first move. The versions that are genuinely too old are the
-  long-term releases; see [On Ubuntu](#on-ubuntu). Nothing here chases the newest thing for its own
-  sake — it is simply not held back either.
+- **Rust 1.89 or newer** to build it (`edition = "2024"` and let-chains want 1.88; `File::lock`,
+  which guards the bookmarks file against the daemon and the CLI writing it at once, wants 1.89).
+  This is declared as `rust-version` in `Cargo.toml`, so an older toolchain is refused by Cargo
+  with a plain message naming the version it wants rather than a page of syntax errors. Rolling and
+  recent distributions are well past it — 1.89 is from August 2025 — so their packaged Rust is
+  usually enough and `rustup` is the fallback rather than the first move. The versions that are
+  genuinely too old are the long-term releases; see [On Ubuntu](#on-ubuntu). Nothing here chases
+  the newest thing for its own sake — it is simply not held back either.
 
   **The fix is a newer toolchain, not a smaller number.** Lowering `rust-version` or reverting
   `edition` to 2021 in `Cargo.toml` does not work: the code is edition-2024, so that trades one

@@ -4,6 +4,7 @@
 //! Waybar's `mpris` module, `playerctl`, desktop media keys - gets Sonos control
 //! for free. State comes from the player's own events; nothing here polls.
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -33,6 +34,27 @@ pub fn bus_suffix(room: &str) -> String {
         }
     }
     suffix.trim_end_matches('-').to_string()
+}
+
+/// A suffix none of `taken` is using. [`bus_suffix`] is many-to-one - "Kitchen"
+/// and "kitchen", "Media Room" and "Media-Room", any two names with no ASCII in
+/// them at all - and zbus asks for a bus name without queueing, so a second
+/// player on a taken name is refused outright (`NameTaken`), which used to
+/// cost the household its players. The first room keeps the plain name, so a
+/// bar config written against it stays right; the next gets `-2`, then `-3`.
+pub fn bus_suffix_among(room: &str, taken: &HashSet<String>) -> String {
+    let base = bus_suffix(room);
+    if !taken.contains(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 #[derive(Default)]
@@ -746,6 +768,25 @@ mod tests {
         assert_eq!(bus_suffix("Kitchen"), "x2rock-kitchen");
         assert_eq!(bus_suffix("Björn's Den!!"), "x2rock-bj-rn-s-den");
         assert_eq!(bus_suffix("  "), "x2rock");
+    }
+
+    #[test]
+    fn colliding_rooms_get_numbered_and_the_first_keeps_the_plain_name() {
+        let mut taken = HashSet::new();
+        for (room, expected) in [
+            ("Kitchen", "x2rock-kitchen"),
+            ("kitchen", "x2rock-kitchen-2"),
+            ("Kitchen!", "x2rock-kitchen-3"),
+            ("Media Room", "x2rock-media-room"),
+            ("Media-Room", "x2rock-media-room-2"),
+            // Two names with nothing ASCII in them both reduce to the bare prefix.
+            ("書斎", "x2rock"),
+            ("寝室", "x2rock-2"),
+        ] {
+            let suffix = bus_suffix_among(room, &taken);
+            assert_eq!(suffix, expected, "{room:?}");
+            taken.insert(suffix);
+        }
     }
 
     /// Both shapes are trimmed from real `getMetadataStatus` responses off the

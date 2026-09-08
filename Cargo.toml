@@ -2,7 +2,7 @@
 name = "x2rock"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Local-first Sonos control for Linux: CLI and MPRIS2 server, no Sonos account"
 license = "0BSD"
 repository = "https://github.com/rahga/x2rock"

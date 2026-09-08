@@ -1559,7 +1559,11 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
     if parts.next().is_some() {
         return None;
     }
-    Some(Duration::from_secs_f64((h * 3600 + m * 60) as f64 + s))
+    // Player-supplied text, and `f64::from_str` takes "NaN", "inf" and negatives
+    // in its stride - each of which `Duration::from_secs_f64` panics on. Every
+    // caller reads a `None` as "no duration", which is what those are.
+    let whole = h.checked_mul(3600)?.checked_add(m.checked_mul(60)?)?;
+    Duration::try_from_secs_f64(whole as f64 + s).ok()
 }
 
 #[cfg(test)]
@@ -1813,6 +1817,10 @@ mod tests {
         assert_eq!(parse_hms("0:00:01.500"), Some(Duration::from_millis(1500)));
         assert_eq!(parse_hms("NOT_IMPLEMENTED"), None);
         assert_eq!(parse_hms("1:2:3:4"), None);
+        // Accepted by the float parser, refused here rather than panicking.
+        for text in ["0:00:NaN", "0:00:inf", "0:00:-1", "0:00:1e300"] {
+            assert_eq!(parse_hms(text), None, "{text}");
+        }
     }
 
     #[test]
