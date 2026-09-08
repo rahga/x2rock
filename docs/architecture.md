@@ -750,6 +750,17 @@ Media Room — Deep Space One on SomaFM Radio
   root as a trust anchor - and accepts any cert only because on a LAN that already concedes active
   MITM it buys nothing. A music service, by contrast, is a public host with a real chain, and this
   call does leave the LAN, so it gets real roots.
+
+  **Independently confirmed from x2rock's own side, 2026-09-08** - `openssl s_client` against the
+  office Media Room One SL (a *different* speaker from x2rocktv's capture): one cert sent
+  (leaf-only), `subject=CN=48A6B81853E0`, `issuer=CN=Sonos Device Authentication Root CA`, verify
+  error 20/21 (root not obtainable), RSA-2048 / SHA-256, TLS 1.3, validity Jun 4 → Dec 15 2026
+  (~6 months). The SAN turned out richer than expected and settles the derivation for good: it
+  carries **both** `URI:urn:sonos:udn:RINCON_48A6B81853E001400` and
+  `DNS:sonos-48A6B81853E0.local`, so the RINCON→`.local` transform is provable from the cert
+  itself. It also carries a second hostname, `DNS:sonos-48A6B81853E0.smartspeaker.audio`, and a
+  full `urn:sonos:*` identity block (serial with its check digit, household id, model, generation)
+  - none needed today, but noted in case an identity lookup ever wants a source that needs no call.
 - **No XML declaration, no BOM.** Already recorded, and the client now strips a leading BOM from
   every response too, because services send one and every XML parser then rejects it as content
   before the declaration.
