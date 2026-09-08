@@ -172,10 +172,14 @@ enum Command {
     Alarms {
         #[command(subcommand)]
         action: Option<AlarmsAction>,
-        /// The list as JSON: `{id, room, start, duration_ms, recurrence,
-        /// enabled, volume, play_mode, program, include_grouped}` per alarm.
-        /// With `add`, the created alarm as one such object - its `id` is what
-        /// `x2rock alarm <id> off` wants later.
+        /// The list as JSON: `{id, room, room_id, start, duration_ms,
+        /// recurrence, enabled, volume, play_mode, program, include_grouped}`
+        /// per alarm. `room_id` is the raw `RINCON_...` uuid, which is what
+        /// names the room when `room` is null because the speaker is off the
+        /// network - and which embeds that speaker's MAC, so strip it before
+        /// pasting output anywhere public. With `add`, the created alarm as
+        /// one such object - its `id` is what `x2rock alarm <id> off` wants
+        /// later.
         // Global, so `alarms add --json` is this flag and not a usage error.
         #[arg(long, global = true)]
         json: bool,

@@ -176,8 +176,12 @@ room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `
 already in is a no-op that says so. `recurrence` is `ONCE`, `WEEKDAYS`, `WEEKENDS`, `DAILY` or
 `ON_<digits>` for named days with Sunday 0; `program` is a URI, and `x-rincon-buzzer:0` is the
 built-in chime, which is what `alarms add` uses unless `--program` names a favorite or playlist.
+Beside `room`, each entry carries **`room_id`, the raw `RINCON_...` uuid** - the only thing naming
+the room when `room` is `null` because that speaker is off the network. It embeds the speaker's MAC,
+and `alarms` has no `--redact` the way `system` does, so strip it yourself before putting alarm JSON
+in a bug report or a paste.
 
-Three things about alarms that will otherwise surprise a user:
+Several things about alarms that will otherwise surprise a user:
 
 - **The time is the household's, not the user's, and not this machine's.** `StartLocalTime` is
   local to the Sonos system. A household with no timezone configured runs on **UTC**, so
@@ -194,8 +198,12 @@ Three things about alarms that will otherwise surprise a user:
 
   Never relay "your alarm is set for 7" without having read that line: on an unset household it is
   the one claim most likely to be hours out.
-- **An alarm sets the room's volume and leaves it there.** After one fires, the room stays at the
-  alarm's level, not the level it had before. Say so if a user wonders why a room went quiet.
+- **An alarm sets the room's volume and leaves it there, and ramps up to it.** After one fires,
+  the room stays at the alarm's level, not the level it had before. Say so if a user wonders why a
+  room went quiet. It *reaches* that level by ramping over **roughly ten to fifteen seconds**, so a
+  volume read in the first seconds after firing is really lower than the alarm's setting - measured
+  climbing 6 -> 16 for a `--volume 16` alarm. Never report that as `--volume` being ignored; wait
+  and re-read.
 - **Removing a running alarm does not stop it**, and neither does disarming it. Use `pause`.
 - **An alarm needs about two minutes of lead time.** One created less than that before its own
   start misses its scheduling slot and fires roughly two minutes late, so setting an alarm "for one
