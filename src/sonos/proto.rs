@@ -306,6 +306,10 @@ pub struct PlaybackActions {
     pub can_repeat_one: bool,
     #[serde(default)]
     pub can_shuffle: bool,
+    /// Confirmed sent by this household's firmware (2026-09-09), true on a
+    /// queue and alongside every other flag here.
+    #[serde(default)]
+    pub can_crossfade: bool,
 }
 
 impl PlaybackActions {

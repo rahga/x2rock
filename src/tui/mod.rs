@@ -811,16 +811,16 @@ impl App {
         Intent::SetLoop(room.bus_name.clone(), next)
     }
 
-    /// Crossfade, flipped on screen as it is sent like the other two modes.
-    /// No capability hint guards it: the API's `canCrossfade` is not read
-    /// here, and a guard on a field that might not be sent would withdraw the
-    /// key everywhere. A source that cannot crossfade answers through the CLI's
-    /// own sentence instead.
+    /// Crossfade, flipped on screen as it is sent like the other two modes,
+    /// and withdrawn like them where the source cannot do it. The guard is
+    /// `canCrossfade`, which this household's firmware was checked to send
+    /// alongside the other flags before it was trusted: a guard on a field the
+    /// player leaves out would withdraw the key everywhere.
     fn toggle_crossfade(&mut self) -> Intent {
         let Some(room) = self.rooms.get_mut(self.cursor) else {
             return Intent::Nothing;
         };
-        if !room.transport_available() {
+        if !room.can_crossfade || !room.transport_available() {
             return Intent::Nothing;
         }
         room.crossfade = !room.crossfade;
@@ -1001,6 +1001,7 @@ mod tests {
             can_repeat: true,
             can_repeat_one: true,
             can_shuffle: true,
+            can_crossfade: true,
             loop_status: "None".to_owned(),
             ..RoomSnapshot::default()
         }
@@ -1087,10 +1088,10 @@ mod tests {
         assert!(app.selected().is_some_and(|room| !room.muted));
     }
 
-    /// Crossfade flips like shuffle, and is withdrawn with the rest of the
-    /// modes on TV input.
+    /// Crossfade flips like shuffle, is refused like shuffle where the source
+    /// says it cannot, and is withdrawn with the rest of the modes on TV input.
     #[test]
-    fn crossfade_toggles_and_is_withdrawn_on_tv_input() {
+    fn crossfade_toggles_and_is_withdrawn_where_it_cannot_apply() {
         let mut app = App::new(vec![room("Kitchen")]);
         assert_eq!(
             press(&mut app, 'x'),
@@ -1100,6 +1101,11 @@ mod tests {
             press(&mut app, 'x'),
             Intent::Crossfade("Kitchen".into(), false)
         );
+        let mut radio = App::new(vec![RoomSnapshot {
+            can_crossfade: false,
+            ..room("Kitchen")
+        }]);
+        assert_eq!(press(&mut radio, 'x'), Intent::Nothing);
         let mut tv = App::new(vec![RoomSnapshot {
             on_tv: true,
             has_tv: true,

@@ -14,9 +14,9 @@ use zbus::zvariant::OwnedValue;
 // The daemon's own names for its keys, so the two ends of the contract cannot
 // drift apart by a typo in one of them.
 use crate::mpris::{
-    CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT, INPUT_FORMAT,
-    LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT,
-    STATION_NAME, STREAM_INFO,
+    CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT,
+    INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUMES, MEMBERS, MUTED,
+    ON_TV_INPUT, STATION_NAME, STREAM_INFO,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -99,6 +99,7 @@ pub struct RoomSnapshot {
     pub can_repeat: bool,
     pub can_repeat_one: bool,
     pub can_shuffle: bool,
+    pub can_crossfade: bool,
 }
 
 /// `xesam:artist` is an array per the MPRIS spec, and the daemon writes a
@@ -160,6 +161,7 @@ impl RoomSnapshot {
         self.can_repeat = flag(get(CAN_REPEAT));
         self.can_repeat_one = flag(get(CAN_REPEAT_ONE));
         self.can_shuffle = flag(get(CAN_SHUFFLE));
+        self.can_crossfade = flag(get(CAN_CROSSFADE));
     }
 
     pub fn set_playback_state(&mut self, status: &str) {

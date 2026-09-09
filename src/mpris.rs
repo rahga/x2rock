@@ -154,6 +154,8 @@ pub(crate) const MEMBER_MUTED: &str = "x2rock:memberMuted";
 /// Crossfade, the one play mode MPRIS has no property for. Repeat and shuffle
 /// go out as LoopStatus and Shuffle; this rides on Metadata like the hints.
 pub(crate) const CROSSFADE: &str = "x2rock:crossfade";
+/// Whether the source can crossfade at all, with [`CAN_REPEAT`] and the others.
+pub(crate) const CAN_CROSSFADE: &str = "x2rock:canCrossfade";
 /// Whether the group, and each member, has a fixed volume: line-level output
 /// with no volume control of its own, a Port feeding an amplifier. The CLI
 /// refuses a volume change on such a room and says to adjust the amplifier; a
@@ -246,10 +248,12 @@ impl RoomState {
                 self.actions.can_repeat,
                 self.actions.can_repeat_one,
                 self.actions.can_shuffle,
+                self.actions.can_crossfade,
             ) != (
                 actions.can_repeat,
                 actions.can_repeat_one,
                 actions.can_shuffle,
+                actions.can_crossfade,
             )
         });
         if let Some(actions) = status.available_playback_actions {
@@ -299,6 +303,7 @@ impl RoomState {
         metadata.set(CAN_REPEAT, Some(self.actions.can_repeat));
         metadata.set(CAN_REPEAT_ONE, Some(self.actions.can_repeat_one));
         metadata.set(CAN_SHUFFLE, Some(self.actions.can_shuffle));
+        metadata.set(CAN_CROSSFADE, Some(self.actions.can_crossfade));
         let names: Vec<_> = self.members.iter().map(|(_, name)| name.clone()).collect();
         metadata.set(MEMBERS, Some(names));
         metadata.set(
