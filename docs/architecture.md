@@ -3307,10 +3307,19 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   so it looks like the push channel for night mode and dialog enhancement. It
   is not: night mode was toggled on and off with `eq --night` and *no event
   arrived*, on either edge, with `X2ROCK_LOG_EVENTS=1` capturing every body -
-  only `playback:1`, `playbackMetadata:1` and `groupVolume:1` ever fired. Most
-  likely because x2rock writes these over UPnP `SetEQ` and the Control API does
-  not observe its own settings changing from underneath; whether the Sonos app's
-  own write pushes one is untested. **What it does send is a confirmation
+  only `playback:1`, `playbackMetadata:1` and `groupVolume:1` ever fired.
+  **The push channel exists; it is just not this one.** The official app does
+  reflect a night/dialog change live, which first read as a contradiction and is
+  not: `RenderingControl`'s SCPD marks `NightMode`, `DialogLevel` and `EQValue`
+  all `sendEvents="no"` and `LastChange` `sendEvents="yes"`, the ordinary UPnP
+  bundling - so these travel as UPnP **GENA** events, which need the player to
+  connect back to the subscriber and are therefore the one transport this file
+  rules out on purpose (see the module comment on `sonos/upnp.rs`: a default-deny
+  firewall silently eats the callback). So the app is not using a Control-API
+  namespace x2rock has missed. An earlier draft of this note guessed the cause
+  was the Control API failing to observe a UPnP write from underneath; that was
+  speculation and it was wrong.
+  **What `homeTheater:1` does send is a confirmation
   carrying no options at all**, and that is the dangerous part: read through
   `HomeTheaterOptions`, whose bools are `#[serde(default)]`, an empty body says
   "night off, dialog off". It overwrote a Beam that had just been seeded
