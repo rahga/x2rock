@@ -166,6 +166,20 @@ const LIVE_STREAM: &str = "x2rock:isLiveStream";
 /// all and the title already *is* the station, which is why this is sent only
 /// when it would add something rather than repeat the line above it.
 const STATION_NAME: &str = "x2rock:stationName";
+/// A live stream's own "now playing" text, verbatim and unparsed.
+///
+/// For a stream started by `play-url` this is the *only* track information
+/// there is: `xesam:title` is the station (often just its host) and artist,
+/// album and length are all absent, so a client with no access to this shows
+/// the URL and nothing about the music.
+///
+/// **Never split it.** `Artist - Title` is an Icecast convention rather than a
+/// format - a station is equally free to put a show name or a slogan here - and
+/// splitting on the hyphen invents an artist wherever it happens to land.
+///
+/// Blank counts as absent, matching `now --json`: a station between titles
+/// sends a few spaces, and an empty headline reads worse than saying nothing.
+const STREAM_INFO: &str = "x2rock:streamInfo";
 
 impl RoomState {
     /// Fold a `playbackStatus` body into the room, returning what MPRIS has to
@@ -487,6 +501,17 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     metadata.set(
         STATION_NAME,
         Some(station_name(meta, title).unwrap_or_default().to_owned()),
+    );
+    metadata.set(
+        STREAM_INFO,
+        Some(
+            meta.stream_info
+                .as_deref()
+                .map(str::trim)
+                .filter(|info| !info.is_empty())
+                .unwrap_or_default()
+                .to_owned(),
+        ),
     );
     metadata
 }
