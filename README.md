@@ -2,8 +2,8 @@
 
 Local-first Sonos control for Linux, in Rust.
 
-A CLI plus an MPRIS2 server, targeting [Omarchy](https://omarchy.org) 4.0 "Quattro" and its
-Quickshell top bar. **No Sonos login required** — x2rock talks to speakers directly on the local
+A CLI, a terminal UI and an MPRIS2 server, targeting [Omarchy](https://omarchy.org) 4.0 "Quattro"
+and its Quickshell top bar. **No Sonos login required** — x2rock talks to speakers directly on the local
 network.
 
 The bar widget is Omarchy's. The CLI and the daemon are not: they carry no dependency on Omarchy,
@@ -163,6 +163,7 @@ x2rock party off         # break it up, every room on its own
 x2rock system            # every speaker: model, firmware, hardware, bonding
 x2rock system --redact   # ...with serials and addresses masked, to paste somewhere
 x2rock daemon            # every room as an MPRIS2 player, until stopped
+x2rock tui               # every room on one screen, in the terminal
 ```
 
 `-r`/`--room` is repeatable for the per-room commands — `vol`, `repeat`, `shuffle`, and transport
@@ -321,6 +322,48 @@ own output.)
 Installing it is three commands, under [Install](#install) along with the binary and the daemon
 it needs.
 
+## Terminal UI
+
+`x2rock tui` is the household on one screen, keyboard-driven — what a CLI cannot be and the bar
+widget cannot be either, since a bar popup takes no keyboard and this one wants none of Omarchy.
+It is the front end for an ssh session, a bare console, or a terminal that is already open.
+
+- **Each room is up to three lines**: its name and the group volume, what is playing, and a
+  context line beneath — station, the format a TV is sending, who else is in the group, and
+  whether repeat or shuffle is on. A room a control does not apply to is silent rather than wrong:
+  a room on its TV input has no transport to drive, and a radio stream has no shuffle to be off.
+- `space` play/pause, `n`/`p` skip, `←`/`→` the group's volume, `r` repeat (off → all → one), `s`
+  shuffle, `j`/`k` or the arrows to move between rooms, `?` for the full list, `q` to quit.
+- **`g` opens grouping**: the rooms playing together, each with its *own* volume beneath the group
+  mix (`←`/`→` sets it — the balance the group volume cannot express), and every other room one
+  `enter` from joining. `enter` on a member takes it back out; the coordinator cannot leave, since
+  the group is the coordinator, and it says so rather than failing.
+- **`P` is party mode**, hosted by the room under the cursor, and it asks first because it takes
+  every room in the house. Once everyone is in there is one row left, and the same key offers to
+  end it.
+- `t` switches a soundbar to its TV input.
+- **It needs the daemon**, which the CLI never does. The daemon is the only thing here that
+  pushes, and a screen that stays right without polling wants push. Without it the TUI says so and
+  names the command to start it, rather than drawing an empty household — and what it draws is
+  exactly the set the bar widget renders, so this is a second consumer of a contract that already
+  exists rather than a new one.
+- **It re-reads the household every thirty seconds on top of the pushed events**, and that read
+  goes to the daemon's own state rather than to the speakers. A dropped signal therefore repairs
+  itself instead of leaving a screen that is wrong and confident, which matters for the way this
+  is actually used: left open on a spare terminal or over ssh, not picked up for ten seconds. If
+  those reads stop being answered the header says how long it has been, since a house where
+  nothing is happening and a screen that has stopped listening otherwise look exactly alike.
+- Reads and most writes go over MPRIS and land instantly. Grouping, party, TV input and one
+  speaker's own volume have no MPRIS equivalent, so those run this same binary's CLI as a
+  subprocess — the route the bar widget takes, for the same reason — which is why they put a line
+  in the footer while they run, and why an error there is the CLI's own sentence.
+- No mouse, no configuration, no theme: it draws in the terminal's own colours and inherits
+  whatever that is themed to.
+- **Not everything is in it.** Favorites, the queue, alarms and tone controls stay CLI commands:
+  MPRIS carries none of them, so each would be a panel of its own reading the CLI's JSON — which is
+  what the widget's favorites picker had to become, and is separate work. What is here is the set
+  the daemon already publishes.
+
 ## Other Linux desktops
 
 Omarchy Quattro is the target, and the bar widget needs it — it is a Quickshell plugin. Nothing
@@ -335,6 +378,8 @@ On any Linux with systemd and a session D-Bus:
   interface — `playerctl`, Waybar's `mpris` module, GNOME's and KDE's media controls and desktop
   media keys all drive Sonos with no further setup. That is most of the widget's value without the
   widget.
+- **`x2rock tui` needs nothing but that daemon**, so the every-room-at-once view is there on any
+  Linux, and over ssh — see [Terminal UI](#terminal-ui).
 
 Worth knowing before installing:
 
