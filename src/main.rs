@@ -242,7 +242,11 @@ enum Command {
         /// out of the mix.
         #[arg(long)]
         dialog: Option<String>,
-        /// The resulting `{room, bass, treble, loudness}` as JSON.
+        /// The resulting `{room, bass, treble, loudness, trueplay,
+        /// trueplay_available}` as JSON, plus `night_mode`,
+        /// `dialog_enhancement` and `dialog_level` on a room with a TV input.
+        /// `dialog_level` is the graduated level the speaker holds; `--dialog`
+        /// itself only turns it on and off.
         #[arg(long)]
         json: bool,
     },
