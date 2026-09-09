@@ -213,14 +213,20 @@ impl Source {
         loop {
             // Wait for something to happen, then let the burst finish before
             // reading: see SETTLE.
+            // Neither stream should ever end while the bus is up. If one does,
+            // say which: the TUI exited once during a household's first
+            // republish after a network change (2026-09-09) and took no reason
+            // with it, and "lost the session bus" was all it could have said.
             tokio::select! {
                 message = properties.next() => {
                     if message.is_none() {
-                        break;
+                        bail!("the PropertiesChanged signal stream ended");
                     }
                 }
                 owner = owners.next() => {
-                    let Some(owner) = owner else { break };
+                    let Some(owner) = owner else {
+                        bail!("the NameOwnerChanged signal stream ended");
+                    };
                     let matched = owner
                         .args()
                         .map(|a| a.name().starts_with(PREFIX))
@@ -241,9 +247,9 @@ impl Source {
             while owners.next().now_or_never().flatten().is_some() {}
             let rooms = self.snapshot().await.unwrap_or_default();
             if tx.send(rooms).is_err() {
-                break;
+                // The screen has gone; nothing left to tell.
+                return Ok(());
             }
         }
-        Ok(())
     }
 }

@@ -208,16 +208,15 @@ async fn drive(
                 }
                 // A daemon that stops does not close this channel - its players
                 // leaving is an event, and the room list simply empties. The
-                // channel closes when the *watcher* stops, so its own error is
-                // the one worth printing; the fallback covers the bus going away
-                // underneath it, which carries no error of its own.
+                // channel closes when the *watcher* stops, and it always says
+                // why; the fallback is reached only if it panicked instead.
                 None => {
                     if let Some(watcher) = watcher.take()
                         && let Ok(Err(e)) = watcher.await
                     {
                         return Err(e).context("watching the daemon");
                     }
-                    bail!("lost the session bus, so nothing is arriving any more")
+                    bail!("the daemon watcher stopped without saying why")
                 }
             },
         };
