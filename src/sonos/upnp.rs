@@ -712,7 +712,18 @@ impl Upnp {
 
     /// One of the extended-EQ toggles, over `SetEQ` - `NightMode` and
     /// `DialogLevel`, the soundbar settings the Control API reads but refuses to
-    /// write (see docs/architecture.md). Boolean on the hardware here (0/1). A
+    /// write (see docs/architecture.md).
+    ///
+    /// Boolean on the hardware here (0/1), and that is a statement about the
+    /// hardware rather than about the field. `NightMode` really is a boolean;
+    /// `DialogLevel` is documented as 1-4 on the devices that grade it, and on
+    /// newer ones (Arc Ultra) the on/off half moves to a separate
+    /// `SpeechEnhanceEnabled` type. A Beam does neither - it reads
+    /// `DialogLevel: 1` with `SpeechEnhanceEnabled: 0` while dialog is on, and
+    /// the Sonos app draws it as a plain toggle - so 0/1 is the right write
+    /// here and an `on: bool` is the honest signature for it. Supporting a
+    /// level means hardware nobody here has; see the `DialogLevel` section of
+    /// docs/architecture.md before widening this. A
     /// soundbar accepts it; a non-soundbar answers UPnP 402, so callers gate on
     /// the TV-input capability first and this is the write once that holds.
     pub async fn set_eq(&self, eq_type: &str, on: bool) -> Result<()> {

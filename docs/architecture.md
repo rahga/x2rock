@@ -5120,6 +5120,42 @@ Three things fall out of that grid, and two of them sharpen rules this file alre
   `SubCrossover` was predicted "Amp only" and does answer on a Beam — with `0`, which is consistent
   with the setting simply not applying rather than the type being absent.
 
+### `DialogLevel` is a level, and the Beam is not the device that shows it (2026-09-08)
+
+`eq --dialog` writes `DialogLevel` as `0` or `1` and `eq --json` reports back an
+`enhance_dialog_level` that has been seen as `2` in a captured body. That looked like x2rock reading
+a graduated setting it could not write. It is narrower than that, and the CLI is right for the
+hardware here.
+
+The community reference for `RenderingControl` (svrooij.io, reverse-engineered - Sonos documents the
+Control API but not this service) puts it as: **`DialogLevel` is `1`-`4` on supported devices** - 1
+low, 2 medium, 3 high, 4 max - and **on newer devices (Arc Ultra is the example) the on/off state
+moves to a separate `SpeechEnhanceEnabled` type**, with `DialogLevel` carrying intensity only and
+not returning `0` when disabled.
+
+Measured against the Bedroom Beam while speech enhancement was on:
+
+| EQType | Beam |
+|---|---|
+| `DialogLevel` | `1` |
+| `NightMode` | `0` |
+| `SpeechEnhanceEnabled` | `0` |
+
+`SpeechEnhanceEnabled` reads `0` at the same moment `getPlayerSettings` reports `enhanceDialog:
+true`, so **that split is not operative on a Beam**: `DialogLevel` is the control, used as a
+boolean, which is also what the Sonos app draws for this model - a plain toggle, no levels. So
+writing `0`/`1` is correct here, and the ceiling above `1` belongs to hardware not present in this
+household. Whether a Beam clamps, ignores or accepts `2` is **untested**, because settling it means
+a real write.
+
+Two cautions for whoever picks this up on an Arc or Arc Ultra. `SpeechEnhanceEnabled` **answered**
+rather than returning UPnP 402, exactly like the Sub family above - so its presence in the reply
+says nothing about whether it does anything, and the "answering is not capability" rule covers it.
+And the Beam's own SCPD types `DialogLevel` as `string` and `NightMode` as `boolean` with **no
+`allowedValueList` or `allowedValueRange` on either**, so the device advertises no range to
+validate a write against; the 1-4 ceiling is documentation and measurement, never something the
+player will tell you.
+
 There is no CLI door to `GetEQ` as a generic probe, so exploring the full type list is still a
 shell one-liner - but two of the types now have a first-class home: **`NightMode` and `DialogLevel`
 are set by `eq --night on|off` / `--dialog on|off`** on a soundbar (built 2026-09-05, over `SetEQ`;
@@ -5128,7 +5164,7 @@ of the extended set stays a probe. Sweep a room and record what answers:
 
 ```sh
 for t in SubEnable SubGain SubCrossover SubPolarity SurroundEnable SurroundLevel \
-         MusicSurroundLevel NightMode DialogLevel HeightChannelLevel; do
+         MusicSurroundLevel NightMode DialogLevel SpeechEnhanceEnabled HeightChannelLevel; do
   printf '%-20s ' "$t"
   curl -s "http://<ip>:1400/MediaRenderer/RenderingControl/Control" \
     -H 'Content-Type: text/xml; charset="utf-8"' \
