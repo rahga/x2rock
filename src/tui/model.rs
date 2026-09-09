@@ -14,8 +14,9 @@ use zbus::zvariant::OwnedValue;
 // The daemon's own names for its keys, so the two ends of the contract cannot
 // drift apart by a typo in one of them.
 use crate::mpris::{
-    CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, HAS_TV_INPUT, INPUT_FORMAT, LIVE_STREAM, MEMBER_MUTED,
-    MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT, STATION_NAME, STREAM_INFO,
+    CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT, INPUT_FORMAT,
+    LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT,
+    STATION_NAME, STREAM_INFO,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -79,6 +80,14 @@ pub struct RoomSnapshot {
     /// zero while muted, so these are the only way to tell muted from quiet.
     pub muted: bool,
     pub member_muted: Vec<bool>,
+    /// Whether the group, and each member, has a fixed volume: line-level
+    /// output with no volume control of its own. The bar and its keys mean
+    /// nothing on such a room, and are withdrawn - see
+    /// [`RoomSnapshot::volume_available`].
+    pub fixed_volume: bool,
+    pub member_fixed: Vec<bool>,
+    /// Crossfade, the play mode MPRIS has no property for.
+    pub crossfade: bool,
     pub on_tv: bool,
     pub has_tv: bool,
     pub input_format: String,
@@ -136,6 +145,12 @@ impl RoomSnapshot {
             .iter()
             .map(|v| v == "true")
             .collect();
+        self.fixed_volume = flag(get(FIXED_VOLUME));
+        self.member_fixed = strings(get(MEMBER_FIXED_VOLUME))
+            .iter()
+            .map(|v| v == "true")
+            .collect();
+        self.crossfade = flag(get(CROSSFADE));
         self.on_tv = flag(get(ON_TV_INPUT));
         self.has_tv = flag(get(HAS_TV_INPUT));
         self.input_format = first_string(get(INPUT_FORMAT));
@@ -226,6 +241,14 @@ impl RoomSnapshot {
             "" => self.title.clone(),
             suffix => format!("{} — {suffix}", self.title),
         }
+    }
+
+    /// Whether the group's volume can be changed from here at all. A fixed
+    /// volume is set on the amplifier the room feeds, and the CLI refuses a
+    /// step or a mute on it in those words; offering the keys anyway would be
+    /// offering an error.
+    pub fn volume_available(&self) -> bool {
+        !self.fixed_volume
     }
 
     /// Whether this row is a group rather than a lone room.
@@ -357,6 +380,18 @@ mod tests {
         room.apply_metadata(&metadata);
         assert!(room.muted);
         assert_eq!(room.member_muted, vec![true, false]);
+    }
+
+    /// Fixed volume withdraws the volume controls; nothing else does, and a
+    /// muted room in particular still has them, since unmute is one of them.
+    #[test]
+    fn only_a_fixed_volume_withdraws_the_volume_keys() {
+        let mut room = RoomSnapshot::default();
+        assert!(room.volume_available());
+        room.muted = true;
+        assert!(room.volume_available());
+        room.fixed_volume = true;
+        assert!(!room.volume_available());
     }
 
     /// Absent keys mean "nothing to say", not "false" - the daemon omits what

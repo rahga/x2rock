@@ -138,6 +138,14 @@ impl Cli {
             .await
     }
 
+    /// Crossfade on or off for a group. A play mode like repeat and shuffle,
+    /// but MPRIS has no property for it, so of the three it is the one that
+    /// goes through the CLI.
+    pub async fn crossfade(&self, room: &str, on: bool) -> Result<()> {
+        self.run(&["-r", room, "crossfade", if on { "on" } else { "off" }])
+            .await
+    }
+
     pub async fn tv(&self, room: &str) -> Result<()> {
         self.run(&["-r", room, "tv"]).await
     }

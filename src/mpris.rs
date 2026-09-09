@@ -81,6 +81,10 @@ struct RoomState {
     /// Whether the group, and each member, is muted - see [`MUTED`].
     muted: bool,
     member_muted: Vec<bool>,
+    /// Whether the group, and each member, has a fixed volume - see
+    /// [`FIXED_VOLUME`].
+    fixed: bool,
+    member_fixed: Vec<bool>,
     /// The queue's version, straight from `playback:1`.
     queue_version: String,
     /// Whether the room is on its TV input right now.
@@ -147,6 +151,18 @@ pub(crate) const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
 /// [`MEMBER_VOLUMES`] gives.
 pub(crate) const MUTED: &str = "x2rock:muted";
 pub(crate) const MEMBER_MUTED: &str = "x2rock:memberMuted";
+/// Crossfade, the one play mode MPRIS has no property for. Repeat and shuffle
+/// go out as LoopStatus and Shuffle; this rides on Metadata like the hints.
+pub(crate) const CROSSFADE: &str = "x2rock:crossfade";
+/// Whether the group, and each member, has a fixed volume: line-level output
+/// with no volume control of its own, a Port feeding an amplifier. The CLI
+/// refuses a volume change on such a room and says to adjust the amplifier; a
+/// client that knows can withdraw the control instead of offering one that
+/// fails. Read from the same `fixed` field the CLI already reports. **Untested
+/// against a real Port** - this household has none - so what is verified is
+/// that the flag travels, not what a Port sends.
+pub(crate) const FIXED_VOLUME: &str = "x2rock:fixedVolume";
+pub(crate) const MEMBER_FIXED_VOLUME: &str = "x2rock:memberFixedVolume";
 /// What a soundbar is receiving, and whether it has a TV input to receive on.
 /// The format is the interesting one: a source that has quietly fallen back to
 /// stereo is invisible anywhere else, and this is what makes it a glance.
@@ -239,6 +255,10 @@ impl RoomState {
         if let Some(actions) = status.available_playback_actions {
             self.actions = actions;
         }
+        // Crossfade rides on Metadata too, having no MPRIS property of its own.
+        let crossfade_moved = status
+            .play_modes
+            .is_some_and(|modes| modes.crossfade != self.play_modes.crossfade);
         if let Some(modes) = status.play_modes {
             self.play_modes = modes;
         }
@@ -258,8 +278,8 @@ impl RoomState {
         if let Some(mpris_status) = mpris_status {
             properties.push(Property::PlaybackStatus(mpris_status));
         }
-        // Both ride on Metadata, so either moving means re-announcing it.
-        if hints_changed || queue_moved {
+        // All three ride on Metadata, so any of them moving means re-announcing it.
+        if hints_changed || queue_moved || crossfade_moved {
             properties.push(Property::Metadata(self.with_hints()));
         }
         properties
@@ -295,6 +315,17 @@ impl RoomState {
             MEMBER_MUTED,
             Some(
                 self.member_muted
+                    .iter()
+                    .map(bool::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        metadata.set(CROSSFADE, Some(self.play_modes.crossfade));
+        metadata.set(FIXED_VOLUME, Some(self.fixed));
+        metadata.set(
+            MEMBER_FIXED_VOLUME,
+            Some(
+                self.member_fixed
                     .iter()
                     .map(bool::to_string)
                     .collect::<Vec<_>>(),
@@ -340,6 +371,7 @@ impl RoomPlayer {
     ) -> Self {
         let member_volumes = vec![0; members.len()];
         let member_muted = vec![false; members.len()];
+        let member_fixed = vec![false; members.len()];
         Self {
             connection,
             group_id,
@@ -348,6 +380,7 @@ impl RoomPlayer {
                 members,
                 member_volumes,
                 member_muted,
+                member_fixed,
                 has_tv_input,
                 ..RoomState::default()
             }),
@@ -377,12 +410,16 @@ impl RoomPlayer {
         let level = if volume.muted { 0 } else { volume.volume };
         if state.member_volumes.get(at) == Some(&level)
             && state.member_muted.get(at) == Some(&volume.muted)
+            && state.member_fixed.get(at) == Some(&volume.fixed)
         {
             return Vec::new();
         }
         state.member_volumes[at] = level;
         if let Some(slot) = state.member_muted.get_mut(at) {
             *slot = volume.muted;
+        }
+        if let Some(slot) = state.member_fixed.get_mut(at) {
+            *slot = volume.fixed;
         }
         vec![Property::Metadata(state.with_hints())]
     }
@@ -478,10 +515,12 @@ impl RoomPlayer {
         let mut state = self.state.lock().unwrap();
         state.volume = level;
         let mut properties = vec![Property::Volume(level)];
-        // Mute is a metadata fact and the level is not: a metadata announcement
-        // on every volume tick would be noise, one on the flag turning is news.
-        if state.muted != volume.muted {
+        // Mute and fixed are metadata facts and the level is not: a metadata
+        // announcement on every volume tick would be noise, one on a flag
+        // turning is news.
+        if state.muted != volume.muted || state.fixed != volume.fixed {
             state.muted = volume.muted;
+            state.fixed = volume.fixed;
             properties.push(Property::Metadata(state.with_hints()));
         }
         properties

@@ -94,7 +94,7 @@ fn footer(app: &App, width: usize) -> Paragraph<'static> {
     // 80 or 100 - falling straight from everything to "q quit" would leave the
     // common width with the least help.
     let keys = [
-        "space play/pause · n/p skip · ←→ volume · m mute · r repeat · s shuffle · g group · t tv · P party · ? keys · q quit",
+        "space play/pause · n/p skip · ←→ volume · m mute · r repeat · s shuffle · x crossfade · g group · t tv · P party · ? keys · q quit",
         "space play/pause · n/p skip · ←→ volume · g group · ? keys · q quit",
         "? keys · q quit",
     ];
@@ -137,7 +137,7 @@ fn item(room: &RoomSnapshot, width: usize) -> ListItem<'static> {
     let name = format!("{} {}", glyph(room.state), label(room));
     lines.push(shoulders(
         vec![Span::raw(name)],
-        volume(room.volume, room.muted),
+        volume(room.volume, room.muted, room.fixed_volume),
         width,
     ));
 
@@ -229,6 +229,9 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
     if room.shuffle {
         badge("shuffle", Style::new().dim());
     }
+    if room.crossfade {
+        badge("crossfade", Style::new().dim());
+    }
     spans
 }
 
@@ -236,7 +239,12 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
 /// volume as zero, since that is what is heard; the word is what tells that
 /// zero from a room that is simply turned down, and it takes the number's
 /// place because the number would be a zero that means nothing.
-fn volume(volume: f64, muted: bool) -> Vec<Span<'static>> {
+fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
+    // No bar at all: the level is set on an amplifier this cannot see, and a
+    // bar would be a control drawn where there is nothing to control.
+    if fixed {
+        return vec![Span::styled("fixed volume", Style::new().dim())];
+    }
     if muted {
         return vec![
             Span::styled("░".repeat(BAR), Style::new().dim()),
@@ -271,6 +279,7 @@ fn grouping(frame: &mut Frame, app: &App, area: Rect) {
                 room,
                 volume: level,
                 muted,
+                fixed,
                 coordinator,
             } => {
                 let name = if *coordinator {
@@ -280,7 +289,7 @@ fn grouping(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 ListItem::new(shoulders(
                     vec![Span::raw(name)],
-                    volume(f64::from(*level) / 100.0, *muted),
+                    volume(f64::from(*level) / 100.0, *muted, *fixed),
                     width,
                 ))
             }
@@ -327,6 +336,7 @@ fn help(frame: &mut Frame, area: Rect) {
         ("m", "mute, or unmute"),
         ("r", "repeat: off, all, one"),
         ("s", "shuffle"),
+        ("x", "crossfade"),
         ("g", "grouping, and each speaker's own volume"),
         ("t", "switch a soundbar to its TV input"),
         ("P", "party: the whole house, or end it"),
@@ -446,7 +456,7 @@ mod tests {
     fn a_long_name_gives_way_to_the_volume_rather_than_pushing_it_off() {
         let line = shoulders(
             vec![Span::raw("A Room With A Really Very Long Name Indeed")],
-            volume(0.62, false),
+            volume(0.62, false, false),
             30,
         );
         assert_eq!(line.width(), 30);
@@ -553,17 +563,28 @@ mod tests {
     /// from turned down, which is the whole problem.
     #[test]
     fn a_muted_room_says_so_where_its_percentage_would_be() {
-        let text: String = volume(0.0, true)
+        let text: String = volume(0.0, true, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.ends_with(" muted"), "{text:?}");
         assert!(!text.contains('%'), "{text:?}");
-        let unmuted: String = volume(0.0, false)
+        let unmuted: String = volume(0.0, false, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
         assert!(unmuted.ends_with("  0%"), "{unmuted:?}");
+    }
+
+    /// A fixed volume has no bar, whatever else is true of the room: there is
+    /// nothing for a bar to show and nothing for its keys to do.
+    #[test]
+    fn a_fixed_volume_draws_no_bar() {
+        let text: String = volume(0.4, true, true)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "fixed volume");
     }
 
     /// Coarse on purpose: the question is hiccup or outage.
@@ -580,7 +601,7 @@ mod tests {
     #[test]
     fn the_volume_bar_rounds_to_its_own_number() {
         let filled = |level| {
-            volume(level, false)
+            volume(level, false, false)
                 .first()
                 .map(|span| span.content.chars().count())
                 .unwrap_or_default()

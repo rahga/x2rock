@@ -336,6 +336,9 @@ pub enum Intent {
     Nudge(Nudge),
     /// Mute a group (true) or unmute it, by its coordinator's room name.
     Mute(String, bool),
+    /// Crossfade on or off, by its coordinator's room name. The one play mode
+    /// that goes through the CLI, MPRIS having no property for it.
+    Crossfade(String, bool),
     Group {
         coordinator: String,
         others: Vec<String>,
@@ -371,6 +374,7 @@ async fn execute(source: &Source, cli: &action::Cli, intent: Intent) -> Result<(
         // Folded by `drive` first: this is a run of keys, not one of them.
         Intent::Nudge(nudge) => cli.nudge_volume(&nudge.room, nudge.by, nudge.player).await,
         Intent::Mute(room, on) => cli.mute(&room, on).await,
+        Intent::Crossfade(room, on) => cli.crossfade(&room, on).await,
         Intent::PlayPause(bus) => source
             .player(&bus)
             .await?
@@ -479,6 +483,7 @@ pub enum GroupRow {
         room: String,
         volume: u8,
         muted: bool,
+        fixed: bool,
         coordinator: bool,
     },
     /// A room somewhere else in the household, one keypress from joining.
@@ -617,6 +622,10 @@ impl App {
                     .and_then(|at| selected.member_muted.get(at))
                     .copied()
                     .unwrap_or(false),
+                fixed: at
+                    .and_then(|at| selected.member_fixed.get(at))
+                    .copied()
+                    .unwrap_or(false),
                 coordinator: selected.is_coordinator(room),
             }
         };
@@ -703,6 +712,7 @@ impl App {
             KeyCode::Char('m') => self.mute(),
             KeyCode::Char('r') => self.cycle_repeat(),
             KeyCode::Char('s') => self.toggle_shuffle(),
+            KeyCode::Char('x') => self.toggle_crossfade(),
             KeyCode::Char('g') => {
                 if !self.rooms.is_empty() {
                     self.overlay = Overlay::Group { cursor: 0 };
@@ -747,6 +757,11 @@ impl App {
         let Some(room) = self.rooms.get_mut(self.cursor) else {
             return Intent::Nothing;
         };
+        // Silent, as transport is on TV input: the row has already said "fixed
+        // volume" where the bar would be.
+        if !room.volume_available() {
+            return Intent::Nothing;
+        }
         room.volume = stepped(room.volume, by);
         Intent::Nudge(Nudge {
             room: room.room.clone(),
@@ -762,6 +777,10 @@ impl App {
         let Some(room) = self.rooms.get_mut(self.cursor) else {
             return Intent::Nothing;
         };
+        // The CLI refuses mute on a fixed volume in the same breath as a step.
+        if !room.volume_available() {
+            return Intent::Nothing;
+        }
         room.muted = !room.muted;
         Intent::Mute(room.room.clone(), room.muted)
     }
@@ -790,6 +809,22 @@ impl App {
         };
         room.loop_status = next.to_owned();
         Intent::SetLoop(room.bus_name.clone(), next)
+    }
+
+    /// Crossfade, flipped on screen as it is sent like the other two modes.
+    /// No capability hint guards it: the API's `canCrossfade` is not read
+    /// here, and a guard on a field that might not be sent would withdraw the
+    /// key everywhere. A source that cannot crossfade answers through the CLI's
+    /// own sentence instead.
+    fn toggle_crossfade(&mut self) -> Intent {
+        let Some(room) = self.rooms.get_mut(self.cursor) else {
+            return Intent::Nothing;
+        };
+        if !room.transport_available() {
+            return Intent::Nothing;
+        }
+        room.crossfade = !room.crossfade;
+        Intent::Crossfade(room.room.clone(), room.crossfade)
     }
 
     fn toggle_shuffle(&mut self) -> Intent {
@@ -882,7 +917,10 @@ impl App {
     /// for the reason it gives too: a muted member reads as zero.
     fn nudge_member(&mut self, cursor: usize, by: i16) -> Intent {
         let rows = self.group_rows();
-        let Some(GroupRow::Member { room, .. }) = rows.get(cursor) else {
+        let Some(GroupRow::Member {
+            room, fixed: false, ..
+        }) = rows.get(cursor)
+        else {
             return Intent::Nothing;
         };
         let room = room.clone();
@@ -1047,6 +1085,62 @@ mod tests {
         assert!(app.selected().is_some_and(|room| room.muted));
         assert_eq!(press(&mut app, 'm'), Intent::Mute("Kitchen".into(), false));
         assert!(app.selected().is_some_and(|room| !room.muted));
+    }
+
+    /// Crossfade flips like shuffle, and is withdrawn with the rest of the
+    /// modes on TV input.
+    #[test]
+    fn crossfade_toggles_and_is_withdrawn_on_tv_input() {
+        let mut app = App::new(vec![room("Kitchen")]);
+        assert_eq!(
+            press(&mut app, 'x'),
+            Intent::Crossfade("Kitchen".into(), true)
+        );
+        assert_eq!(
+            press(&mut app, 'x'),
+            Intent::Crossfade("Kitchen".into(), false)
+        );
+        let mut tv = App::new(vec![RoomSnapshot {
+            on_tv: true,
+            has_tv: true,
+            ..room("Living Room")
+        }]);
+        assert_eq!(press(&mut tv, 'x'), Intent::Nothing);
+    }
+
+    /// A fixed volume has nothing for the volume keys to do - a Port's level is
+    /// set on the amplifier - so they do nothing, as the row already says.
+    #[test]
+    fn the_volume_keys_do_nothing_on_a_fixed_volume() {
+        let mut app = App::new(vec![RoomSnapshot {
+            fixed_volume: true,
+            ..room("Study")
+        }]);
+        assert_eq!(press(&mut app, '+'), Intent::Nothing);
+        assert_eq!(press(&mut app, '-'), Intent::Nothing);
+        assert_eq!(press(&mut app, 'm'), Intent::Nothing);
+        // Everything else is still there.
+        assert_eq!(
+            press(&mut app, ' '),
+            Intent::PlayPause("org.mpris.MediaPlayer2.x2rock-study".into())
+        );
+    }
+
+    /// The same for one fixed-volume speaker inside a group: its row in the
+    /// overlay takes no step, and its neighbours still do.
+    #[test]
+    fn a_fixed_volume_member_takes_no_step_in_the_overlay() {
+        let mut app = App::new(vec![RoomSnapshot {
+            members: vec!["Kitchen".into(), "Study".into()],
+            member_volumes: vec![40, 0],
+            member_fixed: vec![false, true],
+            ..room("Kitchen")
+        }]);
+        press(&mut app, 'g');
+        key(&mut app, KeyCode::Down);
+        assert_eq!(key(&mut app, KeyCode::Right), Intent::Nothing);
+        key(&mut app, KeyCode::Up);
+        assert_eq!(key(&mut app, KeyCode::Right), nudge("Kitchen", 5, true));
     }
 
     /// A room on its TV input has no transport to drive, and the keys say so by
