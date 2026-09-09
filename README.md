@@ -357,9 +357,10 @@ It is the front end for an ssh session, a bare console, or a terminal that is al
 
 - **Each room is up to three lines**: its name and the group volume, what is playing, and a
   context line beneath — station, the format a TV is sending, who else is in the group, and
-  whether repeat, shuffle or crossfade is on. A muted room says `muted` where its percentage would
-  be: the daemon reports what is heard, which is zero, and zero alone cannot be told from turned
-  down. A room with a fixed volume — a Port feeding an amplifier — says `fixed volume` there
+  whether repeat, shuffle or crossfade is on. A muted room keeps its bar at the level it will come
+  back at, dimmed, with `muted` beside it, and a volume key unmutes it — the Sonos app's own
+  behaviour. The daemon publishes that level separately, since MPRIS volume reads zero while muted,
+  which is what is heard. A room with a fixed volume — a Port feeding an amplifier — says `fixed volume` there
   instead of a bar, and its volume keys do nothing, since the level is set on the amplifier. A
   room a control does not apply to is silent rather than wrong: a room on its TV input has no
   transport to drive, and a radio stream has no shuffle to be off.

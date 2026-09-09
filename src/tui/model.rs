@@ -15,8 +15,8 @@ use zbus::zvariant::OwnedValue;
 // drift apart by a typo in one of them.
 use crate::mpris::{
     CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT,
-    INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUMES, MEMBERS, MUTED,
-    ON_TV_INPUT, STATION_NAME, STREAM_INFO,
+    INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUME_LEVELS,
+    MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT, STATION_NAME, STREAM_INFO, VOLUME_LEVEL,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -59,7 +59,16 @@ pub struct RoomSnapshot {
     pub state: State,
     pub title: String,
     pub artist: String,
+    /// The slider position, 0.0-1.0: where the bar is drawn and what a step
+    /// starts from. Not the heard volume - a muted room keeps its level here
+    /// and says so through [`RoomSnapshot::muted`], the way the Sonos app keeps
+    /// the slider where it was and dims it. Settled by
+    /// [`RoomSnapshot::settle_volume`] once both sources have been read.
     pub volume: f64,
+    /// The level the daemon publishes regardless of mute, where it publishes
+    /// one. An older daemon does not, and then the heard volume is all there
+    /// is - which reads as zero while muted, the best that can be done.
+    pub level: Option<f64>,
     pub can_go_next: bool,
     pub can_go_previous: bool,
     pub can_pause: bool,
@@ -141,6 +150,21 @@ impl RoomSnapshot {
             .iter()
             .map(|v| v.parse().unwrap_or(0))
             .collect();
+        // The slider positions, where the daemon sends them: the same list with
+        // mute not zeroing anything. Trusted only when it lines up with the
+        // members, since a half-published list would pair levels with the
+        // wrong rooms.
+        let levels: Vec<u8> = strings(get(MEMBER_VOLUME_LEVELS))
+            .iter()
+            .map(|v| v.parse().unwrap_or(0))
+            .collect();
+        if !levels.is_empty() && levels.len() == self.member_volumes.len() {
+            self.member_volumes = levels;
+        }
+        self.level = first_string(get(VOLUME_LEVEL))
+            .parse::<u8>()
+            .ok()
+            .map(|level| f64::from(level) / 100.0);
         self.muted = flag(get(MUTED));
         self.member_muted = strings(get(MEMBER_MUTED))
             .iter()
@@ -162,6 +186,13 @@ impl RoomSnapshot {
         self.can_repeat_one = flag(get(CAN_REPEAT_ONE));
         self.can_shuffle = flag(get(CAN_SHUFFLE));
         self.can_crossfade = flag(get(CAN_CROSSFADE));
+    }
+
+    /// Decide where the bar sits, given what MPRIS Volume said. The published
+    /// level wins where there is one; the heard volume is the fallback for a
+    /// daemon that predates it.
+    pub fn settle_volume(&mut self, heard: f64) {
+        self.volume = self.level.unwrap_or(heard);
     }
 
     pub fn set_playback_state(&mut self, status: &str) {
@@ -394,6 +425,42 @@ mod tests {
         assert!(room.volume_available());
         room.fixed_volume = true;
         assert!(!room.volume_available());
+    }
+
+    /// The bar shows the level, not what is heard: a muted room at 40 is drawn
+    /// at 40 with the word beside it. Without a published level - an older
+    /// daemon - the heard volume is all there is.
+    #[test]
+    fn the_bar_sits_at_the_published_level_and_falls_back_to_what_is_heard() {
+        let mut room = RoomSnapshot {
+            level: Some(0.4),
+            ..RoomSnapshot::default()
+        };
+        room.settle_volume(0.0);
+        assert_eq!(room.volume, 0.4);
+
+        let mut older = RoomSnapshot::default();
+        older.settle_volume(0.25);
+        assert_eq!(older.volume, 0.25);
+    }
+
+    /// Member levels replace the heard member volumes only when the two lists
+    /// line up; a list of the wrong length would pair levels with the wrong
+    /// rooms and is left alone.
+    #[test]
+    fn member_levels_replace_heard_volumes_only_when_they_line_up() {
+        let value = |v: Vec<&str>| OwnedValue::try_from(zbus::zvariant::Value::from(v)).unwrap();
+        let mut room = RoomSnapshot::default();
+        let mut metadata = HashMap::new();
+        metadata.insert(MEMBERS.to_owned(), value(vec!["Kitchen", "Office"]));
+        metadata.insert(MEMBER_VOLUMES.to_owned(), value(vec!["0", "30"]));
+        metadata.insert(MEMBER_VOLUME_LEVELS.to_owned(), value(vec!["40", "30"]));
+        room.apply_metadata(&metadata);
+        assert_eq!(room.member_volumes, vec![40, 30]);
+
+        metadata.insert(MEMBER_VOLUME_LEVELS.to_owned(), value(vec!["40"]));
+        room.apply_metadata(&metadata);
+        assert_eq!(room.member_volumes, vec![0, 30]);
     }
 
     /// Absent keys mean "nothing to say", not "false" - the daemon omits what

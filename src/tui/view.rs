@@ -235,29 +235,33 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
     spans
 }
 
-/// `██████░░░░  62%`, or `░░░░░░░░░░ muted`. The daemon reports a muted room's
-/// volume as zero, since that is what is heard; the word is what tells that
-/// zero from a room that is simply turned down, and it takes the number's
-/// place because the number would be a zero that means nothing.
+/// `██████░░░░  62%`, or dimmed `████░░░░░░  40% muted`. The Sonos app's own
+/// picture of mute: the slider stays where it was and dims, so the level the
+/// room will come back at is still readable, and the word says why nothing is
+/// heard. The level is the one the daemon publishes regardless of mute; the
+/// MPRIS volume alone would put the bar at zero.
 fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     // No bar at all: the level is set on an amplifier this cannot see, and a
     // bar would be a control drawn where there is nothing to control.
     if fixed {
         return vec![Span::styled("fixed volume", Style::new().dim())];
     }
-    if muted {
-        return vec![
-            Span::styled("░".repeat(BAR), Style::new().dim()),
-            Span::styled(" muted", Style::new().fg(Color::Yellow)),
-        ];
-    }
     let percent = (volume.clamp(0.0, 1.0) * 100.0).round() as usize;
     let filled = (percent * BAR + 50) / 100;
-    vec![
-        Span::raw("█".repeat(filled)),
+    let lit = if muted {
+        Style::new().dim()
+    } else {
+        Style::new()
+    };
+    let mut spans = vec![
+        Span::styled("█".repeat(filled), lit),
         Span::styled("░".repeat(BAR - filled), Style::new().dim()),
-        Span::raw(format!(" {percent:>3}%")),
-    ]
+        Span::styled(format!(" {percent:>3}%"), lit),
+    ];
+    if muted {
+        spans.push(Span::styled(" muted", Style::new().fg(Color::Yellow)));
+    }
+    spans
 }
 
 /// The grouping and balance overlay: who is playing together, each with the
@@ -559,21 +563,23 @@ mod tests {
         assert!(stale.contains("no answer for 10m"), "{stale}");
     }
 
-    /// Muted takes the number's place: a zero there would be indistinguishable
-    /// from turned down, which is the whole problem.
+    /// Muted keeps the level in view and adds the word: a bar at zero would be
+    /// indistinguishable from turned down, and a bar with no number would hide
+    /// where the room comes back to.
     #[test]
-    fn a_muted_room_says_so_where_its_percentage_would_be() {
-        let text: String = volume(0.0, true, false)
+    fn a_muted_room_keeps_its_level_and_says_muted_beside_it() {
+        let text: String = volume(0.4, true, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert!(text.ends_with(" muted"), "{text:?}");
-        assert!(!text.contains('%'), "{text:?}");
-        let unmuted: String = volume(0.0, false, false)
+        assert!(text.ends_with("  40% muted"), "{text:?}");
+        assert!(text.starts_with("████░░░░░░"), "{text:?}");
+        let unmuted: String = volume(0.4, false, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert!(unmuted.ends_with("  0%"), "{unmuted:?}");
+        assert!(unmuted.ends_with("  40%"), "{unmuted:?}");
+        assert!(!unmuted.contains("muted"), "{unmuted:?}");
     }
 
     /// A fixed volume has no bar, whatever else is true of the room: there is

@@ -762,6 +762,11 @@ impl App {
         if !room.volume_available() {
             return Intent::Nothing;
         }
+        // A step on a muted room unmutes it - the Sonos app's slider does, and
+        // so does the player itself on a relative set (checked: `vol +1` on a
+        // muted room came back unmuted). Shown at once, like the step, so the
+        // bar lights up under the key.
+        room.muted = false;
         room.volume = stepped(room.volume, by);
         Intent::Nudge(Nudge {
             room: room.room.clone(),
@@ -929,6 +934,10 @@ impl App {
             && let Some(slot) = selected.member_volumes.get_mut(at)
         {
             *slot = (i16::from(*slot) + by).clamp(0, 100) as u8;
+            // As for the group: a step unmutes the speaker it steps.
+            if let Some(flag) = selected.member_muted.get_mut(at) {
+                *flag = false;
+            }
         }
         Intent::Nudge(Nudge {
             room,
@@ -1075,6 +1084,34 @@ mod tests {
         };
         assert_eq!(held.absorb(other.clone()), Some(other));
         assert_eq!(held.by, 10);
+    }
+
+    /// A volume key on a muted room unmutes it, on screen as at the speaker,
+    /// and the step still goes out - the player's relative set is what does
+    /// the unmuting.
+    #[test]
+    fn a_volume_step_unmutes_the_room_it_steps() {
+        let mut app = App::new(vec![RoomSnapshot {
+            muted: true,
+            ..room("Kitchen")
+        }]);
+        assert_eq!(press(&mut app, '+'), nudge("Kitchen", 5, false));
+        assert!(app.selected().is_some_and(|room| !room.muted));
+        assert_eq!(app.selected().map(|room| room.volume), Some(0.55));
+
+        let mut grouped = App::new(vec![RoomSnapshot {
+            members: vec!["Kitchen".into(), "Office".into()],
+            member_volumes: vec![40, 60],
+            member_muted: vec![false, true],
+            ..room("Kitchen")
+        }]);
+        press(&mut grouped, 'g');
+        key(&mut grouped, KeyCode::Down);
+        assert_eq!(key(&mut grouped, KeyCode::Right), nudge("Office", 5, true));
+        assert_eq!(
+            grouped.selected().map(|room| room.member_muted.clone()),
+            Some(vec![false, false])
+        );
     }
 
     /// `m` flips mute and shows the flip at once, so a second press unmutes

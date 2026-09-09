@@ -85,6 +85,10 @@ struct RoomState {
     /// [`FIXED_VOLUME`].
     fixed: bool,
     member_fixed: Vec<bool>,
+    /// The group's and each member's volume regardless of mute - see
+    /// [`VOLUME_LEVEL`].
+    level: u8,
+    member_levels: Vec<u8>,
     /// The queue's version, straight from `playback:1`.
     queue_version: String,
     /// Whether the room is on its TV input right now.
@@ -165,6 +169,15 @@ pub(crate) const CAN_CROSSFADE: &str = "x2rock:canCrossfade";
 /// that the flag travels, not what a Port sends.
 pub(crate) const FIXED_VOLUME: &str = "x2rock:fixedVolume";
 pub(crate) const MEMBER_FIXED_VOLUME: &str = "x2rock:memberFixedVolume";
+/// The slider position: the group's volume regardless of mute, and each
+/// member's in [`MEMBERS`] order. MPRIS Volume and [`MEMBER_VOLUMES`] read zero
+/// while muted, which is right for what is heard and wrong for a slider - the
+/// Sonos app keeps the slider where it was and dims it, and moving it unmutes.
+/// The player keeps the level under mute and reports it (checked: a muted room
+/// at 27 answers `getVolume` with 27); this passes it on. Strings, for the
+/// reason [`MEMBER_VOLUMES`] gives.
+pub(crate) const VOLUME_LEVEL: &str = "x2rock:volumeLevel";
+pub(crate) const MEMBER_VOLUME_LEVELS: &str = "x2rock:memberVolumeLevels";
 /// What a soundbar is receiving, and whether it has a TV input to receive on.
 /// The format is the interesting one: a source that has quietly fallen back to
 /// stereo is invisible anywhere else, and this is what makes it a glance.
@@ -336,6 +349,16 @@ impl RoomState {
                     .collect::<Vec<_>>(),
             ),
         );
+        metadata.set(VOLUME_LEVEL, Some(self.level.to_string()));
+        metadata.set(
+            MEMBER_VOLUME_LEVELS,
+            Some(
+                self.member_levels
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+        );
         metadata.set(QUEUE_VERSION, Some(self.queue_version.clone()));
         metadata.set(INPUT_FORMAT, Some(self.input_format.clone()));
         metadata.set(ON_TV_INPUT, Some(self.on_tv_input));
@@ -377,6 +400,7 @@ impl RoomPlayer {
         let member_volumes = vec![0; members.len()];
         let member_muted = vec![false; members.len()];
         let member_fixed = vec![false; members.len()];
+        let member_levels = vec![0; members.len()];
         Self {
             connection,
             group_id,
@@ -386,6 +410,7 @@ impl RoomPlayer {
                 member_volumes,
                 member_muted,
                 member_fixed,
+                member_levels,
                 has_tv_input,
                 ..RoomState::default()
             }),
@@ -416,6 +441,7 @@ impl RoomPlayer {
         if state.member_volumes.get(at) == Some(&level)
             && state.member_muted.get(at) == Some(&volume.muted)
             && state.member_fixed.get(at) == Some(&volume.fixed)
+            && state.member_levels.get(at) == Some(&volume.volume)
         {
             return Vec::new();
         }
@@ -425,6 +451,9 @@ impl RoomPlayer {
         }
         if let Some(slot) = state.member_fixed.get_mut(at) {
             *slot = volume.fixed;
+        }
+        if let Some(slot) = state.member_levels.get_mut(at) {
+            *slot = volume.volume;
         }
         vec![Property::Metadata(state.with_hints())]
     }
@@ -518,12 +547,16 @@ impl RoomPlayer {
             f64::from(volume.volume) / 100.0
         };
         let mut state = self.state.lock().unwrap();
+        // A level moving under mute moves no heard volume and so no Volume
+        // property, and a client that only re-reads on Volume would miss it.
+        // That case goes out as metadata; the ordinary tick does not, since a
+        // metadata announcement on every volume change would be noise and the
+        // Volume change already prompts the re-read that picks the level up.
+        let level_moved_silently = state.level != volume.volume && state.volume == level;
         state.volume = level;
+        state.level = volume.volume;
         let mut properties = vec![Property::Volume(level)];
-        // Mute and fixed are metadata facts and the level is not: a metadata
-        // announcement on every volume tick would be noise, one on a flag
-        // turning is news.
-        if state.muted != volume.muted || state.fixed != volume.fixed {
+        if state.muted != volume.muted || state.fixed != volume.fixed || level_moved_silently {
             state.muted = volume.muted;
             state.fixed = volume.fixed;
             properties.push(Property::Metadata(state.with_hints()));
