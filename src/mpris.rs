@@ -89,6 +89,8 @@ struct RoomState {
     /// [`VOLUME_LEVEL`].
     level: u8,
     member_levels: Vec<u8>,
+    /// Nothing loaded - see [`NO_SOURCE`].
+    no_source: bool,
     /// The queue's version, straight from `playback:1`.
     queue_version: String,
     /// Whether the room is on its TV input right now.
@@ -178,6 +180,14 @@ pub(crate) const MEMBER_FIXED_VOLUME: &str = "x2rock:memberFixedVolume";
 /// reason [`MEMBER_VOLUMES`] gives.
 pub(crate) const VOLUME_LEVEL: &str = "x2rock:volumeLevel";
 pub(crate) const MEMBER_VOLUME_LEVELS: &str = "x2rock:memberVolumeLevels";
+/// Whether the room has nothing loaded at all: no current item and no
+/// container - a queue that was cleared, a room that has never played. The
+/// Sonos app calls this "No Content" and withdraws transport, the position
+/// bar, repeat and shuffle, leaving volume and mute. The player withdraws play,
+/// pause and skip itself (all false) but keeps canRepeat and canShuffle true,
+/// so under this flag the mode hints above go out false as well: what the
+/// current source allows is nothing, there being no source.
+pub(crate) const NO_SOURCE: &str = "x2rock:noSource";
 /// What a soundbar is receiving, and whether it has a TV input to receive on.
 /// The format is the interesting one: a source that has quietly fallen back to
 /// stereo is invisible anywhere else, and this is what makes it a glance.
@@ -313,10 +323,20 @@ impl RoomState {
     /// The track metadata plus the availability hints.
     fn with_hints(&self) -> Metadata {
         let mut metadata = self.metadata.clone();
-        metadata.set(CAN_REPEAT, Some(self.actions.can_repeat));
-        metadata.set(CAN_REPEAT_ONE, Some(self.actions.can_repeat_one));
-        metadata.set(CAN_SHUFFLE, Some(self.actions.can_shuffle));
-        metadata.set(CAN_CROSSFADE, Some(self.actions.can_crossfade));
+        // With no source there is nothing for a mode to apply to, whatever the
+        // player says about the modes - see NO_SOURCE.
+        let has_source = !self.no_source;
+        metadata.set(CAN_REPEAT, Some(self.actions.can_repeat && has_source));
+        metadata.set(
+            CAN_REPEAT_ONE,
+            Some(self.actions.can_repeat_one && has_source),
+        );
+        metadata.set(CAN_SHUFFLE, Some(self.actions.can_shuffle && has_source));
+        metadata.set(
+            CAN_CROSSFADE,
+            Some(self.actions.can_crossfade && has_source),
+        );
+        metadata.set(NO_SOURCE, Some(self.no_source));
         let names: Vec<_> = self.members.iter().map(|(_, name)| name.clone()).collect();
         metadata.set(MEMBERS, Some(names));
         metadata.set(
@@ -536,6 +556,15 @@ impl RoomPlayer {
             .and_then(|c| c.ht_input_format.as_ref());
         state.on_tv_input = format.is_some();
         state.input_format = format.map(|f| f.summary()).unwrap_or_default();
+        // No item and no container is nothing loaded. A URL stream has no item
+        // but names its host in the container; the TV input has no item but its
+        // format in the container; only an emptied room has neither.
+        let container_names_something = meta
+            .container
+            .as_ref()
+            .is_some_and(|c| c.id.is_some() || c.name.is_some());
+        state.no_source =
+            meta.current_item.is_none() && !container_names_something && format.is_none();
         vec![Property::Metadata(state.with_hints())]
     }
 

@@ -314,7 +314,9 @@ own output.)
 - The popup lists every room: now-playing, previous/play/pause/next, repeat (one button cycling
   off → all → one) and shuffle, and a volume slider. Repeat and shuffle are dimmed when the
   source cannot do them — a radio stream, say — the way previous and next are dimmed when the
-  source cannot skip.
+  source cannot skip. A room with nothing loaded at all says `No content`, as the Sonos app does,
+  and dims transport and the modes together, leaving volume and mute — the daemon publishes that
+  state as `x2rock:noSource`, since only it can see that there is no item.
 - A `󰌷` on each room row opens grouping: the rooms playing together, each with its **own volume
   slider**, and every other room a click away from joining. The popup's own slider stays the
   group's, so the two are not the same control wearing different hats.
@@ -363,7 +365,8 @@ It is the front end for an ssh session, a bare console, or a terminal that is al
   which is what is heard. A room with a fixed volume — a Port feeding an amplifier — says `fixed volume` there
   instead of a bar, and its volume keys do nothing, since the level is set on the amplifier. A
   room a control does not apply to is silent rather than wrong: a room on its TV input has no
-  transport to drive, and a radio stream has no shuffle to be off.
+  transport to drive, a radio stream has no shuffle to be off, and a room with nothing loaded says
+  `No content` and answers only its volume keys, as the Sonos app does.
 - `space` play/pause, `n`/`p` skip, `←`/`→` the group's volume, `m` mute, `r` repeat (off → all →
   one), `s` shuffle, `x` crossfade, `j`/`k` or the arrows to move between rooms, `?` for the full
   list, `q` to quit.

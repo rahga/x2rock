@@ -16,7 +16,8 @@ use zbus::zvariant::OwnedValue;
 use crate::mpris::{
     CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT,
     INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUME_LEVELS,
-    MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT, STATION_NAME, STREAM_INFO, VOLUME_LEVEL,
+    MEMBER_VOLUMES, MEMBERS, MUTED, NO_SOURCE, ON_TV_INPUT, STATION_NAME, STREAM_INFO,
+    VOLUME_LEVEL,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -99,6 +100,9 @@ pub struct RoomSnapshot {
     pub crossfade: bool,
     pub on_tv: bool,
     pub has_tv: bool,
+    /// Nothing loaded at all - the Sonos app's "No Content". Transport and the
+    /// modes are withdrawn; volume and mute stay.
+    pub no_source: bool,
     pub input_format: String,
     pub is_live_stream: bool,
     pub station_name: String,
@@ -176,6 +180,7 @@ impl RoomSnapshot {
             .map(|v| v == "true")
             .collect();
         self.crossfade = flag(get(CROSSFADE));
+        self.no_source = flag(get(NO_SOURCE));
         self.on_tv = flag(get(ON_TV_INPUT));
         self.has_tv = flag(get(HAS_TV_INPUT));
         self.input_format = first_string(get(INPUT_FORMAT));
@@ -208,8 +213,11 @@ impl RoomSnapshot {
     /// alone is not the test: a live stream reports that too and *can* be
     /// stopped, which is the conflation that once put an inert stop button on
     /// the bar widget.
+    ///
+    /// False too with nothing loaded, where there is nothing for transport to
+    /// act on - the Sonos app withdraws it there as well.
     pub fn transport_available(&self) -> bool {
-        !self.on_tv
+        !self.on_tv && !self.no_source
     }
 
     /// The station's name, wherever the daemon put it.
@@ -273,6 +281,11 @@ impl RoomSnapshot {
     /// ordinary shape - its title stays on top and its station is a field of its
     /// own.
     pub fn now_line(&self) -> String {
+        // Said rather than left blank: an empty line reads as a room that has
+        // not answered, and this one has.
+        if self.no_source {
+            return "No content".to_owned();
+        }
         if self.station_name.is_empty() && self.is_live_stream && !self.stream_info.is_empty() {
             return self.stream_info.clone();
         }
@@ -479,6 +492,26 @@ mod tests {
         metadata.insert(MEMBER_VOLUME_LEVELS.to_owned(), value(vec!["40"]));
         room.apply_metadata(&metadata);
         assert_eq!(room.member_volumes, vec![0, 30]);
+    }
+
+    /// Nothing loaded: the room says so where its track would be, and has no
+    /// transport to offer - but a room on its TV input, which also reports no
+    /// transport, is not the same state and keeps its own line.
+    #[test]
+    fn a_room_with_no_source_says_so_and_offers_no_transport() {
+        let empty = RoomSnapshot {
+            no_source: true,
+            ..RoomSnapshot::default()
+        };
+        assert_eq!(empty.now_line(), "No content");
+        assert!(!empty.transport_available());
+        let tv = RoomSnapshot {
+            on_tv: true,
+            has_tv: true,
+            title: "TV Audio".into(),
+            ..RoomSnapshot::default()
+        };
+        assert_eq!(tv.now_line(), "TV Audio");
     }
 
     /// Absent keys mean "nothing to say", not "false" - the daemon omits what

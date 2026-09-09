@@ -1218,6 +1218,33 @@ mod tests {
         assert_eq!(key(&mut app, KeyCode::Right), nudge("Kitchen", 5, true));
     }
 
+    /// Nothing loaded: the Sonos app withdraws transport and the modes and keeps
+    /// volume and mute, and so does this - the daemon publishes the mode hints
+    /// false under no source, and the flag itself withdraws transport.
+    #[test]
+    fn with_no_source_only_volume_and_mute_answer() {
+        let mut app = App::new(vec![RoomSnapshot {
+            no_source: true,
+            can_repeat: false,
+            can_repeat_one: false,
+            can_shuffle: false,
+            can_crossfade: false,
+            can_play: false,
+            can_pause: false,
+            can_go_next: false,
+            can_go_previous: false,
+            ..room("Dining Room")
+        }]);
+        for c in [' ', 'n', 'p', 'r', 's', 'x'] {
+            assert_eq!(press(&mut app, c), Intent::Nothing, "key {c:?}");
+        }
+        assert_eq!(press(&mut app, '+'), nudge("Dining Room", 5, false));
+        assert_eq!(
+            press(&mut app, 'm'),
+            Intent::Mute("Dining Room".into(), true)
+        );
+    }
+
     /// A room on its TV input has no transport to drive, and the keys say so by
     /// doing nothing - the row has already drawn them as unavailable.
     #[test]
