@@ -607,9 +607,8 @@ async fn publish_group(
                     match member.player_settings(id).await {
                         Ok(settings) => {
                             if let Some(options) = settings.home_theater {
-                                let properties = server
-                                    .imp()
-                                    .apply_home_theater(id, &(&options).into());
+                                let properties =
+                                    server.imp().apply_home_theater(id, &(&options).into());
                                 if let Err(e) = server.properties_changed(properties).await {
                                     log(&format!("{name}: {e:#}"));
                                 }
@@ -618,7 +617,9 @@ async fn publish_group(
                         Err(e) => log(&format!("{name}: no night/dialog state ({e:#})")),
                     }
                     if let Err(e) = member.subscribe_player("homeTheater:1", id).await {
-                        log(&format!("{name}: night/dialog will not follow changes ({e:#})"));
+                        log(&format!(
+                            "{name}: night/dialog will not follow changes ({e:#})"
+                        ));
                     }
                 }
             }
