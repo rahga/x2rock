@@ -48,6 +48,12 @@ const COALESCE: Duration = Duration::from_millis(120);
 /// action ran are delivered the instant it returns, and without this they would
 /// wipe the message before anyone had read it.
 const HOLD: Duration = Duration::from_secs(1);
+/// How long a write may take before it is given up on. Longer than any action
+/// here takes against speakers that are answering - party across a household,
+/// which reconnects to each coordinator in turn, is a few seconds - and short
+/// enough that a speaker that has stopped answering is reported rather than
+/// waited on. The child is killed with the wait; see [`action::Cli`].
+const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the household is re-read with nothing having been pushed.
 ///
 /// **Push is what makes the screen quick; this is what makes it true.** A
@@ -117,6 +123,13 @@ async fn drive(
     tokio::pin!(stop);
     // Volume keys waiting to be sent as one change, and when. See COALESCE.
     let mut pending: Option<(Nudge, tokio::time::Instant)> = None;
+    // Writes run in tasks of their own and report back here, so the keyboard
+    // stays live while a speaker is slow to answer - or never does, which is
+    // what a resume from suspend can leave behind, and the one case where a
+    // person most wants `q` to work. Counted, so that the "working" line comes
+    // down when the last of them is in and not the first.
+    let (finished, mut finishes) = mpsc::unbounded_channel::<Result<()>>();
+    let mut in_flight: usize = 0;
 
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
@@ -134,7 +147,24 @@ async fn drive(
             _ = &mut stop => Intent::Quit,
             _ = tokio::time::sleep_until(pending.as_ref().map_or_else(tokio::time::Instant::now, |p| p.1)), if pending.is_some() => {
                 if let Some((nudge, _)) = pending.take() {
-                    send_nudge(cli, &mut app, nudge).await;
+                    flush(source, cli, nudge, &mut in_flight, &finished);
+                }
+                continue;
+            },
+            outcome = finishes.recv() => {
+                if let Some(outcome) = outcome {
+                    in_flight = in_flight.saturating_sub(1);
+                    match outcome {
+                        // The CLI's own sentence, which names the room and the fix.
+                        Err(e) => app.status = Some(Status::bad(format!("{e:#}"))),
+                        // What it was waiting for has happened, and the daemon's
+                        // event is what shows it - so once nothing else is still
+                        // on its way, the line has nothing left to say.
+                        Ok(()) if in_flight == 0 => {
+                            app.status.take_if(|status| status.kind == Kind::Busy);
+                        }
+                        Ok(()) => {}
+                    }
                 }
                 continue;
             },
@@ -183,9 +213,14 @@ async fn drive(
         };
         match intent {
             Intent::Quit => {
-                // The last few taps of a volume key are still on their way.
-                if let Some((nudge, _)) = pending.take() {
-                    send_nudge(cli, &mut app, nudge).await;
+                // The last few taps of a volume key are still on their way, and
+                // this is the one place waiting for them is right: the process
+                // is about to end, and a task would end with it.
+                if let Some((nudge, _)) = pending.take()
+                    && nudge.by != 0
+                {
+                    let step = execute(source, cli, Intent::Nudge(nudge));
+                    let _ = tokio::time::timeout(WRITE_TIMEOUT, step).await;
                 }
                 return Ok(());
             }
@@ -200,7 +235,7 @@ async fn drive(
                         // the order the two were pressed in is the order the
                         // speakers should see them.
                         Some(other) => {
-                            send_nudge(cli, &mut app, held).await;
+                            flush(source, cli, held, &mut in_flight, &finished);
                             (other, due)
                         }
                     },
@@ -209,35 +244,54 @@ async fn drive(
             }
             _ => {}
         }
-        // Drawn before the await, not after: the CLI intents take about a
-        // second, and a second of nothing reads as a dropped keypress.
+        // The CLI intents take about a second, and a second of nothing reads as
+        // a dropped keypress; the loop redraws with this before anything else
+        // happens.
         if let Some(waiting) = intent.waiting() {
             app.status = Some(Status::busy(waiting));
-            terminal.draw(|frame| view::draw(frame, &app))?;
         }
-        match execute(source, cli, intent).await {
-            // The CLI's own sentence, which names the room and the fix.
-            Err(e) => app.status = Some(Status::bad(format!("{e:#}"))),
-            // What it was waiting for has happened, and the daemon's event is
-            // what shows it - so the line has nothing left to say. Anything
-            // else there was a note worth keeping.
-            Ok(()) => {
-                app.status.take_if(|status| status.kind == Kind::Busy);
-            }
-        }
+        in_flight += 1;
+        dispatch(source, cli, intent, finished.clone());
     }
 }
 
-/// Send one folded run of volume keys, keeping the CLI's sentence if it fails.
-async fn send_nudge(cli: &action::Cli, app: &mut App, nudge: Nudge) {
-    // `+5` then `-5` is nothing, and a command that does nothing still costs a
-    // round trip to the speaker.
+/// Carry out an intent in a task of its own, and report how it went.
+fn dispatch(
+    source: &Source,
+    cli: &action::Cli,
+    intent: Intent,
+    finished: mpsc::UnboundedSender<Result<()>>,
+) {
+    let source = source.clone();
+    let cli = *cli;
+    tokio::spawn(async move {
+        let outcome =
+            match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &cli, intent)).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow::anyhow!(
+                    "gave up after {}s; the speakers did not answer",
+                    WRITE_TIMEOUT.as_secs()
+                )),
+            };
+        let _ = finished.send(outcome);
+    });
+}
+
+/// Send one folded run of volume keys, unless it folded to nothing: `+5` then
+/// `-5` is no change, and a command that changes nothing still costs a round
+/// trip to the speaker.
+fn flush(
+    source: &Source,
+    cli: &action::Cli,
+    nudge: Nudge,
+    in_flight: &mut usize,
+    finished: &mpsc::UnboundedSender<Result<()>>,
+) {
     if nudge.by == 0 {
         return;
     }
-    if let Err(e) = cli.nudge_volume(&nudge.room, nudge.by, nudge.player).await {
-        app.status = Some(Status::bad(format!("{e:#}")));
-    }
+    *in_flight += 1;
+    dispatch(source, cli, Intent::Nudge(nudge), finished.clone());
 }
 
 /// So many points on one volume: a group's (by its coordinator's room name), or
@@ -311,8 +365,9 @@ impl Intent {
 /// Carry out one intent, by whichever route can express it.
 async fn execute(source: &Source, cli: &action::Cli, intent: Intent) -> Result<()> {
     match intent {
-        // Volume steps are sent by `drive`, folded; they never reach here.
-        Intent::Nothing | Intent::Quit | Intent::Nudge(_) => Ok(()),
+        Intent::Nothing | Intent::Quit => Ok(()),
+        // Folded by `drive` first: this is a run of keys, not one of them.
+        Intent::Nudge(nudge) => cli.nudge_volume(&nudge.room, nudge.by, nudge.player).await,
         Intent::PlayPause(bus) => source
             .player(&bus)
             .await?

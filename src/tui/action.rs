@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 /// given. Carried rather than reconstructed, because the network that needs
 /// `--ip` for the daemon needs it for every child too - and the child that
 /// dropped it would fail with the very hint the user had already followed.
+#[derive(Clone, Copy)]
 pub struct Cli {
     ip: Option<IpAddr>,
 }
@@ -44,11 +45,14 @@ impl Cli {
 
     /// Run one CLI command and wait for it.
     ///
-    /// Waiting is deliberate. These change the household, and the room list is
-    /// refreshed by the daemon's own events afterwards - so returning before the
-    /// command has landed would repaint from state older than the keypress.
+    /// Waiting for the child is what makes its exit status and its last line
+    /// available to report. It is the *caller's* task that waits, not the
+    /// screen: `drive` runs each of these off the event loop and gives up on it
+    /// after a while, and a child that is given up on is killed rather than
+    /// left to finish on a household nobody is watching any more.
     async fn run(&self, args: &[&str]) -> Result<()> {
         let mut command = tokio::process::Command::new(Self::binary()?);
+        command.kill_on_drop(true);
         if let Some(ip) = self.ip {
             command.arg("--ip").arg(ip.to_string());
         }
