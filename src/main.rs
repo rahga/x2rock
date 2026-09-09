@@ -12,6 +12,7 @@ mod sonos;
 mod state;
 mod stations;
 mod store;
+mod tui;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -605,6 +606,8 @@ enum Command {
     Discover,
     /// Publish every room as an MPRIS2 media player, until stopped.
     Daemon,
+    /// Every room on one screen, in the terminal. Needs the daemon running.
+    Tui,
     /// Install the x2rock agent skill so an AI assistant on this machine knows
     /// how to drive the CLI. Writes to `~/.claude/skills/x2rock/` by default
     /// (or `$CLAUDE_CONFIG_DIR/skills/`); the skill is embedded in the binary,
@@ -4257,6 +4260,10 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await;
         }
+        // Before the household session below: the TUI reads the daemon, which has
+        // its own connection, and opening a second one here would be a
+        // connection nothing in the TUI ever uses.
+        Command::Tui => return tui::run(cli.ip).await,
         Command::Daemon => {
             tokio::select! {
                 result = daemon::run(cli.ip) => return result,
@@ -5313,6 +5320,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Accounts { .. }
         | Command::Discover
         | Command::Skill { .. }
+        | Command::Tui
         | Command::Daemon => unreachable!("handled above"),
     }
     Ok(())

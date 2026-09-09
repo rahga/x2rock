@@ -10,10 +10,17 @@ repository = "https://github.com/rahga/x2rock"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+# Already in the tree under ratatui; named here only for `event-stream`, which
+# ratatui does not pass through. That feature is what lets the TUI wait on the
+# keyboard and on the daemon's D-Bus signals in one `select!` - the alternative
+# is a thread parked in a blocking `read()`. It adds no crate: futures-core is
+# already here under futures-util.
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 directories = "6.0.0"
 futures-util = "0.3.34"
 if-addrs = "0.15.0"
 mpris-server = { version = "0.10.0", features = ["tokio"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 roxmltree = "0.21.1"
 # ring, not the aws-lc-rs default: 2MB smaller, and no cmake step - a C
 # compiler is still needed, since ring's build script compiles C and asm. See

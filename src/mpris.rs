@@ -102,13 +102,13 @@ struct RoomState {
 /// source allows those goes out as namespaced metadata keys - the one place the
 /// spec lets a player add its own fields - for clients that want to grey out a
 /// button rather than have the set fail.
-const CAN_REPEAT: &str = "x2rock:canRepeat";
-const CAN_REPEAT_ONE: &str = "x2rock:canRepeatOne";
-const CAN_SHUFFLE: &str = "x2rock:canShuffle";
+pub(crate) const CAN_REPEAT: &str = "x2rock:canRepeat";
+pub(crate) const CAN_REPEAT_ONE: &str = "x2rock:canRepeatOne";
+pub(crate) const CAN_SHUFFLE: &str = "x2rock:canShuffle";
 /// The rooms in this group. MPRIS describes one player, and has no way to say
 /// that player is really several speakers - but a bar widget wants to show it,
 /// and needs it to tell "everything is grouped" from "there is only one room".
-const MEMBERS: &str = "x2rock:members";
+pub(crate) const MEMBERS: &str = "x2rock:members";
 /// The queue's version: a number that moves whenever the queue changes.
 ///
 /// **Observed empty on every player here, always** (2026-09-01). It is taken
@@ -135,13 +135,13 @@ const QUEUE_VERSION: &str = "x2rock:queueVersion";
 /// does not survive the trip: Quickshell hands `as` to QML as an ordinary array
 /// but `ai` arrives with no length and no indexing, so every slider read zero.
 /// An array of strings is what [`MEMBERS`] already proves works.
-const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
+pub(crate) const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
 /// What a soundbar is receiving, and whether it has a TV input to receive on.
 /// The format is the interesting one: a source that has quietly fallen back to
 /// stereo is invisible anywhere else, and this is what makes it a glance.
-const INPUT_FORMAT: &str = "x2rock:inputFormat";
-const ON_TV_INPUT: &str = "x2rock:onTvInput";
-const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
+pub(crate) const INPUT_FORMAT: &str = "x2rock:inputFormat";
+pub(crate) const ON_TV_INPUT: &str = "x2rock:onTvInput";
+pub(crate) const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
 /// Night sound and speech enhancement, sent only for a room that has them.
 ///
 /// The Sonos app offers a room on its TV input no transport at all - volume,
@@ -157,7 +157,7 @@ const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
 /// signal and it is not the same question - a track whose duration the service
 /// simply did not send looks identical, and a client that dropped the icon on
 /// that would be wrong about the source rather than about the metadata.
-const LIVE_STREAM: &str = "x2rock:isLiveStream";
+pub(crate) const LIVE_STREAM: &str = "x2rock:isLiveStream";
 /// The station behind a live stream, when it is not already the title.
 ///
 /// Sonos Radio names the *track* in `currentItem` and the station only in the
@@ -165,7 +165,7 @@ const LIVE_STREAM: &str = "x2rock:isLiveStream";
 /// "Veruschka") (II)" and never says where it came from. TuneIn has no track at
 /// all and the title already *is* the station, which is why this is sent only
 /// when it would add something rather than repeat the line above it.
-const STATION_NAME: &str = "x2rock:stationName";
+pub(crate) const STATION_NAME: &str = "x2rock:stationName";
 /// A live stream's own "now playing" text, verbatim and unparsed.
 ///
 /// For a stream started by `play-url` this is the *only* track information
@@ -179,7 +179,7 @@ const STATION_NAME: &str = "x2rock:stationName";
 ///
 /// Blank counts as absent, matching `now --json`: a station between titles
 /// sends a few spaces, and an empty headline reads worse than saying nothing.
-const STREAM_INFO: &str = "x2rock:streamInfo";
+pub(crate) const STREAM_INFO: &str = "x2rock:streamInfo";
 
 impl RoomState {
     /// Fold a `playbackStatus` body into the room, returning what MPRIS has to
