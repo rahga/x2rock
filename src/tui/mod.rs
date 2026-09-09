@@ -334,6 +334,8 @@ pub enum Intent {
     SetShuffle(String, bool),
     /// A volume step. Not sent straight away: see [`COALESCE`].
     Nudge(Nudge),
+    /// Mute a group (true) or unmute it, by its coordinator's room name.
+    Mute(String, bool),
     Group {
         coordinator: String,
         others: Vec<String>,
@@ -368,6 +370,7 @@ async fn execute(source: &Source, cli: &action::Cli, intent: Intent) -> Result<(
         Intent::Nothing | Intent::Quit => Ok(()),
         // Folded by `drive` first: this is a run of keys, not one of them.
         Intent::Nudge(nudge) => cli.nudge_volume(&nudge.room, nudge.by, nudge.player).await,
+        Intent::Mute(room, on) => cli.mute(&room, on).await,
         Intent::PlayPause(bus) => source
             .player(&bus)
             .await?
@@ -475,6 +478,7 @@ pub enum GroupRow {
     Member {
         room: String,
         volume: u8,
+        muted: bool,
         coordinator: bool,
     },
     /// A room somewhere else in the household, one keypress from joining.
@@ -598,16 +602,23 @@ impl App {
         let Some(selected) = self.selected() else {
             return Vec::new();
         };
-        let member = |room: &String| GroupRow::Member {
-            room: room.clone(),
-            volume: selected
+        let member = |room: &String| {
+            let at = selected
                 .members
                 .iter()
-                .position(|candidate| candidate == room)
-                .and_then(|at| selected.member_volumes.get(at))
-                .copied()
-                .unwrap_or(0),
-            coordinator: selected.is_coordinator(room),
+                .position(|candidate| candidate == room);
+            GroupRow::Member {
+                room: room.clone(),
+                volume: at
+                    .and_then(|at| selected.member_volumes.get(at))
+                    .copied()
+                    .unwrap_or(0),
+                muted: at
+                    .and_then(|at| selected.member_muted.get(at))
+                    .copied()
+                    .unwrap_or(false),
+                coordinator: selected.is_coordinator(room),
+            }
         };
         let mut rows: Vec<GroupRow> = selected
             .members
@@ -689,6 +700,7 @@ impl App {
             KeyCode::Char('p') => self.transport(Transport::Previous),
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.nudge_volume(STEP),
             KeyCode::Left | KeyCode::Char('-') => self.nudge_volume(-STEP),
+            KeyCode::Char('m') => self.mute(),
             KeyCode::Char('r') => self.cycle_repeat(),
             KeyCode::Char('s') => self.toggle_shuffle(),
             KeyCode::Char('g') => {
@@ -741,6 +753,17 @@ impl App {
             by,
             player: false,
         })
+    }
+
+    /// Mute or unmute the group. Flipped on screen as well as sent, for the
+    /// reason repeat and shuffle are: the second press has to see the first,
+    /// or two quick presses both mute.
+    fn mute(&mut self) -> Intent {
+        let Some(room) = self.rooms.get_mut(self.cursor) else {
+            return Intent::Nothing;
+        };
+        room.muted = !room.muted;
+        Intent::Mute(room.room.clone(), room.muted)
     }
 
     /// off → all → one → off, skipping what the source cannot do. One key for
@@ -1015,6 +1038,17 @@ mod tests {
         assert_eq!(held.by, 10);
     }
 
+    /// `m` flips mute and shows the flip at once, so a second press unmutes
+    /// rather than muting again.
+    #[test]
+    fn mute_toggles_and_shows_at_once() {
+        let mut app = App::new(vec![room("Kitchen")]);
+        assert_eq!(press(&mut app, 'm'), Intent::Mute("Kitchen".into(), true));
+        assert!(app.selected().is_some_and(|room| room.muted));
+        assert_eq!(press(&mut app, 'm'), Intent::Mute("Kitchen".into(), false));
+        assert!(app.selected().is_some_and(|room| !room.muted));
+    }
+
     /// A room on its TV input has no transport to drive, and the keys say so by
     /// doing nothing - the row has already drawn them as unavailable.
     #[test]
@@ -1195,6 +1229,7 @@ mod tests {
             room,
             volume,
             coordinator: true,
+            ..
         }) = rows.first()
         else {
             panic!("the first row should be the coordinator");
@@ -1205,6 +1240,7 @@ mod tests {
             room,
             volume,
             coordinator: false,
+            ..
         }) = rows.get(1)
         else {
             panic!("the second row should be the member");

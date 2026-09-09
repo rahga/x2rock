@@ -356,10 +356,13 @@ It is the front end for an ssh session, a bare console, or a terminal that is al
 
 - **Each room is up to three lines**: its name and the group volume, what is playing, and a
   context line beneath — station, the format a TV is sending, who else is in the group, and
-  whether repeat or shuffle is on. A room a control does not apply to is silent rather than wrong:
-  a room on its TV input has no transport to drive, and a radio stream has no shuffle to be off.
-- `space` play/pause, `n`/`p` skip, `←`/`→` the group's volume, `r` repeat (off → all → one), `s`
-  shuffle, `j`/`k` or the arrows to move between rooms, `?` for the full list, `q` to quit.
+  whether repeat or shuffle is on. A muted room says `muted` where its percentage would be: the
+  daemon reports what is heard, which is zero, and zero alone cannot be told from turned down. A
+  room a control does not apply to is silent rather than wrong: a room on its TV input has no
+  transport to drive, and a radio stream has no shuffle to be off.
+- `space` play/pause, `n`/`p` skip, `←`/`→` the group's volume, `m` mute, `r` repeat (off → all →
+  one), `s` shuffle, `j`/`k` or the arrows to move between rooms, `?` for the full list, `q` to
+  quit.
 - **`g` opens grouping**: the rooms playing together, each with its *own* volume beneath the group
   mix (`←`/`→` sets it — the balance the group volume cannot express), and every other room one
   `enter` from joining. `enter` on a member takes it back out; the coordinator cannot leave, since

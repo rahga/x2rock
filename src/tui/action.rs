@@ -130,6 +130,14 @@ impl Cli {
         self.run(&args).await
     }
 
+    /// Mute or unmute a group. Group mute is what mute means - the CLI refuses
+    /// `--player` here, since muting one speaker of a group is not a thing
+    /// anyone asks for - so this offers no per-speaker form.
+    pub async fn mute(&self, room: &str, on: bool) -> Result<()> {
+        self.run(&["-r", room, "vol", if on { "mute" } else { "unmute" }])
+            .await
+    }
+
     pub async fn tv(&self, room: &str) -> Result<()> {
         self.run(&["-r", room, "tv"]).await
     }

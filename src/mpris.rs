@@ -78,6 +78,9 @@ struct RoomState {
     /// Each member's own volume, in the same order. Grouped rooms share a group
     /// volume; this is the balance between them, which MPRIS has no room for.
     member_volumes: Vec<u8>,
+    /// Whether the group, and each member, is muted - see [`MUTED`].
+    muted: bool,
+    member_muted: Vec<bool>,
     /// The queue's version, straight from `playback:1`.
     queue_version: String,
     /// Whether the room is on its TV input right now.
@@ -136,6 +139,14 @@ const QUEUE_VERSION: &str = "x2rock:queueVersion";
 /// but `ai` arrives with no length and no indexing, so every slider read zero.
 /// An array of strings is what [`MEMBERS`] already proves works.
 pub(crate) const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
+/// Whether the group is muted, and each member in [`MEMBERS`] order. The
+/// volumes read zero while muted - that is what is heard, and what a generic
+/// MPRIS client should show - so without these a muted room and a silent one
+/// are the same picture, and a client cannot offer "unmute" where it would
+/// otherwise offer a volume step. Strings for the member list, for the reason
+/// [`MEMBER_VOLUMES`] gives.
+pub(crate) const MUTED: &str = "x2rock:muted";
+pub(crate) const MEMBER_MUTED: &str = "x2rock:memberMuted";
 /// What a soundbar is receiving, and whether it has a TV input to receive on.
 /// The format is the interesting one: a source that has quietly fallen back to
 /// stereo is invisible anywhere else, and this is what makes it a glance.
@@ -279,6 +290,16 @@ impl RoomState {
                     .collect::<Vec<_>>(),
             ),
         );
+        metadata.set(MUTED, Some(self.muted));
+        metadata.set(
+            MEMBER_MUTED,
+            Some(
+                self.member_muted
+                    .iter()
+                    .map(bool::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+        );
         metadata.set(QUEUE_VERSION, Some(self.queue_version.clone()));
         metadata.set(INPUT_FORMAT, Some(self.input_format.clone()));
         metadata.set(ON_TV_INPUT, Some(self.on_tv_input));
@@ -318,6 +339,7 @@ impl RoomPlayer {
         has_tv_input: bool,
     ) -> Self {
         let member_volumes = vec![0; members.len()];
+        let member_muted = vec![false; members.len()];
         Self {
             connection,
             group_id,
@@ -325,6 +347,7 @@ impl RoomPlayer {
             state: Mutex::new(RoomState {
                 members,
                 member_volumes,
+                member_muted,
                 has_tv_input,
                 ..RoomState::default()
             }),
@@ -349,12 +372,18 @@ impl RoomPlayer {
         let Some(at) = state.members.iter().position(|(id, _)| id == player_id) else {
             return Vec::new();
         };
-        // Muted reads as nothing heard, matching how group volume is reported.
+        // Muted reads as nothing heard, matching how group volume is reported;
+        // the flag beside it is what says which of the two it is.
         let level = if volume.muted { 0 } else { volume.volume };
-        if state.member_volumes.get(at) == Some(&level) {
+        if state.member_volumes.get(at) == Some(&level)
+            && state.member_muted.get(at) == Some(&volume.muted)
+        {
             return Vec::new();
         }
         state.member_volumes[at] = level;
+        if let Some(slot) = state.member_muted.get_mut(at) {
+            *slot = volume.muted;
+        }
         vec![Property::Metadata(state.with_hints())]
     }
 
@@ -446,8 +475,16 @@ impl RoomPlayer {
         } else {
             f64::from(volume.volume) / 100.0
         };
-        self.state.lock().unwrap().volume = level;
-        vec![Property::Volume(level)]
+        let mut state = self.state.lock().unwrap();
+        state.volume = level;
+        let mut properties = vec![Property::Volume(level)];
+        // Mute is a metadata fact and the level is not: a metadata announcement
+        // on every volume tick would be noise, one on the flag turning is news.
+        if state.muted != volume.muted {
+            state.muted = volume.muted;
+            properties.push(Property::Metadata(state.with_hints()));
+        }
+        properties
     }
 
     async fn playback(&self, command: &str) -> fdo::Result<()> {

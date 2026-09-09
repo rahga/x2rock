@@ -94,7 +94,7 @@ fn footer(app: &App, width: usize) -> Paragraph<'static> {
     // 80 or 100 - falling straight from everything to "q quit" would leave the
     // common width with the least help.
     let keys = [
-        "space play/pause · n/p skip · ←→ volume · r repeat · s shuffle · g group · t tv · P party · ? keys · q quit",
+        "space play/pause · n/p skip · ←→ volume · m mute · r repeat · s shuffle · g group · t tv · P party · ? keys · q quit",
         "space play/pause · n/p skip · ←→ volume · g group · ? keys · q quit",
         "? keys · q quit",
     ];
@@ -135,7 +135,11 @@ fn item(room: &RoomSnapshot, width: usize) -> ListItem<'static> {
     let mut lines = Vec::new();
 
     let name = format!("{} {}", glyph(room.state), label(room));
-    lines.push(shoulders(vec![Span::raw(name)], volume(room.volume), width));
+    lines.push(shoulders(
+        vec![Span::raw(name)],
+        volume(room.volume, room.muted),
+        width,
+    ));
 
     let now = room.now_line();
     if !now.is_empty() {
@@ -228,9 +232,17 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
     spans
 }
 
-/// `██████░░░░  62%`. Muted reads as zero, because that is what the daemon
-/// publishes and what is heard.
-fn volume(volume: f64) -> Vec<Span<'static>> {
+/// `██████░░░░  62%`, or `░░░░░░░░░░ muted`. The daemon reports a muted room's
+/// volume as zero, since that is what is heard; the word is what tells that
+/// zero from a room that is simply turned down, and it takes the number's
+/// place because the number would be a zero that means nothing.
+fn volume(volume: f64, muted: bool) -> Vec<Span<'static>> {
+    if muted {
+        return vec![
+            Span::styled("░".repeat(BAR), Style::new().dim()),
+            Span::styled(" muted", Style::new().fg(Color::Yellow)),
+        ];
+    }
     let percent = (volume.clamp(0.0, 1.0) * 100.0).round() as usize;
     let filled = (percent * BAR + 50) / 100;
     vec![
@@ -258,6 +270,7 @@ fn grouping(frame: &mut Frame, app: &App, area: Rect) {
             GroupRow::Member {
                 room,
                 volume: level,
+                muted,
                 coordinator,
             } => {
                 let name = if *coordinator {
@@ -267,7 +280,7 @@ fn grouping(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 ListItem::new(shoulders(
                     vec![Span::raw(name)],
-                    volume(f64::from(*level) / 100.0),
+                    volume(f64::from(*level) / 100.0, *muted),
                     width,
                 ))
             }
@@ -311,6 +324,7 @@ fn help(frame: &mut Frame, area: Rect) {
         ("space", "play or pause"),
         ("n / p", "next, previous"),
         ("← / →, - / +", "the group's volume"),
+        ("m", "mute, or unmute"),
         ("r", "repeat: off, all, one"),
         ("s", "shuffle"),
         ("g", "grouping, and each speaker's own volume"),
@@ -432,7 +446,7 @@ mod tests {
     fn a_long_name_gives_way_to_the_volume_rather_than_pushing_it_off() {
         let line = shoulders(
             vec![Span::raw("A Room With A Really Very Long Name Indeed")],
-            volume(0.62),
+            volume(0.62, false),
             30,
         );
         assert_eq!(line.width(), 30);
@@ -535,6 +549,23 @@ mod tests {
         assert!(stale.contains("no answer for 10m"), "{stale}");
     }
 
+    /// Muted takes the number's place: a zero there would be indistinguishable
+    /// from turned down, which is the whole problem.
+    #[test]
+    fn a_muted_room_says_so_where_its_percentage_would_be() {
+        let text: String = volume(0.0, true)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.ends_with(" muted"), "{text:?}");
+        assert!(!text.contains('%'), "{text:?}");
+        let unmuted: String = volume(0.0, false)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(unmuted.ends_with("  0%"), "{unmuted:?}");
+    }
+
     /// Coarse on purpose: the question is hiccup or outage.
     #[test]
     fn an_age_is_reported_at_the_resolution_that_matters() {
@@ -549,7 +580,7 @@ mod tests {
     #[test]
     fn the_volume_bar_rounds_to_its_own_number() {
         let filled = |level| {
-            volume(level)
+            volume(level, false)
                 .first()
                 .map(|span| span.content.chars().count())
                 .unwrap_or_default()

@@ -14,8 +14,8 @@ use zbus::zvariant::OwnedValue;
 // The daemon's own names for its keys, so the two ends of the contract cannot
 // drift apart by a typo in one of them.
 use crate::mpris::{
-    CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, HAS_TV_INPUT, INPUT_FORMAT, LIVE_STREAM,
-    MEMBER_VOLUMES, MEMBERS, ON_TV_INPUT, STATION_NAME, STREAM_INFO,
+    CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, HAS_TV_INPUT, INPUT_FORMAT, LIVE_STREAM, MEMBER_MUTED,
+    MEMBER_VOLUMES, MEMBERS, MUTED, ON_TV_INPUT, STATION_NAME, STREAM_INFO,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -75,6 +75,10 @@ pub struct RoomSnapshot {
     /// list together say which one it is, and position says nothing.
     pub members: Vec<String>,
     pub member_volumes: Vec<u8>,
+    /// Whether the group, and each member, is muted. The volumes above read
+    /// zero while muted, so these are the only way to tell muted from quiet.
+    pub muted: bool,
+    pub member_muted: Vec<bool>,
     pub on_tv: bool,
     pub has_tv: bool,
     pub input_format: String,
@@ -126,6 +130,11 @@ impl RoomSnapshot {
         self.member_volumes = strings(get(MEMBER_VOLUMES))
             .iter()
             .map(|v| v.parse().unwrap_or(0))
+            .collect();
+        self.muted = flag(get(MUTED));
+        self.member_muted = strings(get(MEMBER_MUTED))
+            .iter()
+            .map(|v| v == "true")
             .collect();
         self.on_tv = flag(get(ON_TV_INPUT));
         self.has_tv = flag(get(HAS_TV_INPUT));
@@ -329,6 +338,25 @@ mod tests {
         assert!(room.is_coordinator("Kitchen"));
         assert!(!room.is_coordinator("Office"));
         assert_eq!(room.others().collect::<Vec<_>>(), vec!["Office", "Den"]);
+    }
+
+    /// The member flags arrive as the strings the daemon has to send them as,
+    /// and anything that is not the word `true` is not muted.
+    #[test]
+    fn mute_flags_are_read_from_the_daemon_s_keys() {
+        let mut room = RoomSnapshot::default();
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            MUTED.to_owned(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(true)).unwrap(),
+        );
+        metadata.insert(
+            MEMBER_MUTED.to_owned(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(vec!["true", "false"])).unwrap(),
+        );
+        room.apply_metadata(&metadata);
+        assert!(room.muted);
+        assert_eq!(room.member_muted, vec![true, false]);
     }
 
     /// Absent keys mean "nothing to say", not "false" - the daemon omits what
