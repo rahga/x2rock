@@ -3302,6 +3302,28 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   agent) tell the user the TV is off while it is still on, which is worse than
   not offering it. It is the `raw` escape hatch's whole purpose: the wide API,
   used by whoever wants it, without x2rock vouching for it.
+- **`homeTheater:1` accepts a subscribe and then never sends anything
+  (measured 2026-09-08).** `subscribe` on player scope answers `success: true`,
+  so it looks like the push channel for night mode and dialog enhancement. It
+  is not: night mode was toggled on and off with `eq --night` and *no event
+  arrived*, on either edge, with `X2ROCK_LOG_EVENTS=1` capturing every body -
+  only `playback:1`, `playbackMetadata:1` and `groupVolume:1` ever fired. Most
+  likely because x2rock writes these over UPnP `SetEQ` and the Control API does
+  not observe its own settings changing from underneath; whether the Sonos app's
+  own write pushes one is untested. **What it does send is a confirmation
+  carrying no options at all**, and that is the dangerous part: read through
+  `HomeTheaterOptions`, whose bools are `#[serde(default)]`, an empty body says
+  "night off, dialog off". It overwrote a Beam that had just been seeded
+  correctly - `enhanceDialog: true` published, then `false` a second later, with
+  nothing in the log to say why. Hence `HomeTheaterUpdate`, whose fields are
+  `Option` so absent means unchanged. The same trap `PlaybackActions` documents;
+  the second time this shape has cost real debugging, so the rule is worth
+  stating flatly: **in this API an event body that omits a field is not a body
+  setting it to false**, and any type deserialized from both a reply and an
+  event needs two shapes, not one.
+  The consequence for consumers is that the daemon's night/dialog values are
+  right when read and never updated again, which is why the bar widget lays its
+  own toggles over them rather than waiting for a push that does not come.
 - **`getOptions`/`setOptions` on `homeTheater:1` - a lead, not built.**
   `getOptions` reads the home-theatre block (night mode, dialog, virtual
   height, grouping latency); `setOptions` on an empty body answered `success`
