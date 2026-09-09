@@ -54,6 +54,16 @@ const HOLD: Duration = Duration::from_secs(1);
 /// enough that a speaker that has stopped answering is reported rather than
 /// waited on. The child is killed with the wait; see [`action::Cli`].
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an empty household is disbelieved.
+///
+/// A regroup, and a daemon restart, drop every player and publish them again
+/// a few seconds later, one Sonos round-trip at a time - and the read that
+/// lands in between finds nothing. Drawing that flashed "no rooms" and closed
+/// the grouping overlay on the very regroup the overlay had just asked for
+/// (seen on a five-room household, 2026-09-09). The last rooms are held for
+/// this long instead; a daemon that is really gone shows as empty once the
+/// heartbeat re-reads past it.
+const REPUBLISH_GRACE: Duration = Duration::from_secs(8);
 /// How often the household is re-read with nothing having been pushed.
 ///
 /// **Push is what makes the screen quick; this is what makes it true.** A
@@ -499,6 +509,9 @@ pub struct App {
     /// where nothing is happening is quiet, not stale, and the two look
     /// identical from a screen that only timestamps events.
     contacted: Instant,
+    /// When the bus first came back empty while rooms were still showing - see
+    /// [`REPUBLISH_GRACE`].
+    emptied: Option<Instant>,
 }
 
 impl App {
@@ -509,6 +522,7 @@ impl App {
             overlay: Overlay::None,
             status: None,
             contacted: Instant::now(),
+            emptied: None,
         }
     }
 
@@ -530,6 +544,11 @@ impl App {
     #[cfg(test)]
     pub fn set_contacted_for_test(&mut self, at: Instant) {
         self.contacted = at;
+    }
+
+    #[cfg(test)]
+    fn set_emptied_for_test(&mut self, at: Instant) {
+        self.emptied = Some(at);
     }
 
     pub fn rooms(&self) -> &[RoomSnapshot] {
@@ -563,6 +582,20 @@ impl App {
         // Anything that arrives is proof the daemon answered, whether it was
         // pushed or asked for.
         self.contacted = Instant::now();
+        // An empty bus right after a full one is a republish in progress until
+        // it has gone on too long to be one. The rooms on screen are kept, and
+        // the footer says why nothing is moving.
+        if rooms.is_empty() && !self.rooms.is_empty() {
+            let since = *self.emptied.get_or_insert_with(Instant::now);
+            if since.elapsed() < REPUBLISH_GRACE {
+                if self.status.is_none() {
+                    self.status = Some(Status::busy("the daemon is republishing…"));
+                }
+                return;
+            }
+        } else if self.emptied.take().is_some() {
+            self.status.take_if(|status| status.kind == Kind::Busy);
+        }
         let was = self.selected().map(|room| room.room.clone());
         self.rooms = rooms;
         if let Some(at) = was.and_then(|room| self.locate(&room)) {
@@ -1496,12 +1529,37 @@ mod tests {
         assert_eq!(app.group_cursor(), 0);
     }
 
-    /// Losing every player mid-session must not leave the cursor pointing past
+    /// The bus goes empty for a moment on every regroup, while the daemon
+    /// drops its players and publishes them again. That moment must not clear
+    /// the screen or close the overlay that asked for the regroup; only an
+    /// emptiness that has outlasted a republish is believed.
+    #[test]
+    fn a_momentary_empty_bus_is_a_republish_not_an_empty_house() {
+        let mut app = grouped();
+        press(&mut app, 'g');
+        app.apply(Vec::new());
+        assert_eq!(app.rooms().len(), 2, "the last rooms stay up");
+        assert!(matches!(app.overlay(), Overlay::Group { .. }));
+        assert_eq!(app.status().map(|status| status.kind), Some(Kind::Busy));
+
+        // The players come back: the note comes down with them.
+        app.apply(vec![room("Kitchen"), room("Bedroom")]);
+        assert!(app.status().is_none());
+
+        // Empty for longer than a republish takes: believed.
+        app.apply(Vec::new());
+        app.set_emptied_for_test(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
+        app.apply(Vec::new());
+        assert!(app.rooms().is_empty());
+    }
+
+    /// Losing every player for good must not leave the cursor pointing past
     /// the end of an empty list.
     #[test]
     fn an_empty_household_leaves_nothing_selected() {
         let mut app = grouped();
         app.cursor = 1;
+        app.set_emptied_for_test(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
         app.apply(Vec::new());
         assert_eq!(app.cursor, 0);
         assert!(app.selected().is_none());

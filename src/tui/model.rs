@@ -219,11 +219,20 @@ impl RoomSnapshot {
     /// name that would only repeat the line above. So the fallback is not a
     /// guess: an empty station on something known to be a live stream means the
     /// title is carrying it.
+    ///
+    /// But only while the headline is on the line above. With no headline the
+    /// title is itself the top line ([`Self::now_line`]), and naming it again
+    /// here said the host twice - which is what an idle `play-url` room did on
+    /// a real household.
     pub fn station_label(&self) -> &str {
         if !self.station_name.is_empty() {
             return &self.station_name;
         }
-        if self.is_live_stream { &self.title } else { "" }
+        if self.is_live_stream && !self.stream_info.is_empty() {
+            &self.title
+        } else {
+            ""
+        }
     }
 
     /// What follows the title: the artist where there is one, else the stream's
@@ -325,6 +334,15 @@ mod tests {
         let room = stream("ice1.somafm.com", "Gary Numan - I'm An Agent", "");
         assert_eq!(room.now_line(), "Gary Numan - I'm An Agent");
         assert_eq!(room.station_label(), "ice1.somafm.com");
+    }
+
+    /// An idle `play-url` room has a host and no headline: the host is the top
+    /// line, and the line below has nothing to add rather than the host again.
+    #[test]
+    fn a_stream_with_no_headline_names_its_host_once() {
+        let room = stream("ice1.somafm.com", "", "");
+        assert_eq!(room.now_line(), "ice1.somafm.com");
+        assert_eq!(room.station_label(), "");
     }
 
     /// A stream that names its own station keeps the ordinary shape, so the
