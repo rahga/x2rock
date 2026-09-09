@@ -439,6 +439,31 @@ async fn follow(
                     }
                 }
             }
+            // Player-scoped for the same reason as playerVolume:1: the TV
+            // socket belongs to a player, not to the group around it, so a
+            // soundbar that joined someone else's group still answers here.
+            ("homeTheater:1", _) => {
+                let Some(player_id) = event.player_id.as_deref() else {
+                    continue;
+                };
+                let update: proto::HomeTheaterUpdate =
+                    match serde_json::from_value(event.body.clone()) {
+                        Ok(update) => update,
+                        Err(e) => {
+                            log(&format!("ignoring unparseable homeTheater event: {e}"));
+                            continue;
+                        }
+                    };
+                for server in &rooms {
+                    let properties = server.imp().apply_home_theater(player_id, &update);
+                    if properties.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = server.properties_changed(properties).await {
+                        log(&format!("{}: {e:#}", server.imp().room));
+                    }
+                }
+            }
             ("playback:1" | "playbackMetadata:1" | "groupVolume:1", _) => {
                 let Some(server) = rooms
                     .iter()
@@ -568,6 +593,33 @@ async fn publish_group(
             Ok(member) => {
                 if let Err(e) = member.subscribe_player("playerVolume:1", id).await {
                     log(&format!("{name}: no per-room volume ({e:#})"));
+                }
+                // Night sound and speech enhancement belong to the player with
+                // the TV socket, and only it answers for them - the same
+                // player-scoped refusal that puts per-member volume on its own
+                // connection. Seeded here because an event only arrives when
+                // something changes, and a room nobody has touched today would
+                // otherwise publish neither setting at all.
+                let owns_tv = groups
+                    .player(id)
+                    .is_some_and(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+                if owns_tv {
+                    match member.player_settings(id).await {
+                        Ok(settings) => {
+                            if let Some(options) = settings.home_theater {
+                                let properties = server
+                                    .imp()
+                                    .apply_home_theater(id, &(&options).into());
+                                if let Err(e) = server.properties_changed(properties).await {
+                                    log(&format!("{name}: {e:#}"));
+                                }
+                            }
+                        }
+                        Err(e) => log(&format!("{name}: no night/dialog state ({e:#})")),
+                    }
+                    if let Err(e) = member.subscribe_player("homeTheater:1", id).await {
+                        log(&format!("{name}: night/dialog will not follow changes ({e:#})"));
+                    }
                 }
             }
             Err(e) => log(&format!("{name}: could not be reached ({e:#})")),

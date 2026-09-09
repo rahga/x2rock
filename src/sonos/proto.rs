@@ -709,6 +709,33 @@ pub struct HomeTheaterOptions {
     pub enhance_dialog_level: i32,
 }
 
+/// A `homeTheater:1` event body, where **every field is `Option` because absent
+/// means unchanged, not off**.
+///
+/// [`HomeTheaterOptions`] cannot be used here. Its bools are `#[serde(default)]`,
+/// which is right for `getOptions` and `getPlayerSettings` - a reply always
+/// carries the whole block - and wrong for an event: subscribing to
+/// `homeTheater:1` delivers a confirmation carrying no options at all, which
+/// through those defaults reads as "night off, dialog off" and overwrote a
+/// freshly-seeded Beam with the opposite of its real settings. The same trap
+/// [`PlaybackActions`] documents, in the same shape, one namespace over.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeTheaterUpdate {
+    pub night_mode: Option<bool>,
+    pub enhance_dialog: Option<bool>,
+}
+
+impl From<&HomeTheaterOptions> for HomeTheaterUpdate {
+    /// A full read is an update that names both fields.
+    fn from(options: &HomeTheaterOptions) -> Self {
+        Self {
+            night_mode: Some(options.night_mode),
+            enhance_dialog: Some(options.enhance_dialog),
+        }
+    }
+}
+
 /// `settings:1 getPlayerSettings` - player-scoped, and answered without an
 /// account, unlike `getSettings`, which wants a `userId`. Only the home-theatre
 /// block is deserialized; the object carries more (room name, volume mode,

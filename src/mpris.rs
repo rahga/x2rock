@@ -88,6 +88,14 @@ struct RoomState {
     input_format: String,
     /// Whether this room has a TV input to switch to at all.
     has_tv_input: bool,
+    /// Night sound and speech enhancement, the two settings the Sonos app puts
+    /// in front of a room on its TV input. `None` until the owning player has
+    /// said, and forever on anything that is not a soundbar - which is why they
+    /// are `Option` and not `bool`: a client has to be able to tell "this room
+    /// has no such setting" from "it has it and it is off", and only the first
+    /// means do not draw the control.
+    night_mode: Option<bool>,
+    enhance_dialog: Option<bool>,
 }
 
 /// MPRIS has `CanGoNext` but no `CanLoop` or `CanShuffle`, so whether the current
@@ -134,6 +142,15 @@ const MEMBER_VOLUMES: &str = "x2rock:memberVolumes";
 const INPUT_FORMAT: &str = "x2rock:inputFormat";
 const ON_TV_INPUT: &str = "x2rock:onTvInput";
 const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
+/// Night sound and speech enhancement, sent only for a room that has them.
+///
+/// The Sonos app offers a room on its TV input no transport at all - volume,
+/// grouping, Night Sound, Speech Enhancement and a sleep timer are the whole
+/// set - so a client drawing that room needs these two the way it needs
+/// [`CAN_REPEAT`] elsewhere. Writing them is not MPRIS's to do: it has no verb
+/// for either, and `x2rock eq --night/--dialog` is the write path.
+const NIGHT_MODE: &str = "x2rock:nightMode";
+const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
 /// Whether what is playing is a live stream rather than something on demand.
 ///
 /// MPRIS has no way to say it. `mpris:length` being absent is the closest
@@ -252,6 +269,10 @@ impl RoomState {
         metadata.set(INPUT_FORMAT, Some(self.input_format.clone()));
         metadata.set(ON_TV_INPUT, Some(self.on_tv_input));
         metadata.set(HAS_TV_INPUT, Some(self.has_tv_input));
+        // Left out entirely when unknown, rather than sent as false: see the
+        // `Option` on the fields.
+        metadata.set(NIGHT_MODE, self.night_mode);
+        metadata.set(ENHANCE_DIALOG, self.enhance_dialog);
         metadata
     }
 }
@@ -320,6 +341,32 @@ impl RoomPlayer {
             return Vec::new();
         }
         state.member_volumes[at] = level;
+        vec![Property::Metadata(state.with_hints())]
+    }
+
+    /// Fold a `homeTheater:1` options body in, for the member that owns the TV
+    /// socket - which need not be the coordinator, so this is matched by player
+    /// the way [`Self::apply_member_volume`] is, and a body for someone else's
+    /// player is not this room's news.
+    pub fn apply_home_theater(
+        &self,
+        player_id: &str,
+        update: &proto::HomeTheaterUpdate,
+    ) -> Vec<Property> {
+        let mut state = self.state.lock().unwrap();
+        if !state.members.iter().any(|(id, _)| id == player_id) {
+            return Vec::new();
+        }
+        // A field the body did not mention keeps what the room had: see
+        // `proto::HomeTheaterUpdate` for the confirmation event that made this
+        // the difference between "dialog on" and silently the reverse.
+        let night = update.night_mode.or(state.night_mode);
+        let dialog = update.enhance_dialog.or(state.enhance_dialog);
+        if (night, dialog) == (state.night_mode, state.enhance_dialog) {
+            return Vec::new();
+        }
+        state.night_mode = night;
+        state.enhance_dialog = dialog;
         vec![Property::Metadata(state.with_hints())]
     }
 
