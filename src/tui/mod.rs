@@ -272,7 +272,7 @@ fn dispatch(
     finished: mpsc::UnboundedSender<Result<()>>,
 ) {
     let source = source.clone();
-    let cli = *cli;
+    let cli = cli.clone();
     tokio::spawn(async move {
         let outcome =
             match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &cli, intent)).await {

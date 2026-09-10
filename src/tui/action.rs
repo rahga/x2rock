@@ -15,6 +15,7 @@
 
 use std::ffi::OsString;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -22,25 +23,48 @@ use anyhow::{Context, Result};
 /// given. Carried rather than reconstructed, because the network that needs
 /// `--ip` for the daemon needs it for every child too - and the child that
 /// dropped it would fail with the very hint the user had already followed.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Cli {
     ip: Option<IpAddr>,
+    /// Resolved once, at startup - see [`Cli::resolve`].
+    binary: OsString,
 }
 
 impl Cli {
     pub fn new(ip: Option<IpAddr>) -> Self {
-        Self { ip }
+        Self {
+            ip,
+            binary: Self::resolve(),
+        }
     }
 
-    /// The binary to shell out to - this one, whatever it is called and wherever
-    /// it was installed. Resolving it rather than trusting `PATH` matters
-    /// because a TUI launched from a desktop entry does not inherit the `PATH`
-    /// an interactive shell has, which is the same trap the README documents
-    /// for `~/.local/bin`.
-    fn binary() -> Result<OsString> {
-        Ok(std::env::current_exe()
-            .context("finding this binary to run its CLI")?
-            .into_os_string())
+    /// Which binary to run, decided once at startup.
+    ///
+    /// **An upgrade under a running TUI used to break every action it has.**
+    /// `current_exe` reads `/proc/self/exe`, and the kernel appends
+    /// " (deleted)" to that link once the file behind it is replaced - which is
+    /// what installing a new build does, `cargo install` and a package upgrade
+    /// alike, since each writes a new inode at the same path. Asking for it
+    /// afresh at every keypress therefore returned a path that cannot be run,
+    /// and grouping, party, TV input and every volume key failed with "No such
+    /// file or directory" naming a file that is plainly there.
+    ///
+    /// Resolving at startup makes that window small, stripping the marker
+    /// closes it, and a path that still leads nowhere falls back to the plain
+    /// name for `PATH` to answer - a worse answer, since a TUI launched from a
+    /// desktop entry has not the `PATH` a shell has, but a better one than a
+    /// certain failure.
+    fn resolve() -> OsString {
+        let Ok(path) = std::env::current_exe() else {
+            return OsString::from("x2rock");
+        };
+        if path.exists() {
+            return path.into_os_string();
+        }
+        match undeleted(&path).filter(|path| path.exists()) {
+            Some(path) => path.into_os_string(),
+            None => OsString::from("x2rock"),
+        }
     }
 
     /// Run one CLI command and wait for it.
@@ -51,7 +75,7 @@ impl Cli {
     /// after a while, and a child that is given up on is killed rather than
     /// left to finish on a household nobody is watching any more.
     async fn run(&self, args: &[&str]) -> Result<()> {
-        let mut command = tokio::process::Command::new(Self::binary()?);
+        let mut command = tokio::process::Command::new(&self.binary);
         command.kill_on_drop(true);
         if let Some(ip) = self.ip {
             command.arg("--ip").arg(ip.to_string());
@@ -148,5 +172,31 @@ impl Cli {
 
     pub async fn tv(&self, room: &str) -> Result<()> {
         self.run(&["-r", room, "tv"]).await
+    }
+}
+
+/// The path a `/proc/self/exe` link names once the file behind it has been
+/// replaced, with the kernel's marker taken back off. `None` when there is no
+/// marker to take off, which is every ordinary case.
+fn undeleted(path: &Path) -> Option<PathBuf> {
+    Some(PathBuf::from(path.to_str()?.strip_suffix(" (deleted)")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one thing here that can be tested without a filesystem: an upgrade
+    /// leaves the running binary's own path with a marker on the end, and the
+    /// file it means is the one without it.
+    #[test]
+    fn a_replaced_binary_is_found_under_the_kernels_marker() {
+        assert_eq!(
+            undeleted(Path::new("/home/x/.local/bin/x2rock (deleted)")),
+            Some(PathBuf::from("/home/x/.local/bin/x2rock"))
+        );
+        assert_eq!(undeleted(Path::new("/home/x/.local/bin/x2rock")), None);
+        // Not a suffix match on the word alone: a file may be called that.
+        assert_eq!(undeleted(Path::new("/home/x/bin/x2rock(deleted)")), None);
     }
 }
