@@ -170,7 +170,7 @@ impl Source {
         room.set_playback_state(&player.playback_status().await?);
         // After the metadata, which may carry the level mute is holding; the
         // Volume property alone reads zero on a muted room.
-        room.settle_volume(player.volume().await.unwrap_or(0.0));
+        room.settle_volume(player.volume().await.ok());
         room.loop_status = player.loop_status().await.unwrap_or_default();
         room.shuffle = player.shuffle().await.unwrap_or(false);
         room.can_go_next = player.can_go_next().await.unwrap_or(false);

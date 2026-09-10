@@ -193,7 +193,8 @@ impl RoomSnapshot {
         self.can_crossfade = flag(get(CAN_CROSSFADE));
     }
 
-    /// Decide where the bar sits, given what MPRIS Volume said.
+    /// Decide where the bar sits, given what MPRIS Volume said - `None` if it
+    /// did not answer.
     ///
     /// The heard volume is the canonical property and says everything except
     /// under mute, where it reads zero by design; there, and only there, the
@@ -201,11 +202,15 @@ impl RoomSnapshot {
     /// work here - this reads both in one pass - but the rule is the same one
     /// a push-driven client has to follow, and one rule is easier to keep true
     /// than two.
-    pub fn settle_volume(&mut self, heard: f64) {
-        self.volume = if self.muted {
-            self.level.unwrap_or(heard)
-        } else {
-            heard
+    ///
+    /// A property that did not answer is the third case, and it is not zero: a
+    /// player whose bus name drops between the metadata read and this one is a
+    /// regroup landing mid-read, and drawing the room silent would be inventing
+    /// a fact. The level parsed a moment ago is the better answer.
+    pub fn settle_volume(&mut self, heard: Option<f64>) {
+        self.volume = match heard {
+            Some(heard) if !self.muted => heard,
+            heard => self.level.or(heard).unwrap_or(0.0),
         };
     }
 
@@ -477,7 +482,7 @@ mod tests {
             level: Some(0.4),
             ..RoomSnapshot::default()
         };
-        room.settle_volume(0.0);
+        room.settle_volume(Some(0.0));
         assert_eq!(room.volume, 0.4);
 
         // Unmuted, the heard volume is the answer even with a level published:
@@ -486,11 +491,20 @@ mod tests {
             level: Some(0.4),
             ..RoomSnapshot::default()
         };
-        heard.settle_volume(0.55);
+        heard.settle_volume(Some(0.55));
         assert_eq!(heard.volume, 0.55);
 
+        // The property did not answer - a regroup landing between the two
+        // reads. Silence is not what that means, and the level says so.
+        let mut unanswered = RoomSnapshot {
+            level: Some(0.4),
+            ..RoomSnapshot::default()
+        };
+        unanswered.settle_volume(None);
+        assert_eq!(unanswered.volume, 0.4);
+
         let mut older = RoomSnapshot::default();
-        older.settle_volume(0.25);
+        older.settle_volume(Some(0.25));
         assert_eq!(older.volume, 0.25);
     }
 
