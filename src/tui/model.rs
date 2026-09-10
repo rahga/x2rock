@@ -193,11 +193,20 @@ impl RoomSnapshot {
         self.can_crossfade = flag(get(CAN_CROSSFADE));
     }
 
-    /// Decide where the bar sits, given what MPRIS Volume said. The published
-    /// level wins where there is one; the heard volume is the fallback for a
-    /// daemon that predates it.
+    /// Decide where the bar sits, given what MPRIS Volume said.
+    ///
+    /// The heard volume is the canonical property and says everything except
+    /// under mute, where it reads zero by design; there, and only there, the
+    /// published level is what the bar wants. Preferring it everywhere would
+    /// work here - this reads both in one pass - but the rule is the same one
+    /// a push-driven client has to follow, and one rule is easier to keep true
+    /// than two.
     pub fn settle_volume(&mut self, heard: f64) {
-        self.volume = self.level.unwrap_or(heard);
+        self.volume = if self.muted {
+            self.level.unwrap_or(heard)
+        } else {
+            heard
+        };
     }
 
     pub fn set_playback_state(&mut self, status: &str) {
@@ -464,11 +473,21 @@ mod tests {
     #[test]
     fn the_bar_sits_at_the_published_level_and_falls_back_to_what_is_heard() {
         let mut room = RoomSnapshot {
+            muted: true,
             level: Some(0.4),
             ..RoomSnapshot::default()
         };
         room.settle_volume(0.0);
         assert_eq!(room.volume, 0.4);
+
+        // Unmuted, the heard volume is the answer even with a level published:
+        // it is the property that moves on every change.
+        let mut heard = RoomSnapshot {
+            level: Some(0.4),
+            ..RoomSnapshot::default()
+        };
+        heard.settle_volume(0.55);
+        assert_eq!(heard.volume, 0.55);
 
         let mut older = RoomSnapshot::default();
         older.settle_volume(0.25);

@@ -576,18 +576,27 @@ impl RoomPlayer {
             f64::from(volume.volume) / 100.0
         };
         let mut state = self.state.lock().unwrap();
-        // A level moving under mute moves no heard volume and so no Volume
-        // property, and a client that only re-reads on Volume would miss it.
-        // That case goes out as metadata; the ordinary tick does not, since a
-        // metadata announcement on every volume change would be noise and the
-        // Volume change already prompts the re-read that picks the level up.
-        let level_moved_silently = state.level != volume.volume && state.volume == level;
+        // Metadata carries the level, the mute and the fixed flag, so any of
+        // the three moving has to be announced - the level included.
+        //
+        // **A client caches what a signal names and re-reads nothing else.**
+        // An earlier version here announced the level only when it moved under
+        // mute, on the reasoning that a Volume change would prompt a re-read
+        // anyway. It does not: setting a room to 25 sent `Volume` 0.25 and left
+        // `x2rock:volumeLevel` reading the level before it, so a bar widget's
+        // slider sat at the old position (seen on a live household). Nor is
+        // this the flood it looks - the player coalesces volume commands into
+        // one settled report about every 260ms (docs/architecture.md), so a
+        // drag is a handful of these.
+        let moved = state.level != volume.volume
+            || state.muted != volume.muted
+            || state.fixed != volume.fixed;
         state.volume = level;
         state.level = volume.volume;
+        state.muted = volume.muted;
+        state.fixed = volume.fixed;
         let mut properties = vec![Property::Volume(level)];
-        if state.muted != volume.muted || state.fixed != volume.fixed || level_moved_silently {
-            state.muted = volume.muted;
-            state.fixed = volume.fixed;
+        if moved {
             properties.push(Property::Metadata(state.with_hints()));
         }
         properties
