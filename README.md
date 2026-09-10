@@ -316,7 +316,9 @@ own output.)
   source cannot do them — a radio stream, say — the way previous and next are dimmed when the
   source cannot skip. A room with nothing loaded at all says `No content`, as the Sonos app does,
   and dims transport and the modes together, leaving volume and mute — the daemon publishes that
-  state as `x2rock:noSource`, since only it can see that there is no item.
+  state as `x2rock:noSource`, since only it can see that there is no item. A muted room keeps its
+  slider where the room will come back, dimmed and marked, and dragging it unmutes; a room whose
+  volume is fixed on an amplifier loses the slider rather than offering an inert one.
 - A `󰌷` on each room row opens grouping: the rooms playing together, each with its **own volume
   slider**, and every other room a click away from joining. The popup's own slider stays the
   group's, so the two are not the same control wearing different hats.
