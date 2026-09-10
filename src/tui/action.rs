@@ -27,7 +27,7 @@ use anyhow::{Context, Result};
 pub struct Cli {
     ip: Option<IpAddr>,
     /// Resolved once, at startup - see [`Cli::resolve`].
-    binary: OsString,
+    binary: Option<OsString>,
 }
 
 impl Cli {
@@ -50,21 +50,21 @@ impl Cli {
     /// file or directory" naming a file that is plainly there.
     ///
     /// Resolving at startup makes that window small, stripping the marker
-    /// closes it, and a path that still leads nowhere falls back to the plain
-    /// name for `PATH` to answer - a worse answer, since a TUI launched from a
-    /// desktop entry has not the `PATH` a shell has, but a better one than a
-    /// certain failure.
-    fn resolve() -> OsString {
-        let Ok(path) = std::env::current_exe() else {
-            return OsString::from("x2rock");
-        };
+    /// closes it, and a path that still leads nowhere is `None` - carried as a
+    /// failure rather than papered over with the plain name for `PATH` to
+    /// answer. That fallback looks kinder and is not: on the desktop-entry
+    /// launch this comment describes there is no useful `PATH`, and where there
+    /// is one it may hold a *different* install, which would leave an old
+    /// screen driving a new CLI and reads as a Sonos fault rather than a
+    /// packaging one.
+    fn resolve() -> Option<OsString> {
+        let path = std::env::current_exe().ok()?;
         if path.exists() {
-            return path.into_os_string();
+            return Some(path.into_os_string());
         }
-        match undeleted(&path).filter(|path| path.exists()) {
-            Some(path) => path.into_os_string(),
-            None => OsString::from("x2rock"),
-        }
+        undeleted(&path)
+            .filter(|path| path.exists())
+            .map(PathBuf::into_os_string)
     }
 
     /// Run one CLI command and wait for it.
@@ -75,7 +75,11 @@ impl Cli {
     /// after a while, and a child that is given up on is killed rather than
     /// left to finish on a household nobody is watching any more.
     async fn run(&self, args: &[&str]) -> Result<()> {
-        let mut command = tokio::process::Command::new(&self.binary);
+        let binary = self.binary.as_ref().context(
+            "cannot find the x2rock binary this screen was started from, so grouping, \
+             party, TV input and the volume keys have nothing to run",
+        )?;
+        let mut command = tokio::process::Command::new(binary);
         command.kill_on_drop(true);
         if let Some(ip) = self.ip {
             command.arg("--ip").arg(ip.to_string());

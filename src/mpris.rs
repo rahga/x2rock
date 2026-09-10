@@ -61,8 +61,7 @@ pub fn bus_suffix_among(room: &str, taken: &HashSet<String>) -> String {
 struct RoomState {
     status: Option<PlaybackStatus>,
     metadata: Metadata,
-    /// MPRIS volume, 0.0-1.0. Reported as 0.0 while muted, since that is what is heard.
-    volume: f64,
+
     /// Position at the last event, and when that was, so `Position` can advance
     /// between events without polling the player.
     position_millis: u64,
@@ -109,6 +108,9 @@ struct RoomState {
     /// means do not draw the control.
     night_mode: Option<bool>,
     enhance_dialog: Option<bool>,
+    /// What was last announced, so a change can be noticed rather than
+    /// predicted - see [`RoomState::announce`].
+    announced: Metadata,
 }
 
 /// MPRIS has `CanGoNext` but no `CanLoop` or `CanShuffle`, so whether the current
@@ -257,35 +259,15 @@ impl RoomState {
             self.position_millis = position_millis;
             self.position_at = Some(Instant::now());
         }
-        // The hints ride on Metadata, so it has to be re-announced when they move -
-        // which is on a change of source, not on every playback event.
-        let queue_moved = status
-            .queue_version
-            .as_deref()
-            .is_some_and(|version| version != self.queue_version);
+        // The queue version, the availability hints and crossfade all ride on
+        // Metadata, and each used to be compared here to decide whether to
+        // re-announce it. `announce` compares the whole thing instead.
         if let Some(version) = status.queue_version.as_deref() {
             self.queue_version = version.to_owned();
         }
-        let hints_changed = status.available_playback_actions.is_some_and(|actions| {
-            (
-                self.actions.can_repeat,
-                self.actions.can_repeat_one,
-                self.actions.can_shuffle,
-                self.actions.can_crossfade,
-            ) != (
-                actions.can_repeat,
-                actions.can_repeat_one,
-                actions.can_shuffle,
-                actions.can_crossfade,
-            )
-        });
         if let Some(actions) = status.available_playback_actions {
             self.actions = actions;
         }
-        // Crossfade rides on Metadata too, having no MPRIS property of its own.
-        let crossfade_moved = status
-            .play_modes
-            .is_some_and(|modes| modes.crossfade != self.play_modes.crossfade);
         if let Some(modes) = status.play_modes {
             self.play_modes = modes;
         }
@@ -305,10 +287,7 @@ impl RoomState {
         if let Some(mpris_status) = mpris_status {
             properties.push(Property::PlaybackStatus(mpris_status));
         }
-        // All three ride on Metadata, so any of them moving means re-announcing it.
-        if hints_changed || queue_moved || crossfade_moved {
-            properties.push(Property::Metadata(self.with_hints()));
-        }
+        properties.extend(self.announce());
         properties
     }
 
@@ -318,6 +297,60 @@ impl RoomState {
             Repeat::All => LoopStatus::Playlist,
             Repeat::One => LoopStatus::Track,
         }
+    }
+
+    /// Fold a `groupVolume` event in.
+    fn apply_volume(&mut self, volume: &proto::Volume) -> Vec<Property> {
+        // Metadata carries the level, the mute and the fixed flag, so any of
+        // the three moving has to be announced - the level included.
+        //
+        // **A client caches what a signal names and re-reads nothing else.**
+        // The level, the mute and the fixed flag all ride on Metadata, and an
+        // earlier version here announced it only when the level moved *under
+        // mute* - on the reasoning that a Volume change prompts a re-read
+        // anyway. It does not: setting a room to 25 sent `Volume` 0.25 and left
+        // `x2rock:volumeLevel` reading the level before it, so a bar widget's
+        // slider sat at the old position, seen on a live household. Deciding
+        // that here is what went wrong; `announce` decides it now.
+        self.level = volume.volume;
+        self.muted = volume.muted;
+        self.fixed = volume.fixed;
+        let mut properties = vec![Property::Volume(self.heard())];
+        properties.extend(self.announce());
+        properties
+    }
+
+    /// MPRIS `Volume`: 0.0-1.0, and 0.0 while muted, since that is what is
+    /// heard. Derived rather than stored - the level and the mute are what the
+    /// player reports, and a third field holding what those two already say is
+    /// a field that can disagree with them.
+    fn heard(&self) -> f64 {
+        if self.muted {
+            0.0
+        } else {
+            f64::from(self.level) / 100.0
+        }
+    }
+
+    /// The metadata to announce, if it has moved since the last announcement.
+    ///
+    /// **No caller has to know which keys ride on Metadata.** [`Self::with_hints`]
+    /// writes twenty of them off this struct, and each `apply_` site used to
+    /// carry its own predicate naming the ones it believed it could move. Miss
+    /// one and nothing complains: the daemon is right, the terminal UI is right
+    /// because it re-reads everything, and only a client that caches what a
+    /// signal names is wrong - which is how a volume level that had moved sat
+    /// stale on a live household. A comparison cannot miss one.
+    ///
+    /// The cost is a map compare against the last announcement, on events that
+    /// arrive a few times a second at their fastest.
+    fn announce(&mut self) -> Option<Property> {
+        let next = self.with_hints();
+        if next == self.announced {
+            return None;
+        }
+        self.announced = next.clone();
+        Some(Property::Metadata(next))
     }
 
     /// The track metadata plus the availability hints.
@@ -475,7 +508,7 @@ impl RoomPlayer {
         if let Some(slot) = state.member_levels.get_mut(at) {
             *slot = volume.volume;
         }
-        vec![Property::Metadata(state.with_hints())]
+        state.announce().into_iter().collect()
     }
 
     /// Fold a `homeTheater:1` options body in, for the member that owns the TV
@@ -501,7 +534,7 @@ impl RoomPlayer {
         }
         state.night_mode = night;
         state.enhance_dialog = dialog;
-        vec![Property::Metadata(state.with_hints())]
+        state.announce().into_iter().collect()
     }
 
     /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
@@ -540,7 +573,7 @@ impl RoomPlayer {
             return None;
         }
         state.queue_version = version;
-        Some(Property::Metadata(state.with_hints()))
+        state.announce()
     }
 
     /// Fold a `metadataStatus` event in.
@@ -565,41 +598,12 @@ impl RoomPlayer {
             .is_some_and(|c| c.id.is_some() || c.name.is_some());
         state.no_source =
             meta.current_item.is_none() && !container_names_something && format.is_none();
-        vec![Property::Metadata(state.with_hints())]
+        state.announce().into_iter().collect()
     }
 
     /// Fold a `groupVolume` event in.
     pub fn apply_volume(&self, volume: &proto::Volume) -> Vec<Property> {
-        let level = if volume.muted {
-            0.0
-        } else {
-            f64::from(volume.volume) / 100.0
-        };
-        let mut state = self.state.lock().unwrap();
-        // Metadata carries the level, the mute and the fixed flag, so any of
-        // the three moving has to be announced - the level included.
-        //
-        // **A client caches what a signal names and re-reads nothing else.**
-        // An earlier version here announced the level only when it moved under
-        // mute, on the reasoning that a Volume change would prompt a re-read
-        // anyway. It does not: setting a room to 25 sent `Volume` 0.25 and left
-        // `x2rock:volumeLevel` reading the level before it, so a bar widget's
-        // slider sat at the old position (seen on a live household). Nor is
-        // this the flood it looks - the player coalesces volume commands into
-        // one settled report about every 260ms (docs/architecture.md), so a
-        // drag is a handful of these.
-        let moved = state.level != volume.volume
-            || state.muted != volume.muted
-            || state.fixed != volume.fixed;
-        state.volume = level;
-        state.level = volume.volume;
-        state.muted = volume.muted;
-        state.fixed = volume.fixed;
-        let mut properties = vec![Property::Volume(level)];
-        if moved {
-            properties.push(Property::Metadata(state.with_hints()));
-        }
-        properties
+        self.state.lock().unwrap().apply_volume(volume)
     }
 
     async fn playback(&self, command: &str) -> fdo::Result<()> {
@@ -852,7 +856,7 @@ impl PlayerInterface for RoomPlayer {
         Ok(self.state.lock().unwrap().with_hints())
     }
     async fn volume(&self) -> fdo::Result<f64> {
-        Ok(self.state.lock().unwrap().volume)
+        Ok(self.state.lock().unwrap().heard())
     }
     async fn set_volume(&self, volume: f64) -> zbus::Result<()> {
         let level = (volume.clamp(0.0, 1.0) * 100.0).round() as u8;
@@ -984,6 +988,49 @@ mod tests {
                 .any(|p| matches!(p, Property::PlaybackStatus(_))),
             "an unchanged state is not re-announced"
         );
+    }
+
+    /// The bug that made `announce` exist: a level that moves has to be
+    /// announced, because a client caches what a signal names. Deciding that
+    /// per-field is what got it wrong, so this asks the question the way a
+    /// client does - did the metadata I was handed change?
+    #[test]
+    fn a_volume_that_moves_is_announced_and_one_that_does_not_is_not() {
+        let mut state = RoomState::default();
+        let at = |volume: u8, muted: bool| proto::Volume {
+            volume,
+            muted,
+            fixed: false,
+        };
+        // Published as a decimal string, for the reason MEMBER_VOLUMES gives.
+        let level_of = |properties: &[Property]| {
+            properties.iter().find_map(|p| match p {
+                Property::Metadata(metadata) => metadata
+                    .get_value(VOLUME_LEVEL)
+                    .and_then(|value| <&str>::try_from(value).ok())
+                    .map(str::to_owned),
+                _ => None,
+            })
+        };
+
+        let first = state.apply_volume(&at(25, false));
+        assert_eq!(level_of(&first).as_deref(), Some("25"));
+        assert_eq!(state.heard(), 0.25);
+
+        // The same event again says nothing new.
+        assert_eq!(level_of(&state.apply_volume(&at(25, false))), None);
+
+        // Muting moves the heard volume to zero and keeps the level, and both
+        // facts go out.
+        let muted = state.apply_volume(&at(25, true));
+        assert_eq!(state.heard(), 0.0);
+        assert_eq!(level_of(&muted).as_deref(), Some("25"));
+
+        // A level that moves *under* mute moves no heard volume at all, which
+        // is the case a Volume-only signal cannot carry.
+        let quietly = state.apply_volume(&at(40, true));
+        assert_eq!(state.heard(), 0.0);
+        assert_eq!(level_of(&quietly).as_deref(), Some("40"));
     }
 
     #[test]

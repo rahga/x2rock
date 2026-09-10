@@ -262,9 +262,11 @@ fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     if muted {
         spans.push(Span::styled("muted ", Style::new().fg(Color::Yellow)));
     }
-    spans.push(Span::styled("█".repeat(filled), lit));
-    spans.push(Span::styled("░".repeat(BAR - filled), Style::new().dim()));
-    spans.push(Span::styled(format!(" {percent:>3}%"), lit));
+    spans.extend([
+        Span::styled("█".repeat(filled), lit),
+        Span::styled("░".repeat(BAR - filled), Style::new().dim()),
+        Span::styled(format!(" {percent:>3}%"), lit),
+    ]);
     spans
 }
 
