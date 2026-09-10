@@ -235,11 +235,16 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
     spans
 }
 
-/// `██████░░░░  62%`, or dimmed `████░░░░░░  40% muted`. The Sonos app's own
-/// picture of mute: the slider stays where it was and dims, so the level the
-/// room will come back at is still readable, and the word says why nothing is
-/// heard. The level is the one the daemon publishes regardless of mute; the
-/// MPRIS volume alone would put the bar at zero.
+/// `██████░░░░  62%`, or `muted ████░░░░░░  40%` with the bar dimmed. The Sonos
+/// app's own picture of mute: the slider stays where it was and dims, so the
+/// level the room will come back at is still readable, and the word says why
+/// nothing is heard. The level is the one the daemon publishes regardless of
+/// mute; the MPRIS volume alone would put the bar at zero.
+///
+/// The word goes to the *left* of the bar, growing into the gap, so that the
+/// bar and the percentage keep their columns down the screen - this whole block
+/// is right-aligned, and a word on the end would push those two left on the one
+/// row that has it.
 fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     // No bar at all: the level is set on an amplifier this cannot see, and a
     // bar would be a control drawn where there is nothing to control.
@@ -253,14 +258,13 @@ fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     } else {
         Style::new()
     };
-    let mut spans = vec![
-        Span::styled("█".repeat(filled), lit),
-        Span::styled("░".repeat(BAR - filled), Style::new().dim()),
-        Span::styled(format!(" {percent:>3}%"), lit),
-    ];
+    let mut spans = Vec::with_capacity(4);
     if muted {
-        spans.push(Span::styled(" muted", Style::new().fg(Color::Yellow)));
+        spans.push(Span::styled("muted ", Style::new().fg(Color::Yellow)));
     }
+    spans.push(Span::styled("█".repeat(filled), lit));
+    spans.push(Span::styled("░".repeat(BAR - filled), Style::new().dim()));
+    spans.push(Span::styled(format!(" {percent:>3}%"), lit));
     spans
 }
 
@@ -563,17 +567,27 @@ mod tests {
         assert!(stale.contains("no answer for 10m"), "{stale}");
     }
 
-    /// Muted keeps the level in view and adds the word: a bar at zero would be
-    /// indistinguishable from turned down, and a bar with no number would hide
-    /// where the room comes back to.
+    /// Muted keeps the level in view and says so to the left of the bar, where
+    /// the word cannot push the bar and the percentage out of the columns they
+    /// share with every other row. A bar at zero would be indistinguishable
+    /// from turned down, and a bar with no number would hide where the room
+    /// comes back to.
     #[test]
-    fn a_muted_room_keeps_its_level_and_says_muted_beside_it() {
+    fn a_muted_room_says_so_before_its_bar_and_keeps_its_level() {
         let text: String = volume(0.4, true, false)
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert!(text.ends_with("  40% muted"), "{text:?}");
-        assert!(text.starts_with("████░░░░░░"), "{text:?}");
+        assert!(text.starts_with("muted ████░░░░░░"), "{text:?}");
+        assert!(text.ends_with("  40%"), "{text:?}");
+        // The bar and the number occupy the same columns as an unmuted room's,
+        // the word having grown leftward into the gap.
+        let plain: Vec<Span> = volume(0.4, false, false);
+        let muted: Vec<Span> = volume(0.4, true, false);
+        assert_eq!(
+            Line::from(plain).width() + Span::raw("muted ").width(),
+            Line::from(muted).width()
+        );
         let unmuted: String = volume(0.4, false, false)
             .iter()
             .map(|span| span.content.as_ref())
