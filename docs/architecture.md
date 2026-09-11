@@ -6415,6 +6415,84 @@ deliberately stays at DeviceLink + Plex, and the "ask anyway" comment already co
 code change that *did* follow from this was narrower and lived somewhere the module comment doesn't
 reach: `bookmarks::service_uri()`'s scheme lookup, above.
 
+## `bookmark` gets the same stream fallback `play_item` already had (2026-09-10)
+
+A gap fell out of live testing a Sonos Radio track dispatched from the official app: `keep` could
+capture it (a real, resolvable Deezer-backed object id - Sonos Radio's "Hit List" turned out to be
+Deezer content under a Sonos-branded wrapper, readable straight off the kept id:
+`sonos:…-DZR:28:…:dzrs.trk.4105889521:…`), but replaying it with `bookmark` always failed outright
+with a raw `UPnP 800`.
+
+The item is the same *shape* Radio Paradise's `program` containers already are - `queue_position:
+null`, `duration_ms: null`, nothing discrete for a queue position to point at - which is exactly the
+case `play_item` already has a rule for: "fall back to the session on any refusal, because a refusal
+is the player saying this is not queue material." `Command::Bookmark`, unlike `play_item`, never had
+that fallback; it called `AddURIToQueue` directly and gave up on any error.
+
+Fixed by splitting the enqueue-and-play sequence into `play_bookmark()` and wrapping it the same way
+`play_item` wraps `enqueue_item` - on failure, `stream_item()` with the bookmark's own service and a
+looked-up token. One deliberate asymmetry: `bookmark --next` (queue for later) does **not** get the
+fallback, because streaming starts playback immediately, which would silently break what `--next`
+promised. Verified against the Sonos Radio bookmark: the fallback now triggers and fails with a
+clear `needs_link` error (Sonos Radio's own `link` is separately broken, so it stays unplayable)
+instead of surfacing only the bare UPnP code - proof the wiring is right even though this one
+service still can't complete the chain.
+
+### AccuRadio's server is broken, not x2rock's request (2026-09-10)
+
+Also surfaced while sweeping more DeviceLink services: AccuRadio linked cleanly (search works per
+the link reply), but both `search` and `getMetadata` refuse with a raw Python `TypeError` -
+`sonosSearch() takes exactly 7 arguments (6 given)` and `getMetadata() takes exactly 6 arguments (5
+given)`. Worth stating plainly since it looks, at a glance, like x2rock sending a malformed request:
+it is not. `X2ROCK_DUMP_SMAPI` dumped against Spotify in the same session with the **identical**
+`search` body shape (`<id>…</id><term>…</term><index>…</index><count>…</count>`) was accepted fine -
+Spotify answered with an unrelated fault (a stale token, see below), not an argument-count error. The
+same envelope-building code (`call`, `envelope`) is shared by every service; an error this specific
+to one service's own handler, in a shape typical of a Python SOAP framework calling a handler with
+one more or fewer positional arguments than its own dispatcher passes, points at a mismatch inside
+AccuRadio's server between a handler signature and its own framework - not at anything in the
+request. Nothing to fix here; recorded so a future session does not re-litigate it.
+
+## A service can hand back a working token instead of just refusing (2026-09-11)
+
+Found chasing the AccuRadio comparison above: Spotify's session had gone stale, and its `search`
+fault wasn't a plain refusal -
+
+```
+faultcode: Client.TokenRefreshRequired
+faultstring: tokenRefreshRequired
+detail: <refreshAuthTokenResult><authToken>…</authToken><privateKey>…</privateKey>
+         <userInfo><userIdHashCode>…</userIdHashCode>…</userInfo></refreshAuthTokenResult>
+```
+
+- a full replacement token, the same shape `getDeviceAuthToken` returns on a fresh link, riding in
+the very fault that reported the old one dead. Before this, x2rock's `call()` (the one function
+`search`, `metadata` and `media_uri` all funnel through) treated every fault the same way: format
+the message, bail. That meant failing - or telling someone to re-link through the browser - for a
+problem the service had already handed the fix for.
+
+**Fixed with one retry, spent transparently.** `Fault` gained a `refresh: Option<RefreshedToken>`
+field (`refresh_in()`, keyed on the *presence* of `refreshAuthTokenResult` rather than the fault
+code or message text, both of which are undocumented and likely vary by service). `call()` now
+retries once with the refreshed token when a fault carries one, and only bails for real on either a
+refusal with nothing to retry or a retry that fails too. The new token comes back to the caller
+through an out-parameter (`&mut Option<RefreshedToken>`, threaded through `search`/`metadata`/
+`media_uri`) rather than a changed return shape, and `main.rs`'s three call sites persist it to
+`credentials.json` on success via a new `save_refreshed_token()` - best-effort and silent, since the
+refresh already did its job in memory for the call that triggered it either way. The original
+`linked` timestamp is kept: a refresh is not a new link event.
+
+**Verified live, not just in the test suite.** The real, actually-expired Spotify token from earlier
+in the session was still on disk. `X2ROCK_DUMP_SMAPI=1 x2rock search -s Spotify jazz` showed the
+whole sequence: first request → `TokenRefreshRequired` fault → retry with the new token → HTTP 200
+with real results, printed with **no error surfaced at all**. `credentials.json` then held the new
+`authToken` with the old `linked` value intact, and a second search afterward needed no further
+refresh - proof the persistence half works, not just the in-memory retry.
+
+Deliberately scoped narrow: this is a retry on one specific, self-identifying fault shape, not a
+general "retry anything" policy - the existing `NOT_LINKED_RETRY` / device-link-poll handling stays
+completely separate, and a fault with no `refreshAuthTokenResult` still bails exactly as before.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
