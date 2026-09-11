@@ -6371,6 +6371,40 @@ end, three ways, across three rooms:**
 All three played. Search, browse, link, and playback are now all confirmed working for Spotify, the
 first major-streaming service on this list to reach that state.
 
+### Sweeping Amazon Music and Pandora for the same bug (2026-09-10)
+
+The natural next question: does `bookmarks::service_uri()`'s hardcoded scheme bite any other
+service, the way it did Spotify? Checked directly rather than guessed at, and both came back
+negative - but for two different, instructive reasons.
+
+**Amazon Music: the bug is latent, not active.** `AddURIToQueue` for a real, non-station track
+(`catalog:track:asin:…`, browsed out of a Prime "station" container the way earlier testing
+did) still answers UPnP 800 - the household never registered this account (see "Amazon Music
+plays" above; its `match` failed the same way Spotify's first link attempt did, and unlike
+Spotify it has never been re-linked through the official app to fix that). So the enqueue path -
+the one `service_uri()` feeds - is never reached at all; every Amazon Music play still goes
+through the `getMediaURI` stream fallback, which works today for the reason already documented
+(a self-authorizing CloudFront URL). If this account is ever linked through the official app the
+way Spotify's was, `AddURIToQueue` might start succeeding under the same wrong generic scheme,
+and nobody yet knows what Amazon Music's real native scheme is - there is no officially-added
+queue item to read it off, the way Spotify's was found. Worth re-checking the moment that
+changes, not before.
+
+**Pandora: blocked one step earlier.** The user signed up for a real (free-tier) Pandora account
+mid-session and linked it through x2rock's own `getAppLink` flow. Search works and returns real
+results - but every one of them is a `type: program` station container (`SF:16722:125644` for the
+artist), which is Pandora's actual product shape for this search, not an artifact of the account
+tier the way Amazon Music's station-shaped browsing was suspected to be. Opening one goes further
+wrong: `getMetadata` refuses outright with **"Unsupported action for account type"** - the free
+tier cannot browse a station's content via SMAPI at all, so there is no track id to build an
+enqueue URI for in the first place. The scheme question is moot until a paid Pandora account is
+available to test with.
+
+**Pandora CloudCover** was started (`x2rock link "Pandora CloudCover"`) and abandoned - the user
+declined a second sign-up mid-session ("not doing CloudCover signup right now"). Left for a later
+session; see the `pandora-cloudcover-deferred` memory note in the assistant's memory store, which
+exists specifically so a future session asks before restarting it.
+
 ### What this changes in the module doc
 
 `sonos/smapi.rs`'s module comment currently reads app-link as "the tier that mostly stays out of
