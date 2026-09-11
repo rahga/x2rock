@@ -634,10 +634,15 @@ enum Command {
         #[arg(long)]
         install: bool,
     },
-    /// Internal completion helper for shell scripts.
+    /// Internal completion helper for shell scripts: the names in one list,
+    /// one per line, optionally only those starting with `prefix`
+    /// (case-insensitive). The filtering is here rather than in the shell
+    /// because bash's `compgen -W` re-parses its word list with shell quoting
+    /// rules and loses every entry after one with a parenthesis in it.
     #[command(name = "__complete", hide = true)]
     Complete {
         what: String,
+        prefix: Option<String>,
     },
 }
 
@@ -4454,8 +4459,11 @@ async fn run(cli: Cli) -> Result<()> {
                 return completions::generate(shell, &mut std::io::stdout());
             }
         }
-        Command::Complete { ref what } => {
-            return completions::complete(what, &mut std::io::stdout());
+        Command::Complete {
+            ref what,
+            ref prefix,
+        } => {
+            return completions::complete(what, prefix.as_deref(), &mut std::io::stdout());
         }
         Command::PlayItem {
             ref service,

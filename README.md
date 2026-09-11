@@ -271,14 +271,17 @@ automatically.
 
 ### Shell completions
 
-`x2rock completions` generates completion scripts for Bash, Zsh, Fish, Elvish, and PowerShell,
-enhanced with dynamic completion for `-r / --room` (resolving known rooms instantaneously from local state),
-bookmarks, and services:
+`x2rock completions` generates completion scripts for Bash, Zsh, Fish, Elvish, and PowerShell.
+For Bash, Zsh and Fish the scripts also complete `-r`/`--room` from the rooms remembered on this
+network, `-s`/`--service` from the cached catalogue, and the `bookmark` / `bookmarks remove` name
+from what was kept - all read from local state, so a `<Tab>` never waits on a speaker.
 
 ```sh
 x2rock completions bash --install    # → ~/.local/share/bash-completion/completions/x2rock
 x2rock completions fish --install    # → ~/.config/fish/completions/x2rock.fish
 x2rock completions zsh --install     # → ~/.local/share/zsh/site-functions/_x2rock
+# zsh does not look there by default; put this in .zshrc before compinit:
+#   fpath=(~/.local/share/zsh/site-functions $fpath)
 
 # Or print to stdout:
 source <(x2rock completions bash)
