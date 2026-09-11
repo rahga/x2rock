@@ -1854,6 +1854,38 @@ async fn enqueue_item(
     Ok(())
 }
 
+/// Put a bookmark in the room's queue and jump to it, using its own remembered
+/// URI and DIDL (account serial included) rather than rebuilding them.
+///
+/// Split out of `Command::Bookmark` so a refusal can fall back to streaming the
+/// same way a fresh search/browse hit does in [`play_item`] - a bookmarked
+/// Sonos Radio "program" answers `AddURIToQueue` with the identical UPnP 800 a
+/// live stream does, because it is not discrete queue material either, and
+/// until this existed `bookmark` had no way to notice and just gave up.
+async fn play_bookmark(
+    session: &session::Session,
+    room: Option<&str>,
+    bookmark: &bookmarks::Bookmark,
+    cdudn: &str,
+) -> Result<()> {
+    let target = session::target(&session.groups, room)?;
+    let upnp = Upnp::new(
+        target
+            .coordinator_ip
+            .unwrap_or_else(|| session.connection.ip()),
+    );
+    let length = upnp
+        .add_to_queue(&bookmark.uri(), &bookmark.didl(cdudn), false)
+        .await?;
+    if !upnp.playing_from_queue().await? {
+        upnp.use_queue(&target.coordinator_id).await?;
+    }
+    upnp.seek_track(length).await?;
+    let coordinator = session::coordinator(session, &target).await?;
+    coordinator.playback(&target.group_id, "play").await?;
+    Ok(())
+}
+
 /// Play a service item as a stream, alongside the queue rather than in it.
 async fn stream_item(
     session: &session::Session,
@@ -5057,7 +5089,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Bookmark { query, next } => {
             let list = bookmarks::Bookmarks::load()?;
-            let bookmark = list.find(&query)?;
+            let bookmark = list.find(&query)?.clone();
 
             // The cdudn names the account the player resolves the content with,
             // and it is derived from the service type list rather than copied
@@ -5078,7 +5110,8 @@ async fn run(cli: Cli) -> Result<()> {
                         bookmark.service_id,
                         bookmark.name
                     )
-                })?;
+                })?
+                .clone();
             let cdudn = service.cdudn().ok_or_else(|| {
                 anyhow!(
                     "{} has no service type in this player's list, so {:?} cannot name its account",
@@ -5087,20 +5120,41 @@ async fn run(cli: Cli) -> Result<()> {
                 )
             })?;
 
-            let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
-            let length = upnp
-                .add_to_queue(&bookmark.uri(), &bookmark.didl(&cdudn), next)
-                .await?;
-            if !next {
-                // Appended, so it is the last track. Make the queue the source
-                // first: after a station it is not, and Seek fails with 701.
-                if !upnp.playing_from_queue().await? {
-                    upnp.use_queue(&target.coordinator_id).await?;
+            if next {
+                // Queuing for later, not playing now - streaming would start it
+                // immediately and break what `--next` promised, so there is no
+                // fallback here: a refusal is just a refusal.
+                let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+                upnp.add_to_queue(&bookmark.uri(), &bookmark.didl(&cdudn), true)
+                    .await?;
+                println!("{:<24} {}", target.name, bookmark.name);
+            } else {
+                match play_bookmark(&session, room, &bookmark, &cdudn).await {
+                    Ok(()) => println!("{:<24} {}", target.name, bookmark.name),
+                    // The same rule `play_item` follows for a fresh search/browse
+                    // hit: a refusal means this is not queue material, most often
+                    // a Sonos Radio-style program with no discrete track to hold
+                    // a queue position, and the fix is the stream session, not a
+                    // retry.
+                    Err(e) => {
+                        eprintln!(
+                            "x2rock: {:?} would not go in the queue ({e:#}); streaming it",
+                            bookmark.name
+                        );
+                        let linked = credentials::Credentials::load()?;
+                        let token = linked.get(&service.id).map(|a| a.token());
+                        stream_item(
+                            &session,
+                            room,
+                            &service,
+                            token.as_ref(),
+                            &bookmark.object_id,
+                            &bookmark.name,
+                        )
+                        .await?;
+                    }
                 }
-                upnp.seek_track(length).await?;
-                player.playback(group, "play").await?;
             }
-            println!("{:<24} {}", target.name, bookmark.name);
         }
         Command::Favorite { query } => {
             let household = session.connection.household_id().await?;
