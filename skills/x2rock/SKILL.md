@@ -398,7 +398,8 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
   service with no queue support here (Amazon Music on a Prime account is the known one) is played as
   a direct stream: it **cannot be paused and resumed**, and its URL stops working after a while.
   When `play` hits that, x2rock **re-resolves a fresh URL from the item it remembered and plays it**
-  - so an ordinary `play` usually just works again, printing that it refreshed the stream. It falls
+  - so an ordinary `play` (one room, `--all`, or several `-r` alike) usually just works again,
+  printing that it refreshed the stream, and this time waiting to confirm it plays. It falls
   back to a `playback_failed` error only when there is nothing to resume: x2rock did not start the
   stream (so it has no item), or the room has since moved on to something else. The remedy for that
   error is not to retry `play` but to **load a fresh source**: `favorite`, `bookmark`, or a search.

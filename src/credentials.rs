@@ -171,6 +171,11 @@ impl Credentials {
         self.services.get(service_id)
     }
 
+    /// The token held for a service, if any - what every play path hands SMAPI.
+    pub fn token_for(&self, service_id: &str) -> Option<Token> {
+        self.get(service_id).map(Account::token)
+    }
+
     /// Record a completed link, keeping what the service did not send this time.
     ///
     /// Re-linking a service that is already linked is the repair path - a

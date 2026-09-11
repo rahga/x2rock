@@ -10,8 +10,10 @@
 //!
 //! A convenience cache, not user data: last-writer-wins with no lock, and a
 //! missing or unreadable file is simply "nothing remembered", the way the
-//! service catalogue treats its own. Keyed by the room (or group) display name
-//! the play resolved to, which both the write and the resume read the same way.
+//! service catalogue treats its own. Keyed by the **coordinator player's id**,
+//! which grouping and ungrouping leave alone - a group's display name
+//! ("Dining Room + 1") changes with its members, and a note keyed by that name
+//! went missing the moment a room was grouped into or out of it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::store;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 /// The item behind a direct stream: enough to ask the service for a fresh URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,9 +40,9 @@ pub struct Stream {
 pub struct Streams {
     #[serde(default)]
     schema: u32,
-    /// Room (or group) display name -> the last direct stream started there.
+    /// Coordinator player id -> the last direct stream started on its group.
     #[serde(default)]
-    rooms: BTreeMap<String, Stream>,
+    players: BTreeMap<String, Stream>,
 }
 
 fn path() -> Result<PathBuf> {
@@ -63,19 +65,20 @@ impl Streams {
             .unwrap_or_default()
     }
 
-    pub fn get(&self, room: &str) -> Option<&Stream> {
-        self.rooms.get(room)
+    pub fn get(&self, coordinator_id: &str) -> Option<&Stream> {
+        self.players.get(coordinator_id)
     }
 
-    /// Remember the stream now playing in `room`, replacing any before it.
-    pub fn remember(room: &str, stream: Stream) -> Result<()> {
-        Self::remember_at(&path()?, room, stream)
+    /// Remember the stream now playing on `coordinator_id`'s group, replacing
+    /// any before it.
+    pub fn remember(coordinator_id: &str, stream: Stream) -> Result<()> {
+        Self::remember_at(&path()?, coordinator_id, stream)
     }
 
-    fn remember_at(path: &Path, room: &str, stream: Stream) -> Result<()> {
+    fn remember_at(path: &Path, coordinator_id: &str, stream: Stream) -> Result<()> {
         let mut all = Self::load_at(path);
         all.schema = SCHEMA;
-        all.rooms.insert(room.to_string(), stream);
+        all.players.insert(coordinator_id.to_string(), stream);
         store::write_atomically(path, &serde_json::to_string_pretty(&all)?, store::PLAIN)
     }
 }
@@ -100,37 +103,43 @@ mod tests {
     }
 
     #[test]
-    fn a_remembered_stream_reads_back_by_room() {
+    fn a_remembered_stream_reads_back_by_coordinator() {
         let path = scratch("roundtrip");
-        Streams::remember_at(&path, "Media Room", stream("i1", "Bodies")).unwrap();
+        Streams::remember_at(&path, "RINCON_1", stream("i1", "Bodies")).unwrap();
         let back = Streams::load_at(&path);
-        assert_eq!(back.get("Media Room"), Some(&stream("i1", "Bodies")));
-        assert_eq!(back.get("Kitchen"), None);
+        assert_eq!(back.get("RINCON_1"), Some(&stream("i1", "Bodies")));
+        assert_eq!(back.get("RINCON_2"), None);
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn remembering_a_room_again_replaces_its_stream() {
+    fn remembering_a_player_again_replaces_its_stream() {
         let path = scratch("replace");
-        Streams::remember_at(&path, "Media Room", stream("i1", "Old")).unwrap();
-        Streams::remember_at(&path, "Media Room", stream("i2", "New")).unwrap();
-        // Another room is untouched by the replacement.
-        Streams::remember_at(&path, "Kitchen", stream("k1", "Kitchen thing")).unwrap();
+        Streams::remember_at(&path, "RINCON_1", stream("i1", "Old")).unwrap();
+        Streams::remember_at(&path, "RINCON_1", stream("i2", "New")).unwrap();
+        // Another player is untouched by the replacement.
+        Streams::remember_at(&path, "RINCON_2", stream("k1", "Kitchen thing")).unwrap();
         let back = Streams::load_at(&path);
-        assert_eq!(back.get("Media Room"), Some(&stream("i2", "New")));
-        assert_eq!(back.get("Kitchen"), Some(&stream("k1", "Kitchen thing")));
+        assert_eq!(back.get("RINCON_1"), Some(&stream("i2", "New")));
+        assert_eq!(back.get("RINCON_2"), Some(&stream("k1", "Kitchen thing")));
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn a_missing_or_stale_schema_file_is_empty_not_an_error() {
         let missing = scratch("missing").with_file_name("nothing.json");
-        assert!(Streams::load_at(&missing).rooms.is_empty());
+        assert!(Streams::load_at(&missing).players.is_empty());
 
+        // Schema 1 keyed by room display name, which grouping renamed from
+        // under it; discarded rather than read as a set of unknown players.
         let stale = scratch("stale");
-        std::fs::write(&stale, r#"{"schema":999,"rooms":{"Media Room":{"service_id":"201","item_id":"i","title":"t"}}}"#).unwrap();
+        std::fs::write(
+            &stale,
+            r#"{"schema":1,"rooms":{"Media Room":{"service_id":"201","item_id":"i","title":"t"}}}"#,
+        )
+        .unwrap();
         assert!(
-            Streams::load_at(&stale).rooms.is_empty(),
+            Streams::load_at(&stale).players.is_empty(),
             "a schema this build does not understand is discarded, like the catalogue"
         );
         std::fs::remove_file(&stale).ok();

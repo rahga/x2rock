@@ -521,6 +521,19 @@ pub struct MetadataStatus {
     pub stream_info: Option<String>,
 }
 
+impl MetadataStatus {
+    /// What the room is showing: the track's name, else the container's. The
+    /// one derivation, so `now`, the MPRIS title and anything else that says
+    /// "what is on" say the same thing.
+    pub fn title(&self) -> Option<&str> {
+        self.current_item
+            .as_ref()
+            .and_then(|i| i.track.as_ref())
+            .and_then(|t| t.name.as_deref())
+            .or_else(|| self.container.as_ref().and_then(|c| c.name.as_deref()))
+    }
+}
+
 /// How Sonos names a piece of a service's catalogue: what it is, which service
 /// it belongs to, and which of the household's accounts on that service.
 ///

@@ -905,9 +905,7 @@ fn parse_volume(text: &str) -> Result<VolumeChange> {
 
 fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
-    let title = track
-        .and_then(|t| t.name.as_deref())
-        .or_else(|| meta.container.as_ref().and_then(|c| c.name.as_deref()));
+    let title = meta.title();
     let artist = track
         .and_then(|t| t.artist.as_ref())
         .and_then(|a| a.name.as_deref());
@@ -1809,7 +1807,7 @@ async fn play_item(
             }
         }
     }
-    stream_item(session, room, service, token, id, title).await
+    stream_item(session, room, service, token, id, title, StreamStart::Fresh).await
 }
 
 /// Put a service item in the room's queue, and optionally jump to it.
@@ -1964,6 +1962,22 @@ fn use_refreshed_token(
     })
 }
 
+/// Whether a stream is starting fresh or replacing one whose URL expired.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamStart {
+    /// Started by a person or the bar widget. Says it is a direct stream, and
+    /// does not wait for PLAYING: this is the path the widget takes through
+    /// `play-item`, where ten seconds before the button responds would be a
+    /// worse bug than the rare silent failure - and the URL was resolved by the
+    /// service that owns the content, so that failure is rare.
+    Fresh,
+    /// `play` re-resolving a remembered stream. Waits for PLAYING, since a fresh
+    /// URL that is also dead must come back as a failure rather than a cheerful
+    /// "(starting)" - the whole point of confirming the play was to catch that
+    /// - and says nothing about direct streams, having just resumed one.
+    Resume,
+}
+
 /// Play a service item as a stream, alongside the queue rather than in it.
 async fn stream_item(
     session: &session::Session,
@@ -1972,6 +1986,7 @@ async fn stream_item(
     token: Option<&sonos::smapi::Token>,
     id: &str,
     title: &str,
+    how: StreamStart,
 ) -> Result<()> {
     let mut refreshed = None;
     let uri = sonos::smapi::media_uri(service, token, id, &mut refreshed).await?;
@@ -1987,25 +2002,25 @@ async fn stream_item(
     // result is unaffected; this is the fallback path (a service with no queue
     // support here, Amazon Music on a Prime account among them), not the queued
     // one, so it is not on every play.
-    eprintln!(
-        "x2rock: {title:?} is playing as a direct stream from {}; a direct stream cannot \
-         be paused and resumed, and its URL may stop working after a while.",
-        service.name
-    );
-    // **Deliberately does not wait**, unlike `play-url` and `stations`. This is
-    // the path the bar widget takes through `play-item`, where up to ten
-    // seconds before the button responds would be a worse bug than the one
-    // being fixed - and the URL here was resolved by the service that owns the
-    // content, so the silent failure is rare rather than routine. Revisit if
-    // that turns out to be wrong; the capability is one argument away.
-    let (room_name, started) =
-        stream_url(session, room, &uri, title, Some(service), Duration::ZERO).await?;
-    // Remembered by the room it played in, so `play` can re-resolve a fresh URL
-    // once this one expires - the player will hold only the dead URL by then,
-    // not the item that made it. Non-fatal: a stream that plays but is not
-    // remembered simply cannot be auto-resumed later.
+    if how == StreamStart::Fresh {
+        eprintln!(
+            "x2rock: {title:?} is playing as a direct stream from {}; a direct stream cannot \
+             be paused and resumed, and its URL may stop working after a while.",
+            service.name
+        );
+    }
+    let wait = match how {
+        StreamStart::Fresh => Duration::ZERO,
+        StreamStart::Resume => STREAM_START,
+    };
+    let target = session::target(&session.groups, room)?;
+    let (_, started) = stream_url(session, room, &uri, title, Some(service), wait).await?;
+    // Remembered against the group's coordinator, so `play` can re-resolve a
+    // fresh URL once this one expires - the player will hold only the dead URL
+    // by then, not the item that made it. Non-fatal: a stream that plays but is
+    // not remembered simply cannot be auto-resumed later.
     if let Err(e) = streams::Streams::remember(
-        &room_name,
+        &target.coordinator_id,
         streams::Stream {
             service_id: service.id.clone(),
             item_id: id.to_string(),
@@ -2014,7 +2029,7 @@ async fn stream_item(
     ) {
         eprintln!("x2rock: could not remember this stream for resume ({e:#})");
     }
-    report_started(&room_name, title, Some(&service.name), &started)
+    report_started(&target.name, title, Some(&service.name), &started)
 }
 
 /// How long to wait for a loaded stream to actually reach `PLAYING`.
@@ -2564,7 +2579,7 @@ async fn run_play_item(
     let linked = credentials::Credentials::load()?;
     let usable = catalogue.usable(&linked);
     let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
-    let token = linked.get(&chosen.id).map(|a| a.token());
+    let token = linked.token_for(&chosen.id);
     play_item(
         &session,
         room,
@@ -3040,7 +3055,7 @@ async fn run_browse(
     };
 
     let chosen = catalogue::Catalogue::find(&usable, query)?.clone();
-    let token = linked.get(&chosen.id).map(|a| a.token());
+    let token = linked.token_for(&chosen.id);
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
     let at = container.unwrap_or("root");
@@ -3278,7 +3293,7 @@ async fn run_search(
         return Ok(());
     };
 
-    let token = linked.get(&chosen.id).map(|a| a.token());
+    let token = linked.token_for(&chosen.id);
     let mut refreshed = None;
     let (items, total) = sonos::smapi::search(
         chosen,
@@ -4060,64 +4075,126 @@ fn stayed_idle(room: &str) -> anyhow::Error {
     .into()
 }
 
+/// Ask a room to play; if that fails on a dead source x2rock started as a direct
+/// stream, resume it from the remembered item. The one play path for a single
+/// room, `--all` and several `-r` alike, so what SKILL.md says of `play` holds
+/// wherever `play` is typed.
+async fn play_or_resume(
+    session: &session::Session,
+    player: &Connection,
+    target: &session::Target,
+) -> Result<()> {
+    let failed = match play_confirmed(player, &target.group_id, &target.name).await {
+        Ok(()) => return Ok(()),
+        Err(e) if hint::of(&e).0 == "playback_failed" => e,
+        Err(e) => return Err(e),
+    };
+    match try_resume_stream(session, player, target).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(failed),
+        // A resume that failed for a *named* reason - the fresh URL did not play
+        // either, an account needs relinking - is the sharper report, and its
+        // code is the one to act on. One that failed for no named reason must
+        // not bury the original: the code and remedy a caller branches on stay
+        // the play's, and the resume's failure joins the sentence.
+        Err(resume) => match hint::of(&resume).0 {
+            "unknown" => Err(hint::Hint::new(
+                format!("{failed:#} A resume was tried and failed too: {resume:#}"),
+                "playback_failed",
+                None,
+            )
+            .into()),
+            _ => Err(resume),
+        },
+    }
+}
+
 /// `play` failed on a room whose direct stream x2rock started: re-resolve a
 /// fresh URL from the remembered item and play that. `Ok(true)` when a stream
 /// was resumed, `Ok(false)` when there was nothing to resume - no remembered
 /// stream, the room has moved on, or the service is no longer known - which
 /// leaves the caller's original error to stand.
-///
-/// The guard is a title match. The player keeps an expired stream's metadata,
-/// so a remembered title that still equals what the room shows means the dead
-/// stream is what just failed; a title that differs means the room moved on and
-/// the note is stale, so resuming would start something the room is not on.
-async fn try_resume_stream(session: &session::Session, target: &session::Target) -> Result<bool> {
-    let Some(stream) = streams::Streams::load().get(&target.name).cloned() else {
+async fn try_resume_stream(
+    session: &session::Session,
+    player: &Connection,
+    target: &session::Target,
+) -> Result<bool> {
+    let Some(stream) = streams::Streams::load()
+        .get(&target.coordinator_id)
+        .cloned()
+    else {
         return Ok(false);
     };
-    let player = session::coordinator(session, target).await?;
+    // Refreshed, as every other by-id lookup does: a cleared or schema-bumped
+    // cache would otherwise make this give up until some `search` happened to
+    // rebuild it, and the failure would look like the URL's.
+    let mut catalogue = catalogue::Catalogue::load();
+    catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await?;
+    let Some(service) = catalogue.by_id(&stream.service_id).cloned() else {
+        return Ok(false);
+    };
     let meta = player.metadata(&target.group_id).await?;
-    let showing = meta
-        .current_item
-        .as_ref()
-        .and_then(|i| i.track.as_ref())
-        .and_then(|t| t.name.as_deref())
-        .or_else(|| meta.container.as_ref().and_then(|c| c.name.as_deref()));
-    if showing != Some(stream.title.as_str()) {
+    if !holds_stream(&meta, &stream, &service.name) {
         return Ok(false);
     }
 
     // The same fallback that started it - a refreshed URL plays exactly as the
     // first did. Addressed by the coordinator's own room name, since a group's
     // display name is a composite no player answers to.
-    let Some(service) = catalogue::Catalogue::load()
-        .services()
-        .iter()
-        .find(|s| s.id == stream.service_id)
-        .cloned()
-    else {
-        return Ok(false);
-    };
     let coord_room = session
         .groups
         .player(&target.coordinator_id)
-        .map(|p| p.name.as_str());
-    let token = credentials::Credentials::load()?
-        .get(&service.id)
-        .map(|a| a.token());
+        .map(|p| p.name.as_str())
+        .ok_or_else(|| anyhow!("no player for {}", target.name))?;
+    let token = credentials::Credentials::load()?.token_for(&service.id);
     eprintln!(
         "x2rock: {:?} was a direct stream whose URL expired; fetching a fresh one.",
         stream.title
     );
     stream_item(
         session,
-        coord_room,
+        Some(coord_room),
         &service,
         token.as_ref(),
         &stream.item_id,
         &stream.title,
+        StreamStart::Resume,
     )
     .await?;
     Ok(true)
+}
+
+/// Whether the room still holds the remembered stream, read off its metadata.
+///
+/// The container is what echoes the `stationMetadata` a direct stream was
+/// loaded with - its name is the title x2rock gave, its service the one named -
+/// while `currentItem.track` is the stream's *own* now-playing, the song a
+/// station is on, which changes under the same stream (an iHeartRadio station
+/// remembered as "The BIG 98" shows "Springsteen" there). So the container is
+/// what is compared, and the track only when there is no container to read.
+/// The player keeps an expired stream's metadata, so a match means the dead
+/// stream is what just failed; a mismatch means the room moved on and the note
+/// is stale, and resuming would start something the room is not on.
+fn holds_stream(meta: &MetadataStatus, stream: &streams::Stream, service_name: &str) -> bool {
+    let title = Some(stream.title.as_str());
+    match meta.container.as_ref() {
+        Some(c) => {
+            c.name.as_deref() == title
+                && c.service
+                    .as_ref()
+                    .and_then(|s| s.name.as_deref())
+                    .is_none_or(|name| name == service_name)
+        }
+        None => {
+            meta.current_item
+                .as_ref()
+                .and_then(|i| i.track.as_ref())
+                .and_then(|t| t.name.as_deref())
+                == title
+        }
+    }
 }
 
 /// Fan a per-room command across several `--room`, topology resolved once. Only
@@ -4146,6 +4223,13 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
             PerRoom::Crossfade { mode, json } => {
                 apply_crossfade(session, &target, mode.clone(), json).await
             }
+            // `play` alone confirms and resumes; the other verbs have nothing
+            // to confirm against, and `pause` on an idle room is a no-op that
+            // must not spend the failure budget.
+            PerRoom::Transport("play") => match session::coordinator(session, &target).await {
+                Ok(player) => play_or_resume(session, &player, &target).await,
+                Err(e) => Err(e),
+            },
             PerRoom::Transport(verb) => apply_transport(session, &target, verb).await,
         };
         // Name the room the batch stopped on: a fan-out that halts silently on
@@ -5309,20 +5393,7 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", now_line(&status, &meta));
             }
         }
-        Command::Play { track: None } => match play_confirmed(&player, group, &target.name).await {
-            Ok(()) => {}
-            // A play that failed on a dead source: if x2rock started that source
-            // as a direct stream, re-resolve a fresh URL from the item it
-            // remembered rather than handing back the failure. Only that code,
-            // and only when there is something to resume - otherwise the
-            // original error stands.
-            Err(e) if hint::of(&e).0 == "playback_failed" => {
-                if !try_resume_stream(&session, &target).await? {
-                    return Err(e);
-                }
-            }
-            Err(e) => return Err(e),
-        },
+        Command::Play { track: None } => play_or_resume(&session, &player, &target).await?,
         Command::Play { track: Some(n) } => {
             ensure!(n >= 1, "queue tracks are numbered from 1");
             // The queue lives on the coordinator and only UPnP can address it by
@@ -5437,8 +5508,7 @@ async fn run(cli: Cli) -> Result<()> {
                             "x2rock: {:?} would not go in the queue ({e:#}); streaming it",
                             bookmark.name
                         );
-                        let linked = credentials::Credentials::load()?;
-                        let token = linked.get(&service.id).map(|a| a.token());
+                        let token = credentials::Credentials::load()?.token_for(&service.id);
                         stream_item(
                             &session,
                             room,
@@ -5446,6 +5516,7 @@ async fn run(cli: Cli) -> Result<()> {
                             token.as_ref(),
                             &bookmark.object_id,
                             &bookmark.name,
+                            StreamStart::Fresh,
                         )
                         .await?;
                     }
@@ -5967,6 +6038,41 @@ mod tests {
         assert!(cli.all);
         assert_eq!(matches.value_source("room"), Some(ValueSource::CommandLine));
         assert_eq!(cli.room, ["Kitchen"]);
+    }
+
+    #[test]
+    fn a_room_holds_the_remembered_stream_by_its_container_not_its_song() {
+        let stream = streams::Stream {
+            service_id: "6".into(),
+            item_id: "live_stations.2157".into(),
+            title: "The BIG 98".into(),
+        };
+        let meta =
+            |json: serde_json::Value| -> MetadataStatus { serde_json::from_value(json).unwrap() };
+        // The capture in architecture.md: the station in the container, the
+        // song it is on in currentItem. It is the station that was remembered.
+        let station = meta(json!({
+            "container": {"name": "The BIG 98", "service": {"name": "iHeartRadio"}},
+            "currentItem": {"track": {"name": "Springsteen", "artist": {"name": "Eric Church"}}}
+        }));
+        assert!(holds_stream(&station, &stream, "iHeartRadio"));
+        // A different station on the same service: the room moved on.
+        let other = meta(json!({
+            "container": {"name": "Some Other Station", "service": {"name": "iHeartRadio"}}
+        }));
+        assert!(!holds_stream(&other, &stream, "iHeartRadio"));
+        // Same title, different service: not the same stream.
+        let elsewhere = meta(json!({
+            "container": {"name": "The BIG 98", "service": {"name": "TuneIn (New)"}}
+        }));
+        assert!(!holds_stream(&elsewhere, &stream, "iHeartRadio"));
+        // No service named on the container is not a mismatch.
+        let unnamed = meta(json!({"container": {"name": "The BIG 98"}}));
+        assert!(holds_stream(&unnamed, &stream, "iHeartRadio"));
+        // With no container at all, the track name is the only thing to read.
+        let bare = meta(json!({"currentItem": {"track": {"name": "The BIG 98"}}}));
+        assert!(holds_stream(&bare, &stream, "iHeartRadio"));
+        assert!(!holds_stream(&meta(json!({})), &stream, "iHeartRadio"));
     }
 
     #[test]

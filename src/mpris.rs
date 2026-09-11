@@ -623,9 +623,7 @@ impl RoomPlayer {
 fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
-    let title = track
-        .and_then(|t| t.name.as_deref())
-        .or_else(|| container.and_then(|c| c.name.as_deref()));
+    let title = meta.title();
     let artist = track
         .and_then(|t| t.artist.as_ref())
         .and_then(|a| a.name.as_deref());

@@ -125,13 +125,15 @@ impl Catalogue {
         &self.services
     }
 
+    /// A service by its id.
+    pub fn by_id(&self, service_id: &str) -> Option<&Service> {
+        self.services.iter().find(|s| s.id == service_id)
+    }
+
     /// A service's display name by its id, for filling in what the player leaves
     /// blank: now-playing metadata carries the sid but not always the name.
     pub fn name_of(&self, service_id: &str) -> Option<&str> {
-        self.services
-            .iter()
-            .find(|s| s.id == service_id)
-            .map(|s| s.name.as_str())
+        self.by_id(service_id).map(|s| s.name.as_str())
     }
 
     /// The services this machine can talk to at all: the anonymous ones, plus
