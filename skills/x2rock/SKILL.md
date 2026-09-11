@@ -393,6 +393,13 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
     never answered (find out why before anything else), or it answered every poll without naming a
     state (the room is reachable - just re-check with `x2rock now`). (Distinct from a plain
     `no_player`, which means no speaker answered *before* anything was loaded.)
+- **`play` (resume) now confirms too, and reports `playback_failed`.** A room can hold a source that
+  has gone stale - most often a **direct stream** whose signed URL has expired. A service with no
+  queue support here (Amazon Music on a Prime account is the known one) is played as a direct
+  stream: it **cannot be paused and resumed**, and its URL stops working after a while, at which
+  point `play` returns `playback_failed` and the room is idle. The fix is not to retry `play` - the
+  source is gone - but to **load a fresh one**: `favorite`, `bookmark`, or a search. Starting such a
+  stream prints a one-line warning on stderr that it is a direct stream, for the same reason.
 
   With `--json`, both commands emit `{room, title, url, started}` on success (`started` is
   `"playing"` or `"starting"`) and the standard `{error, code, fix}` on either failure. A good
@@ -508,6 +515,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
 | `stream_unverified` | the stream was loaded but the room's state could not be established for 10s — unknown, and *not* a verdict on the stream | **null** (the message says whether the room answered; act on that, do *not* try another stream) |
+| `playback_failed` | `play` reached the room but it did not start — the player raised a playback error (often an expired direct-stream URL) or sat idle with nothing loaded | null (load a fresh source: `favorite`, `bookmark`, or a search) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |

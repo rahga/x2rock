@@ -527,7 +527,11 @@ mod tests {
         // docs/architecture.md.
         let b = Bookmark::from_id(
             "So What",
-            &id("spotify:track:7q3kkfAVpmcZ8g6JUThi3o", Some("12"), Some("sn_22")),
+            &id(
+                "spotify:track:7q3kkfAVpmcZ8g6JUThi3o",
+                Some("12"),
+                Some("sn_22"),
+            ),
         )
         .unwrap();
         assert_eq!(

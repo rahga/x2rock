@@ -1397,7 +1397,9 @@ mod tests {
             </SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>"#;
         let fault = fault_in(body).expect("a fault, refreshable or not, is still a fault");
         assert_eq!(fault.message, "tokenRefreshRequired");
-        let refresh = fault.refresh.expect("this fault carries a replacement token");
+        let refresh = fault
+            .refresh
+            .expect("this fault carries a replacement token");
         assert_eq!(refresh.auth_token, "new-tok");
         assert_eq!(refresh.private_key, "new-key");
         assert_eq!(refresh.user_id_hash_code.as_deref(), Some("hash-1"));
