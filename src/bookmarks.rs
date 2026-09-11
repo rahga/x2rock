@@ -157,6 +157,28 @@ impl Bookmark {
     }
 }
 
+/// Spotify's own service id in the catalogue, per `services.json`.
+const SPOTIFY_SERVICE_ID: &str = "12";
+
+/// The URI scheme a service's own object ids need to be wrapped in.
+///
+/// `x-sonosapi-hls-static` is what the player writes for a service it reaches
+/// over an HLS-backed stream - verified against YouTube Music and Mixcloud,
+/// which both enqueue and play under it regardless of their own native
+/// `flags` value (see [`Bookmark::uri`]'s doc). It is **not universal**:
+/// Spotify's own queue items, read directly off a track the official Sonos
+/// app enqueued, carry `x-sonos-spotify` instead. Enqueuing a Spotify id under
+/// the generic scheme is accepted - `AddURIToQueue` succeeds, the row shows
+/// correct metadata - but is never actually playable: `Seek` answers UPnP 711
+/// against a queue that visibly holds the item. See "A Spotify track added to
+/// the queue cannot be seeked to or played" in docs/architecture.md.
+fn native_scheme(service_id: &str) -> &'static str {
+    match service_id {
+        SPOTIFY_SERVICE_ID => "x-sonos-spotify",
+        _ => "x-sonosapi-hls-static",
+    }
+}
+
 /// The playback URI for a service item, for callers that have no [`Bookmark`].
 ///
 /// `account` is the `sn=` serial, and it is **optional because the player does
@@ -169,8 +191,9 @@ pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> 
         .filter(|a| !a.is_empty())
         .map(|a| format!("&sn={a}"))
         .unwrap_or_default();
+    let scheme = native_scheme(service_id);
     format!(
-        "x-sonosapi-hls-static:{}?sid={service_id}&flags=65544{sn}",
+        "{scheme}:{}?sid={service_id}&flags=65544{sn}",
         encode_object_id(object_id)
     )
 }
@@ -481,6 +504,38 @@ mod tests {
         assert_eq!(
             b.uri(),
             "x-sonosapi-hls-static:ALkSOiGTPQu2?sid=284&flags=65544&sn=3"
+        );
+    }
+
+    #[test]
+    fn spotify_gets_its_own_scheme_not_the_generic_hls_one() {
+        // Read directly off a queue item the official Sonos app built
+        // (2026-09-10): `x-sonos-spotify:spotify:track:<id>?sid=12&flags=8232
+        // &sn=22`, not `x-sonosapi-hls-static`. Enqueuing under the generic
+        // scheme was accepted by AddURIToQueue but never actually playable -
+        // UPnP 711 on Seek against a queue that visibly held the item. See "A
+        // Spotify track added to the queue cannot be seeked to or played" in
+        // docs/architecture.md.
+        let b = Bookmark::from_id(
+            "So What",
+            &id("spotify:track:7q3kkfAVpmcZ8g6JUThi3o", Some("12"), Some("sn_22")),
+        )
+        .unwrap();
+        assert_eq!(
+            b.uri(),
+            "x-sonos-spotify:spotify%3atrack%3a7q3kkfAVpmcZ8g6JUThi3o?sid=12&flags=65544&sn=22"
+        );
+
+        // The no-bookmark path (a fresh search/browse hit) must agree.
+        assert_eq!(
+            service_uri("spotify:track:abc", "12", None),
+            "x-sonos-spotify:spotify%3atrack%3aabc?sid=12&flags=65544"
+        );
+
+        // Every other service keeps the scheme that has always worked.
+        assert_eq!(
+            service_uri("cloudcast:1", "181", None),
+            "x-sonosapi-hls-static:cloudcast%3a1?sid=181&flags=65544"
         );
     }
 

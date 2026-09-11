@@ -17,13 +17,39 @@
 //! are the device-link flow, driven by the controller, with the browser step
 //! handed to whatever browser the person already uses.
 //!
-//! `AppLink` is the tier that mostly stays out of reach. It expects the Sonos
-//! app to launch the service's own mobile app, and there is no desktop app to
-//! hand off to - but `getAppLink` nests the same browser link a device link
-//! uses, so `x2rock link` asks anyway and lets the service answer. Some never
-//! will: YouTube Music gates the endpoint on an API key before user auth is
-//! even reached, and Plex's SMAPI link half is dead - Plex links through its
-//! own published PIN flow instead, in [`super::plex`].
+//! `AppLink` is designed to expect the Sonos app to launch the service's own
+//! mobile app, and there is no desktop app to hand off to - but `getAppLink`
+//! nests the same browser link a device link uses, so `x2rock link` asks
+//! anyway and lets the service answer. A full sweep (2026-09-10) found most of
+//! what gets *tried* answers with a real browser page: TuneIn, Radio Paradise,
+//! Amazon Music, Pandora, Pandora CloudCover and Spotify all do. YouTube
+//! Music, Apple Music and SoundCloud refuse outright - YouTube Music gates the
+//! endpoint on an API key before user auth is even reached - and Plex's SMAPI
+//! link half is dead, linking instead through its own published PIN flow, in
+//! [`super::plex`].
+//!
+//! **Linking is not playing, for a service with no household account yet.** A
+//! service that answers `getAppLink` still needs `musicServiceAccounts:1
+//! match` to register the account on the household, and `match` normally
+//! cannot be called successfully by a third-party controller at all - it
+//! wants a `userIdHashCode` only the service's own SMAPI server can compute.
+//! An `x2rock link` against a service the household has never linked answers
+//! `match`-less, and playback then comes down entirely to what `getMediaURI`
+//! answers with: a real, self-authorizing stream URL plays with no
+//! registration (Amazon Music, verified on hardware); a native pointer that
+//! needs a trusted account to resolve does not on its own (Spotify's
+//! `x-spotify://spotify:track:…`, which the stream fallback refuses outright
+//! as an unsupported scheme).
+//!
+//! **But that native-pointer case is not a dead end, once the household has
+//! any account for the service at all - from any client.** Verified against
+//! Spotify: once the official Sonos app had linked a real account, an
+//! `x2rock link Spotify` immediately after *did* register successfully
+//! (`match` returned a real account id), and search/browse/playback all work
+//! in full from there - playback via [`crate::bookmarks::service_uri`], which
+//! builds the enqueue URI in the scheme the player itself expects rather than
+//! asking `getMediaURI` for anything directly playable. See "The real fix:
+//! the enqueue URI itself was wrong" in docs/architecture.md.
 
 use std::time::Duration;
 

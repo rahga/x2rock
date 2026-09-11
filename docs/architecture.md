@@ -6220,6 +6220,167 @@ above printed `Media Room — BBC Somali Radio` and produced silence. The skill 
 agent to confirm with `x2rock now` and try the next result rather than trusting the play command's
 output, which is the honest instruction and the only one available.
 
+## Sweeping the AppLink tier: three outcomes, not two (2026-09-10)
+
+The taxonomy after TuneIn (New) and Radio Paradise expected app-link services to sort into "403s
+like YouTube Music" or "answers like TuneIn". A full sweep of the household's `AppLink` services —
+`x2rock link <name>` against Apple Music (204), Amazon Music (201), SoundCloud (160), Pandora
+(236), Pandora CloudCover (296), plus Spotify (12) and a re-check of YouTube Music (284) — found a
+**third** outcome, and it is the one that matters most:
+
+| Service | `getAppLink` | Playback |
+|---|---|---|
+| YouTube Music | 403, sealed key | — |
+| Apple Music | refused (`There was an error processing your request`) | — |
+| SoundCloud | refused (`Client.NOT_AUTHORIZED`) | — |
+| Amazon Music, Pandora, Pandora CloudCover | real browser page | Amazon Music verified playable (below) |
+| Spotify | real browser page | **links and searches, cannot play** (below) |
+
+Amazon Music and Spotify were both linked for real (browser login completed, not just the code
+probed). Both landed in the same place `Radio Paradise` did: `musicServiceAccounts:1 match` fails
+with `ERROR_COMMAND_FAILED (no reason given)`, so the household never learns about either account.
+Per "`musicServiceAccounts match` is for service providers, not controllers" above, this was never
+going to succeed — `match` needs a `userIdHashCode` only a service's own SMAPI server can compute,
+and neither service handed one back to `getDeviceAuthToken` (also consistent with TuneIn and Radio
+Paradise, above).
+
+### Amazon Music plays. Spotify does not. Same failure, different `getMediaURI`.
+
+Both fail the same first path: `AddURIToQueue` → UPnP error 800, no registered credential to
+substitute — identical to Radio Paradise's `program` item. The fallback (the stream path
+`play-url`/`stations` already use, `playbackSession:1 createSession` + `loadStreamUrl`) is where
+they diverge, and the divergence is entirely in what `getMediaURI` hands back:
+
+- **Amazon Music** returns a real, presigned CloudFront `.m3u8` URL
+  (`https://…cloudfront.net/api/manifest.m3u8?...&Signature=...&Key-Pair-Id=...`) — the credential
+  is baked into the URL itself, so `loadStreamUrl` plays it with no account registration needed at
+  all. Verified end to end on a real room (Kitchen): position advanced 1308ms → 4742ms over 3
+  seconds, a real stream, not a stuck `PLAYING`.
+- **Spotify** returns `x-spotify://spotify:track:<id>` — not a stream URL, a pointer only a
+  Spotify-Connect-aware player can resolve, and only for an account it already trusts.
+  `loadStreamUrl` refuses it outright: `ERROR_INVALID_PARAMETER (streamUrl has unsupported
+  scheme)`. There is no fallback left once this one is exhausted — this *is* the fallback.
+
+So "does app-link work" is not a per-service yes/no; it is a per-service question of what
+`getMediaURI` is willing to answer with. A service whose content already lives behind a
+self-authorizing URL (Amazon Music, and presumably most of the legacy/radio-shaped catalogue) plays
+end to end with no Sonos account at all. A service whose content requires the player to already
+know the account (Spotify, and by construction anything using the same native-URI-scheme pattern)
+needs that registration first — **but, unlike this paragraph originally concluded, it is not a dead
+end once the registration exists.** See "The real fix: the enqueue URI itself was wrong" below —
+`getMediaURI`'s `x-spotify://` answer was never going to be playable directly, but that turned out
+to be beside the point, because x2rock never plays a `getMediaURI` answer for a queueable track in
+the first place; it builds its own enqueue URI, and *that* URI was wrong in a fixable way.
+
+### Why the fallback can never be extended to reach it
+
+The natural next question — build out `createSession`/`loadStreamUrl` further, or reach for
+`loadCloudQueue` — was asked and closed on the spot. Both are already fully built
+(`stream_url()` in `src/main.rs`, shared by `play-url`, `stations --play`, and `notify`) and were
+exercised against this exact Spotify track today with the exact failure above; there was nothing
+left to build. `loadCloudQueue` is a **permanent no** per "`loadCloudQueue` is a permanent no, not a
+backlog item" above — it is scoped to registered Sonos content integrations, which x2rock is not
+and will not become. This reasoning still stands for the `getMediaURI`/stream-fallback path
+specifically, and a Spotify Connect client is still the only route to a `getMediaURI` URL playing
+directly. It does not, however, bear on the enqueue path at all, which is where the real fix landed
+— seed the queue, in one of the schemes the player already understands, rather than asking the
+service to hand over a directly-playable URL.
+
+### What this leaves working today
+
+- **Spotify**: `x2rock link Spotify`, `search -s Spotify`, `browse -s Spotify` all work fully —
+  real `spotify:album:…`/`spotify:track:…` ids, deterministic tracklists (stable across repeated
+  `getMetadata` calls, unlike Amazon Music below). **Playback now works too** — see "The real fix"
+  below; this bullet originally said it did not, and stayed wrong for the rest of the session.
+- **Amazon Music**: link, search, browse, and playback all work, verified on real hardware. One
+  catalogue-shape caveat worth knowing before building anything on top of it: the `getMetadata`
+  container id an album search hit carries (`sp:container:station:catalog:album:asin:…`) is a
+  *station*, not the album's tracklist — three repeated calls against the same album id returned
+  three different single tracks (`Freddie Freeloader`, `Take Five` — not even on the same album,
+  `Flamenco Sketches`), not a stable list of five. This account is a Prime membership rather than
+  Amazon Music Unlimited, which likely explains both the station-shaped browsing and the failed
+  `match` — worth re-testing against an Unlimited account before concluding the shape is universal.
+- **The DeviceLink tier not previously linked** (AccuRadio, Bandcamp, Mixcloud, Murfie,
+  NhacCuaTui, TIDAL, Tribe of Noise, FIT Radio) all answered `getDeviceLinkCode` with a real
+  code/URL (`--no-open`, not completed). Sonos Backgrounds and Classical Archives refused outright;
+  Deezer repeated its already-documented empty-body answer; Sonos Radio repeated its already-
+  documented SOAP 1.2 `TypeError` fault; Saavn returned a code but then answered
+  `getDeviceAuthToken` with an immediate HTTP 500 rather than a pending fault — worth a slower,
+  deliberate re-test rather than trusting one aggressive poll.
+
+### Even the household's own registration doesn't fix it
+
+The obvious next move was tried the same session: the user linked Spotify for real through the
+**official Sonos app**, giving the household a legitimate registration this time (the thing x2rock's
+own `getAppLink` route can never produce, since `match` is provider-only). That changed the failure
+mode, but did not fix it.
+
+With x2rock's own token still present, `AddURIToQueue` for a Spotify track **succeeded** for the
+first time — `queue --json` showed the item with real metadata (album, artist, `duration_ms`) —
+whereas it had always been UPnP 800 before. But playing it failed differently: `Seek` answered UPnP
+711 ("no such track in the queue") against a queue that visibly held exactly one item at that index,
+and a bare `play` answered `ERROR_PLAYBACK_NO_CONTENT`.
+
+To separate "x2rock's own token is interfering" from "Spotify itself is the problem," x2rock's
+Spotify token was removed entirely (`x2rock unlink Spotify`) and the test redone through the
+*household*-only path that already works for other services: play a Spotify track from the official
+app, `x2rock keep`, then `x2rock bookmark` it into a different room. **Same failure** — UPnP 711,
+zero position, `state: IDLE` — with no x2rock credential anywhere in the chain. A same-session
+control test with the identical code path against a YouTube Music track (`keep` on Guest TV,
+`bookmark` into Living Room) played correctly, position advancing normally, proving the queue/seek
+machinery itself is not broken and the room is not at fault — Kitchen had already played Amazon
+Music cleanly earlier in the same session.
+
+So the finding was narrower and more surprising than "x2rock's Spotify token can't play things": **a
+Spotify track added to the Sonos queue was not seekable/playable through this queue+seek mechanism at
+all, regardless of which account added it or whether it's the household's own legitimate
+registration.** That ruled out the token and the account — which turned attention to the one thing
+neither test had varied: the URI x2rock itself builds when it enqueues a track.
+
+### The real fix: the enqueue URI itself was wrong
+
+`bookmarks::service_uri()` (`src/bookmarks.rs`) builds the playback URI x2rock hands to
+`AddURIToQueue` for *every* linked service, and it hardcoded one scheme:
+`x-sonosapi-hls-static:<id>?sid=<n>&flags=65544&sn=<serial>`. That is genuinely what the player
+writes for YouTube Music and Mixcloud — verified against real queue items for both — which is
+exactly why it had never been questioned. It is not what the player writes for Spotify.
+
+The officially-added Kitchen queue item (from "Even the household's own registration doesn't fix
+it", above) carried its own answer the whole time, sitting unread in its `art_url`'s `u=` query
+parameter: `x-sonos-spotify:spotify%3atrack%3a…?sid=12&flags=8232&sn=22`. A different scheme
+entirely — `x-sonos-spotify`, not `x-sonosapi-hls-static`. x2rock's generic URI was accepted by
+`AddURIToQueue` (which explains the correct-looking metadata: the DIDL title/artist came from
+x2rock's own `didl()`, built independently of the URI) but described a resource the player could
+never actually resolve, which is exactly the shape of "looks queued, answers 711 on Seek."
+
+The fix (2026-09-10) is a two-line scheme lookup: `native_scheme(service_id)` returns
+`"x-sonos-spotify"` for Spotify's service id and the existing `"x-sonosapi-hls-static"` for
+everything else, and `service_uri()` uses it instead of the hardcoded string. **Verified end to
+end, three ways, across three rooms:**
+
+1. **`keep`/`bookmark` replay**, the exact reproduction from above — track playing via the official
+   app in Kitchen, `keep`, `bookmark` into Dining Room. Played correctly this time: position
+   advanced 1082ms → 5570ms over 4 real seconds.
+2. **A fresh direct play**, the case that never touched a bookmark — re-linked x2rock's own Spotify
+   token (which this time registered cleanly as `sn_22`, unlike the first link attempt), searched
+   for an album the household had never played, browsed into it, and played a track straight into
+   Living Room. Position advanced 613ms → 5007ms over 4 real seconds.
+3. **The original failing case**, replayed: Kitchen, `browse -s Spotify … --play`, the same call
+   that produced UPnP 711 before the fix.
+
+All three played. Search, browse, link, and playback are now all confirmed working for Spotify, the
+first major-streaming service on this list to reach that state.
+
+### What this changes in the module doc
+
+`sonos/smapi.rs`'s module comment currently reads app-link as "the tier that mostly stays out of
+reach". After TuneIn, Radio Paradise, Amazon Music and Spotify, that is no longer the right
+summary — most of what has actually been *tried* answers with a real browser page, and Spotify now
+plays in full. `link`'s own no-args listing still gets this right as far as it goes (`linkable()`
+deliberately stays at DeviceLink + Plex, and the "ask anyway" comment already covers app-link) — the
+code change that *did* follow from this was narrower and lived somewhere the module comment doesn't
+reach: `bookmarks::service_uri()`'s scheme lookup, above.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
@@ -6306,6 +6467,15 @@ output, which is the honest instruction and the only one available.
   same bookmark played as `sn_16`'s successor `sn_20` after a remove-and-re-add of the same
   YouTube Premium subscription. Provenance at most. See "Re-added the same day: `sn_20`, and the
   bookmark resurrected".
+
+- ~~A Spotify track added to the queue cannot be seeked to or played, even under the household's
+  own legitimate registration~~ — **closed 2026-09-10: `bookmarks::service_uri()` was enqueuing
+  every service under one hardcoded URI scheme, `x-sonosapi-hls-static`, which is genuinely what
+  the player writes for YouTube Music and Mixcloud but not for Spotify, whose real scheme
+  (`x-sonos-spotify`) was sitting unread in an officially-added queue item's own `art_url` the whole
+  time. Fixed with a two-line per-service scheme lookup and verified three ways across three rooms —
+  `keep`/`bookmark` replay, a fresh direct search-and-play, and the original failing case rerun.
+  See "The real fix: the enqueue URI itself was wrong" above.
 
 - ~~Should x2rock present Sonos's API key to unlock YouTube Music search?~~ — **closed
   2026-09-01: the question dissolved, like the bookmark-serial one before it.** There is no key in

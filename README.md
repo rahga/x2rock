@@ -512,7 +512,9 @@ can drive — see below. The remaining sixty-two link through the service's own 
 code — but that tier is not uniformly closed, because the hand-off is the controller's business
 and not every service insists on it. `x2rock link` will ask any of them for a browser page and let
 the service answer; **Plex** is linked through its own PIN flow and then searched and browsed like
-anything else. For one that never answers, x2rock says so plainly rather than half-working:
+anything else, and **Spotify** links, searches, browses and plays in full through the generic
+`getAppLink` flow — the first major streaming service on this list to work completely. For one that
+never answers, x2rock says so plainly rather than half-working:
 
 ```
 $ x2rock search -s "YouTube Music" jazz
@@ -619,11 +621,12 @@ copy; revoking it properly is done from that service's own account page.
 
 ## Keeping things you cannot search for
 
-Most app-link services stay unsearchable — YouTube Music, Spotify and Apple Music among them
-(Plex used to be on this list, and is not any more; see "Linking an account"). But *replaying*
-something needs no credential at all: the id is enough, and the player resolves the account it
-already holds. Discovery and repetition are separate problems, and this closes the second one for
-every service, linked or not:
+Most app-link services stay unsearchable — YouTube Music and Apple Music among them (Plex used to
+be on this list, and is not any more; see "Linking an account"). **Spotify is the other exception**:
+`x2rock link Spotify` unlocks full search, browse and playback, with real, stable results. For the
+services that stay unsearchable, *replaying* something needs no credential at all: the id is enough,
+and the player resolves the account it already holds. Discovery and repetition are separate
+problems, and this closes the second one for every service, linked or not:
 
 ```sh
 x2rock keep                  # remember what is playing
