@@ -23,6 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::fmt;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
@@ -168,6 +169,33 @@ pub struct Connection {
     inner: Arc<Inner>,
 }
 
+/// A command the player refused: its `errorCode` and `reason`, as the reply
+/// carried them. Kept typed rather than flattened into the sentence, so the
+/// one caller that acts on a *particular* refusal - `play` on a source the
+/// room cannot play, `ERROR_PLAYBACK_FAILED` - can tell it from a lost socket
+/// without matching text. Displays exactly as the sentence always read.
+#[derive(Debug)]
+pub struct ApiError {
+    /// `namespace command`, e.g. `playback:1 play`.
+    pub what: String,
+    pub code: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} failed: {} ({})",
+            self.what,
+            self.code.as_deref().unwrap_or("unknown error"),
+            self.reason.as_deref().unwrap_or("no reason given")
+        )
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 impl Connection {
     pub async fn open(ip: IpAddr) -> Result<Self> {
         let mut request = format!("wss://{ip}:{PORT}/websocket/api").into_client_request()?;
@@ -267,6 +295,8 @@ impl Connection {
     ///
     /// `command` carries the namespace, command name and target
     /// (`groupId` / `playerId` / `householdId`); `options` is the command's parameters.
+    /// A refusal is an [`ApiError`], so a caller that needs to know *which*
+    /// refusal can downcast rather than read the sentence.
     pub async fn call(&self, command: Value, options: Value) -> Result<Value> {
         let what = format!(
             "{} {}",
@@ -278,11 +308,12 @@ impl Connection {
             return Ok(body);
         }
         let err: ErrorBody = serde_json::from_value(body).unwrap_or_default();
-        bail!(
-            "{what} failed: {} ({})",
-            err.error_code.as_deref().unwrap_or("unknown error"),
-            err.reason.as_deref().unwrap_or("no reason given")
-        )
+        Err(ApiError {
+            what,
+            code: err.error_code,
+            reason: err.reason,
+        }
+        .into())
     }
 
     /// The household this player belongs to.

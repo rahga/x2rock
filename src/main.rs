@@ -3996,7 +3996,17 @@ async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<
     // and the stream loader both follow.
     player.subscribe_group("playback:1", group).await?;
     let mut events = player.events();
-    player.playback(group, "play").await?;
+    // A dead source fails in one of two shapes: the player takes the play and
+    // raises a `playbackError` a beat later (an expired Amazon URL did), or it
+    // refuses the play outright with the same code (a URL that never loaded
+    // does). Both are "the room cannot play what it holds", and both must read
+    // as `playback_failed`, since that is what the resume waits for.
+    if let Err(e) = player.playback(group, "play").await {
+        return Err(match refused_play(&e) {
+            Some(error) => playback_failed(room, &error),
+            None => e,
+        });
+    }
 
     // A play on an already-playing room raises no transition event to wait for,
     // and an instant resume has often already landed by now: one status read
@@ -4039,6 +4049,19 @@ async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<
         Some("IDLE") | Some("STOPPED") | None => Err(stayed_idle(room)),
         _ => Ok(()),
     }
+}
+
+/// A `play` the player refused because it cannot play what it holds, read off
+/// the typed refusal; `None` for any other failure (a lost socket, a stale
+/// group id), which is not about the source and must not be treated as one.
+fn refused_play(e: &anyhow::Error) -> Option<sonos::proto::PlaybackError> {
+    let api = e.downcast_ref::<sonos::local::ApiError>()?;
+    (api.code.as_deref() == Some("ERROR_PLAYBACK_FAILED")).then(|| sonos::proto::PlaybackError {
+        error_code: api.code.clone(),
+        reason: api.reason.clone(),
+        track_name: None,
+        service_name: None,
+    })
 }
 
 /// The player raised a `playbackError` on a play: an expired stream URL, or a
@@ -6038,6 +6061,40 @@ mod tests {
         assert!(cli.all);
         assert_eq!(matches.value_source("room"), Some(ValueSource::CommandLine));
         assert_eq!(cli.room, ["Kitchen"]);
+    }
+
+    #[test]
+    fn a_refused_play_is_a_playback_failure_and_a_lost_socket_is_not() {
+        let refused: anyhow::Error = sonos::local::ApiError {
+            what: "playback:1 play".into(),
+            code: Some("ERROR_PLAYBACK_FAILED".into()),
+            reason: None,
+        }
+        .into();
+        // The forced live test: a URL that never loaded, refused at the command.
+        let error = refused_play(&refused).expect("a playback refusal");
+        assert_eq!(error.error_code.as_deref(), Some("ERROR_PLAYBACK_FAILED"));
+        assert_eq!(
+            hint::of(&playback_failed("Media Room", &error)).0,
+            "playback_failed"
+        );
+        // Context wrapped around it still downcasts - anyhow reaches through.
+        let wrapped = refused.context("on room \"Media Room\"");
+        assert!(refused_play(&wrapped).is_some());
+        // Other refusals, and plain failures, are not about the source.
+        let other: anyhow::Error = sonos::local::ApiError {
+            what: "playback:1 play".into(),
+            code: Some("ERROR_INVALID_OBJECT_ID".into()),
+            reason: Some("Incorrect groupId".into()),
+        }
+        .into();
+        assert!(refused_play(&other).is_none());
+        assert!(refused_play(&anyhow!("connection to player was lost")).is_none());
+        // The sentence reads exactly as the flattened one always did.
+        assert_eq!(
+            other.to_string(),
+            "playback:1 play failed: ERROR_INVALID_OBJECT_ID (Incorrect groupId)"
+        );
     }
 
     #[test]
