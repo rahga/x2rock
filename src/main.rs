@@ -1889,27 +1889,78 @@ async fn play_bookmark(
 /// Persist a token a service handed back inside a `tokenRefreshRequired`
 /// fault, so the next command does not pay for the same refresh again.
 ///
-/// Best-effort and silent: the refreshed token already did its job for this
-/// call, in memory, whether or not it reaches disk, and a link that predates
-/// this feature (or was somehow removed mid-command) is nothing to report -
-/// there is no account left to attach the refresh to.
-fn save_refreshed_token(service_id: &str, refreshed: sonos::smapi::RefreshedToken) {
-    let Ok(mut creds) = credentials::Credentials::load() else {
-        return;
-    };
+/// Takes an already-loaded store rather than loading its own - every caller
+/// either already has one in scope from resolving the account in the first
+/// place, or is about to load one fresh for this alone, and hiding a second
+/// load inside this function was paying for the same file twice in the one
+/// command this feature exists to make cheaper.
+///
+/// A blank `private_key` is not trusted the way [`sonos::smapi::parse_device_auth`]
+/// trusts one on a fresh link (there, an honest empty key is the fair test of
+/// whether the service meant it). Here it would silently overwrite a key that
+/// has been working, for a service that may simply not have sent one this
+/// time - so the existing key is kept instead when the refresh's is empty.
+///
+/// Best-effort and silent otherwise: the refreshed token already did its job
+/// for this call, in memory, whether or not it reaches disk, and a link that
+/// predates this feature (or was somehow removed mid-command) is nothing to
+/// report - there is no account left to attach the refresh to.
+fn save_refreshed_token(
+    creds: &mut credentials::Credentials,
+    service_id: &str,
+    refreshed: sonos::smapi::RefreshedToken,
+) {
     let Some(existing) = creds.get(service_id).cloned() else {
         return;
+    };
+    let private_key = if refreshed.private_key.is_empty() {
+        existing.private_key.clone()
+    } else {
+        refreshed.private_key
     };
     creds.remember(
         service_id,
         credentials::Account {
             auth_token: refreshed.auth_token,
-            private_key: refreshed.private_key,
+            private_key,
             user_id_hash_code: refreshed.user_id_hash_code,
             ..existing
         },
     );
     let _ = creds.save();
+}
+
+/// The token to use for whatever comes right after a call that may have
+/// refreshed it - the refreshed one, persisted along the way, or the original
+/// unchanged. Without this, a `browse`/`search --play` that had to refresh
+/// mid-call handed the very next call (`play_item`) the token that call had
+/// just proven stale.
+///
+/// Loads its own store: callers of this one are past the point of having a
+/// `Credentials` already open for another reason, so there is nothing to
+/// avoid reloading. `save_refreshed_token` is the one that matters for reuse.
+fn use_refreshed_token(
+    service_id: &str,
+    token: Option<sonos::smapi::Token>,
+    refreshed: Option<sonos::smapi::RefreshedToken>,
+) -> Option<sonos::smapi::Token> {
+    let Some(new_token) = refreshed else {
+        return token;
+    };
+    let key = if new_token.private_key.is_empty() {
+        token.as_ref().map(|t| t.key.clone()).unwrap_or_default()
+    } else {
+        new_token.private_key.clone()
+    };
+    let household = token.and_then(|t| t.household);
+    if let Ok(mut creds) = credentials::Credentials::load() {
+        save_refreshed_token(&mut creds, service_id, new_token.clone());
+    }
+    Some(sonos::smapi::Token {
+        token: new_token.auth_token,
+        key,
+        household,
+    })
 }
 
 /// Play a service item as a stream, alongside the queue rather than in it.
@@ -1924,7 +1975,9 @@ async fn stream_item(
     let mut refreshed = None;
     let uri = sonos::smapi::media_uri(service, token, id, &mut refreshed).await?;
     if let Some(new_token) = refreshed {
-        save_refreshed_token(&service.id, new_token);
+        if let Ok(mut creds) = credentials::Credentials::load() {
+            save_refreshed_token(&mut creds, &service.id, new_token);
+        }
     }
     // **Deliberately does not wait**, unlike `play-url` and `stations`. This is
     // the path the bar widget takes through `play-item`, where up to ten
@@ -2967,9 +3020,9 @@ async fn run_browse(
     let mut refreshed = None;
     let (items, total) =
         sonos::smapi::metadata(&chosen, token.as_ref(), at, 0, count, &mut refreshed).await?;
-    if let Some(new_token) = refreshed {
-        save_refreshed_token(&chosen.id, new_token);
-    }
+    // Feeds whatever comes next, below - not just persisted for later. A
+    // token that just proved stale must not be handed straight to `play_item`.
+    let token = use_refreshed_token(&chosen.id, token, refreshed);
 
     if let Some(nth) = play {
         let item = items
@@ -3210,9 +3263,9 @@ async fn run_search(
         &mut refreshed,
     )
     .await?;
-    if let Some(new_token) = refreshed {
-        save_refreshed_token(&chosen.id, new_token);
-    }
+    // Feeds whatever comes next, below - not just persisted for later. A
+    // token that just proved stale must not be handed straight to `play_item`.
+    let token = use_refreshed_token(&chosen.id, token, refreshed);
 
     if let Some(nth) = play {
         let item = items

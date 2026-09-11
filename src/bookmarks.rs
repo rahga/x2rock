@@ -186,6 +186,15 @@ fn native_scheme(service_id: &str) -> &'static str {
 /// there. Verified against Mixcloud, where the real serial, a wrong one and no
 /// `sn=` at all were each accepted and each played. It is still sent when known,
 /// since that is what the player writes for itself.
+///
+/// `flags=65544` is carried into every scheme, [`native_scheme`] included,
+/// rather than varied per service - not just assumed to travel, but
+/// independently verified for Spotify specifically, whose own officially-built
+/// URIs carry `flags=8232` instead (see the scheme's own doc comment): several
+/// different `spotify:track:…` ids played correctly this way, across three
+/// rooms, in the same session the scheme itself was fixed in. Not proof for
+/// every future service this constant might reach, only that it is not a
+/// coincidence limited to the two it was first checked against.
 pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
     let sn = account
         .filter(|a| !a.is_empty())

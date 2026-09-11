@@ -955,9 +955,13 @@ async fn call(
             *refreshed = Some(new);
             Ok(body)
         }
+        // Both messages, not just the retry's - the first is what actually
+        // explains why a refresh was tried at all, and losing it would make
+        // this strictly less informative than the plain refusal above.
         Err(retry_fault) => bail!(
-            "{} refused {action} even after refreshing its token: {}",
+            "{} refused {action} even after refreshing its token ({}): {}",
             service.name,
+            fault.message,
             retry_fault.message
         ),
     }
