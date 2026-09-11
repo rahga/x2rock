@@ -12,6 +12,7 @@ mod sonos;
 mod state;
 mod stations;
 mod store;
+mod streams;
 mod tui;
 
 use std::net::IpAddr;
@@ -1999,6 +2000,20 @@ async fn stream_item(
     // that turns out to be wrong; the capability is one argument away.
     let (room_name, started) =
         stream_url(session, room, &uri, title, Some(service), Duration::ZERO).await?;
+    // Remembered by the room it played in, so `play` can re-resolve a fresh URL
+    // once this one expires - the player will hold only the dead URL by then,
+    // not the item that made it. Non-fatal: a stream that plays but is not
+    // remembered simply cannot be auto-resumed later.
+    if let Err(e) = streams::Streams::remember(
+        &room_name,
+        streams::Stream {
+            service_id: service.id.clone(),
+            item_id: id.to_string(),
+            title: title.to_string(),
+        },
+    ) {
+        eprintln!("x2rock: could not remember this stream for resume ({e:#})");
+    }
     report_started(&room_name, title, Some(&service.name), &started)
 }
 
@@ -4045,6 +4060,66 @@ fn stayed_idle(room: &str) -> anyhow::Error {
     .into()
 }
 
+/// `play` failed on a room whose direct stream x2rock started: re-resolve a
+/// fresh URL from the remembered item and play that. `Ok(true)` when a stream
+/// was resumed, `Ok(false)` when there was nothing to resume - no remembered
+/// stream, the room has moved on, or the service is no longer known - which
+/// leaves the caller's original error to stand.
+///
+/// The guard is a title match. The player keeps an expired stream's metadata,
+/// so a remembered title that still equals what the room shows means the dead
+/// stream is what just failed; a title that differs means the room moved on and
+/// the note is stale, so resuming would start something the room is not on.
+async fn try_resume_stream(session: &session::Session, target: &session::Target) -> Result<bool> {
+    let Some(stream) = streams::Streams::load().get(&target.name).cloned() else {
+        return Ok(false);
+    };
+    let player = session::coordinator(session, target).await?;
+    let meta = player.metadata(&target.group_id).await?;
+    let showing = meta
+        .current_item
+        .as_ref()
+        .and_then(|i| i.track.as_ref())
+        .and_then(|t| t.name.as_deref())
+        .or_else(|| meta.container.as_ref().and_then(|c| c.name.as_deref()));
+    if showing != Some(stream.title.as_str()) {
+        return Ok(false);
+    }
+
+    // The same fallback that started it - a refreshed URL plays exactly as the
+    // first did. Addressed by the coordinator's own room name, since a group's
+    // display name is a composite no player answers to.
+    let Some(service) = catalogue::Catalogue::load()
+        .services()
+        .iter()
+        .find(|s| s.id == stream.service_id)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let coord_room = session
+        .groups
+        .player(&target.coordinator_id)
+        .map(|p| p.name.as_str());
+    let token = credentials::Credentials::load()?
+        .get(&service.id)
+        .map(|a| a.token());
+    eprintln!(
+        "x2rock: {:?} was a direct stream whose URL expired; fetching a fresh one.",
+        stream.title
+    );
+    stream_item(
+        session,
+        coord_room,
+        &service,
+        token.as_ref(),
+        &stream.item_id,
+        &stream.title,
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Fan a per-room command across several `--room`, topology resolved once. Only
 /// the per-room-state commands accept it; anything else is refused with a clear
 /// message rather than silently acting on the first room. A failure on one room
@@ -5234,7 +5309,20 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", now_line(&status, &meta));
             }
         }
-        Command::Play { track: None } => play_confirmed(&player, group, &target.name).await?,
+        Command::Play { track: None } => match play_confirmed(&player, group, &target.name).await {
+            Ok(()) => {}
+            // A play that failed on a dead source: if x2rock started that source
+            // as a direct stream, re-resolve a fresh URL from the item it
+            // remembered rather than handing back the failure. Only that code,
+            // and only when there is something to resume - otherwise the
+            // original error stands.
+            Err(e) if hint::of(&e).0 == "playback_failed" => {
+                if !try_resume_stream(&session, &target).await? {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        },
         Command::Play { track: Some(n) } => {
             ensure!(n >= 1, "queue tracks are numbered from 1");
             // The queue lives on the coordinator and only UPnP can address it by

@@ -393,13 +393,16 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
     never answered (find out why before anything else), or it answered every poll without naming a
     state (the room is reachable - just re-check with `x2rock now`). (Distinct from a plain
     `no_player`, which means no speaker answered *before* anything was loaded.)
-- **`play` (resume) now confirms too, and reports `playback_failed`.** A room can hold a source that
-  has gone stale - most often a **direct stream** whose signed URL has expired. A service with no
-  queue support here (Amazon Music on a Prime account is the known one) is played as a direct
-  stream: it **cannot be paused and resumed**, and its URL stops working after a while, at which
-  point `play` returns `playback_failed` and the room is idle. The fix is not to retry `play` - the
-  source is gone - but to **load a fresh one**: `favorite`, `bookmark`, or a search. Starting such a
-  stream prints a one-line warning on stderr that it is a direct stream, for the same reason.
+- **`play` (resume) confirms the room started, and self-heals an expired stream.** A room can hold a
+  source that has gone stale - most often a **direct stream** whose signed URL has expired. A
+  service with no queue support here (Amazon Music on a Prime account is the known one) is played as
+  a direct stream: it **cannot be paused and resumed**, and its URL stops working after a while.
+  When `play` hits that, x2rock **re-resolves a fresh URL from the item it remembered and plays it**
+  - so an ordinary `play` usually just works again, printing that it refreshed the stream. It falls
+  back to a `playback_failed` error only when there is nothing to resume: x2rock did not start the
+  stream (so it has no item), or the room has since moved on to something else. The remedy for that
+  error is not to retry `play` but to **load a fresh source**: `favorite`, `bookmark`, or a search.
+  Starting such a stream also prints a one-line warning on stderr that it is a direct stream.
 
   With `--json`, both commands emit `{room, title, url, started}` on success (`started` is
   `"playing"` or `"starting"`) and the standard `{error, code, fix}` on either failure. A good
