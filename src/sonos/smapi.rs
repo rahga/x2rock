@@ -124,6 +124,19 @@ pub struct DeviceAuth {
     pub user_id_hash_code: Option<String>,
 }
 
+/// A working replacement for a token that just expired, offered inside a
+/// `tokenRefreshRequired` fault rather than making the caller go through the
+/// browser again. Verified against Spotify (2026-09-11): the fault detail
+/// carries a full `refreshAuthTokenResult` - `authToken`, `privateKey` and a
+/// `userInfo/userIdHashCode` - the same shape `getDeviceAuthToken` returns on
+/// a fresh link, just arriving through a different door.
+#[derive(Debug, Clone)]
+pub struct RefreshedToken {
+    pub auth_token: String,
+    pub private_key: String,
+    pub user_id_hash_code: Option<String>,
+}
+
 /// A SOAP fault, which during a device link is not necessarily a failure.
 #[derive(Debug, Clone)]
 pub struct Fault {
@@ -133,6 +146,10 @@ pub struct Fault {
     pub message: String,
     /// `<SonosError>` from the fault detail. 5 means "not linked yet".
     pub sonos_error: Option<u32>,
+    /// A `refreshAuthTokenResult` riding in the fault detail, present rather
+    /// than absent being the signal - not the fault code or message, which
+    /// vary (`Client.TokenRefreshRequired` here, undocumented elsewhere).
+    pub refresh: Option<RefreshedToken>,
 }
 
 impl Fault {
@@ -397,6 +414,12 @@ pub async fn categories(service: &Service) -> Result<Vec<Category>> {
 }
 
 /// `search`, returning the hits and the total the service claims.
+///
+/// `refreshed` is an out-parameter: `None` in, and still `None` out unless the
+/// token this call was given had expired and the service handed back a
+/// working replacement inside the fault - see [`call`]. Callers that get
+/// `Some` back should persist it; searching again with the same stale token
+/// would only pay for the same refresh over.
 pub async fn search(
     service: &Service,
     token: Option<&Token>,
@@ -404,6 +427,7 @@ pub async fn search(
     term: &str,
     index: u32,
     count: u32,
+    refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
     let body = call(
         service,
@@ -414,6 +438,7 @@ pub async fn search(
             escape(category),
             escape(term)
         ),
+        refreshed,
     )
     .await?;
     parse_items(&body, "search")
@@ -430,6 +455,7 @@ pub async fn metadata(
     id: &str,
     index: u32,
     count: u32,
+    refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
     let body = call(
         service,
@@ -439,6 +465,7 @@ pub async fn metadata(
             "<id>{}</id><index>{index}</index><count>{count}</count>",
             escape(id)
         ),
+        refreshed,
     )
     .await?;
     parse_items(&body, "getMetadata")
@@ -503,12 +530,18 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
 }
 
 /// `getMediaURI`, turning a search hit into something a player can be handed.
-pub async fn media_uri(service: &Service, token: Option<&Token>, id: &str) -> Result<String> {
+pub async fn media_uri(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<String> {
     let body = call(
         service,
         token,
         "getMediaURI",
         &format!("<id>{}</id>", escape(id)),
+        refreshed,
     )
     .await?;
     let doc = Document::parse(&body).context("parsing getMediaURI response")?;
@@ -760,6 +793,7 @@ async fn call_soap(
             code: String::new(),
             message: format!("answered HTTP {status} with an empty body"),
             sonos_error: None,
+            refresh: None,
         }));
     }
     if let Some(fault) = fault_in(&text) {
@@ -836,6 +870,30 @@ fn fault_in(text: &str) -> Option<Fault> {
             .or_else(soap12_reason)
             .unwrap_or_else(|| "a fault with no message".to_string()),
         sonos_error: field("SonosError").and_then(|v| v.trim().parse().ok()),
+        refresh: refresh_in(&doc),
+    })
+}
+
+/// A `refreshAuthTokenResult` inside a fault's `detail`, if this fault carries
+/// one. Verified against Spotify (2026-09-11): a `tokenRefreshRequired` fault
+/// answers the expired call with a full replacement token rather than just
+/// refusing, and this is the whole point of noticing - a call that hits it can
+/// retry once instead of sending the person through the browser again.
+fn refresh_in(doc: &Document) -> Option<RefreshedToken> {
+    let result = doc
+        .descendants()
+        .find(|n| n.has_tag_name("refreshAuthTokenResult"))?;
+    let field = |tag: &str| {
+        result
+            .descendants()
+            .find(|n| n.has_tag_name(tag))
+            .and_then(|n| n.text())
+            .map(str::to_string)
+    };
+    Some(RefreshedToken {
+        auth_token: field("authToken")?,
+        private_key: field("privateKey").unwrap_or_default(),
+        user_id_hash_code: field("userIdHashCode"),
     })
 }
 
@@ -855,6 +913,7 @@ fn parse_fault(text: &str, status: u16) -> Fault {
         },
         message: format!("HTTP {status}"),
         sonos_error: None,
+        refresh: None,
     })
 }
 
@@ -862,18 +921,45 @@ fn parse_fault(text: &str, status: u16) -> Fault {
 ///
 /// A service that needs an account is refused here rather than sent and
 /// rejected, and the error names the command that would fix it.
+///
+/// **A `tokenRefreshRequired` fault gets one retry, transparently.** The
+/// service handed back a working replacement token in the same reply that
+/// refused the call - there is nothing to ask the person for, so asking them
+/// (or just failing) would be making them pay for a problem the service
+/// already solved. `refreshed` carries the new token out to the caller, which
+/// owns persisting it; this function only spends it once, on the retry.
 async fn call(
     service: &Service,
     token: Option<&Token>,
     action: &str,
     params: &str,
+    refreshed: &mut Option<RefreshedToken>,
 ) -> Result<String> {
     if service.auth != Auth::Anonymous && token.is_none() {
         return Err(service.needs_link_hint().into());
     }
-    match call_soap(service, token, action, params).await? {
-        Ok(body) => Ok(body),
-        Err(fault) => bail!("{} refused {action}: {}", service.name, fault.message),
+    let fault = match call_soap(service, token, action, params).await? {
+        Ok(body) => return Ok(body),
+        Err(fault) => fault,
+    };
+    let Some(new) = fault.refresh else {
+        bail!("{} refused {action}: {}", service.name, fault.message);
+    };
+    let retry_token = Token {
+        token: new.auth_token.clone(),
+        key: new.private_key.clone(),
+        household: token.and_then(|t| t.household.clone()),
+    };
+    match call_soap(service, Some(&retry_token), action, params).await? {
+        Ok(body) => {
+            *refreshed = Some(new);
+            Ok(body)
+        }
+        Err(retry_fault) => bail!(
+            "{} refused {action} even after refreshing its token: {}",
+            service.name,
+            retry_fault.message
+        ),
     }
 }
 
@@ -1049,7 +1135,7 @@ mod tests {
 
         // A device-link service with no token is refused with the command that
         // fixes it, not with "cannot be searched".
-        let err = search(&services[2], None, "all", "jazz", 0, 5)
+        let err = search(&services[2], None, "all", "jazz", 0, 5, &mut None)
             .await
             .unwrap_err()
             .to_string();
@@ -1058,7 +1144,7 @@ mod tests {
         // An app-link service is refused with the same suggestion, hedged:
         // `x2rock link` now asks such a service for a browser page, and whether
         // one comes back is the service's answer to give.
-        let err = search(&services[1], None, "all", "jazz", 0, 5)
+        let err = search(&services[1], None, "all", "jazz", 0, 5, &mut None)
             .await
             .unwrap_err()
             .to_string();
@@ -1284,6 +1370,44 @@ mod tests {
         // be checked before the parser is asked.
         assert!(fault_in("").is_none());
         assert!(fault_in("   \n ").is_none());
+    }
+
+    #[test]
+    fn a_token_refresh_fault_carries_a_working_replacement() {
+        // Shape verbatim from Spotify, 2026-09-11 (values replaced - this file
+        // never carries a real secret): a `tokenRefreshRequired` fault answers
+        // the expired call with a full replacement token rather than just
+        // refusing it.
+        let body = r#"<?xml version="1.0" encoding="utf-8" ?>
+            <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">
+            <SOAP-ENV:Body><SOAP-ENV:Fault>
+            <faultcode xmlns:ns0="SOAP-ENV">ns0:Client.TokenRefreshRequired</faultcode>
+            <faultstring xml:lang="en">tokenRefreshRequired</faultstring>
+            <detail><refreshAuthTokenResult xmlns:ns2="http://www.sonos.com/Services/1.1">
+            <ns2:authToken>new-tok</ns2:authToken>
+            <ns2:privateKey>new-key</ns2:privateKey>
+            <ns2:userInfo><ns2:userIdHashCode>hash-1</ns2:userIdHashCode>
+            <ns2:accountTier>paidPremium</ns2:accountTier>
+            <ns2:nickname>Someone</ns2:nickname></ns2:userInfo>
+            </refreshAuthTokenResult></detail>
+            </SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>"#;
+        let fault = fault_in(body).expect("a fault, refreshable or not, is still a fault");
+        assert_eq!(fault.message, "tokenRefreshRequired");
+        let refresh = fault.refresh.expect("this fault carries a replacement token");
+        assert_eq!(refresh.auth_token, "new-tok");
+        assert_eq!(refresh.private_key, "new-key");
+        assert_eq!(refresh.user_id_hash_code.as_deref(), Some("hash-1"));
+    }
+
+    #[test]
+    fn a_fault_with_no_refresh_result_carries_none() {
+        // The ordinary case - almost every fault this module reads has no
+        // `refreshAuthTokenResult` at all, and that must not be mistaken for a
+        // parse failure.
+        let refused = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>
+            <s:Fault><faultcode>s:Client.LOGIN_INVALID</faultcode>
+            <faultstring>Invalid credentials</faultstring></s:Fault></s:Body></s:Envelope>"#;
+        assert!(fault_in(refused).unwrap().refresh.is_none());
     }
 
     #[test]

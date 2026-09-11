@@ -1886,6 +1886,32 @@ async fn play_bookmark(
     Ok(())
 }
 
+/// Persist a token a service handed back inside a `tokenRefreshRequired`
+/// fault, so the next command does not pay for the same refresh again.
+///
+/// Best-effort and silent: the refreshed token already did its job for this
+/// call, in memory, whether or not it reaches disk, and a link that predates
+/// this feature (or was somehow removed mid-command) is nothing to report -
+/// there is no account left to attach the refresh to.
+fn save_refreshed_token(service_id: &str, refreshed: sonos::smapi::RefreshedToken) {
+    let Ok(mut creds) = credentials::Credentials::load() else {
+        return;
+    };
+    let Some(existing) = creds.get(service_id).cloned() else {
+        return;
+    };
+    creds.remember(
+        service_id,
+        credentials::Account {
+            auth_token: refreshed.auth_token,
+            private_key: refreshed.private_key,
+            user_id_hash_code: refreshed.user_id_hash_code,
+            ..existing
+        },
+    );
+    let _ = creds.save();
+}
+
 /// Play a service item as a stream, alongside the queue rather than in it.
 async fn stream_item(
     session: &session::Session,
@@ -1895,7 +1921,11 @@ async fn stream_item(
     id: &str,
     title: &str,
 ) -> Result<()> {
-    let uri = sonos::smapi::media_uri(service, token, id).await?;
+    let mut refreshed = None;
+    let uri = sonos::smapi::media_uri(service, token, id, &mut refreshed).await?;
+    if let Some(new_token) = refreshed {
+        save_refreshed_token(&service.id, new_token);
+    }
     // **Deliberately does not wait**, unlike `play-url` and `stations`. This is
     // the path the bar widget takes through `play-item`, where up to ten
     // seconds before the button responds would be a worse bug than the one
@@ -2934,7 +2964,12 @@ async fn run_browse(
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
     let at = container.unwrap_or("root");
-    let (items, total) = sonos::smapi::metadata(&chosen, token.as_ref(), at, 0, count).await?;
+    let mut refreshed = None;
+    let (items, total) =
+        sonos::smapi::metadata(&chosen, token.as_ref(), at, 0, count, &mut refreshed).await?;
+    if let Some(new_token) = refreshed {
+        save_refreshed_token(&chosen.id, new_token);
+    }
 
     if let Some(nth) = play {
         let item = items
@@ -3164,8 +3199,20 @@ async fn run_search(
     };
 
     let token = linked.get(&chosen.id).map(|a| a.token());
-    let (items, total) =
-        sonos::smapi::search(chosen, token.as_ref(), &picked.mapped_id, term, 0, count).await?;
+    let mut refreshed = None;
+    let (items, total) = sonos::smapi::search(
+        chosen,
+        token.as_ref(),
+        &picked.mapped_id,
+        term,
+        0,
+        count,
+        &mut refreshed,
+    )
+    .await?;
+    if let Some(new_token) = refreshed {
+        save_refreshed_token(&chosen.id, new_token);
+    }
 
     if let Some(nth) = play {
         let item = items
