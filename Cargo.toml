@@ -10,6 +10,9 @@ repository = "https://github.com/rahga/x2rock"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+# Maintained by clap's authors; shares clap_lex with clap itself, so adding it
+# pulls no new transitives into the tree.
+clap_complete = "4.6.9"
 # Already in the tree under ratatui; named here only for `event-stream`, which
 # ratatui does not pass through. That feature is what lets the TUI wait on the
 # keyboard and on the daemon's D-Bus signals in one `select!` - the alternative

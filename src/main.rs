@@ -1,5 +1,6 @@
 mod bookmarks;
 mod catalogue;
+mod completions;
 mod credentials;
 mod daemon;
 mod discover;
@@ -621,6 +622,22 @@ enum Command {
         /// to seed an agent that is not Claude.
         #[arg(long)]
         print: bool,
+    },
+    /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
+    ///
+    /// Outputs the script to stdout. Room names, bookmarks, and services are
+    /// dynamically completed from local state.
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
+        /// Install the completion script to the default user directory for the shell.
+        #[arg(long)]
+        install: bool,
+    },
+    /// Internal completion helper for shell scripts.
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        what: String,
     },
 }
 
@@ -4430,6 +4447,16 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Discover => return discover_and_remember(&mut State::load()?).await,
         Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
+        Command::Completions { shell, install } => {
+            if install {
+                return completions::install(shell);
+            } else {
+                return completions::generate(shell, &mut std::io::stdout());
+            }
+        }
+        Command::Complete { ref what } => {
+            return completions::complete(what, &mut std::io::stdout());
+        }
         Command::PlayItem {
             ref service,
             ref id,
@@ -5764,6 +5791,8 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Accounts { .. }
         | Command::Discover
         | Command::Skill { .. }
+        | Command::Completions { .. }
+        | Command::Complete { .. }
         | Command::Tui
         | Command::Daemon => unreachable!("handled above"),
     }

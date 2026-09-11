@@ -91,6 +91,34 @@ impl State {
             .map(|households| households.values().flatten().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Room / player names remembered for this machine, deduplicated and sorted.
+    /// Prefers the current network when a fingerprint is provided and matches;
+    /// otherwise returns all players across all networks.
+    pub fn room_names(&self, current_network: Option<&str>) -> Vec<String> {
+        let mut names: Vec<String> = if let Some(fp) = current_network {
+            let on_net = self.players_on(fp);
+            if !on_net.is_empty() {
+                on_net.into_iter().map(|p| p.name).collect()
+            } else {
+                self.all_room_names()
+            }
+        } else {
+            self.all_room_names()
+        };
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn all_room_names(&self) -> Vec<String> {
+        self.networks
+            .values()
+            .flat_map(|households| households.values())
+            .flatten()
+            .map(|p| p.name.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -246,5 +274,51 @@ mod tests {
         // user would have to delete the file to escape.
         let bare: State = serde_json::from_str("{}").unwrap();
         assert!(bare.networks.is_empty());
+    }
+
+    #[test]
+    fn room_names_prefers_the_current_network_and_falls_back_to_all() {
+        let mut state = State::default();
+        state.remember(
+            "home",
+            "hh:1",
+            &household(&[
+                ("RINCON_1", "Media Room", "wss://192.168.1.10:1443/x"),
+                ("RINCON_2", "Kitchen", "wss://192.168.1.11:1443/x"),
+                // Stereo pair or satellite sharing room name:
+                ("RINCON_3", "Media Room", "wss://192.168.1.12:1443/x"),
+            ]),
+        );
+        state.remember(
+            "office",
+            "hh:2",
+            &household(&[("RINCON_4", "Conference Room", "wss://10.0.0.5:1443/x")]),
+        );
+
+        // Matching current network gives deduplicated, sorted names on that network:
+        assert_eq!(
+            state.room_names(Some("home")),
+            vec!["Kitchen".to_string(), "Media Room".to_string()]
+        );
+
+        // Unknown network falls back to all remembered rooms across all networks:
+        assert_eq!(
+            state.room_names(Some("unknown")),
+            vec![
+                "Conference Room".to_string(),
+                "Kitchen".to_string(),
+                "Media Room".to_string()
+            ]
+        );
+
+        // None falls back to all:
+        assert_eq!(
+            state.room_names(None),
+            vec![
+                "Conference Room".to_string(),
+                "Kitchen".to_string(),
+                "Media Room".to_string()
+            ]
+        );
     }
 }

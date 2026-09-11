@@ -269,6 +269,21 @@ The skill is embedded in the binary, so it always matches the CLI it documents; 
 upgrade to refresh it. With it installed, asking Claude to control Sonos loads x2rock's usage
 automatically.
 
+### Shell completions
+
+`x2rock completions` generates completion scripts for Bash, Zsh, Fish, Elvish, and PowerShell,
+enhanced with dynamic completion for `-r / --room` (resolving known rooms instantaneously from local state),
+bookmarks, and services:
+
+```sh
+x2rock completions bash --install    # → ~/.local/share/bash-completion/completions/x2rock
+x2rock completions fish --install    # → ~/.config/fish/completions/x2rock.fish
+x2rock completions zsh --install     # → ~/.local/share/zsh/site-functions/_x2rock
+
+# Or print to stdout:
+source <(x2rock completions bash)
+```
+
 ## MPRIS
 
 This is the feature most of the rest rides on: **x2rock makes Sonos a first-class citizen of the
