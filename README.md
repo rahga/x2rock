@@ -127,31 +127,6 @@ GNOME's and KDE's media controls, `playerctl`, Waybar and the desktop media keys
 through MPRIS, which is most of the widget's value. See [Other Linux
 desktops](#other-linux-desktops).
 
-### On a headless box
-
-The natural home for this is a machine that exists to sit on the speakers' LAN: a server, or a box
-in an office with Sonos players and nothing else on Linux to drive them, reached over ssh. Build
-and discover as above. The one thing that differs is the service. On a desktop it is tied to the
-graphical session so it comes up and goes down with it; on a box that never has one it would never
-start. A shipped drop-in points it at the target the user manager always reaches:
-
-```sh
-mkdir -p ~/.config/systemd/user/x2rock.service.d
-cp systemd/x2rock.service ~/.config/systemd/user/
-cp systemd/x2rock.service.d/headless.conf ~/.config/systemd/user/x2rock.service.d/
-systemctl --user daemon-reload
-systemctl --user enable --now x2rock.service
-loginctl enable-linger $USER
-```
-
-The last line is the one that gets missed. Without lingering, the user manager stops when the last
-ssh session closes and takes the daemon with it; with it, the daemon runs from boot with nobody
-logged in. If polkit refuses it over ssh, `sudo loginctl enable-linger $USER` does the same.
-
-Then `x2rock tui` over ssh is the every-room view, updating as the house changes, and `x2rock
-status --json` is the same information for anything scripted — see [Terminal UI](#terminal-ui).
-Nothing here wants a desktop: no Omarchy, no Quickshell, no display. `journalctl --user -u x2rock`
-is where the daemon says what it is doing.
 
 ## Usage
 
@@ -816,6 +791,32 @@ address to talk to.
   The build constraints are the Rust version above and a C compiler — `ring` vendors C and assembly
   and compiles them in its build script, so `cc` must be present, though `cmake` is not needed.
   Beyond that there is nothing unusual, and no networkaccess at build time beyond fetching crates.
+  
+### On a headless box
+
+The natural home for this is a machine that exists to sit on the speakers' LAN: a server, or a box
+in an office with Sonos players and nothing else on Linux to drive them, reached over ssh. Build
+and discover as above. The one thing that differs is the service. On a desktop it is tied to the
+graphical session so it comes up and goes down with it; on a box that never has one it would never
+start. A shipped drop-in points it at the target the user manager always reaches:
+
+```sh
+mkdir -p ~/.config/systemd/user/x2rock.service.d
+cp systemd/x2rock.service ~/.config/systemd/user/
+cp systemd/x2rock.service.d/headless.conf ~/.config/systemd/user/x2rock.service.d/
+systemctl --user daemon-reload
+systemctl --user enable --now x2rock.service
+loginctl enable-linger $USER
+```
+
+The last line is the one that gets missed. Without lingering, the user manager stops when the last
+ssh session closes and takes the daemon with it; with it, the daemon runs from boot with nobody
+logged in. If polkit refuses it over ssh, `sudo loginctl enable-linger $USER` does the same.
+
+Then `x2rock tui` over ssh is the every-room view, updating as the house changes, and `x2rock
+status --json` is the same information for anything scripted — see [Terminal UI](#terminal-ui).
+Nothing here wants a desktop: no Omarchy, no Quickshell, no display. `journalctl --user -u x2rock`
+is where the daemon says what it is doing.
 
 ### Firewall note
 
