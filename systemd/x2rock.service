@@ -5,6 +5,13 @@ PartOf=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/x2rock daemon
+# Only for a network carrying more than one Sonos household - an office, a lab,
+# a guest system on the same LAN. The daemon names no room, so it cannot work
+# out which household is meant on its own: without this it logs
+# `multiple_households` and retries forever. Name yours by any of its room
+# names, or by an id from `x2rock households`. A single-household home - which
+# is nearly every home - needs nothing here.
+#Environment=X2ROCK_HOUSEHOLD=Studio
 # The daemon reconnects on its own; this only catches a crash.
 Restart=on-failure
 RestartSec=5

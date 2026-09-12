@@ -81,6 +81,13 @@ scan an unfamiliar network on its own. Doing it the other way round is not fatal
 daemon re-reads the remembered players between reconnect attempts, so a `discover` that comes later
 is picked up within a minute rather than needing a restart.
 
+On a network carrying **more than one Sonos household** — an office, a lab, a guest system on the
+same LAN — the daemon needs to be told which one. Every other command works this out from the room
+it was given; the daemon names no room, so without help it logs `multiple_households` and retries
+forever. Uncomment the `Environment=X2ROCK_HOUSEHOLD=` line in the unit (`systemctl --user edit
+x2rock.service`) and name the household by any of its room names, or by an id from `x2rock
+households`. A single-household home needs nothing.
+
 ### On Omarchy
 
 Arch's `rust` package tracks current stable, so `pacman -S rust` is enough if you would rather not

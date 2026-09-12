@@ -145,6 +145,41 @@ impl StatusLog {
     }
 }
 
+/// How a failed `connect` reads in the journal.
+///
+/// Pure, and separate from the loop, because the interesting cases are the
+/// ones that need a *person* to change something and cannot be reproduced
+/// without a second Sonos household on the network.
+///
+/// Two rules shape the wording. "no player: " frames a generic failure by its
+/// consequence, but the unregistered-network line must not lead with the
+/// *name* of the other error code - the skill teaches agents to tell the two
+/// apart in this very log. And the household cases must name
+/// **`X2ROCK_HOUSEHOLD`**, never `--household`: nothing passes flags to a
+/// systemd unit, so the flag is not the remedy here even though it is the same
+/// setting.
+fn connect_failure_line(code: &str, e: &anyhow::Error) -> String {
+    match code {
+        "unregistered_network" => format!("{e:#}"),
+        // Without a selector this daemon never comes up on a multi-household
+        // network - it retries on backoff forever - and the log is the only
+        // place anyone will look. So it carries the whole remedy.
+        "multiple_households" => format!(
+            "{e:#} -- this daemon names no room, so set Environment=X2ROCK_HOUSEHOLD=<room or \
+             id> in the unit (`systemctl --user edit x2rock.service`) and restart it"
+        ),
+        "unknown_household" => format!(
+            "{e:#} -- check Environment=X2ROCK_HOUSEHOLD in the unit (`systemctl --user cat \
+             x2rock.service`); `x2rock households` lists what is reachable"
+        ),
+        // Nothing to reconfigure: the selector is right and that household is
+        // simply not here. Retrying is the correct behaviour, so this only has
+        // to say what is happening.
+        "household_unreachable" => format!("{e:#} -- retrying until it comes back"),
+        _ => format!("no player: {e:#}"),
+    }
+}
+
 /// Run until the process is stopped. Never returns `Ok` in practice; the `Result`
 /// is for fatal setup errors such as an unreadable state file.
 pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result<()> {
@@ -196,15 +231,8 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
             // then holds, and folding it in would defeat the coalescing during
             // the ramp. The heartbeat's "N× in the last hour" conveys that the
             // daemon is still trying.
-            // "no player: " frames a generic connect failure by its consequence,
-            // but the unregistered-network line must not lead with the *name* of
-            // the other error code - the skill teaches agents to tell the two
-            // apart in this very log.
             Err(e) => {
-                let line = match crate::hint::of(&e).0 {
-                    "unregistered_network" => format!("{e:#}"),
-                    _ => format!("no player: {e:#}"),
-                };
+                let line = connect_failure_line(crate::hint::of(&e).0, &e);
                 status.note(format!("{fingerprint:?}|{e:#}"), &line);
             }
         }
@@ -770,6 +798,51 @@ fn remember(status: &proto::MetadataStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon names no room, so on a network with two households it can
+    /// never resolve one by itself: it retries on backoff forever and the
+    /// journal is the only place anyone will look. The line therefore has to
+    /// carry the whole remedy - and name the **env var**, because nothing
+    /// passes `--household` to a systemd unit.
+    #[test]
+    fn the_household_lines_name_the_env_var_not_the_flag() {
+        let e = anyhow::anyhow!("2 Sonos households are reachable");
+        let line = connect_failure_line("multiple_households", &e);
+        assert!(line.contains("X2ROCK_HOUSEHOLD"), "{line}");
+        assert!(
+            !line.contains("--household"),
+            "a unit takes no flags: {line}"
+        );
+        assert!(line.contains("systemctl"), "say how to set it: {line}");
+
+        let line = connect_failure_line("unknown_household", &e);
+        assert!(line.contains("X2ROCK_HOUSEHOLD"), "{line}");
+        assert!(!line.contains("--household"), "{line}");
+
+        // This one is not misconfiguration - the selector is right and the
+        // household is away - so it must not tell anyone to go edit the unit.
+        let line = connect_failure_line("household_unreachable", &e);
+        assert!(!line.contains("X2ROCK_HOUSEHOLD"), "{line}");
+        assert!(line.contains("retrying"), "{line}");
+    }
+
+    /// The two pre-existing shapes, kept: a generic failure is framed by its
+    /// consequence, and the unregistered-network line must not lead with the
+    /// name of the other code - agents are taught to tell them apart here.
+    #[test]
+    fn the_original_two_failure_shapes_are_unchanged() {
+        let e = anyhow::anyhow!("unregistered network (gateway aa:bb)");
+        assert_eq!(
+            connect_failure_line("unregistered_network", &e),
+            "unregistered network (gateway aa:bb)"
+        );
+
+        let e = anyhow::anyhow!("connection refused");
+        assert_eq!(
+            connect_failure_line("unknown", &e),
+            "no player: connection refused"
+        );
+    }
 
     #[test]
     fn a_held_status_is_silent_until_the_heartbeat_then_counts_the_silence() {
