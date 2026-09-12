@@ -400,9 +400,53 @@ pub struct SystemPlayer {
     /// Carried by the topology for every player, satellites included - which is
     /// the one place a satellite's firmware is visible at all.
     pub software_version: String,
+    /// Whether this player has an ethernet cable in it (`EthLink="1"`).
+    pub eth_link: bool,
+    /// How this player reaches the household, as the topology's
+    /// `ConnectionType`. See [`SystemPlayer::connection`] for the values that
+    /// have actually been observed; `None` when the attribute is absent.
+    pub connection_type: Option<u8>,
 }
 
 impl SystemPlayer {
+    /// How this player reaches the household: `wired`, `sonosnet`,
+    /// `satellite`, or `unknown`.
+    ///
+    /// **Observed values only** (one household, 2026-09-12, S2 firmware
+    /// 83.1-58210) - this is a small enumeration read off real hardware, not a
+    /// documented one, so anything unseen stays `unknown` rather than being
+    /// guessed at, and `connection_type` keeps the raw number for whoever hits
+    /// one:
+    ///
+    /// | `ConnectionType` | `EthLink` | what it was |
+    /// |---|---|---|
+    /// | 1 | 1 | the one Beam with a cable in it |
+    /// | 2 | 0 | four rooms on SonosNet, bridged through that Beam |
+    /// | 6 | 0 | home-theatre satellites: two Play:1 surrounds, a Sub, two One SL surrounds |
+    ///
+    /// **A speaker joined to the home WiFi was not seen**, because this
+    /// household has none - every wireless player is on SonosNet, which is what
+    /// Sonos does as soon as one player is wired. So there is no fourth row
+    /// here and no guess at one.
+    ///
+    /// **`satellite` is a link, not a bond.** The SYMFONISK stereo-pair half in
+    /// this household is bonded and reports `2`, the same as any ordinary
+    /// SonosNet speaker; only the home-theatre satellites report `6`, which is
+    /// the private link they hold to their soundbar. [`SystemPlayer::role`] and
+    /// `channels` are the fields that answer "is this bonded".
+    ///
+    /// **`WirelessMode` is not this, and is dead on S2.** It reads `0` on every
+    /// player in this household including the four on SonosNet, so the legacy
+    /// "0 wired / 1 SonosNet / 2 WiFi" reading of it is simply wrong here.
+    pub fn connection(&self) -> &'static str {
+        match self.connection_type {
+            Some(1) => "wired",
+            Some(2) => "sonosnet",
+            Some(6) => "satellite",
+            _ => "unknown",
+        }
+    }
+
     /// How the Sonos apps label a bonded player: `(LS)`, `(RS)`, `(L)`, `(R)`.
     ///
     /// Derived from the channel map rather than from the model, because the same
@@ -2004,6 +2048,8 @@ fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
             invisible: attr("Invisible") == "1",
             satellite,
             software_version: attr("SoftwareVersion").to_owned(),
+            eth_link: attr("EthLink") == "1",
+            connection_type: attr("ConnectionType").parse().ok(),
         });
     }
     // A satellite is also listed under the group it belongs to, so the same
@@ -2281,20 +2327,27 @@ mod tests {
     /// produced, 2026-09-05, keeping the attributes that decide anything: a
     /// home theatre with a Sub and two surrounds, a stereo pair whose right
     /// half is hidden, and a speaker bonded to nothing.
+    ///
+    /// `EthLink`/`ConnectionType` were added 2026-09-12 from the same
+    /// household read live, and its shape is why they are worth having here:
+    /// one Beam holds the only cable, so everything wireless is on SonosNet
+    /// bridged through it. Note the stereo-pair halves report `2` like any
+    /// ordinary speaker while the home-theatre satellites report `6` - bonding
+    /// and link type are different questions.
     const TOPOLOGY: &str = r#"<ZoneGroups>
 <ZoneGroup Coordinator="RINCON_BEAM" ID="RINCON_BEAM:1">
-  <ZoneGroupMember UUID="RINCON_BEAM" Location="http://192.168.86.25:1400/xml/device_description.xml" ZoneName="Living Room" SoftwareVersion="96.1-79270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW;RINCON_LS:LR;RINCON_RS:RR">
-    <Satellite UUID="RINCON_SUB" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW"/>
-    <Satellite UUID="RINCON_LS" Location="http://192.168.86.44:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_LS:LR"/>
-    <Satellite UUID="RINCON_RS" Location="http://192.168.86.39:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_RS:RR"/>
+  <ZoneGroupMember UUID="RINCON_BEAM" EthLink="1" ConnectionType="1" Location="http://192.168.86.25:1400/xml/device_description.xml" ZoneName="Living Room" SoftwareVersion="96.1-79270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW;RINCON_LS:LR;RINCON_RS:RR">
+    <Satellite UUID="RINCON_SUB" EthLink="0" ConnectionType="6" Location="http://192.168.86.34:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_SUB:SW"/>
+    <Satellite UUID="RINCON_LS" EthLink="0" ConnectionType="6" Location="http://192.168.86.44:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_LS:LR"/>
+    <Satellite UUID="RINCON_RS" EthLink="0" ConnectionType="6" Location="http://192.168.86.39:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1" SoftwareVersion="86.8-78270" HTSatChanMapSet="RINCON_BEAM:LF,RF;RINCON_RS:RR"/>
   </ZoneGroupMember>
 </ZoneGroup>
 <ZoneGroup Coordinator="RINCON_PAIRL" ID="RINCON_PAIRL:2">
-  <ZoneGroupMember UUID="RINCON_PAIRR" Location="http://192.168.86.28:1400/xml/device_description.xml" ZoneName="Dining Room" Invisible="1" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
-  <ZoneGroupMember UUID="RINCON_PAIRL" Location="http://192.168.86.32:1400/xml/device_description.xml" ZoneName="Dining Room" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
+  <ZoneGroupMember UUID="RINCON_PAIRR" EthLink="0" ConnectionType="2" Location="http://192.168.86.28:1400/xml/device_description.xml" ZoneName="Dining Room" Invisible="1" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
+  <ZoneGroupMember UUID="RINCON_PAIRL" EthLink="0" ConnectionType="2" Location="http://192.168.86.32:1400/xml/device_description.xml" ZoneName="Dining Room" SoftwareVersion="86.8-78270" ChannelMapSet="RINCON_PAIRL:LF,LF;RINCON_PAIRR:RF,RF"/>
 </ZoneGroup>
 <ZoneGroup Coordinator="RINCON_ONE" ID="RINCON_ONE:3">
-  <ZoneGroupMember UUID="RINCON_ONE" Location="http://192.168.86.26:1400/xml/device_description.xml" ZoneName="Kitchen" SoftwareVersion="96.1-79270"/>
+  <ZoneGroupMember UUID="RINCON_ONE" EthLink="0" ConnectionType="2" Location="http://192.168.86.26:1400/xml/device_description.xml" ZoneName="Kitchen" SoftwareVersion="96.1-79270"/>
 </ZoneGroup>
 </ZoneGroups>"#;
 
@@ -2322,6 +2375,59 @@ mod tests {
         // The primary is not a satellite of itself, and the room can therefore
         // sit on two firmwares at once.
         assert!(!beam.satellite);
+    }
+
+    /// Which speaker holds the cable, and how everything else gets home - the
+    /// question `system` could not answer before, and the one to ask first when
+    /// a whole set of rooms drops out at once.
+    #[test]
+    fn the_topology_says_how_each_player_is_connected() {
+        let players = players_in(TOPOLOGY).unwrap();
+        let of = |uuid: &str| {
+            let p = players.iter().find(|p| p.uuid == uuid).unwrap();
+            (p.connection(), p.eth_link, p.connection_type)
+        };
+
+        // One cable in the household, and it is the Beam every wireless room
+        // is bridged through.
+        assert_eq!(of("RINCON_BEAM"), ("wired", true, Some(1)));
+        assert_eq!(of("RINCON_ONE"), ("sonosnet", false, Some(2)));
+
+        // Home-theatre satellites hold a private link to their primary.
+        assert_eq!(of("RINCON_SUB"), ("satellite", false, Some(6)));
+        assert_eq!(of("RINCON_LS"), ("satellite", false, Some(6)));
+
+        // But a stereo-pair half is bonded and still on SonosNet: `satellite`
+        // is a link, not a bond, and `bonded()` answers the other question.
+        assert_eq!(of("RINCON_PAIRL"), ("sonosnet", false, Some(2)));
+        assert_eq!(of("RINCON_PAIRR"), ("sonosnet", false, Some(2)));
+        let pair = players.iter().find(|p| p.uuid == "RINCON_PAIRL").unwrap();
+        assert!(
+            pair.bonded(),
+            "a pair half is bonded despite reading sonosnet"
+        );
+
+        // An unseen value stays unknown rather than being guessed at - a
+        // speaker joined to home WiFi has never been observed here, so nothing
+        // claims to know what it would report - and an absent attribute is not
+        // zero.
+        let odd = |attrs: &str| {
+            players_in(&format!(
+                r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_X" ID="RINCON_X:1">
+                <ZoneGroupMember UUID="RINCON_X" {attrs} ZoneName="Den"
+                  Location="http://192.168.86.60:1400/xml/device_description.xml"/>
+                </ZoneGroup></ZoneGroups>"#
+            ))
+            .unwrap()
+        };
+        let unseen = odd(r#"ConnectionType="9""#);
+        assert_eq!(unseen[0].connection(), "unknown");
+        assert_eq!(unseen[0].connection_type, Some(9));
+
+        let absent = odd("");
+        assert_eq!(absent[0].connection_type, None);
+        assert_eq!(absent[0].connection(), "unknown");
+        assert!(!absent[0].eth_link);
     }
 
     /// The labels the Sonos apps print, derived from the channel map because the

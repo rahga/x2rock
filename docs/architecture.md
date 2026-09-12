@@ -6622,6 +6622,38 @@ the code - a third-party menu, a live catalogue, or a to-do that another section
 completed. The claims about what speakers actually answer have all held. Statements of the first
 kind should be dated and re-checked; statements of the second kind have earned their confidence.
 
+## How a player reaches the household, and the attribute that no longer says (2026-09-12)
+
+`system` reported what every speaker *is* and never how it is *connected* - which is the first thing
+worth knowing when several rooms go quiet together. Read live off this household's
+`ZoneGroupTopology GetZoneGroupState`:
+
+| | `ConnectionType` | `EthLink` | what it was |
+|---|---|---|---|
+| Living Room (Beam) | 1 | 1 | the only ethernet cable in the household |
+| Kitchen, Guest TV, Bedroom, Dining Room | 2 | 0 | SonosNet, channel 1, bridged through that Beam |
+| 2 Play:1 surrounds, Sub, 2 One SL surrounds | 6 | 0 | home-theatre satellites |
+| the SYMFONISK stereo-pair half | **2** | 0 | bonded, and still an ordinary SonosNet speaker |
+
+Two things fall out of that table.
+
+**`satellite` is a link, not a bond.** The pair half is bonded and reports `2`; only home-theatre
+satellites report `6`, which is the private link they hold to their soundbar. So `connection` and
+`bonded`/`role` answer different questions and neither substitutes for the other.
+
+**`WirelessMode` is dead on S2 and the legacy reading of it is wrong.** The widely-repeated legend
+is "0 = wired, 1 = SonosNet, 2 = WiFi". On this household it reads **`0` on every player**,
+including the four that are demonstrably on SonosNet. `EthLink` and `ConnectionType` are the live
+fields; anything keying on `WirelessMode` is reading a constant. Worth stating plainly because it is
+exactly the class of external claim the audit above found rots - a legend that was true once, for
+hardware or firmware nobody here runs.
+
+**What is not known:** a speaker joined to the home WiFi rather than SonosNet was never observed,
+because this household has none - Sonos moves the wireless players onto its own mesh as soon as one
+player is wired. So there is no fourth row, and `connection()` answers `unknown` for any value it
+has not seen rather than inventing one. `--json` keeps the raw `connection_type` beside the word for
+whoever hits it first.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

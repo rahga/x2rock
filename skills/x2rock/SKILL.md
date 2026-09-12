@@ -165,7 +165,19 @@ readout the Sonos apps call **About My System**, and it is read-only and local.
 
 Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`, `bonded`,
 `satellite`, `hidden`, `serial`, `sonos_os`, `display_version`, `build`, `software_version`,
-`hardware_version`, `series_id`, `ip`. Three of those need care:
+`hardware_version`, `series_id`, `ip`, `connection`, `connection_type`, `eth_link`. Four of those
+need care:
+
+- **`connection` is how that speaker reaches the household**, and it is the first thing to read when
+  several rooms drop out at once: `wired`, `sonosnet`, `satellite`, or `unknown`. As soon as one
+  speaker has an ethernet cable the others typically leave your WiFi for **SonosNet**, Sonos's own
+  mesh bridged through the wired one - so a single `wired` player can be what four other rooms
+  depend on, and "the WiFi is fine" is not the same question. `satellite` is the private link a
+  home-theatre surround or Sub holds to its soundbar. **It is a link, not a bond**: a stereo-pair
+  half is bonded and still reads `sonosnet`, so `bonded`/`role` remain the fields for that.
+  `connection_type` is the raw number beside it, because the words cover only values seen on real
+  hardware - a speaker joined to home WiFi has never been observed here, so an unseen number reads
+  `unknown` rather than being guessed at.
 
 - **`role` is the app's bonding label** - `LS`/`RS` for surrounds, `L`/`R` for the halves of a
   stereo pair, and `null` for a Sub, for a soundbar carrying both front channels, and for a speaker

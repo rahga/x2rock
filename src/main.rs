@@ -1830,6 +1830,13 @@ fn print_system(
                     "satellite": player.satellite,
                     "hidden": player.invisible,
                     "ip": show_ip(player.ip),
+                    "connection": player.connection(),
+                    // The raw number beside the word, because the word covers
+                    // only the values seen on real hardware - see
+                    // `SystemPlayer::connection`. Anything else reads
+                    // "unknown" here and is still legible there.
+                    "connection_type": player.connection_type,
+                    "eth_link": player.eth_link,
                 });
                 match found {
                     Ok(info) => {
@@ -1873,9 +1880,10 @@ fn print_system(
             Ok(info) => {
                 let addr = show_ip(player.ip).unwrap_or_else(|| "no address".to_owned());
                 println!(
-                    "  {:<22} {:<5} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}",
+                    "  {:<22} {:<5} {:<9} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}",
                     info.model_name,
                     label,
+                    player.connection(),
                     info.display_version,
                     info.build(),
                     info.hardware_version,
