@@ -242,6 +242,15 @@ work" and "the lock is on", and the wire and the app disagree about which. Note 
 *any* string for these and treats everything but `Off` as on, so x2rock validates and a typo is
 refused rather than quietly meaning "on".
 
+**`remote` is a soundbar's relationship with the TV remote**, and is refused on anything without a
+TV input. `--feedback` is the acknowledgement flash when a remote command lands - **a different light
+from `led`**, which is the speaker's own status LED, so do not treat the two as the same setting.
+`--repeater` is infrared pass-through to the TV behind the bar, which is what to reach for when a
+soundbar parked in front of the TV swallows its remote. Reading also reports whether a remote has
+been taught to the bar at all; teaching it one is an interactive press-the-button flow that stays in
+the Sonos app. `repeater` reports a **word**, not a boolean - `On`, `Off`, or the `Disabled` the
+service documents (a Beam refuses to be set to it).
+
 **`rename` changes the room's name for everyone** - every Sonos app in the house, every controller,
 and every script addressing it by name. It is reversible (rename it back) and disturbs nothing that
 is playing, but it is not a local preference, so treat an unrequested one as the kind of change to
@@ -305,6 +314,7 @@ see "Ask before you act".
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
 | Rename a room | `x2rock -r <Room> rename "<New Name>"` — changes it for every app in the house |
 | Speaker status light | `x2rock -r <Room> led [on\|off] [--json]` |
+| Soundbar TV-remote settings | `x2rock -r <Room> remote [--feedback on\|off] [--repeater on\|off] [--json]` |
 | Lock the buttons on the speaker itself | `x2rock -r <Room> buttons [lock\|unlock] [--json]` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |

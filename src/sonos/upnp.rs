@@ -47,6 +47,9 @@ enum Service {
     /// touch-control lock, room name. Per player, and reachable nowhere else -
     /// the Control API has no equivalent namespace.
     DeviceProperties,
+    /// A soundbar's TV-remote settings: the acknowledgement flash and the IR
+    /// pass-through. Answered only by a player with a TV input.
+    HtControl,
     /// Tone controls. Per speaker, and reachable nowhere else: the Control API
     /// has no EQ namespace at all, so this is the only door to bass, treble and
     /// loudness - the Sonos app's own "EQ Settings for <room>" panel.
@@ -69,9 +72,25 @@ impl Service {
             Self::ZoneGroupTopology => "ZoneGroupTopology",
             Self::RenderingControl => "RenderingControl",
             Self::DeviceProperties => "DeviceProperties",
+            Self::HtControl => "HTControl",
         };
         service_entry(name).expect("every Service variant is in SERVICES")
     }
+}
+
+/// A soundbar's TV-remote settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSettings {
+    /// Whether the bar flashes its light to acknowledge a remote command.
+    pub feedback: bool,
+    /// `On`, `Off`, or the `Disabled` the service documents and a Beam refuses
+    /// to be set to. Kept as the word rather than a bool so a third state is
+    /// reported rather than flattened.
+    pub repeater: String,
+    /// Whether a TV remote has been taught to this bar at all. Read-only here:
+    /// learning one is an interactive, press-the-button flow that belongs in
+    /// the app, not in a one-shot CLI.
+    pub configured: bool,
 }
 
 /// A speaker's name and the settings the player stores alongside it.
@@ -696,6 +715,76 @@ impl Upnp {
             Service::AlarmClock,
             "DestroyAlarm",
             &[("ID", &id.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A soundbar's TV-remote settings.
+    ///
+    /// Soundbar-only: a speaker with no TV input answers these with a UPnP
+    /// fault, so callers gate on `HT_PLAYBACK` first, the way `eq` does for
+    /// night mode and dialog.
+    pub async fn remote_settings(&self) -> Result<RemoteSettings> {
+        let led = self
+            .soap(Service::HtControl, "GetLEDFeedbackState", &[])
+            .await?;
+        let repeater = self
+            .soap(Service::HtControl, "GetIRRepeaterState", &[])
+            .await?;
+        let configured = self
+            .soap(Service::HtControl, "IsRemoteConfigured", &[])
+            .await?;
+        let on = |text: &str, tag: &str| -> Result<bool> {
+            let doc = Document::parse(text).with_context(|| format!("parsing {tag}"))?;
+            Ok(text_of(&doc, tag).is_some_and(|s| s.eq_ignore_ascii_case("On")))
+        };
+        let repeater_doc = Document::parse(&repeater).context("parsing GetIRRepeaterState")?;
+        Ok(RemoteSettings {
+            feedback: on(&led, "LEDFeedbackState")?,
+            // Reported as the word rather than a bool: the service documents a
+            // third value, `Disabled`, beside On and Off. A Beam refuses to be
+            // *set* to it (UPnP 402), but nothing promises no player ever
+            // reports it, and flattening an unknown third state to "off" would
+            // be a lie about hardware nobody here has.
+            repeater: text_of(&repeater_doc, "CurrentIRRepeaterState")
+                .unwrap_or("")
+                .to_owned(),
+            configured: {
+                let doc = Document::parse(&configured).context("parsing IsRemoteConfigured")?;
+                text_of(&doc, "RemoteConfigured").is_some_and(|s| s == "1")
+            },
+        })
+    }
+
+    /// Whether the soundbar flashes its light to acknowledge the TV remote.
+    ///
+    /// **Note the argument is `LEDFeedbackState`, with no `Desired` prefix**,
+    /// unlike [`Self::set_ir_repeater`] right below it and unlike every other
+    /// setter here. That is Sonos's inconsistency, not a typo; sending
+    /// `DesiredLEDFeedbackState` earns UPnP 402.
+    ///
+    /// Unlike the `DeviceProperties` toggles, this one *does* validate: a value
+    /// that is not `On` or `Off` is refused rather than coerced.
+    pub async fn set_led_feedback(&self, on: bool) -> Result<()> {
+        self.soap(
+            Service::HtControl,
+            "SetLEDFeedbackState",
+            &[("LEDFeedbackState", if on { "On" } else { "Off" })],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Whether the soundbar passes TV-remote IR through to the TV behind it.
+    ///
+    /// The setting that matters when a soundbar sits in front of the TV's own
+    /// IR receiver and swallows the signal.
+    pub async fn set_ir_repeater(&self, on: bool) -> Result<()> {
+        self.soap(
+            Service::HtControl,
+            "SetIRRepeaterState",
+            &[("DesiredIRRepeaterState", if on { "On" } else { "Off" })],
         )
         .await?;
         Ok(())
@@ -2029,6 +2118,7 @@ mod tests {
             Service::ZoneGroupTopology,
             Service::RenderingControl,
             Service::DeviceProperties,
+            Service::HtControl,
         ] {
             let entry = service.entry();
             assert!(entry.path.starts_with('/'), "{}", entry.name);

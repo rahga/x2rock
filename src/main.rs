@@ -247,6 +247,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or set a soundbar's TV-remote settings.
+    ///
+    /// Two things, both about the bar's relationship with the TV remote rather
+    /// than with music: whether it flashes its light to acknowledge a remote
+    /// command, and whether it passes the remote's infrared through to the TV
+    /// sitting behind it - the setting that matters when the bar is parked in
+    /// front of the TV's own IR receiver and swallows the signal.
+    ///
+    /// Soundbar-only, and per speaker. With no flags it reads, and also reports
+    /// whether a TV remote has been taught to the bar at all. Teaching it one
+    /// is an interactive press-the-button flow and stays in the Sonos app.
+    Remote {
+        /// The acknowledgement flash: on or off. Not the same light as `led`,
+        /// which is the speaker's own status LED.
+        #[arg(long)]
+        feedback: Option<String>,
+        /// Infrared pass-through to the TV: on or off.
+        #[arg(long)]
+        repeater: Option<String>,
+        /// The resulting `{room, feedback, repeater, remote_configured}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Rename a room.
     ///
     /// Changes what the room is called for **everyone** - every Sonos app in
@@ -3951,6 +3974,80 @@ fn named_speaker<'a>(
     }
 }
 
+/// A soundbar's TV-remote settings, read or set.
+async fn apply_remote(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    feedback: Option<String>,
+    repeater: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let speaker = named_speaker(session, target, room)?;
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+
+    // Gated on the capability rather than on the fault, the way `eq` gates
+    // night mode and dialog: a speaker with no TV input answers every one of
+    // these with an opaque UPnP code, and relaying that helps nobody. Checked
+    // before the reads too, since even reading is meaningless here.
+    let is_soundbar = speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK");
+    ensure!(
+        is_soundbar,
+        "{} has no TV input, so it has no TV-remote settings - this is a soundbar command",
+        speaker.name
+    );
+
+    let on_off = |what: &str, text: Option<&str>| -> Result<Option<bool>> {
+        match text {
+            None => Ok(None),
+            Some("on") => Ok(Some(true)),
+            Some("off") => Ok(Some(false)),
+            Some(_) => bail!("{what} takes on or off"),
+        }
+    };
+    let wanted_feedback = on_off("feedback", feedback.as_deref())?;
+    let wanted_repeater = on_off("repeater", repeater.as_deref())?;
+
+    let upnp = Upnp::new(ip);
+    if let Some(on) = wanted_feedback {
+        upnp.set_led_feedback(on).await?;
+    }
+    if let Some(on) = wanted_repeater {
+        upnp.set_ir_repeater(on).await?;
+    }
+    // Read back rather than echoing what was asked: three round trips either
+    // way, and the player is the authority on what it now holds.
+    let now = upnp.remote_settings().await?;
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "room": speaker.name,
+                "feedback": now.feedback,
+                "repeater": now.repeater,
+                "remote_configured": now.configured,
+            })
+        );
+    } else {
+        let word = |on: bool| if on { "on" } else { "off" };
+        println!(
+            "{:<24} feedback {}  repeater {}  remote {}",
+            speaker.name,
+            word(now.feedback),
+            now.repeater.to_lowercase(),
+            if now.configured {
+                "configured"
+            } else {
+                "not configured"
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Rename a room, preserving everything else stored with the name.
 ///
 /// The read-before-write is not caution, it is required: `SetZoneAttributes`
@@ -4924,6 +5021,7 @@ impl Command {
             | Command::Sleep { json, .. }
             | Command::Snooze { json, .. }
             | Command::Crossfade { json, .. }
+            | Command::Remote { json, .. }
             | Command::Led { json, .. }
             | Command::Buttons { json, .. }
             | Command::Eq { json, .. }
@@ -6305,6 +6403,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
+        Command::Remote {
+            feedback,
+            repeater,
+            json,
+        } => apply_remote(&session, &target, room, feedback, repeater, json).await?,
         Command::Rename { name } => {
             apply_rename(&session, &mut state, &target, room, &name).await?
         }
@@ -6566,6 +6669,38 @@ mod tests {
             cli.command,
             Command::Eq { night: Some(ref n), dialog: Some(ref d), .. } if n == "on" && d == "off"
         ));
+    }
+
+    /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is
+    /// the speaker's own status light. Two different lights, one word, so the
+    /// commands are pinned apart here: neither flag belongs to the other.
+    #[test]
+    fn the_two_lights_are_different_commands() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "x2rock",
+            "-r",
+            "Guest TV",
+            "remote",
+            "--feedback",
+            "off",
+            "--repeater",
+            "on",
+        ])
+        .expect("--feedback/--repeater are valid remote flags");
+        assert!(matches!(
+            cli.command,
+            Command::Remote { feedback: Some(ref f), repeater: Some(ref r), .. }
+                if f == "off" && r == "on"
+        ));
+
+        // The status light takes a bare word and knows nothing of --feedback.
+        assert!(Cli::try_parse_from(["x2rock", "-r", "Kitchen", "led", "off"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["x2rock", "-r", "Kitchen", "led", "--feedback", "off"]).is_err()
+        );
+        // And `remote` takes no bare word.
+        assert!(Cli::try_parse_from(["x2rock", "-r", "Guest TV", "remote", "off"]).is_err());
     }
 
     #[test]
