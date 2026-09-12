@@ -3,7 +3,9 @@
 Local-first Sonos control for Linux.
 
 x2rock features an MPRIS2 server for your home, CLI and TUI interfaces, and a lightweight Quickshell 
-top bar widget. **No Sonos login required** — x2rock talks to speakers directly on the local
+top bar widget. 
+
+**No Sonos login required** — x2rock talks to speakers directly on the local
 network.
 
 **Every Sonos room becomes a standard MPRIS media player.** Your media keys, lock screen, GNOME and
