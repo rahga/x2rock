@@ -116,16 +116,17 @@ enum Command {
         each: bool,
         /// Slide to the new level over several seconds instead of jumping.
         ///
-        /// **Acts on one speaker, and implies `--player`** - there is no such
-        /// thing as ramping a group, because the group volume service publishes
-        /// no ramp action. On a room playing by itself that distinction does
-        /// not arise; on a grouped one this moves that room's own balance and
-        /// nothing else, so it is refused with `--each` and `--all` rather than
-        /// pretending to cover them.
+        /// **Slides one speaker at a time, and implies `--player`** - there is
+        /// no such thing as ramping a group, because the group volume service
+        /// publishes no ramp action. It still composes with the fan-outs that
+        /// are themselves over speakers: several `--room`, and `--each` for
+        /// every member of one group. Only `--all` is refused, because that
+        /// fans over group coordinators and would slide one speaker per group
+        /// while reporting it as the group.
         ///
         /// Roughly a second and a half per ten steps, and the room is left at
         /// the new level. Not for mute, which is not a level to slide to.
-        #[arg(long, conflicts_with = "each")]
+        #[arg(long)]
         ramp: bool,
         /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
         /// or for confirming a change. With `--ramp`, a `ramp_seconds` beside
@@ -651,79 +652,24 @@ enum Command {
     Party {
         mode: Option<String>,
     },
-    /// Send one Control API command and print what comes back. A probe, not a
-    /// feature: the API is wider than this CLI covers, and settling what a
-    /// namespace actually answers should not need a rebuild. A refusal is a
-    /// result here, so a player-side error prints and still exits 0.
+    /// Send one command straight to a player and print what comes back.
     ///
-    /// Every command is addressed to something, and which key it wants is a
-    /// property of the namespace: see --scope, which is the flag most probes
-    /// get wrong on the first try.
+    /// A probe, not a feature: both wires are far wider than this CLI covers,
+    /// and settling what one actually answers should not need a rebuild.
+    ///
+    /// Two transports, as two subcommands, because they share no grammar -
+    /// different arity, different scopes, different flags. `api` is the Control
+    /// API over the WebSocket; `upnp` is SOAP on port 1400, the older and much
+    /// wider surface.
+    ///
+    /// **A refusal is a result**: a player-side error prints and still exits 0,
+    /// so a loop over candidate commands is not stopped by the first
+    /// unsupported one. An unreachable speaker is a real failure and exits
+    /// non-zero.
     #[command(after_long_help = RAW_EXAMPLES)]
     Raw {
-        /// Namespace, e.g. `musicService:1`. With --upnp, the service name
-        /// instead, e.g. `DeviceProperties`.
-        namespace: String,
-        /// Command within it, e.g. `getSessions`. With --upnp, the action,
-        /// e.g. `GetZoneAttributes`.
-        command: String,
-        /// The command's parameters, as one JSON object. Defaults to `{}`.
-        ///
-        /// These go in the message body. The target key does not - it belongs
-        /// in the header, so passing `{"groupId": "..."}` here does nothing
-        /// and the player still answers "Missing groupId". Use --scope.
-        ///
-        /// With --upnp, `Name=Value` pairs instead, one argument each - SOAP
-        /// takes a flat list of named strings, not a nested object, so there
-        /// is nothing for JSON to express here.
-        #[arg(value_name = "PARAMS")]
-        options: Vec<String>,
-        /// Speak UPnP/SOAP on port 1400 instead of the Control API.
-        ///
-        /// The older surface, and much the wider one: the Control API never
-        /// got line-in, the physical speaker (LED, touch-button lock, room
-        /// name, stereo pairing), soundbar IR, or the local music library, and
-        /// UPnP has all of it. An unknown service name lists the sixteen there
-        /// are.
-        ///
-        /// Addressed to a player, not a group, so --scope means something
-        /// narrower here: `player` (the default) sends to --room's own speaker,
-        /// `group` to its coordinator, which is the one that answers for
-        /// AVTransport. `household` and `none` have no meaning and are refused.
-        #[arg(long, conflicts_with_all = ["watch", "session"])]
-        upnp: bool,
-        /// What the command is addressed to. Per-namespace, and the player
-        /// will not infer it: `ERROR_MISSING_PARAMETERS - Missing groupId`
-        /// (or playerId, or householdId) means this flag is wrong, not the
-        /// command. Verified against real players:
-        ///
-        /// group - playback:1, playbackMetadata:1, groupVolume:1
-        ///
-        /// player - playerVolume:1, homeTheater:1, audioClip:1
-        ///
-        /// household - groups:1, favorites:1, playlists:1,
-        /// musicServiceAccounts:1
-        ///
-        /// The default depends on the transport, because what is even
-        /// addressable differs: `household` for the Control API, where the
-        /// namespaces left to explore are mostly household-scoped, and
-        /// `player` for --upnp, which can only ever address one speaker.
-        ///
-        /// `group` and `player` resolve through --room and connect to the
-        /// right player themselves, so --ip is never needed to reach one.
-        #[arg(long, value_enum)]
-        scope: Option<RawScope>,
-        /// After the command, keep the socket open this many seconds and print
-        /// every event that arrives. How `subscribe` is read: the reply to a
-        /// subscribe is empty, and the state it asked for turns up afterwards
-        /// as an event.
-        #[arg(long, value_name = "SECONDS")]
-        watch: Option<u64>,
-        /// Address the command to a playback session. `playbackSession:1`
-        /// commands after `createSession` are keyed by the session it returned,
-        /// which is not a target `--scope` can derive from the household.
-        #[arg(long, value_name = "ID")]
-        session: Option<String>,
+        #[command(subcommand)]
+        transport: RawTransport,
     },
     /// Scan the local network for players and remember them.
     Discover,
@@ -772,32 +718,32 @@ enum Command {
 const RAW_EXAMPLES: &str = "\
 Examples:
   # What a soundbar is receiving over HDMI (group-scoped).
-  x2rock -r 'Living Room' raw --scope group playbackMetadata:1 getMetadataStatus
+  x2rock -r 'Living Room' raw api --scope group playbackMetadata:1 getMetadataStatus
 
   # One player's own volume, not its group's (player-scoped).
-  x2rock -r 'Living Room' raw --scope player playerVolume:1 getVolume
+  x2rock -r 'Living Room' raw api --scope player playerVolume:1 getVolume
 
   # Household state needs no --room.
-  x2rock raw favorites:1 getFavorites
+  x2rock raw api favorites:1 getFavorites
 
   # A subscribe replies empty and the state arrives after, so watch for it.
-  x2rock raw --watch 5 musicServiceAccounts:1 subscribe
+  x2rock raw api --watch 5 musicServiceAccounts:1 subscribe
 
   # Parameters are one JSON object, in the body.
-  x2rock -r Kitchen raw --scope group playback:1 seek '{\"positionMillis\": 30000}'
+  x2rock -r Kitchen raw api --scope group playback:1 seek '{\"positionMillis\": 30000}'
 
   # The other surface: UPnP on port 1400, addressed to one speaker.
-  x2rock -r Kitchen raw --upnp DeviceProperties GetZoneAttributes
+  x2rock -r Kitchen raw upnp DeviceProperties GetZoneAttributes
 
   # UPnP arguments are Name=Value pairs, not JSON. Most take InstanceID=0.
-  x2rock -r Kitchen raw --upnp RenderingControl GetOutputFixed InstanceID=0
+  x2rock -r Kitchen raw upnp RenderingControl GetOutputFixed InstanceID=0
 
   # AVTransport is answered by the group's coordinator, so aim there.
-  x2rock -r Kitchen raw --upnp --scope group AVTransport GetCurrentTransportActions \\
+  x2rock -r Kitchen raw upnp --scope group AVTransport GetCurrentTransportActions \\
       InstanceID=0
 ";
 
-/// `raw --upnp`: one SOAP action against one speaker.
+/// `raw upnp`: one SOAP action against one speaker.
 ///
 /// Separate from the Control API path rather than folded into it because
 /// almost nothing is shared: a different transport, a different address (a
@@ -811,7 +757,7 @@ async fn raw_upnp(
     service: &str,
     action: &str,
     args: &[String],
-    scope: RawScope,
+    scope: UpnpScope,
 ) -> Result<()> {
     ensure!(
         !action.is_empty()
@@ -859,28 +805,21 @@ async fn raw_upnp(
         parsed.push((name.to_owned(), value.to_owned()));
     }
 
-    // UPnP addresses a speaker. `group` aims at the coordinator because that is
-    // the only player that answers for the group's transport; `player` at the
-    // room's own speaker, which is what RenderingControl and DeviceProperties
-    // are per. The two Control API scopes have no counterpart and say so rather
-    // than quietly behaving like one of these.
+    // UPnP addresses a speaker, and `UpnpScope` has only the two that mean
+    // something: `group` aims at the coordinator, the only player that answers
+    // for the group's transport, and `player` at the room's own speaker, which
+    // is what RenderingControl and DeviceProperties are per. The Control API's
+    // household and unaddressed scopes are absent from the type rather than
+    // rejected at runtime.
     let target = session::target(&session.groups, room)?;
     let ip = match scope {
-        RawScope::Group => target
+        UpnpScope::Group => target
             .coordinator_ip
             .ok_or_else(|| anyhow!("no address for {}'s coordinator", target.name))?,
-        // The same resolution every per-player command uses, so `raw --upnp
+        // The same resolution every per-player command uses, so `raw upnp
         // --scope player` and `led` cannot drift on which speaker `--room`
         // means.
-        RawScope::Player => named_speaker(session, &target, room)?.1.ip(),
-        RawScope::Household | RawScope::None => bail!(
-            "--scope {} has no meaning over UPnP, which addresses one speaker. \
-             Use `player` (the room's own speaker) or `group` (its coordinator).",
-            match scope {
-                RawScope::Household => "household",
-                _ => "none",
-            }
-        ),
+        UpnpScope::Player => named_speaker(session, &target, room)?.1.ip(),
     };
 
     match Upnp::new(ip).raw_action(entry, action, &parsed).await {
@@ -904,12 +843,105 @@ async fn raw_upnp(
         // Anything else - an unreachable speaker, a timeout, an unparseable
         // envelope - is a real failure and must propagate, or a script's
         // `|| handle_failure` never fires for a speaker that has gone away.
-        Err(e) if e.downcast_ref::<upnp::Fault>().is_some() => {
-            eprintln!("{} {action}: {e:#}", entry.name);
-        }
+        Err(e) if is_refusal(&e) => eprintln!("{} {action}: {e:#}", entry.name),
         Err(e) => return Err(e),
     }
     Ok(())
+}
+
+/// Which wire a raw command goes out on.
+///
+/// A subcommand rather than a flag because the two transports do not share a
+/// grammar: different argument arity, a different set of meaningful scopes with
+/// a different default, and flags (`--watch`, `--session`) that exist only on
+/// one side. As one flag-bearing command all of that had to be re-checked at
+/// runtime - an arity `ensure!`, a `bail!` for the two scopes UPnP cannot mean,
+/// two transport-dependent defaults and a `conflicts_with_all` - and every new
+/// flag or scope had to be classified by hand or it was silently ignored.
+/// Declared per transport, clap enforces the lot and documents it in `--help`.
+#[derive(Subcommand)]
+enum RawTransport {
+    /// The Control API, over the player's WebSocket. The newer surface.
+    Api {
+        /// Namespace, e.g. `musicService:1`.
+        namespace: String,
+        /// Command within it, e.g. `getSessions`.
+        command: String,
+        /// The command's parameters, as one JSON object. Defaults to `{}`.
+        ///
+        /// These go in the message body. The target key does not - it belongs
+        /// in the header, so passing `{"groupId": "..."}` here does nothing
+        /// and the player still answers "Missing groupId". Use --scope.
+        #[arg(value_name = "PARAMS")]
+        options: Option<String>,
+        /// What the command is addressed to. Per-namespace, and the player
+        /// will not infer it: `ERROR_MISSING_PARAMETERS - Missing groupId`
+        /// (or playerId, or householdId) means this flag is wrong, not the
+        /// command. Verified against real players:
+        ///
+        /// group - playback:1, playbackMetadata:1, groupVolume:1
+        ///
+        /// player - playerVolume:1, homeTheater:1, audioClip:1
+        ///
+        /// household - groups:1, favorites:1, playlists:1,
+        /// musicServiceAccounts:1
+        ///
+        /// Household is the default because the namespaces left to explore are
+        /// mostly household-scoped. `group` and `player` resolve through
+        /// --room and connect to the right player themselves, so --ip is never
+        /// needed to reach one.
+        #[arg(long, value_enum, default_value_t = RawScope::Household)]
+        scope: RawScope,
+        /// After the command, keep the socket open this many seconds and print
+        /// every event that arrives. How `subscribe` is read: the reply to a
+        /// subscribe is empty, and the state it asked for turns up afterwards
+        /// as an event.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+        /// Address the command to a playback session. `playbackSession:1`
+        /// commands after `createSession` are keyed by the session it returned,
+        /// which is not a target `--scope` can derive from the household.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// UPnP/SOAP on port 1400. The older surface, and much the wider one.
+    ///
+    /// The Control API never got line-in, the physical speaker (LED,
+    /// touch-button lock, room name, stereo pairing), soundbar IR, or the local
+    /// music library, and UPnP has all of it. An unknown service name lists the
+    /// sixteen there are.
+    Upnp {
+        /// Service name, e.g. `DeviceProperties`. Case-insensitive.
+        service: String,
+        /// Action within it, e.g. `GetZoneAttributes`.
+        action: String,
+        /// `Name=Value` pairs, one argument each. SOAP takes a flat list of
+        /// named strings, not a nested object, so there is nothing for JSON to
+        /// express here. Most actions need `InstanceID=0`.
+        #[arg(value_name = "ARGS")]
+        args: Vec<String>,
+        /// Which speaker to send to. UPnP addresses a player, never a group, so
+        /// only these two mean anything: `player` (the default) is --room's own
+        /// speaker, which is what RenderingControl and DeviceProperties are
+        /// per; `group` is its coordinator, which is the one that answers for
+        /// AVTransport.
+        #[arg(long, value_enum, default_value_t = UpnpScope::Player)]
+        scope: UpnpScope,
+    },
+}
+
+/// Which speaker a UPnP action is addressed to.
+///
+/// Its own enum rather than a subset of [`RawScope`] checked at runtime: the
+/// household and unaddressed variants have no meaning over a transport that
+/// posts to one speaker's IP, and an enum that cannot express them needs no
+/// `bail!` arm to reject them.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum UpnpScope {
+    /// --room's own speaker.
+    Player,
+    /// --room's group coordinator.
+    Group,
 }
 
 /// Which target key a raw command carries, which is per-namespace and is half
@@ -2074,9 +2106,12 @@ async fn play_item(
     if let (false, Some(cdudn)) = (streamish, service.cdudn()) {
         match enqueue_item(session, room, service, &cdudn, id, title, true).await {
             Ok(()) => return Ok(()),
-            Err(e) => {
+            // Only a refusal earns the fallback. An unreachable coordinator is
+            // not the item's fault and the stream session cannot fix it.
+            Err(e) if is_refusal(&e) => {
                 eprintln!("x2rock: {title:?} would not go in the queue ({e:#}); streaming it")
             }
+            Err(e) => return Err(e),
         }
     }
     stream_item(session, room, service, token, id, title, StreamStart::Fresh).await
@@ -3980,7 +4015,7 @@ struct ToneRequest {
 /// The speaker `--room` names, and a UPnP handle on it.
 ///
 /// Every per-player command - `eq`, `led`, `buttons`, `rename`, `remote`, and
-/// `raw --upnp --scope player` - needs exactly this pair, and each used to
+/// `raw upnp --scope player` - needs exactly this pair, and each used to
 /// resolve it itself: the same three lines and the same "did not report an
 /// address" wording, seven times over. Returning the handle rather than just
 /// the `Player` is what makes "which speaker does `--room` mean" one function
@@ -4141,6 +4176,18 @@ async fn apply_rename(
     // caller's to append, the way every other command here does it.
     println!("{}{wanted}", transition(&before.name, wanted));
     Ok(())
+}
+
+/// Whether an error is the *player* declining, as opposed to not being reached.
+///
+/// The distinction the `Fault` type exists to draw, asked in three places: the
+/// two enqueue fallbacks below and `raw upnp`. A refusal means "this is not
+/// queue material", which is a reason to try the stream session instead; a
+/// timeout or a dead socket means nothing of the kind, and falling back on one
+/// spends a second round trip to fail the same way while printing a sentence
+/// that blames the content.
+fn is_refusal(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<upnp::Fault>().is_some()
 }
 
 /// `on`/`off`, for every flag and argument that takes those two words.
@@ -4643,7 +4690,7 @@ async fn apply_transport(
 async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<()> {
     // Subscribed, and the receiver attached, before the play is sent: the error
     // can overtake the command's own reply, and a receiver opened afterwards
-    // would miss exactly the event this went to see - the rule `raw --watch`
+    // would miss exactly the event this went to see - the rule `raw api --watch`
     // and the stream loader both follow.
     player.subscribe_group("playback:1", group).await?;
     let mut events = player.events();
@@ -4886,6 +4933,7 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
             PerRoom::Vol {
                 change,
                 one_room,
+                ramp,
                 json,
             } => {
                 apply_vol(
@@ -4894,7 +4942,7 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
                     Some(name),
                     change.clone(),
                     one_room,
-                    false,
+                    ramp,
                     json,
                 )
                 .await
@@ -4945,6 +4993,7 @@ enum PerRoom<'a> {
     Vol {
         change: &'a Option<String>,
         one_room: bool,
+        ramp: bool,
         json: bool,
     },
     Repeat {
@@ -4971,18 +5020,16 @@ enum PerRoom<'a> {
 /// were given" on a command line that gave none.
 fn per_room(command: &Command) -> Option<PerRoom<'_>> {
     Some(match command {
-        // `ramp` is deliberately absent: a ramp is per speaker, and the
-        // fan-out is over *groups*, so there is no honest thing for it to mean
-        // here. `fans_out` still reports true for `vol`, so the refusal is made
-        // once, where the flags are read, rather than silently per room.
         Command::Vol {
             change,
             player,
+            ramp,
             json,
             ..
         } => PerRoom::Vol {
             change,
             one_room: *player,
+            ramp: *ramp,
             json: *json,
         },
         Command::Repeat { mode, json } => PerRoom::Repeat { mode, json: *json },
@@ -5087,18 +5134,16 @@ async fn run(cli: Cli) -> Result<()> {
     // flag reads as whole-house semantics honored. `bookmarks` is exempt: its
     // own `-a/--all` ("include daemon history") shares clap's arg id with this
     // flag, so setting either sets both.
-    // A ramp is one speaker's RenderingControl action and the fan-out is over
-    // groups, so there is nothing honest for the two to mean together. Refused
-    // here, once, rather than dropped quietly when `per_room` rebuilds the
-    // command without it.
+    // `--all` fans over group *coordinators*, so a ramp there would slide one
+    // speaker per group and report it as the group - the one combination that
+    // cannot be made honest. Several `--room` and `--each` both fan over
+    // speakers, which is exactly what a ramp wants, so they are carried through
+    // rather than refused.
     if let Command::Vol { ramp: true, .. } = &cli.command {
         ensure!(
             !cli.all,
-            "--ramp acts on one speaker; drop --all (there is no group ramp)"
-        );
-        ensure!(
-            cli.room.len() <= 1,
-            "--ramp acts on one speaker; name a single --room"
+            "--ramp slides one speaker at a time and --all fans over groups; \
+             name the rooms with --room, or use --each for one group's members"
         );
     }
     if cli.all && !matches!(cli.command, Command::Bookmarks { .. }) {
@@ -5653,27 +5698,31 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     if let Command::Raw {
-        namespace,
-        command,
-        options,
-        upnp,
-        scope,
-        watch,
-        session: session_id,
+        transport:
+            RawTransport::Upnp {
+                service,
+                action,
+                args,
+                scope,
+            },
     } = &cli.command
     {
-        if *upnp {
-            let scope = scope.unwrap_or(RawScope::Player);
-            return raw_upnp(&session, room, namespace, command, options, scope).await;
-        }
-        let scope = scope.unwrap_or(RawScope::Household);
-        ensure!(
-            options.len() <= 1,
-            "a Control API command takes one JSON object; got {} arguments. \
-             (Name=Value pairs are --upnp's shape, not this one.)",
-            options.len()
-        );
-        let options: serde_json::Value = match options.first() {
+        return raw_upnp(&session, room, service, action, args, *scope).await;
+    }
+
+    if let Command::Raw {
+        transport:
+            RawTransport::Api {
+                namespace,
+                command,
+                options,
+                scope,
+                watch,
+                session: session_id,
+            },
+    } = &cli.command
+    {
+        let options: serde_json::Value = match options.as_deref() {
             None => json!({}),
             Some(text) => serde_json::from_str(text)
                 .with_context(|| format!("options must be a JSON object: {text}"))?,
@@ -6035,6 +6084,7 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Vol {
         each: true,
         change,
+        ramp,
         json,
         ..
     } = &cli.command
@@ -6070,10 +6120,10 @@ async fn run(cli: Cli) -> Result<()> {
             change: change.clone(),
             player: true,
             each: false,
-            // clap already refuses --ramp with --each; this is the same answer
-            // restated where the command is rebuilt, so a future caller cannot
-            // reach the fan-out with a ramp still set.
-            ramp: false,
+            // Carried through: `--each` fans over member names as `--player`,
+            // which is exactly the shape a ramp needs, so `--ramp --each`
+            // slides every member rather than being refused.
+            ramp: *ramp,
             json: *json,
         };
         return fan_out(&session, &members, &per_member).await;
@@ -6232,6 +6282,7 @@ async fn run(cli: Cli) -> Result<()> {
                     // a Sonos Radio-style program with no discrete track to hold
                     // a queue position, and the fix is the stream session, not a
                     // retry.
+                    Err(e) if !is_refusal(&e) => return Err(e),
                     Err(e) => {
                         eprintln!(
                             "x2rock: {:?} would not go in the queue ({e:#}); streaming it",
@@ -7395,50 +7446,145 @@ mod tests {
         }
     }
 
-    /// `--watch` and `--session` belong to the Control API's event socket and
-    /// have no counterpart over UPnP, which is one request and one reply. They
-    /// used to be accepted and silently ignored, which is indistinguishable
-    /// from "no events arrived".
+    /// The enqueue fallbacks turn on this one question, so it has to survive a
+    /// `.context()` layer: a refusal wrapped in explanation is still a refusal,
+    /// and reading it as a transport failure would silently retire the stream
+    /// fallback that `play_item` and `bookmark` depend on.
     #[test]
-    fn the_control_api_only_raw_flags_are_refused_over_upnp() {
+    fn only_a_player_refusal_counts_as_a_refusal() {
+        let fault = anyhow!(upnp::Fault {
+            action: "AddURIToQueue".into(),
+            code: "800".into(),
+            detail: String::new(),
+        });
+        assert!(is_refusal(&fault));
+        assert!(
+            is_refusal(&fault.context("enqueuing the track")),
+            "a refusal must stay recognisable under added context"
+        );
+
+        // The cases that must NOT take the fallback: the speaker was never
+        // reached, so the stream session cannot help and would fail the same
+        // way a round trip later.
+        assert!(!is_refusal(&anyhow!("connection refused")));
+        assert!(!is_refusal(
+            &anyhow!("timed out after 8s").context("reaching Kitchen")
+        ));
+    }
+
+    /// Each transport declares its own grammar, so clap rejects the other's
+    /// rather than anything being checked - or silently ignored - at runtime.
+    /// `--watch`/`--session` are the event socket and have no counterpart over
+    /// UPnP; the arity and the scope set differ in both directions.
+    #[test]
+    fn each_raw_transport_accepts_only_its_own_grammar() {
         let parse = |args: &[&str]| {
             Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
         };
-        assert!(parse(&["raw", "--upnp", "AVTransport", "GetTransportInfo"]).is_ok());
-        assert!(parse(&["raw", "--watch", "5", "favorites:1", "getFavorites"]).is_ok());
+        assert!(parse(&["raw", "api", "favorites:1", "getFavorites"]).is_ok());
+        assert!(parse(&["raw", "api", "--watch", "5", "favorites:1", "subscribe"]).is_ok());
         assert!(
             parse(&[
                 "raw",
-                "--upnp",
-                "--watch",
-                "5",
+                "upnp",
                 "AVTransport",
-                "GetTransportInfo"
+                "GetTransportInfo",
+                "InstanceID=0"
+            ])
+            .is_ok()
+        );
+
+        // The event-socket flags do not exist on the UPnP side.
+        assert!(parse(&["raw", "upnp", "--watch", "5", "AVTransport", "Play"]).is_err());
+        assert!(parse(&["raw", "upnp", "--session", "x", "AVTransport", "Play"]).is_err());
+
+        // Arity: UPnP takes many Name=Value args, the Control API exactly one
+        // JSON object. The second used to need a runtime `ensure!`.
+        assert!(parse(&["raw", "upnp", "RenderingControl", "SetEQ", "a=1", "b=2"]).is_ok());
+        assert!(parse(&["raw", "api", "playback:1", "seek", "{}", "extra"]).is_err());
+
+        // Scope: `household` cannot be spelled over UPnP at all now, rather
+        // than parsing and being rejected later.
+        assert!(
+            parse(&[
+                "raw",
+                "api",
+                "--scope",
+                "household",
+                "groups:1",
+                "getGroups"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "raw",
+                "upnp",
+                "--scope",
+                "household",
+                "AlarmClock",
+                "ListAlarms"
             ])
             .is_err()
         );
-        assert!(parse(&["raw", "--upnp", "--session", "x", "AVTransport", "Play"]).is_err());
+        assert!(
+            parse(&[
+                "raw",
+                "upnp",
+                "--scope",
+                "player",
+                "AlarmClock",
+                "ListAlarms"
+            ])
+            .is_ok()
+        );
+
+        // And the old flag spelling is gone rather than quietly meaning the
+        // Control API with a stray positional.
+        assert!(parse(&["raw", "--upnp", "AVTransport", "GetTransportInfo"]).is_err());
     }
 
-    /// `--ramp` is per speaker because `GroupRenderingControl` publishes no
-    /// ramp action, so the two flags that mean "more than one speaker" have to
-    /// be refused rather than quietly dropped - which is what would happen
-    /// otherwise, since `per_room` rebuilds the command without `ramp`.
+    /// A ramp slides one speaker, so it composes with the fan-outs that are
+    /// *over speakers* and not with the one that is over groups. Only `--all`
+    /// is refused, and that refusal lives in `run()` rather than in clap
+    /// because `--all` is a global flag - parsing must succeed for the message
+    /// to be able to name the reason.
     #[test]
-    fn ramp_is_refused_by_the_flags_that_mean_more_than_one_speaker() {
+    fn ramp_composes_with_the_per_speaker_fan_outs_but_not_with_all() {
         let parse = |args: &[&str]| {
             Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
         };
-        // clap owns this one, declared as conflicts_with.
-        assert!(parse(&["vol", "30", "--ramp", "--each"]).is_err());
-        // These two are ours, and are checked in run() rather than by clap,
-        // because --all and --room are global flags: parsing must succeed so
-        // the message can name the reason.
+        for ok in [
+            vec!["-r", "Kitchen", "vol", "30", "--ramp"],
+            // Several rooms: the fan-out iterates the names as typed, each
+            // resolved to its own speaker.
+            vec!["-r", "a", "-r", "b", "vol", "30", "--ramp"],
+            // --each rebuilds the command as --player over the group's members,
+            // which is the shape a ramp already needs.
+            vec!["vol", "30", "--ramp", "--each"],
+        ] {
+            assert!(parse(&ok).is_ok(), "{ok:?} should parse");
+        }
+        // Parses, then refused in run() - pinned by the fan-out test below.
         assert!(parse(&["--all", "vol", "30", "--ramp"]).is_ok());
-        assert!(parse(&["-r", "a", "-r", "b", "vol", "30", "--ramp"]).is_ok());
-        // And a plain single-speaker ramp parses, so the guard is not simply
-        // refusing everything.
-        assert!(parse(&["-r", "Kitchen", "vol", "30", "--ramp"]).is_ok());
+    }
+
+    /// The flag has to survive `per_room`'s rebuild, which is where it was
+    /// previously dropped: a ramp that silently became a jump would look like
+    /// the command simply ignoring `--ramp`.
+    #[test]
+    fn the_fan_out_carries_ramp_rather_than_dropping_it() {
+        let command = Command::Vol {
+            change: Some("30".into()),
+            player: false,
+            each: false,
+            ramp: true,
+            json: false,
+        };
+        match per_room(&command).expect("vol fans out") {
+            PerRoom::Vol { ramp, .. } => assert!(ramp, "per_room dropped --ramp"),
+            _ => panic!("expected PerRoom::Vol"),
+        }
     }
 
     /// `fixed` is a different question from `audible` and has to survive

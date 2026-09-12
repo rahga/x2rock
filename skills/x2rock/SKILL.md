@@ -116,11 +116,13 @@ This is the highest-stakes thing to get right. When rooms are grouped:
   refused always (code `unknown`), grouped or not: group mute is what people mean, and on a lone room
   plain `vol mute` already is that one speaker.
 - **`--ramp` slides to the new level instead of jumping** — `vol 30 --ramp`, about a second and a
-  half per ten steps, and the room is left at the new level. It **acts on one speaker and implies
-  `--player`**, because the group volume service has no ramp action at all; `--all`, several `-r`
-  and `--each` are refused rather than faked, and so is `mute`. On a room playing by itself the
-  distinction does not arise, which is the case worth using it for. It does **not** unmute the way a
-  plain set does, so a muted speaker slides silently — the command says so on stderr.
+  half per ten steps, and the room is left at the new level. It **slides one speaker at a time and
+  implies `--player`**, because the group volume service has no ramp action at all — but it composes
+  with the fan-outs that are themselves per speaker: `-r Kitchen -r Bedroom vol 20 --ramp` slides
+  both, and `--each` slides every member of one group. **`--all` is the one refusal**, since that
+  fans over group coordinators and would slide one speaker per group while calling it the group.
+  `mute` is refused too — there is no level to slide to. It does **not** unmute the way a plain set
+  does, so a muted speaker slides silently; the command says so on stderr.
 - **`--each` sets every speaker in one group individually** — `-r "Living Room" vol 30 --each`
   puts every grouped room at 30, flat. The plain group `vol 30` scales instead, preserving the
   members' balance the way the Sonos app does, so `--each` is the way to *erase* that balance in one
@@ -301,7 +303,7 @@ see "Ask before you act".
 | Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Flatten a group: every member to one level | `x2rock -r <Room> vol 30 --each` |
-| Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` - one speaker only; `ramp_seconds` is null when the player does not say |
+| Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` — composes with several `-r` and with `--each`, not with `--all`; `ramp_seconds` is null when the player does not say |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
@@ -684,10 +686,28 @@ YouTube Music" fails with `needs_link` or finds nothing). Reach them three other
 
 ## `raw`, and its boundary
 
-`x2rock raw` speaks the Sonos Control API directly and **can mutate state** — high blast radius. Use
-it **only** when the user explicitly asks for raw access, or when no first-class command covers the
-intent. **Never route around an error with it** — a `needs_link` or an unsupported request should be
-*reported*, not bypassed. `x2rock raw --help` documents namespaces and scopes.
+`x2rock raw` speaks a player directly and **can mutate state** — high blast radius. Use it **only**
+when the user explicitly asks for raw access, or when no first-class command covers the intent.
+**Never route around an error with it** — a `needs_link` or an unsupported request should be
+*reported*, not bypassed.
+
+**Two transports, as two subcommands**, because they share no grammar:
+
+- `x2rock raw api <namespace> <command> [JSON]` — the Control API over the player's WebSocket.
+  `--scope household|group|player|none` (default `household`), plus `--watch <seconds>` to read what
+  a `subscribe` delivers afterwards and `--session <id>` for `playbackSession:1`.
+- `x2rock raw upnp <Service> <Action> [Name=Value ...]` — UPnP/SOAP on port 1400, the older and much
+  wider surface: line-in, the physical speaker, soundbar IR, the local music library. Arguments are
+  flat `Name=Value` pairs, not JSON, and most actions need `InstanceID=0`. `--scope player|group`
+  only (default `player`), because UPnP addresses one speaker and never a group. An unknown service
+  name lists the sixteen there are. Output is an **array of `{name, value}` pairs** in the player's
+  own order, not an object — a probe is reading a shape it does not know yet.
+
+**A refusal is a result on both**: a player-side error prints and still exits 0, so a loop over
+candidate actions is not stopped by the first unsupported one. An **unreachable** speaker is a real
+failure and exits non-zero — the two are told apart, so `|| handle_failure` means what it says.
+
+`x2rock raw api --help` and `x2rock raw upnp --help` document the rest.
 
 ## More detail
 
