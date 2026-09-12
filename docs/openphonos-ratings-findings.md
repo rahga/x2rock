@@ -112,8 +112,20 @@ personalized mixes, a different content type from a Live station) do give
 each track a real `currentItem.track.id`, and Pandora-style services
 generally do - but it will show or do nothing for a household simply tuned to
 a Live station, which per tonight's check is the household's actual iHeartRadio
-usage. Worth deciding explicitly whether to keep building this now given that,
-rather than assuming.
+usage.
+
+**Confirmed directly, same evening, on Dining Room.** `x2rock search -s
+iHeartRadio "Berlin" --category artists` finds `artist_radio.2648` (a
+container); browsing it (`x2rock browse -s iHeartRadio artist_radio.2648`)
+returns a real `artist_radio_track.<...>` leaf with `queueable: true`.
+Queueing and advancing to it, then reading `playbackMetadata:1
+getMetadataStatus` directly, showed a full `track.id:
+{"accountId":"sn_15","objectId":"artist_radio_track.artist-2648-...-761331","serviceId":"6"}`
+- the same shape a normal YouTube Music/Spotify queue item's id has, and
+nothing like the Live station's bare `"-1"`. **The split is real, not
+theoretical: Live stations cannot be rated (no id to rate); Custom/Artist-Radio
+stations can (a real, addressable id).** Room restored to its prior state
+afterward (test track removed from Dining Room's queue).
 
 ## Concrete integration points in x2rock
 
