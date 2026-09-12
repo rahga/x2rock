@@ -676,6 +676,52 @@ impl Upnp {
         Ok(())
     }
 
+    /// Slide this speaker's volume to `level` instead of jumping to it, and
+    /// return how long the player says it will take.
+    ///
+    /// **Per speaker, and unavoidably so.** `GroupRenderingControl` publishes
+    /// no ramp action at all - only `SetGroupVolume` and
+    /// `SetRelativeGroupVolume` - so there is no such thing as ramping a group,
+    /// and a caller must not pretend otherwise by ramping the coordinator and
+    /// calling it the group.
+    ///
+    /// `SLEEP_TIMER_RAMP_TYPE` is the gentle one, and is the only one worth
+    /// offering: measured on real hardware, 0 → 20 took about twelve seconds,
+    /// climbing steadily. `ALARM_RAMP_TYPE` covers the same distance in roughly
+    /// a third of that (it is built to wake someone, not to be pleasant), and
+    /// `AUTOPLAY_RAMP_TYPE` answers `RampTime: 0` - it does not ramp at all.
+    ///
+    /// `ResetVolumeAfter`/`ProgramURI` are the ducking mechanism behind
+    /// notifications and are deliberately left at "no": x2rock already ducks
+    /// through `audioClip:1` (`chime`/`notify`), which does it better and does
+    /// not leave a speaker stuck at the clip's level if the caller dies
+    /// mid-ramp.
+    ///
+    /// The returned time is the player's own estimate and runs a little long -
+    /// it predicted 16 seconds for a ramp that finished in about 12 - so it is
+    /// reported as what the player said rather than as a promise.
+    pub async fn ramp_to_volume(&self, level: u8) -> Result<Duration> {
+        let text = self
+            .soap(
+                Service::RenderingControl,
+                "RampToVolume",
+                &[
+                    ("InstanceID", "0"),
+                    ("Channel", "Master"),
+                    ("RampType", "SLEEP_TIMER_RAMP_TYPE"),
+                    ("DesiredVolume", &level.to_string()),
+                    ("ResetVolumeAfter", "0"),
+                    ("ProgramURI", ""),
+                ],
+            )
+            .await?;
+        let doc = Document::parse(&text).context("parsing RampToVolume response")?;
+        let secs = text_of(&doc, "RampTime")
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        Ok(Duration::from_secs(secs))
+    }
+
     /// The alarm currently sounding in this group, or `None` when none is.
     ///
     /// The only way to ask the question. `alarms` lists what is *scheduled*

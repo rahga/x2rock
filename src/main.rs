@@ -114,8 +114,22 @@ enum Command {
         /// vs every speaker), and not for mute - group mute is what mute means.
         #[arg(long, conflicts_with = "player")]
         each: bool,
+        /// Slide to the new level over several seconds instead of jumping.
+        ///
+        /// **Acts on one speaker, and implies `--player`** - there is no such
+        /// thing as ramping a group, because the group volume service publishes
+        /// no ramp action. On a room playing by itself that distinction does
+        /// not arise; on a grouped one this moves that room's own balance and
+        /// nothing else, so it is refused with `--each` and `--all` rather than
+        /// pretending to cover them.
+        ///
+        /// Roughly a second and a half per ten steps, and the room is left at
+        /// the new level. Not for mute, which is not a level to slide to.
+        #[arg(long, conflicts_with = "each")]
+        ramp: bool,
         /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
-        /// or for confirming a change.
+        /// or for confirming a change. With `--ramp`, a `ramp_seconds` beside
+        /// them: the player's own estimate, which runs a little long.
         #[arg(long)]
         json: bool,
     },
@@ -3626,9 +3640,15 @@ async fn apply_vol(
     room: Option<&str>,
     change: Option<String>,
     one_room: bool,
+    ramp: bool,
     json: bool,
 ) -> Result<()> {
     let group = target.group_id.as_str();
+    // A ramp is a RenderingControl action, which is per speaker and has no
+    // group counterpart, so asking for one *is* asking for --player. Implied
+    // rather than required, because a lone room - the common case - has no
+    // meaningful difference between the two and should not have to say both.
+    let one_room = one_room || ramp;
     let player = session::coordinator(session, target).await?;
     // --player names the speaker, so it resolves the room asked for rather than
     // the group's name: once rooms are grouped the group is called after its
@@ -3647,11 +3667,13 @@ async fn apply_vol(
         .transpose()?;
     // A player-scoped command is refused by anyone but that player ("Incorrect
     // playerId"), so it cannot ride the coordinator's connection.
+    let mut speaker_ip = None;
     let speaker = match this.as_ref() {
         Some(named) => {
             let ip = named.ip().with_context(|| {
                 format!("{} did not report an address to reach it on", named.name)
             })?;
+            speaker_ip = Some(ip);
             if ip == session.connection.ip() {
                 session.connection.clone()
             } else {
@@ -3682,8 +3704,46 @@ async fn apply_vol(
             target.name
         );
     }
+    // A ramp resolves the target itself and then slides to it, so both the
+    // absolute and relative forms funnel into one call. The clamp is the same
+    // one the relative path does, because the player takes an absolute level.
+    let ramp_to = ramp
+        .then(|| match change {
+            Some(VolumeChange::Set(level)) => Some(level),
+            Some(VolumeChange::Adjust(delta)) => {
+                Some((i16::from(before.volume) + i16::from(delta)).clamp(0, 100) as u8)
+            }
+            _ => None,
+        })
+        .flatten();
+    let mut ramp_secs = None;
+    if ramp {
+        ensure!(
+            !matches!(change, Some(VolumeChange::Mute(_))),
+            "--ramp does not apply to mute; there is no level to slide to"
+        );
+        ensure!(
+            ramp_to.is_some(),
+            "--ramp needs a level to slide to, e.g. `vol 30 --ramp`"
+        );
+    }
     let (level, muted) = match change {
         None => (before.volume, before.muted),
+        _ if ramp_to.is_some() => {
+            let level = ramp_to.expect("checked just above");
+            let ip = speaker_ip
+                .with_context(|| format!("no address for {label} to ramp its volume on"))?;
+            ramp_secs = Some(Upnp::new(ip).ramp_to_volume(level).await?.as_secs());
+            // A ramp leaves mute alone rather than clearing it the way a plain
+            // set does, so a muted speaker would slide silently. Say so instead
+            // of letting the level look like it took effect.
+            if before.muted {
+                eprintln!(
+                    "note: {label} is muted, so the ramp will not be heard until it is unmuted"
+                );
+            }
+            (level, before.muted)
+        }
         // Both setVolume and setRelativeVolume unmute (verified).
         Some(VolumeChange::Set(level)) => {
             match &this {
@@ -3721,12 +3781,16 @@ async fn apply_vol(
                 "muted": muted,
                 "audible": !muted && level > 0,
                 "fixed": before.fixed,
+                "ramp_seconds": ramp_secs,
             })
         );
     } else {
         let from = transition(&before.volume.to_string(), &level.to_string());
         let muted = if muted { "  (muted)" } else { "" };
-        println!("{label:<24} {from}{level}{muted}");
+        let over = ramp_secs
+            .map(|s| format!("  (over ~{s}s)"))
+            .unwrap_or_default();
+        println!("{label:<24} {from}{level}{muted}{over}");
     }
     Ok(())
 }
@@ -4477,7 +4541,18 @@ async fn fan_out(session: &session::Session, rooms: &[String], command: &Command
                 change,
                 one_room,
                 json,
-            } => apply_vol(session, &target, Some(name), change.clone(), one_room, json).await,
+            } => {
+                apply_vol(
+                    session,
+                    &target,
+                    Some(name),
+                    change.clone(),
+                    one_room,
+                    false,
+                    json,
+                )
+                .await
+            }
             PerRoom::Repeat { mode, json } => {
                 apply_repeat(session, &target, mode.clone(), json).await
             }
@@ -4550,6 +4625,10 @@ enum PerRoom<'a> {
 /// were given" on a command line that gave none.
 fn per_room(command: &Command) -> Option<PerRoom<'_>> {
     Some(match command {
+        // `ramp` is deliberately absent: a ramp is per speaker, and the
+        // fan-out is over *groups*, so there is no honest thing for it to mean
+        // here. `fans_out` still reports true for `vol`, so the refusal is made
+        // once, where the flags are read, rather than silently per room.
         Command::Vol {
             change,
             player,
@@ -4659,6 +4738,20 @@ async fn run(cli: Cli) -> Result<()> {
     // flag reads as whole-house semantics honored. `bookmarks` is exempt: its
     // own `-a/--all` ("include daemon history") shares clap's arg id with this
     // flag, so setting either sets both.
+    // A ramp is one speaker's RenderingControl action and the fan-out is over
+    // groups, so there is nothing honest for the two to mean together. Refused
+    // here, once, rather than dropped quietly when `per_room` rebuilds the
+    // command without it.
+    if let Command::Vol { ramp: true, .. } = &cli.command {
+        ensure!(
+            !cli.all,
+            "--ramp acts on one speaker; drop --all (there is no group ramp)"
+        );
+        ensure!(
+            cli.room.len() <= 1,
+            "--ramp acts on one speaker; name a single --room"
+        );
+    }
     if cli.all && !matches!(cli.command, Command::Bookmarks { .. }) {
         ensure!(
             cli.room.is_empty(),
@@ -5635,6 +5728,10 @@ async fn run(cli: Cli) -> Result<()> {
             change: change.clone(),
             player: true,
             each: false,
+            // clap already refuses --ramp with --each; this is the same answer
+            // restated where the command is rebuilt, so a future caller cannot
+            // reach the fan-out with a ramp still set.
+            ramp: false,
             json: *json,
         };
         return fan_out(&session, &members, &per_member).await;
@@ -6008,9 +6105,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Vol {
             change,
             player: one_room,
+            ramp,
             json,
             ..
-        } => apply_vol(&session, &target, room, change, one_room, json).await?,
+        } => apply_vol(&session, &target, room, change, one_room, ramp, json).await?,
         Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
@@ -6261,6 +6359,7 @@ mod tests {
             change: None,
             player: false,
             each: false,
+            ramp: false,
             json: false
         }));
         assert!(fans_out(&Command::Repeat {
@@ -6883,6 +6982,27 @@ mod tests {
         };
         let entry = room_value(&facts, Ok((status, meta, None)), None);
         assert_eq!(entry["audible"], serde_json::Value::Null);
+    }
+
+    /// `--ramp` is per speaker because `GroupRenderingControl` publishes no
+    /// ramp action, so the two flags that mean "more than one speaker" have to
+    /// be refused rather than quietly dropped - which is what would happen
+    /// otherwise, since `per_room` rebuilds the command without `ramp`.
+    #[test]
+    fn ramp_is_refused_by_the_flags_that_mean_more_than_one_speaker() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+        };
+        // clap owns this one, declared as conflicts_with.
+        assert!(parse(&["vol", "30", "--ramp", "--each"]).is_err());
+        // These two are ours, and are checked in run() rather than by clap,
+        // because --all and --room are global flags: parsing must succeed so
+        // the message can name the reason.
+        assert!(parse(&["--all", "vol", "30", "--ramp"]).is_ok());
+        assert!(parse(&["-r", "a", "-r", "b", "vol", "30", "--ramp"]).is_ok());
+        // And a plain single-speaker ramp parses, so the guard is not simply
+        // refusing everything.
+        assert!(parse(&["-r", "Kitchen", "vol", "30", "--ramp"]).is_ok());
     }
 
     /// `fixed` is a different question from `audible` and has to survive

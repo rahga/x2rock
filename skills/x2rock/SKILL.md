@@ -115,6 +115,12 @@ This is the highest-stakes thing to get right. When rooms are grouped:
   `x2rock -r Kitchen -r "Dining Room" vol --player`. `--player` does **not** apply to `mute` — it is
   refused always (code `unknown`), grouped or not: group mute is what people mean, and on a lone room
   plain `vol mute` already is that one speaker.
+- **`--ramp` slides to the new level instead of jumping** — `vol 30 --ramp`, about a second and a
+  half per ten steps, and the room is left at the new level. It **acts on one speaker and implies
+  `--player`**, because the group volume service has no ramp action at all; `--all`, several `-r`
+  and `--each` are refused rather than faked, and so is `mute`. On a room playing by itself the
+  distinction does not arise, which is the case worth using it for. It does **not** unmute the way a
+  plain set does, so a muted speaker slides silently — the command says so on stderr.
 - **`--each` sets every speaker in one group individually** — `-r "Living Room" vol 30 --each`
   puts every grouped room at 30, flat. The plain group `vol 30` scales instead, preserving the
   members' balance the way the Sonos app does, so `--each` is the way to *erase* that balance in one
@@ -269,6 +275,7 @@ see "Ask before you act".
 | Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Flatten a group: every member to one level | `x2rock -r <Room> vol 30 --each` |
+| Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` - one speaker only |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
