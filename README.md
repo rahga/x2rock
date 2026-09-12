@@ -678,26 +678,38 @@ it can never affect playback — the daemon logs any failure and carries on.
 
 ## Probing the API
 
-`x2rock raw` sends one Control API command and prints the reply, header included:
+`x2rock raw` sends one command straight to a player and prints the reply, header included. Two
+transports, as two subcommands, because they share no grammar:
 
 ```sh
-x2rock raw musicServiceAccounts:1 subscribe --watch 8
-x2rock raw playback:1 getPlaybackStatus --scope group
+x2rock raw api musicServiceAccounts:1 subscribe --watch 8
+x2rock raw api playback:1 getPlaybackStatus --scope group
+x2rock raw upnp DeviceProperties GetZoneAttributes
+x2rock raw upnp --scope group AVTransport GetCurrentTransportActions InstanceID=0
 ```
 
-It exists because the API is wider than this CLI covers, and settling what a namespace answers
-should not need a rebuild. A player-side refusal prints and still exits 0 — for a probe,
-`ERROR_UNSUPPORTED_COMMAND` is the answer, not a failure. `--watch` holds the socket open
-afterwards, which is the only way to read a `subscribe`: its reply is empty and the state turns up
-as an event.
+It exists because both wires are wider than this CLI covers, and settling what one answers should
+not need a rebuild. A player-side refusal prints and still exits 0 — for a probe,
+`ERROR_UNSUPPORTED_COMMAND` is the answer, not a failure — while a speaker that could not be
+reached exits non-zero, so the two are told apart.
 
+`raw api` is the Control API over the WebSocket. `--watch` holds the socket open afterwards, which
+is the only way to read a `subscribe`: its reply is empty and the state turns up as an event.
 `--scope` picks the target key (`household`, `group`, `player`, `none`), and it is the flag a probe
 usually gets wrong first: `playback:1` and `playbackMetadata:1` want `group`, `playerVolume:1` and
 `homeTheater:1` want `player`, `favorites:1` and `groups:1` want `household`. The key travels in
 the header, not the body, so putting `groupId` in `PARAMS` does nothing. Getting it wrong answers
-`ERROR_MISSING_PARAMETERS` naming the key it wanted, which is the tell. `raw --help` carries the
-full table and worked examples — it is written for whoever is driving this next, which is more
-often an agent than a person.
+`ERROR_MISSING_PARAMETERS` naming the key it wanted, which is the tell.
+
+`raw upnp` is SOAP on port 1400 — the older and much wider surface, carrying everything the Control
+API never got: line-in, the physical speaker, soundbar IR, the local music library. Arguments are
+flat `Name=Value` pairs rather than JSON, and most actions want `InstanceID=0`; an unknown service
+name lists the sixteen there are. It addresses one speaker, so `--scope` has only `player` (the
+default) and `group`. The reply is an array of `{name, value}` pairs in the player's own order,
+because a probe is reading a shape it does not know yet.
+
+`raw api --help` and `raw upnp --help` carry the full tables and worked examples — they are written
+for whoever is driving this next, which is more often an agent than a person.
 
 Read the reply's `header.namespace` before believing a namespace is missing — the player
 canonicalises some of them, and `musicService:1` answering as `musicServiceAccounts:1` is what a

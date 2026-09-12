@@ -3296,7 +3296,7 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
   command is honored inconsistently and was ignored by this TV. So `success`
   here means "the Beam queued a CEC message", never "the TV obeyed".
   **Decision:** this stays reachable only through `raw` -
-  `x2rock raw homeTheater:1 setTvPowerState --scope player -r "<Room>"
+  `x2rock raw api homeTheater:1 setTvPowerState --scope player -r "<Room>"
   '{"tvPowerState":"STANDBY"}'` - and is *not* promoted to a first-class
   command. A blessed `tv-power` would report `success` and let a caller (or an
   agent) tell the user the TV is off while it is still on, which is worse than

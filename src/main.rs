@@ -7466,6 +7466,17 @@ mod tests {
         // The cases that must NOT take the fallback: the speaker was never
         // reached, so the stream session cannot help and would fail the same
         // way a round trip later.
+        // HTTP 403 - UPnP switched off in the Sonos app - is the player
+        // declining too, and the one case where the fallback matters most:
+        // `stream_item` is pure Control API, so it still works on a household
+        // where every UPnP call is refused.
+        let forbidden = anyhow!(upnp::Fault {
+            action: "AddURIToQueue".into(),
+            code: "403".into(),
+            detail: "UPnP is turned off".into(),
+        });
+        assert!(is_refusal(&forbidden));
+
         assert!(!is_refusal(&anyhow!("connection refused")));
         assert!(!is_refusal(
             &anyhow!("timed out after 8s").context("reaching Kitchen")

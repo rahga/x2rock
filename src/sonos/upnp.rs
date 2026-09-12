@@ -82,7 +82,7 @@ impl Service {
 ///
 /// Typed rather than a formatted string so that callers can tell "the speaker
 /// said no" from "the speaker could not be reached". Both used to arrive as the
-/// same `anyhow::Error`, which meant `raw --upnp` reported an unreachable
+/// same `anyhow::Error`, which meant `raw upnp` reported an unreachable
 /// speaker as a refusal and exited 0, and `running_alarm` decided whether an
 /// alarm was sounding by searching the message text for `UPnP error 800`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +159,7 @@ pub struct RunningAlarm {
 /// One UPnP service a player exposes: where to POST, and what to call it.
 pub struct ServiceEntry {
     /// The name as the Sonos documentation spells it, which is also what
-    /// `raw --upnp` accepts (case-insensitively).
+    /// `raw upnp` accepts (case-insensitively).
     pub name: &'static str,
     pub path: &'static str,
     pub urn: &'static str,
@@ -168,7 +168,7 @@ pub struct ServiceEntry {
 /// Every UPnP service a Sonos player publishes.
 ///
 /// Six of these are reached by typed methods on [`Upnp`]; the rest are here for
-/// `raw --upnp`, which exists so that settling what an undocumented-to-us action
+/// `raw upnp`, which exists so that settling what an undocumented-to-us action
 /// actually answers does not need a rebuild - the same argument `raw` already
 /// makes for the Control API, applied to the older surface that carries
 /// everything the Control API never got: line-in, the physical speaker
@@ -1270,7 +1270,7 @@ impl Upnp {
 
     /// [`Self::soap`] against a service named at runtime rather than by variant.
     ///
-    /// The whole body of `soap` lives here so that `raw --upnp` gets the same
+    /// The whole body of `soap` lives here so that `raw upnp` gets the same
     /// envelope, the same SOAPACTION header, the same escaping and - the part
     /// that matters - the same fault decoding, rather than a second
     /// nearly-identical path that drifts.
@@ -1295,10 +1295,20 @@ impl Upnp {
             return Ok(text);
         }
         if status == 403 {
-            bail!(
-                "the player refused UPnP (HTTP 403). Enable it in the Sonos app: \
-                 Settings > Privacy & Security > UPnP"
-            );
+            // A `Fault` and not a bare error: this *is* the player declining,
+            // which is what `is_refusal` asks and what lets `play_item` and
+            // `bookmark` degrade to the stream session - a pure Control API
+            // path that keeps working on a household with UPnP switched off.
+            // As a plain `bail!` it read as "could not reach the speaker" and
+            // took both of those down with it.
+            return Err(Fault {
+                action: action.to_owned(),
+                code: "403".to_owned(),
+                detail: "UPnP is turned off for this player - enable it in the \
+                         Sonos app under Settings > Privacy & Security > UPnP"
+                    .to_owned(),
+            }
+            .into());
         }
         let doc = Document::parse(&text).ok();
         let code = doc
@@ -1333,7 +1343,7 @@ impl Upnp {
         .into())
     }
 
-    /// Invoke any action on any service, for `raw --upnp`.
+    /// Invoke any action on any service, for `raw upnp`.
     ///
     /// Returns the response's out-arguments in the order the player listed
     /// them. Order rather than a map because some replies carry repeated names
