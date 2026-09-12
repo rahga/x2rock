@@ -1304,8 +1304,16 @@ impl Upnp {
             return Err(Fault {
                 action: action.to_owned(),
                 code: "403".to_owned(),
-                detail: "UPnP is turned off for this player - enable it in the \
-                         Sonos app under Settings > Privacy & Security > UPnP"
+                // Path verified against Sonos's own support article, which
+                // puts it under the *Account* menu rather than Settings - the
+                // wording this inherited sent people to the wrong menu. It is
+                // on by default, so reaching this at all means someone turned
+                // it off deliberately; note what else that switched off.
+                detail: "UPnP is turned off for this household - turn it back \
+                         on in the Sonos mobile app under Account > Legal and \
+                         Privacy > Privacy & Security > Connection Security > \
+                         UPnP. It also switches off the macOS and Windows Sonos \
+                         apps, which use the same protocol"
                     .to_owned(),
             }
             .into());
