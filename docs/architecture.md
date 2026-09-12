@@ -2353,7 +2353,7 @@ published verb list (`docs.sonos.com/docs/smapi`) is the *service-side* interfac
 playlists, reporting, `getMediaURI` — and nothing in it lists a household's accounts either.
 
 There is no listing verb left to be guessed at. This section stops being provisional, and
-`accounts --household` rests on a sound premise.
+`accounts --content` rests on a sound premise.
 
 #### But the household does say *when* accounts change
 
@@ -3784,17 +3784,17 @@ listing anywhere" into two halves of very different strength:
   were read directly, and they enumerate every action the player implements.
 - The **Control API half is guesswork** — eight command names on `musicServiceAccounts:1` that
   seemed plausible. If the real listing verb is one nobody thought of, "there is no listing" is
-  wrong, and both that section and `accounts --household` rest on a false premise.
+  wrong, and both that section and `accounts --content` rest on a false premise.
 
 **Checking that against Sonos's published API reference is the first thing worth doing.** If a
-listing command exists, `accounts --household` should use it and the harvest sections need
+listing command exists, `accounts --content` should use it and the harvest sections need
 rewriting; if it does not, the section stops being provisional.
 
 **Resolved 2026-08-31, by the inheriting session.** The published reference documents exactly one
 command in `musicServiceAccounts` — `match` — and the live OpenAPI spec embedded in its reference
 page carries a single path under the namespace. No listing verb exists in the published Control
 API, and the SMAPI verb list is service-side and lists nothing either. "There is no listing
-anywhere" stands in full, and with it `accounts --household`. Details under "The published
+anywhere" stands in full, and with it `accounts --content`. Details under "The published
 reference confirms it" in the harvest section.
 
 ### Also unfinished
@@ -5407,7 +5407,7 @@ depends on whether a second household ever turns up unset.
 
 ## How good the serial proxy actually is (measured 2026-09-04)
 
-`accounts --household` reports the account serials named by the household's favorites and queue,
+`accounts --content` reports the account serials named by the household's favorites and queue,
 and has always carried a disclaimer that this is not the registry. A screenshot of the Windows
 controller's Service Settings finally made that measurable, because the app *does* show the
 registry. Ground truth, eight accounts:
@@ -5437,7 +5437,7 @@ are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportIn
 `ERROR_UNSUPPORTED_COMMAND` - it takes `match` and nothing else. There is no `/status` index to
 enumerate what else might exist.
 
-So `accounts --household` stays as it is. It is the best available answer and its own output says
+So `accounts --content` stays as it is. It is the best available answer and its own output says
 what it is not; what changed here is that "not the account list" now has a number attached.
 
 ## The firmware update is dated, and the hunt has its answer (2026-09-04)

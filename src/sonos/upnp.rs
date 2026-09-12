@@ -88,10 +88,26 @@ impl Service {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fault {
     pub action: String,
-    /// The UPnP error code as the player gave it, e.g. `701`, `800`, `402`.
+    /// The UPnP error code as the player gave it, e.g. `701`, `800`, `402` -
+    /// or `403`, which is not a UPnP code at all but the HTTP status a player
+    /// answers with when UPnP is switched off household-wide. See
+    /// [`Self::is_upnp_off`] for why that one is carried here anyway.
     pub code: String,
     /// Whatever gloss could be put on it; often empty.
     pub detail: String,
+}
+
+impl Fault {
+    /// Whether this is the whole transport being refused rather than one action.
+    ///
+    /// The two are the same thing to the stream fallback - either way the item
+    /// will not go in the queue and `loadStreamUrl`, being Control API, still
+    /// works - and different things to `raw upnp`, where a per-action refusal
+    /// is a finding worth exit 0 and "UPnP is off" is a failure a probing loop
+    /// must not read as sixteen unsupported services.
+    pub fn is_upnp_off(&self) -> bool {
+        self.code == "403"
+    }
 }
 
 impl std::fmt::Display for Fault {

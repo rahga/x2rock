@@ -45,12 +45,16 @@ use crate::store;
 /// or AppLink, so every cached `"auth":"Linked"` is unreadable - and a service
 /// wrongly filed as unusable is exactly what linking exists to fix.
 ///
-/// 3: added `ratings`. Technically a no-op field for an old cache - it just
-/// deserializes empty - but empty is indistinguishable from "asked and there
-/// are none" (see `ratings_cached`), so an old cache would report every
-/// service unrated forever rather than asking once. Bumping forces the one
-/// fresh read that tells the two apart.
-const SCHEMA: u32 = 3;
+/// `ratings` was added under schema 2 and did **not** need a bump, though one
+/// was briefly made for it. The worry was that an old cache would deserialize
+/// `ratings` empty and `ratings_cached` would then read "asked, none" for every
+/// service forever. But the two states differ in shape: a file without the key
+/// yields an empty *map*, so `contains_key` is false for every service and
+/// each is asked once; "asked, none" is a per-service empty *Vec*, which no
+/// pre-`ratings` file can contain. Bumping would have discarded every user's
+/// descriptor list and every learned category on upgrade to fix a case that
+/// cannot arise.
+const SCHEMA: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Catalogue {

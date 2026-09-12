@@ -86,6 +86,9 @@ pub async fn connect(
         if session.connection.household_id().await.ok().as_deref() == Some(household_id.as_str()) {
             return Ok(session);
         }
+        // Wrong household at a remembered address: not ours to keep, and not
+        // ours to leak either.
+        session.connection.close();
     }
 
     // The chosen household's remembered players did not answer: addresses have
@@ -117,17 +120,26 @@ pub async fn connect(
         changed |= state.remember(fingerprint, &found.household_id, &found.session.groups);
     }
     if changed {
-        let _ = state.save();
+        // Propagated, as `attach` does a few lines up: a save that fails here
+        // silently would leave every following command re-sweeping the subnet
+        // with nothing to say why.
+        state.save()?;
     }
 
-    discovered
-        .into_iter()
-        .find(|d| &d.household_id == household_id)
-        .map(|d| d.session)
-        .ok_or_else(|| {
-            let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
-            crate::hint::no_players_answered(&names)
-        })
+    // Keep the household that was asked for; close the others rather than
+    // drop them (see `discover_households` for why dropping is a leak).
+    let mut selected = None;
+    for found in discovered {
+        if selected.is_none() && &found.household_id == household_id {
+            selected = Some(found.session);
+        } else {
+            found.session.connection.close();
+        }
+    }
+    selected.ok_or_else(|| {
+        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
+        crate::hint::no_players_answered(&names)
+    })
 }
 
 /// Every household visible among already-Sonos-port-reachable addresses, each
@@ -190,7 +202,8 @@ pub async fn discover_households(found: &[Ipv4Addr]) -> (Vec<Discovered>, Option
     let mut discovered = Vec::new();
     for (household_id, connections) in by_household {
         let mut completed = None;
-        for connection in connections {
+        let mut connections = connections.into_iter();
+        for connection in connections.by_ref() {
             match connection.groups().await {
                 Ok(groups) => {
                     completed = Some(Session { connection, groups });
@@ -199,8 +212,18 @@ pub async fn discover_households(found: &[Ipv4Addr]) -> (Vec<Discovered>, Option
                 Err(e) => {
                     eprintln!("{}: {e:#}", connection.ip());
                     last_error = Some(e);
+                    connection.close();
                 }
             }
+        }
+        // One session per household is kept; every other connection opened by
+        // the probe is closed rather than dropped. `Connection` has no `Drop`
+        // - `open` spawns a read loop and a keepalive holding strong `Arc`s,
+        // and a healthy socket refreshes its own liveness on every pong - so a
+        // dropped one lives, and pings, for the rest of the process. The
+        // daemon rescans on every reconnect, which made this unbounded.
+        for spare in connections {
+            spare.close();
         }
         if let Some(session) = completed {
             discovered.push(Discovered {

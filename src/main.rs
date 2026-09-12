@@ -893,9 +893,13 @@ async fn raw_upnp(
         // is a result worth printing and worth exiting 0 for, so a shell loop
         // over candidate actions is not stopped by the first unsupported one.
         // Anything else - an unreachable speaker, a timeout, an unparseable
-        // envelope - is a real failure and must propagate, or a script's
-        // `|| handle_failure` never fires for a speaker that has gone away.
-        Err(e) if is_refusal(&e) => eprintln!("{} {action}: {e:#}", entry.name),
+        // envelope, or UPnP switched off for the whole household - is a real
+        // failure and must propagate, or a script's `|| handle_failure` never
+        // fires. The last one matters most for a loop over candidate actions,
+        // which would otherwise conclude every service is unsupported.
+        Err(e) if is_refusal(&e) && !is_upnp_off(&e) => {
+            eprintln!("{} {action}: {e:#}", entry.name)
+        }
         Err(e) => return Err(e),
     }
     Ok(())
@@ -4505,6 +4509,14 @@ fn is_refusal(e: &anyhow::Error) -> bool {
     e.downcast_ref::<upnp::Fault>().is_some()
 }
 
+/// Whether the error is UPnP being switched off for the household - a refusal
+/// of the whole transport, which `raw upnp` must propagate even though the
+/// enqueue fallbacks are right to treat it as "try the stream instead".
+fn is_upnp_off(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<upnp::Fault>()
+        .is_some_and(upnp::Fault::is_upnp_off)
+}
+
 /// `on`/`off`, for every flag and argument that takes those two words.
 ///
 /// Hoisted out of `apply_eq`'s closure once `remote`, `led`, `shuffle` and
@@ -7838,6 +7850,9 @@ mod tests {
             detail: String::new(),
         });
         assert!(is_refusal(&fault));
+        // A per-action refusal is not the transport being off - checked before
+        // `.context()` below consumes `fault`.
+        assert!(!is_upnp_off(&fault));
         assert!(
             is_refusal(&fault.context("enqueuing the track")),
             "a refusal must stay recognisable under added context"
@@ -7856,6 +7871,9 @@ mod tests {
             detail: "UPnP is turned off".into(),
         });
         assert!(is_refusal(&forbidden));
+        // ...but it is the transport being off, not one action refused, which
+        // is the distinction `raw upnp` draws and the fallbacks do not.
+        assert!(is_upnp_off(&forbidden));
 
         assert!(!is_refusal(&anyhow!("connection refused")));
         assert!(!is_refusal(
