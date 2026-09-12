@@ -84,19 +84,36 @@ the plan:
   `RatingsMatch` (`MusicService.cs:851-871`) exists to handle; x2rock needs
   the same lookup, not a fixed pair of ids.
 
-**This household is currently proof of the caveat, not just an illustration
-of it.** `x2rock -r Bedroom raw upnp AVTransport GetMediaInfo InstanceID=0`
-right now returns `CurrentURI: x-sonosapi-stream:live_stations.6790?sid=6...`,
+**This household is currently proof of the caveat, and the open question above
+is now answered - negatively, and more fundamentally than expected.**
+`x2rock -r Bedroom raw upnp AVTransport GetMediaInfo InstanceID=0` right now
+returns `CurrentURI: x-sonosapi-stream:live_stations.6790?sid=6...`,
 `upnp:class: object.item.audioItem.audioBroadcast`, title "Love Songs Radio" -
 a live broadcast, playing via iHeartRadio, at the exact moment this was
-checked. Whether *this* track's `getExtendedMetadata` actually reports one of
-the three properties above (making it ratable) or reports none (making
-ratings silently unavailable, the same way a service with no
-`NowPlayingRatings` block at all is) is the one thing still unverified -
-answering it needs `getExtendedMetadata` implemented, which is required
-plumbing either way. No special-casing for "is this a live station" needs
-writing: the per-track property check *is* the gate, for free, once
-`getExtendedMetadata` exists.
+checked - this is not a hypothetical, it is tonight's actual listening.
+
+The Control API's own `playbackMetadata:1 getMetadataStatus` for that group
+was read directly (`--scope group`, since that namespace is group-scoped):
+the **container** (the station, "Love Songs Radio") carries a real id -
+`{"accountId":"sn_15","objectId":"live_stations.6790","serviceId":"6"}` - but
+`currentItem.track` (the actual song airing right now, "Take My Breath Away"
+by Berlin) has **no `id` field of any kind**: only `name`, `artist`, `images`,
+`quality`, `type`. There is nothing to hand `getExtendedMetadata` or
+`rateItem` for the track itself - not "an id that turns out unratable," no id
+at all. A live simulcast has an ID3-derived now-playing label, not a
+per-track SMAPI identity; the only addressable object is the station, and
+rating a station is a different (and, per the presentation map, unoffered)
+thing from rating the song currently on it.
+
+**So: this specific, real, tonight's-listening case cannot be rated by
+construction, independent of anything still to build.** The feature remains
+real and worth having - iHeartRadio's *Custom Stations* ("Perfect For You"
+personalized mixes, a different content type from a Live station) do give
+each track a real `currentItem.track.id`, and Pandora-style services
+generally do - but it will show or do nothing for a household simply tuned to
+a Live station, which per tonight's check is the household's actual iHeartRadio
+usage. Worth deciding explicitly whether to keep building this now given that,
+rather than assuming.
 
 ## Concrete integration points in x2rock
 
