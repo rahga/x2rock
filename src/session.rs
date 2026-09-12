@@ -53,6 +53,7 @@ pub async fn connect(
     explicit: Option<IpAddr>,
     state: &mut State,
     household: Option<&str>,
+    room: Option<&str>,
 ) -> Result<Session> {
     let fingerprint = netid::network_fingerprint();
     if let Some(ip) = explicit {
@@ -72,7 +73,11 @@ pub async fn connect(
         // pinning test).
         return Err(crate::hint::unregistered_network(fingerprint));
     }
-    let (household_id, players) = resolve_household(&households, household)?;
+    // The room a command names already says which household it means, in
+    // every case but two households sharing a room name - so `-r Studio` picks
+    // Studio's household without the user typing it twice, and `--household`
+    // is the tiebreak (or the selector for commands with no room at all).
+    let (household_id, players) = resolve_household(&households, household.or(room))?;
 
     for player in players {
         let Ok(session) = attach(player.ip, state, Some(fingerprint)).await else {
@@ -229,6 +234,20 @@ pub async fn discover_households(
             for each in &discovered {
                 changed |= state.remember(fingerprint, &each.household_id, &each.session.groups);
             }
+            // And forget a remembered household whose every address has just
+            // answered for a different one - a factory reset, a replaced
+            // system, DHCP handing the addresses on. Left in place it would
+            // sit beside the new id with the same room names and make every
+            // command ask for --household, forever. Only that evidence counts:
+            // a household that simply did not answer stays remembered, since
+            // it may be off, and forgetting it would leave the next command
+            // attaching to whoever else is on the network instead of rescanning.
+            let seen: Vec<&str> = discovered.iter().map(|d| d.household_id.as_str()).collect();
+            let answering: Vec<IpAddr> = discovered
+                .iter()
+                .flat_map(|d| d.session.groups.players.iter().filter_map(|p| p.ip()))
+                .collect();
+            changed |= state.forget_superseded_households(fingerprint, &seen, &answering);
             if changed {
                 state.save()?;
             }
@@ -238,9 +257,10 @@ pub async fn discover_households(
     Ok(discovered)
 }
 
-/// Which of several households a `--household` selector names: by any room
-/// name that belongs to it, or - only when a room name is not enough because
-/// two households share it - an unambiguous prefix of the household id.
+/// Which of several households a selector names - `--household` if given,
+/// else the command's own `--room`: by any room name that belongs to it, or -
+/// only when a room name is not enough because two households share it - an
+/// unambiguous prefix of the household id.
 ///
 /// A single household is returned regardless of the selector; there is
 /// nothing to choose, and this is what keeps an ordinary one-household network

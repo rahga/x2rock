@@ -128,6 +128,42 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// Forget, on one network, each remembered household that a completed scan
+    /// has just shown to be gone. Returns whether anything changed.
+    ///
+    /// The evidence required is deliberately specific: a household is
+    /// forgotten only when **every address it was remembered at answered the
+    /// scan for a different household** - `answering` is every address the
+    /// scan got a session from, `seen` every household id it found. That is
+    /// exactly a factory reset, a replaced system, or DHCP handing the same
+    /// addresses on: the old id would otherwise sit beside the new one with
+    /// identical room names and turn every command into `multiple_households`
+    /// until someone hand-edits the state file.
+    ///
+    /// It is *not* "forget whatever did not answer". A household that is
+    /// powered off during a rescan has given no evidence of anything, and
+    /// forgetting it on a two-household network would leave the next command
+    /// attaching to the other household and reporting `unknown_room`, rather
+    /// than rescanning when it comes back. Unanswered addresses keep a
+    /// household remembered.
+    pub fn forget_superseded_households(
+        &mut self,
+        fingerprint: &str,
+        seen: &[&str],
+        answering: &[IpAddr],
+    ) -> bool {
+        let Some(households) = self.networks.get_mut(fingerprint) else {
+            return false;
+        };
+        let before = households.len();
+        households.retain(|id, players| {
+            seen.contains(&id.as_str())
+                || players.is_empty()
+                || !players.iter().all(|p| answering.contains(&p.ip))
+        });
+        households.len() != before
+    }
+
     /// Every household remembered on a network, each with its own players -
     /// the unflattened form of [`Self::players_on`].
     ///
@@ -200,6 +236,42 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// The two cases the rule has to tell apart: a household whose addresses
+    /// now all belong to someone else (gone - a reset, a replacement, DHCP
+    /// moving on) and one that merely did not answer (maybe off - keep it).
+    #[test]
+    fn a_household_is_forgotten_only_when_its_addresses_answer_for_another() {
+        let mut state = State::default();
+        let old = household(&[
+            ("RINCON_1", "Kitchen", "wss://192.168.77.94:1443/x"),
+            ("RINCON_2", "Bedroom", "wss://192.168.77.95:1443/x"),
+        ]);
+        state.remember("net-a", "hh:OLD", &old);
+
+        // The same two speakers, factory-reset, now report a new household id
+        // at the same addresses. A scan sees only hh:NEW.
+        let answering: Vec<IpAddr> = ["192.168.77.94", "192.168.77.95"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        assert!(state.forget_superseded_households("net-a", &["hh:NEW"], &answering));
+        assert!(
+            state.players_on("net-a").is_empty(),
+            "hh:OLD should be gone"
+        );
+
+        // But a household with one address unanswered is kept: it may be off.
+        state.remember("net-a", "hh:OLD", &old);
+        let only_one: Vec<IpAddr> = vec!["192.168.77.94".parse().unwrap()];
+        assert!(!state.forget_superseded_households("net-a", &["hh:NEW"], &only_one));
+        assert_eq!(state.players_on("net-a").len(), 2, "hh:OLD should survive");
+
+        // A household the scan saw is never a candidate, whatever answered.
+        assert!(!state.forget_superseded_households("net-a", &["hh:OLD"], &answering));
+        // And an unknown network changes nothing rather than erroring.
+        assert!(!state.forget_superseded_households("net-none", &["hh:NEW"], &answering));
     }
 
     #[test]

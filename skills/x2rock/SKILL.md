@@ -511,12 +511,20 @@ systems on the same network (test households included).
   `unknown_household` (something was said and it did not match) exactly like `unknown_room` -
   `{error, code, fix, households: [{id, rooms}, ...]}`. Read `data.households` rather than re-running
   `x2rock households` yourself when the error already handed you the list.
-- **Resolve it with a room name first.** `--household <room>` picks whichever household has a room
-  by that name - no id involved, and this is enough whenever the two systems' rooms are named
-  differently (the common case). Only fall back to `--household <id>` when a room name is itself
-  what collides (both households call something "Kitchen") - `x2rock households` is the one place an
-  id is printed; nowhere else names one, matching how `system` never prints a hardware identifier
-  without `--redact`.
+- **`-r <room>` already picks the household.** A room name belongs to exactly one household unless
+  the two systems share it, so `x2rock -r Studio play` works on a two-household network with nothing
+  else typed - the room *is* the selector, and this is enough whenever the two systems' rooms are
+  named differently (the common case). `--household` is only needed in two places: a command that
+  names no room at all (the daemon, `link`, `accounts`), where `--household <room>` names one for
+  it; and a room name that is itself what collides (both households call something "Kitchen"),
+  where only `--household <id>` can say - `x2rock households` is the one place an id is printed;
+  nowhere else names one, matching how `system` never prints a hardware identifier without
+  `--redact`.
+- **A household that has been replaced is forgotten on its own.** After a factory reset or a
+  replaced system, the old household id would sit beside the new one with the same room names and
+  make every command ask which. So a scan that finds *every* remembered address of a household now
+  answering for a different household forgets the old one; a household that merely did not answer
+  (powered off) is kept. There is nothing to hand-edit, and no need to tell the user to.
 - `x2rock households [--json] [--redact]` always scans fresh (like `discover`, unlike `status`),
   because the whole point is telling two systems apart *right now*.
 - `--household` is a **global** flag, same footing as `-r`/`--all`/`--ip`, and env-settable as
@@ -639,7 +647,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
 | `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household" | `x2rock households` (and see `data.households`) |
-| `unknown_household` | `--household` was given and matched nothing — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
+| `unknown_household` | the `-r` room or the `--household` selector matched no household — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry.** **When `fix` is null, do not — read the `error` and

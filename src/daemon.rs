@@ -177,7 +177,7 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
         // status change even when the failure text is identical - and connect()
         // returns nothing to read a fingerprint out of anyway.
         let fingerprint = netid::network_fingerprint();
-        match session::connect(explicit_ip, &mut state, household).await {
+        match session::connect(explicit_ip, &mut state, household, None).await {
             Ok(session) => {
                 backoff = MIN_BACKOFF;
                 // The publisher logs the rooms by name, so this transition is

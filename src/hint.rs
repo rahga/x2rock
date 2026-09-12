@@ -250,8 +250,8 @@ pub fn ambiguous_household(
 pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -> Error {
     household_hint(
         format!(
-            "no household matches --household {selector:?} (checked room names and household \
-             ids); `x2rock households` lists what is actually reachable"
+            "no household on this network has a room or an id matching {selector:?} (from \
+             --room or --household); `x2rock households` lists what is actually reachable"
         ),
         "unknown_household",
         households,

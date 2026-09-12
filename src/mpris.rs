@@ -212,6 +212,20 @@ const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
 /// simply did not send looks identical, and a client that dropped the icon on
 /// that would be wrong about the source rather than about the metadata.
 pub(crate) const LIVE_STREAM: &str = "x2rock:isLiveStream";
+/// Whether the current item carries a real service track id.
+///
+/// The first thing `x2rock rate` checks, and the one half of "can this be
+/// rated" that is knowable on the LAN: a Live broadcast, a `play-url` stream
+/// and the TV input have no id at all, so a rating button on them can only
+/// ever fail. Named for exactly what it knows - not `rateable` - because the
+/// other half, whether the *service* publishes ratings, is a SMAPI question
+/// the daemon must not go to the internet to ask. Spotify has ids and no
+/// ratings, so a client gating on this alone still shows it a thumb.
+///
+/// Not derivable from [`LIVE_STREAM`]: an iHeartRadio Custom Station is a
+/// `station` container *and* carries a rateable per-track id (verified
+/// 2026-09-12), which is the case that makes rating worth having.
+pub(crate) const HAS_TRACK_ID: &str = "x2rock:hasTrackId";
 /// The station behind a live stream, when it is not already the title.
 ///
 /// Sonos Radio names the *track* in `currentItem` and the station only in the
@@ -652,6 +666,7 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     }
     let mut metadata = builder.build();
     metadata.set(LIVE_STREAM, Some(is_live_stream(meta)));
+    metadata.set(HAS_TRACK_ID, Some(has_track_id(meta)));
     metadata.set(
         STATION_NAME,
         Some(station_name(meta, title).unwrap_or_default().to_owned()),
@@ -694,6 +709,17 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
 /// no duration and no end. Only the container type and the absent duration
 /// survive all three, and the duration is not the question anyway (see
 /// [`LIVE_STREAM`]).
+/// The same test `run_rate` makes before anything else: a track, with an id,
+/// that names real content rather than the `-1` a player uses for "nothing
+/// to say".
+fn has_track_id(meta: &MetadataStatus) -> bool {
+    meta.current_item
+        .as_ref()
+        .and_then(|i| i.track.as_ref())
+        .and_then(|t| t.id.as_ref())
+        .is_some_and(|id| id.is_real())
+}
+
 fn is_live_stream(meta: &MetadataStatus) -> bool {
     meta.container
         .as_ref()
@@ -1143,6 +1169,34 @@ mod tests {
         let track = status(r#"{"container":{"name":"Bodies","type":"track"}}"#);
         let md = to_metadata("RINCON_48A6:836412709", &track);
         assert_eq!(live_flag(&md), Some(false));
+    }
+
+    /// The flag the thumbs are gated on, read back the way the widget reads it.
+    /// A real id is true; the player's `-1` placeholder, a track with no id,
+    /// and nothing playing are all false - and a `station` container with a
+    /// real track id (an iHeartRadio Custom Station) is true, which is why
+    /// this is not the live-stream flag inverted.
+    #[test]
+    fn the_track_id_flag_reaches_the_published_metadata() {
+        let flag = |md: &Metadata| md.get::<bool>(HAS_TRACK_ID).and_then(|v| v.ok().copied());
+        let g = "RINCON_48A6:836412709";
+
+        let real = status(
+            r#"{"container":{"name":"Custom Station","type":"station"},
+                "currentItem":{"track":{"id":{"objectId":"track:123","serviceId":"6"},
+                "name":"Song"}}}"#,
+        );
+        assert_eq!(flag(&to_metadata(g, &real)), Some(true));
+
+        let placeholder =
+            status(r#"{"currentItem":{"track":{"id":{"objectId":"-1"},"name":"Live"}}}"#);
+        assert_eq!(flag(&to_metadata(g, &placeholder)), Some(false));
+
+        let no_id = status(r#"{"currentItem":{"track":{"name":"Bodies"}}}"#);
+        assert_eq!(flag(&to_metadata(g, &no_id)), Some(false));
+
+        let nothing = status(r#"{}"#);
+        assert_eq!(flag(&to_metadata(g, &nothing)), Some(false));
     }
 
     #[test]

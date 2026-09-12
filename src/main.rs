@@ -58,11 +58,13 @@ struct Cli {
 
     /// Which Sonos household to use, when more than one is reachable on this
     /// network - an office running two systems, a guest property on the same
-    /// LAN. Any room name belonging to it, or (only when a room name is not
-    /// enough, because it names a room in more than one) a household id from
-    /// `x2rock households`. Ignored on a network with a single household,
-    /// which is every ordinary home; ignored entirely alongside --ip, which
-    /// already names one player unambiguously.
+    /// LAN - **and --room has not already said**: a room name picks its own
+    /// household, so this is only needed when a command names no room (the
+    /// daemon, `link`, `accounts`) or when the room's name exists in more than
+    /// one household. Any room name belonging to it, or (for that collision) a
+    /// household id from `x2rock households`. Ignored on a network with a
+    /// single household, which is every ordinary home; ignored entirely
+    /// alongside --ip, which already names one player unambiguously.
     #[arg(long, global = true, env = "X2ROCK_HOUSEHOLD")]
     household: Option<String>,
 
@@ -2801,7 +2803,7 @@ async fn run_stations(
                 )
             })?;
         let mut state = State::load()?;
-        let session = session::connect(ip, &mut state, household).await?;
+        let session = session::connect(ip, &mut state, household, room).await?;
         let wait = if no_wait {
             Duration::ZERO
         } else {
@@ -2999,7 +3001,7 @@ async fn run_play_url(
 ) -> Result<()> {
     let name = stream_display_name(url, title)?;
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household).await?;
+    let session = session::connect(ip, &mut state, household, room).await?;
     let wait = if no_wait {
         Duration::ZERO
     } else {
@@ -3027,7 +3029,7 @@ async fn run_play_item(
     title: Option<&String>,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household).await?;
+    let session = session::connect(ip, &mut state, household, room).await?;
     let mut catalogue = catalogue::Catalogue::load();
     catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -3060,7 +3062,7 @@ async fn run_queue_item(
     title: Option<&String>,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household).await?;
+    let session = session::connect(ip, &mut state, household, room).await?;
     let mut catalogue = catalogue::Catalogue::load();
     catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -3320,7 +3322,7 @@ async fn run_link(
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household).await?;
+    let session = session::connect(ip, &mut state, household, None).await?;
     let mut catalogue = catalogue::Catalogue::load();
     if catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -3614,7 +3616,7 @@ async fn run_browse(
     json: bool,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state, household).await;
+    let reached = session::connect(ip, &mut state, household, room).await;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
@@ -3774,7 +3776,7 @@ async fn run_search(
     json: bool,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state, household).await;
+    let reached = session::connect(ip, &mut state, household, room).await;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
@@ -5613,7 +5615,7 @@ async fn run(cli: Cli) -> Result<()> {
             let serials = if content {
                 let mut state = State::load()?;
                 let session =
-                    session::connect(cli.ip, &mut state, cli.household.as_deref()).await?;
+                    session::connect(cli.ip, &mut state, cli.household.as_deref(), room).await?;
                 // Favorites are household-wide, so any player answers for the
                 // half that matters, and demanding --room to read them would be
                 // a question with no bearing on the answer. A room is honoured
@@ -5770,7 +5772,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let mut state = State::load()?;
-    let session = session::connect(cli.ip, &mut state, cli.household.as_deref()).await?;
+    let session = session::connect(cli.ip, &mut state, cli.household.as_deref(), room).await?;
 
     if let Command::Rooms { json } = cli.command {
         print_rooms(&session.groups, json);
