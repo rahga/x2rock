@@ -813,6 +813,10 @@ address to talk to.
 - For the queue commands (`x2rock queue`, `x2rock play N`): the Sonos **UPnP** setting enabled
   (Sonos app → Settings → Privacy & Security → UPnP). Playback control needs nothing.
 
+  The build constraints are the Rust version above and a C compiler — `ring` vendors C and assembly
+  and compiles them in its build script, so `cc` must be present, though `cmake` is not needed.
+  Beyond that there is nothing unusual, and no networkaccess at build time beyond fetching crates.
+
 ### Firewall note
 
 x2rock needs no inbound connections and works unchanged behind a default-deny firewall, which is
@@ -839,7 +843,4 @@ Informed by prior reverse-engineering of the Sonos protocols by the community, i
 
 [0BSD](LICENSE) — public-domain-equivalent. Use it for anything, no attribution required.
 
-That extends to packaging: nobody needs to ask. The build constraints are the Rust version above
-and a C compiler — `ring` vendors C and assembly and compiles them in its build script, so `cc`
-must be present, though `cmake` is not needed. Beyond that there is nothing unusual, and no network
-access at build time beyond fetching crates.
+That extends to packaging: nobody needs to ask. 
