@@ -247,6 +247,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rename a room.
+    ///
+    /// Changes what the room is called for **everyone** - every Sonos app in
+    /// the house, every controller, and every script that addresses it by
+    /// name, including this one. Reversible by renaming it back, and nothing
+    /// about what is playing is disturbed.
+    ///
+    /// Per speaker, like `led`: the name belongs to the player. Renaming one
+    /// half of a stereo pair or a room's satellite is not what anyone means, so
+    /// `--room` must name a room rather than a bonded speaker.
+    Rename {
+        /// What to call it instead.
+        name: String,
+    },
     /// Show or set a speaker's status light: on or off.
     ///
     /// Per speaker rather than per group, like `eq`: the light is on the
@@ -3937,6 +3951,68 @@ fn named_speaker<'a>(
     }
 }
 
+/// Rename a room, preserving everything else stored with the name.
+///
+/// The read-before-write is not caution, it is required: `SetZoneAttributes`
+/// has no change-one-field form, so the icon and configuration must be carried
+/// over or they are erased. Guessing an icon from the new name looks harmless
+/// and is not - a household here had a Dining Room carrying the `living` icon,
+/// which a guess would have silently "corrected".
+async fn apply_rename(
+    session: &session::Session,
+    state: &mut State,
+    target: &session::Target,
+    room: Option<&str>,
+    new_name: &str,
+) -> Result<()> {
+    let speaker = named_speaker(session, target, room)?;
+    let id = speaker.id.clone();
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+
+    let wanted = new_name.trim();
+    ensure!(!wanted.is_empty(), "a room needs a name");
+    // The player accepts a duplicate and leaves the household with two rooms of
+    // the same name, which `--room` then cannot tell apart. Refused here
+    // because nothing downstream can recover from it.
+    if let Some(clash) = session
+        .groups
+        .players
+        .iter()
+        .find(|p| p.id != id && p.name.eq_ignore_ascii_case(wanted))
+    {
+        bail!(
+            "{:?} is already the name of another speaker; \
+             two rooms with one name cannot be told apart by --room",
+            clash.name
+        );
+    }
+
+    let upnp = Upnp::new(ip);
+    let before = upnp.zone_attributes().await?;
+    if before.name == wanted {
+        println!("{:<24} already named {wanted:?}", before.name);
+        return Ok(());
+    }
+    let after = upnp::ZoneAttributes {
+        name: wanted.to_string(),
+        ..before.clone()
+    };
+    upnp.set_zone_attributes(&after).await?;
+
+    // The remembered list is keyed by network and only rewritten on attach, so
+    // without this the old name is offered by shell completions until the next
+    // command runs.
+    if state.rename_player(&id, wanted) {
+        state.save()?;
+    }
+    // `transition` yields only the "old \u{2192} " prefix; the new value is the
+    // caller's to append, the way every other command here does it.
+    println!("{}{wanted}", transition(&before.name, wanted));
+    Ok(())
+}
+
 /// `on`/`off` for the status light.
 ///
 /// Parsed here rather than passed to the player, which takes any string and
@@ -6229,6 +6305,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
+        Command::Rename { name } => {
+            apply_rename(&session, &mut state, &target, room, &name).await?
+        }
         Command::Led { mode, json } => apply_led(&session, &target, room, mode, json).await?,
         Command::Buttons { mode, json } => {
             apply_buttons(&session, &target, room, mode, json).await?

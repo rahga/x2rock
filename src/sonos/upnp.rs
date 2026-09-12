@@ -74,6 +74,26 @@ impl Service {
     }
 }
 
+/// A speaker's name and the settings the player stores alongside it.
+///
+/// Kept together because the wire keeps them together: `SetZoneAttributes`
+/// takes all four and overwrites all four, so they have to travel as a unit or
+/// a rename quietly blanks the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneAttributes {
+    /// The room name, which is the only one anybody wants to change.
+    pub name: String,
+    /// `x-rincon-roomicon:kitchen` and friends - what the Sonos app draws
+    /// beside the room. Not derivable from the name: a household's Dining Room
+    /// was found carrying the `living` icon, so guessing one from the new name
+    /// would have silently changed it.
+    pub icon: String,
+    /// Opaque, and passed back untouched.
+    pub configuration: String,
+    /// Empty on every speaker seen here; carried through rather than assumed.
+    pub target_room_name: String,
+}
+
 /// The alarm a room is sounding right now.
 ///
 /// Deliberately thin: the fields that identify *which* alarm is going off, so
@@ -676,6 +696,47 @@ impl Upnp {
             Service::AlarmClock,
             "DestroyAlarm",
             &[("ID", &id.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// What a speaker calls itself, and the settings stored beside the name.
+    ///
+    /// Read before any rename, because [`Self::set_zone_attributes`] writes all
+    /// of them at once and there is no way to change one alone.
+    pub async fn zone_attributes(&self) -> Result<ZoneAttributes> {
+        let text = self
+            .soap(Service::DeviceProperties, "GetZoneAttributes", &[])
+            .await?;
+        let doc = Document::parse(&text).context("parsing GetZoneAttributes response")?;
+        let field = |name: &str| text_of(&doc, name).unwrap_or("").to_owned();
+        Ok(ZoneAttributes {
+            name: field("CurrentZoneName"),
+            icon: field("CurrentIcon"),
+            configuration: field("CurrentConfiguration"),
+            target_room_name: field("CurrentTargetRoomName"),
+        })
+    }
+
+    /// Write a speaker's name and the settings stored with it.
+    ///
+    /// **Every field is written every time.** There is no
+    /// change-just-the-name action, so anything not carried over from
+    /// [`Self::zone_attributes`] is *erased* rather than left alone - passing a
+    /// guessed icon silently replaces the room's real one, which is easy to do
+    /// and invisible afterwards. That is why this takes the whole struct: it
+    /// cannot be called without having read first.
+    pub async fn set_zone_attributes(&self, attrs: &ZoneAttributes) -> Result<()> {
+        self.soap(
+            Service::DeviceProperties,
+            "SetZoneAttributes",
+            &[
+                ("DesiredZoneName", &attrs.name),
+                ("DesiredIcon", &attrs.icon),
+                ("DesiredConfiguration", &attrs.configuration),
+                ("DesiredTargetRoomName", &attrs.target_room_name),
+            ],
         )
         .await?;
         Ok(())

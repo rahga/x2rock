@@ -242,6 +242,14 @@ work" and "the lock is on", and the wire and the app disagree about which. Note 
 *any* string for these and treats everything but `Off` as on, so x2rock validates and a typo is
 refused rather than quietly meaning "on".
 
+**`rename` changes the room's name for everyone** - every Sonos app in the house, every controller,
+and every script addressing it by name. It is reversible (rename it back) and disturbs nothing that
+is playing, but it is not a local preference, so treat an unrequested one as the kind of change to
+confirm first. Two guards are worth knowing: a name another speaker already has is **refused**,
+because `--room` could not then tell them apart, and the room's icon and configuration are preserved
+rather than guessed at - a Dining Room was found here carrying the `living` icon, so deriving one
+from the new name would have quietly changed it.
+
 **`eq` is per speaker, like `vol --player` and unlike everything else.** Bass and treble run
 -10..10 (0 flat) and loudness is on/off; `-r` names the *speaker*, so a grouped room gets its own
 tone rather than its group's, and `--all` does not apply to it. **Loudness is on from the factory**,
@@ -295,6 +303,7 @@ see "Ask before you act".
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
+| Rename a room | `x2rock -r <Room> rename "<New Name>"` — changes it for every app in the house |
 | Speaker status light | `x2rock -r <Room> led [on\|off] [--json]` |
 | Lock the buttons on the speaker itself | `x2rock -r <Room> buttons [lock\|unlock] [--json]` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |

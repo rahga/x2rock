@@ -84,6 +84,38 @@ impl State {
         true
     }
 
+    /// Point a remembered player at its new name after a rename.
+    ///
+    /// Returns whether anything changed, so the caller can skip the write.
+    ///
+    /// Keyed on the player id rather than the old name, and applied across
+    /// every network and household, because the id is what is actually stable:
+    /// the same speaker is remembered once per network this machine has seen it
+    /// on, and leaving the others holding the old name would offer it as a
+    /// completion again the next time the laptop moved.
+    ///
+    /// [`Self::remember`] would fix this by itself on the next run - it
+    /// overwrites the whole list from live state - so this exists only to close
+    /// the window in between, during which completions would offer a name that
+    /// no longer resolves.
+    pub fn rename_player(&mut self, id: &str, new_name: &str) -> bool {
+        let mut changed = false;
+        for households in self.networks.values_mut() {
+            for players in households.values_mut() {
+                for player in players.iter_mut().filter(|p| p.id == id) {
+                    if player.name != new_name {
+                        player.name = new_name.to_string();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    players.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+            }
+        }
+        changed
+    }
+
     /// Every player remembered on a network, across households.
     pub fn players_on(&self, fingerprint: &str) -> Vec<KnownPlayer> {
         self.networks
@@ -215,6 +247,52 @@ mod tests {
         let known = state.players_on("net-a");
         assert_eq!(known.len(), 1);
         assert_eq!(known[0].name, "Media Room");
+    }
+
+    /// A rename has to reach every network the speaker is remembered on, not
+    /// just the one in front of us: a laptop that has seen the same household
+    /// from home and from a guest network holds two copies, and the one left
+    /// behind would offer the old name back as a completion.
+    #[test]
+    fn renaming_a_player_reaches_every_network_it_is_remembered_on() {
+        let mut state = State::default();
+        let same_speaker = household(&[("RINCON_1", "Kitchen", "wss://192.168.77.94:1443/x")]);
+        state.remember("net-home", "hh:1", &same_speaker);
+        state.remember("net-guest", "hh:1", &same_speaker);
+
+        assert!(state.rename_player("RINCON_1", "Galley"));
+        for net in ["net-home", "net-guest"] {
+            let names: Vec<_> = state.players_on(net).into_iter().map(|p| p.name).collect();
+            assert_eq!(names, ["Galley"], "{net} kept the old name");
+        }
+
+        // Idempotent, so a caller can skip the disk write.
+        assert!(!state.rename_player("RINCON_1", "Galley"));
+        // And an id nobody holds changes nothing rather than erroring.
+        assert!(!state.rename_player("RINCON_NOPE", "Somewhere"));
+    }
+
+    /// Renamed entries stay sorted, because `remember` writes them sorted and
+    /// compares the whole vector to decide whether anything changed - an
+    /// out-of-order list would look like a change on every single run.
+    #[test]
+    fn a_rename_keeps_the_remembered_list_sorted() {
+        let mut state = State::default();
+        state.remember(
+            "net-a",
+            "hh:1",
+            &household(&[
+                ("RINCON_1", "Attic", "wss://192.168.77.94:1443/x"),
+                ("RINCON_2", "Basement", "wss://192.168.77.95:1443/x"),
+            ]),
+        );
+        assert!(state.rename_player("RINCON_1", "Zebra"));
+        let names: Vec<_> = state
+            .players_on("net-a")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Basement", "Zebra"]);
     }
 
     #[test]
