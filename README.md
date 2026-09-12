@@ -2,8 +2,8 @@
 
 Local-first Sonos control for Linux, in Rust.
 
-A CLI, a terminal UI and an MPRIS2 server, targeting [Omarchy](https://omarchy.org) 4.0 "Quattro"
-and its Quickshell top bar. **No Sonos login required** — x2rock talks to speakers directly on the local
+x2rock features an MPRIS2 server for your home, CLI and TUI interfaces, and a lightweight Quickshell 
+top bar widget. **No Sonos login required** — x2rock talks to speakers directly on the local
 network.
 
 The bar widget is Omarchy's. The CLI and the daemon are not: they carry no dependency on Omarchy,
