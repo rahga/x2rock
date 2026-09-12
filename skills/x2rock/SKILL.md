@@ -337,6 +337,7 @@ see "Ask before you act".
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
 | Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
+| Page through either | add `--count N --index N` — `--json` answers `{total, index, items}` |
 | Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search -s <svc> <term> --play N -r "<Room>"` |
@@ -358,6 +359,17 @@ queue.
 that list is Sonos's ceiling. `x2rock stations` searches a community directory of tens of thousands
 of internet radio stations that wants no account from anybody. See "Free radio" below - it is the
 answer to most "put something on" requests the household's own services cannot serve.
+
+**`search --json` and `browse --json` answer an envelope, not a bare array**: `{total, index,
+items}`. Read `items`. **`total` is the service's whole count and `items` is one page of it**, so
+there is more whenever `index + items.len() < total` - ask for it with `--index`, which is 0-based
+(`--count 20 --index 20` is the second page). Without this a caller that got exactly `--count` rows
+could not tell a full container from a truncated one. Two commands that look similar do **not**
+share this shape: `favorites --json` and `accounts --json` are still bare arrays.
+
+**`--play N` counts within the page, not the whole result set.** `--index 20 --play 1` plays the
+21st item overall. This is the one place paging can surprise: the number to pass is the row's
+position in `items`, exactly as printed.
 
 **`browse` reaches more services than `search` does.** `x2rock search` lists only the services that
 publish a search category; `x2rock browse` lists every service reachable at all, which is a dozen or

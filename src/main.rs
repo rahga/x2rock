@@ -415,6 +415,12 @@ enum Command {
         category: Option<String>,
         #[arg(long, default_value_t = 20)]
         count: u32,
+        /// First result to return, 0-based. Page with `--index 20 --count 20`,
+        /// `--index 40`, and so on; `--json` reports `total` so a caller knows
+        /// when to stop. **`--play N` counts within the page returned**, so
+        /// `--index 20 --play 1` plays the 21st result overall.
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        index: u32,
         /// Play the Nth result, 1-based, in --room. Opens a playback session
         /// rather than enqueuing: a service's content cannot be added to the
         /// Sonos queue, and Sonos does not intend it to be.
@@ -438,6 +444,12 @@ enum Command {
         container: Option<String>,
         #[arg(long, default_value_t = 50)]
         count: u32,
+        /// First result to return, 0-based. Page with `--index 20 --count 20`,
+        /// `--index 40`, and so on; `--json` reports `total` so a caller knows
+        /// when to stop. **`--play N` counts within the page returned**, so
+        /// `--index 20 --play 1` plays the 21st result overall.
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        index: u32,
         /// Play the Nth row, 1-based, in --room. Refused for a container, which
         /// is something to open rather than something to play.
         #[arg(long, value_name = "N")]
@@ -3619,6 +3631,7 @@ async fn run_browse(
     service: Option<&String>,
     container: Option<&str>,
     count: u32,
+    index: u32,
     play: Option<usize>,
     refresh: bool,
     json: bool,
@@ -3672,7 +3685,7 @@ async fn run_browse(
     let at = container.unwrap_or("root");
     let mut refreshed = None;
     let (items, total) =
-        sonos::smapi::metadata(&chosen, token.as_ref(), at, 0, count, &mut refreshed).await?;
+        sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await?;
     // Feeds whatever comes next, below - not just persisted for later. A
     // token that just proved stale must not be handed straight to `play_item`.
     let token = use_refreshed_token(&chosen.id, token, refreshed);
@@ -3732,7 +3745,20 @@ async fn run_browse(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        // An envelope, not a bare array. `total` is the whole point: a caller
+        // that got `count` rows has no way to tell a full container from a
+        // truncated one, and `--json` used to drop the number the plain-text
+        // line already prints. `index` echoes what was asked so a pager can
+        // step without tracking it. Read `items`; there is more when
+        // `index + items.len() < total`.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "total": total,
+                "index": index,
+                "items": rows,
+            }))?
+        );
         return Ok(());
     }
     if items.is_empty() {
@@ -3779,6 +3805,7 @@ async fn run_search(
     service: Option<&String>,
     category: Option<&String>,
     count: u32,
+    index: u32,
     play: Option<usize>,
     refresh: bool,
     json: bool,
@@ -3923,7 +3950,7 @@ async fn run_search(
         token.as_ref(),
         &picked.mapped_id,
         term,
-        0,
+        index,
         count,
         &mut refreshed,
     )
@@ -3983,7 +4010,20 @@ async fn run_search(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        // An envelope, not a bare array. `total` is the whole point: a caller
+        // that got `count` rows has no way to tell a full container from a
+        // truncated one, and `--json` used to drop the number the plain-text
+        // line already prints. `index` echoes what was asked so a pager can
+        // step without tracking it. Read `items`; there is more when
+        // `index + items.len() < total`.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "total": total,
+                "index": index,
+                "items": rows,
+            }))?
+        );
         return Ok(());
     }
     if items.is_empty() {
@@ -5558,6 +5598,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref service,
             ref container,
             count,
+            index,
             play,
             refresh,
             json,
@@ -5569,6 +5610,7 @@ async fn run(cli: Cli) -> Result<()> {
                 service.as_ref(),
                 container.as_deref(),
                 count,
+                index,
                 play,
                 refresh,
                 json,
@@ -5745,6 +5787,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref service,
             ref category,
             count,
+            index,
             play,
             refresh,
             json,
@@ -5757,6 +5800,7 @@ async fn run(cli: Cli) -> Result<()> {
                 service.as_ref(),
                 category.as_ref(),
                 count,
+                index,
                 play,
                 refresh,
                 json,
@@ -7862,6 +7906,43 @@ mod tests {
     /// Each transport declares its own grammar, so clap rejects the other's
     /// rather than anything being checked - or silently ignored - at runtime.
     /// `--watch`/`--session` are the event socket and have no counterpart over
+    /// Paging is the difference between "this container has 20 things" and
+    /// "here are the first 20 things there might be more of", and `--json` had
+    /// no way to say which. `--index` is 0-based and pairs with `--count`.
+    #[test]
+    fn browse_and_search_take_a_page_to_fetch() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+        };
+        assert!(matches!(
+            parse(&[
+                "browse", "-s", "Relisten", "latest", "--count", "3", "--index", "3"
+            ])
+            .unwrap()
+            .command,
+            Command::Browse {
+                count: 3,
+                index: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["search", "-s", "TuneIn", "jazz", "--index", "40"])
+                .unwrap()
+                .command,
+            Command::Search { index: 40, .. }
+        ));
+        // Zero by default, so every existing caller keeps asking for page one.
+        assert!(matches!(
+            parse(&["browse", "-s", "Relisten"]).unwrap().command,
+            Command::Browse { index: 0, .. }
+        ));
+        assert!(matches!(
+            parse(&["search", "-s", "TuneIn", "jazz"]).unwrap().command,
+            Command::Search { index: 0, .. }
+        ));
+    }
+
     /// UPnP; the arity and the scope set differ in both directions.
     #[test]
     fn each_raw_transport_accepts_only_its_own_grammar() {
