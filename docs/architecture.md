@@ -2033,6 +2033,10 @@ One loose end worth noting: x2rock glosses UPnP 800 as "no such position in the 
 wrong here. 800 is UPnP's undefined-error code and the gloss belongs to `Seek`, not
 `AddURIToQueue`.
 
+> **Resolved** (audit 2026-09-12). Fixed in the enqueue-URI work above — see "Also fixed while
+> here" in that section. `soap_at` now renders 800 as "the player refused it, with no reason
+> given", which is all anyone knows.
+
 ### How to test this when the collection is not empty (deferred 2026-08-31)
 
 Everything above was verified against an account with nothing in it, which is exactly the state
@@ -5523,6 +5527,23 @@ player without asking x2rock's permission; they will simply not be handed a one-
 does it by accident. A read-only `update` command would be worth having with Sonos 27 rolling out,
 and would be exactly `CheckForUpdate` and nothing else.
 
+> **Both halves of that have since changed** (audit 2026-09-12), and the second one materially.
+>
+> The `update` command was built: `x2rock update` is `CheckForUpdate` and the device description,
+> read-only, exactly as proposed here.
+>
+> **"x2rock has no raw UPnP escape hatch at all" is no longer true.** `raw upnp` reaches every
+> action on all sixteen services, `BeginSoftwareUpdate` included, so the "by construction" half of
+> the argument above is gone and only the "by prohibition" half remains. That is a weaker claim and
+> the section should not be read as offering the stronger one.
+>
+> The *decision* survives intact, because it never rested on unreachability - the paragraph above
+> says so itself: anyone with `curl` could always do this, and the policy is about what x2rock
+> **offers**. `raw` is a deliberate, two-word, no-guardrails probe that the skill tells an agent to
+> use only when explicitly asked; it is not a one-word command anyone reaches by accident. What
+> changed is that the reassurance now comes from the shape of the escape hatch rather than from its
+> absence.
+
 ### What stays with the Sonos app (the scope boundary, one place)
 
 `BeginSoftwareUpdate` is one of a family, and the family has a rule: **x2rock controls speakers; it
@@ -6562,6 +6583,44 @@ something the local API offers, and no amount of metadata construction reaches i
 `browse`/`search` stays; what changes is that it should name the way through - **save it as a
 favorite in the Sonos app, and `x2rock favorite` will play it** - rather than only offering to
 descend into the container.
+
+## Audit: re-testing this document's claims against the household (2026-09-12)
+
+Prompted by finding that the UPnP guidance string had named the wrong Sonos menu since the initial
+commit - `Settings > Privacy & Security`, where it is actually under **Account** - which is the kind
+of error nothing in the build can catch. So the testable claims here were re-run against the real
+system rather than re-read.
+
+**Held, re-measured:**
+
+| claim | result |
+|---|---|
+| 108 services on the descriptor list | 108 |
+| split **32 Anonymous / 14 DeviceLink / 62 AppLink** | exact |
+| `SystemProperties GetString` refuses the account keys with UPnP 800 | 6 of 6, unchanged |
+| the Control API has **no EQ namespace at all** | `eq:1`, `equalizer:1`, `renderingControl:1`, `playerSettings:1` all `ERROR_UNSUPPORTED_NAMESPACE`; `settings:1` exists but has no `getEq` |
+| `settings:1` reads night/dialog and **refuses to write them** | read returns the whole `homeTheaterOptions` block; `setPlayerSettings` answers `ERROR_NO_PERMISSION` |
+| iHeartRadio publishes six search categories | stations, artists, tracks, albums, playlists, podcasts |
+| the browse-only filter is **learned and cached**, and a cold cache over-promises once | reproduced live: `search` listed 40, searching Radio Paloma returned the `no_search_categories` hint, and the next listing said 39 |
+
+**Moved, because they were snapshots of live things rather than facts:**
+
+- *"`jazz` returns 55 stations"* (iHeartRadio): **50** today. A catalogue that changes under us. Note
+  that reproducing it needs `--count 100` - the default is 20, which makes the figure look wrong
+  when it is not.
+- *"`x2rock search` now says 24 of 108 (20 anonymous + 4 linked)"*: this machine holds 8 linked
+  accounts now, so a warm cache says 28. The arithmetic is right; the constant was never going to
+  stay.
+
+**Wrong, and corrected in place:** the two stale forward-looking notes marked **Resolved** above -
+the UPnP 800 gloss, fixed elsewhere in this same document, and the proposal for a read-only
+`update` command that has since been built. Plus the claim that x2rock has no raw UPnP escape
+hatch, which `raw upnp` ended; see the note there, because that one was carrying a safety argument.
+
+**The lesson worth keeping:** every claim that turned out to be wrong was about something *outside*
+the code - a third-party menu, a live catalogue, or a to-do that another section had quietly
+completed. The claims about what speakers actually answer have all held. Statements of the first
+kind should be dated and re-checked; statements of the second kind have earned their confidence.
 
 ## Open questions
 
