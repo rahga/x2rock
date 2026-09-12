@@ -8,6 +8,31 @@ positive on `saturating_sub`).
 **Scope of this doc, per conversation:** wire this into x2rock core (Rust) and
 x2rocktv. Quickshell widget gets a UI for it. TUI explicitly excluded for now.
 
+**Status (2026-09-12): core and quickshell are done.** `x2rock rate up|down`
+is implemented (`src/sonos/smapi.rs`: `ratings`/`extended_metadata`/
+`rate_item`/`RatingsMatch::find`; `src/main.rs`: `run_rate`; caching in
+`src/catalogue.rs`) and verified against real hardware both ways - refused
+correctly on the household's actual Live iHeartRadio station, rated
+successfully both directions on a real Custom/Artist-Radio track, matching
+the presentation map's own success strings exactly. The quickshell widget has
+thumbs up/down buttons live in the bar (`quickshell/x2rock.sonos/
+BarWidget.qml`), screenshot-verified.
+
+**x2rocktv is still open, and is a bigger job than it first looked.** It does
+not wrap the `x2rock` CLI - it has its own independent Kotlin Sonos client
+(`~/x2rocktv/core/src/main/kotlin/`: `SonosSocket.kt`, `SonosModels.kt`,
+`Upnp.kt`, `Discovery.kt`, `SonosHousehold.kt`, `PlayModes.kt`,
+`TvSoundbar.kt`, `LanHttp.kt`, `MulticastGate.kt`, `PlayerNames.kt`,
+`AppColorTheme.kt`, `Frame.kt`, `SeedStore.kt`). Wiring ratings there means a
+second real implementation of everything above - presentation-map fetch and
+parse, `getExtendedMetadata`, `rateItem`, the state-dependent id lookup - in
+Kotlin against whatever HTTP client x2rocktv already uses, plus a Leanback-
+shaped up/down affordance on its now-playing screen. Not yet scoped past that:
+next session should start by reading `SonosModels.kt` (for whatever track-id
+shape it already carries, the Kotlin analogue of `MusicObjectId`/`Track.id`
+in x2rock's own `sonos/proto.rs`) and `SonosSocket.kt` (for the HTTP/WebSocket
+machinery already available to build the SMAPI calls on top of).
+
 ## The mechanism
 
 Sonos exposes ratings as a SMAPI extension per music service, not a Sonos-side
