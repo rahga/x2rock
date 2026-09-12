@@ -50,27 +50,138 @@ enum Service {
 }
 
 impl Service {
-    fn path(self) -> &'static str {
-        match self {
-            Self::AvTransport => "/MediaRenderer/AVTransport/Control",
-            Self::ContentDirectory => "/MediaServer/ContentDirectory/Control",
-            Self::MusicServices => "/MusicServices/Control",
-            Self::AlarmClock => "/AlarmClock/Control",
-            Self::ZoneGroupTopology => "/ZoneGroupTopology/Control",
-            Self::RenderingControl => "/MediaRenderer/RenderingControl/Control",
-        }
+    /// The row in [`SERVICES`] this variant names.
+    ///
+    /// The typed variants and the raw table are the same six strings, so they
+    /// are written once. A variant whose name is missing from the table is a
+    /// programming error rather than a runtime condition, hence the panic: the
+    /// unit test below walks every variant so it cannot reach a build.
+    fn entry(self) -> &'static ServiceEntry {
+        let name = match self {
+            Self::AvTransport => "AVTransport",
+            Self::ContentDirectory => "ContentDirectory",
+            Self::MusicServices => "MusicServices",
+            Self::AlarmClock => "AlarmClock",
+            Self::ZoneGroupTopology => "ZoneGroupTopology",
+            Self::RenderingControl => "RenderingControl",
+        };
+        service_entry(name).expect("every Service variant is in SERVICES")
     }
+}
 
-    fn urn(self) -> &'static str {
-        match self {
-            Self::AvTransport => "urn:schemas-upnp-org:service:AVTransport:1",
-            Self::ContentDirectory => "urn:schemas-upnp-org:service:ContentDirectory:1",
-            Self::MusicServices => "urn:schemas-upnp-org:service:MusicServices:1",
-            Self::AlarmClock => "urn:schemas-upnp-org:service:AlarmClock:1",
-            Self::ZoneGroupTopology => "urn:schemas-upnp-org:service:ZoneGroupTopology:1",
-            Self::RenderingControl => "urn:schemas-upnp-org:service:RenderingControl:1",
-        }
-    }
+/// One UPnP service a player exposes: where to POST, and what to call it.
+pub struct ServiceEntry {
+    /// The name as the Sonos documentation spells it, which is also what
+    /// `raw --upnp` accepts (case-insensitively).
+    pub name: &'static str,
+    pub path: &'static str,
+    pub urn: &'static str,
+}
+
+/// Every UPnP service a Sonos player publishes.
+///
+/// Six of these are reached by typed methods on [`Upnp`]; the rest are here for
+/// `raw --upnp`, which exists so that settling what an undocumented-to-us action
+/// actually answers does not need a rebuild - the same argument `raw` already
+/// makes for the Control API, applied to the older surface that carries
+/// everything the Control API never got: line-in, the physical speaker
+/// (DeviceProperties), soundbar IR, and the local music library.
+///
+/// Paths and URNs are transcribed from svrooij/sonos-api-docs, which generates
+/// them from the players' own service descriptions. The six that overlap with
+/// the typed variants were checked against what this file already sent and
+/// agree exactly. Note the two that are not `schemas-upnp-org`: `Queue` is
+/// Sonos's own, and `QPlay` is Tencent's.
+pub const SERVICES: &[ServiceEntry] = &[
+    ServiceEntry {
+        name: "AlarmClock",
+        path: "/AlarmClock/Control",
+        urn: "urn:schemas-upnp-org:service:AlarmClock:1",
+    },
+    ServiceEntry {
+        name: "AudioIn",
+        path: "/AudioIn/Control",
+        urn: "urn:schemas-upnp-org:service:AudioIn:1",
+    },
+    ServiceEntry {
+        name: "AVTransport",
+        path: "/MediaRenderer/AVTransport/Control",
+        urn: "urn:schemas-upnp-org:service:AVTransport:1",
+    },
+    ServiceEntry {
+        name: "ConnectionManager",
+        path: "/MediaRenderer/ConnectionManager/Control",
+        urn: "urn:schemas-upnp-org:service:ConnectionManager:1",
+    },
+    ServiceEntry {
+        name: "ContentDirectory",
+        path: "/MediaServer/ContentDirectory/Control",
+        urn: "urn:schemas-upnp-org:service:ContentDirectory:1",
+    },
+    ServiceEntry {
+        name: "DeviceProperties",
+        path: "/DeviceProperties/Control",
+        urn: "urn:schemas-upnp-org:service:DeviceProperties:1",
+    },
+    ServiceEntry {
+        name: "GroupManagement",
+        path: "/GroupManagement/Control",
+        urn: "urn:schemas-upnp-org:service:GroupManagement:1",
+    },
+    ServiceEntry {
+        name: "GroupRenderingControl",
+        path: "/MediaRenderer/GroupRenderingControl/Control",
+        urn: "urn:schemas-upnp-org:service:GroupRenderingControl:1",
+    },
+    ServiceEntry {
+        name: "HTControl",
+        path: "/HTControl/Control",
+        urn: "urn:schemas-upnp-org:service:HTControl:1",
+    },
+    ServiceEntry {
+        name: "MusicServices",
+        path: "/MusicServices/Control",
+        urn: "urn:schemas-upnp-org:service:MusicServices:1",
+    },
+    ServiceEntry {
+        name: "QPlay",
+        path: "/QPlay/Control",
+        urn: "urn:schemas-tencent-com:service:QPlay:1",
+    },
+    ServiceEntry {
+        name: "Queue",
+        path: "/MediaRenderer/Queue/Control",
+        urn: "urn:schemas-sonos-com:service:Queue:1",
+    },
+    ServiceEntry {
+        name: "RenderingControl",
+        path: "/MediaRenderer/RenderingControl/Control",
+        urn: "urn:schemas-upnp-org:service:RenderingControl:1",
+    },
+    ServiceEntry {
+        name: "SystemProperties",
+        path: "/SystemProperties/Control",
+        urn: "urn:schemas-upnp-org:service:SystemProperties:1",
+    },
+    ServiceEntry {
+        name: "VirtualLineIn",
+        path: "/MediaRenderer/VirtualLineIn/Control",
+        urn: "urn:schemas-upnp-org:service:VirtualLineIn:1",
+    },
+    ServiceEntry {
+        name: "ZoneGroupTopology",
+        path: "/ZoneGroupTopology/Control",
+        urn: "urn:schemas-upnp-org:service:ZoneGroupTopology:1",
+    },
+];
+
+/// Look a service up by name, case-insensitively.
+///
+/// Case-insensitive because the capitalization is not guessable - `AVTransport`
+/// and `HTControl` shout where `AudioIn` does not - and a probe that has to get
+/// that right before it can ask a question is a worse probe.
+pub fn service_entry(name: &str) -> Option<&'static ServiceEntry> {
+    SERVICES.iter().find(|s| s.name.eq_ignore_ascii_case(name))
 }
 
 /// The bounds `RenderingControl`'s own service description gives for bass and
@@ -763,16 +874,33 @@ impl Upnp {
 
     /// Invoke one action and return the response envelope, with UPnP faults as errors.
     async fn soap(&self, service: Service, action: &str, args: &[(&str, &str)]) -> Result<String> {
+        let entry = service.entry();
+        let args: Vec<(&str, &str)> = args.to_vec();
+        self.soap_at(entry, action, &args).await
+    }
+
+    /// [`Self::soap`] against a service named at runtime rather than by variant.
+    ///
+    /// The whole body of `soap` lives here so that `raw --upnp` gets the same
+    /// envelope, the same SOAPACTION header, the same escaping and - the part
+    /// that matters - the same fault decoding, rather than a second
+    /// nearly-identical path that drifts.
+    async fn soap_at(
+        &self,
+        service: &ServiceEntry,
+        action: &str,
+        args: &[(&str, &str)],
+    ) -> Result<String> {
         let mut params = String::new();
         for (name, value) in args {
             params.push_str(&format!("<{name}>{}</{name}>", escape(value)));
         }
         let envelope = format!(
             r#"<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:{action} xmlns:u="{urn}">{params}</u:{action}></s:Body></s:Envelope>"#,
-            urn = service.urn()
+            urn = service.urn
         );
-        let soap_action = format!("{}#{action}", service.urn());
-        let (status, text) = self.post(service.path(), &soap_action, &envelope).await?;
+        let soap_action = format!("{}#{action}", service.urn);
+        let (status, text) = self.post(service.path, &soap_action, &envelope).await?;
 
         if status == 200 {
             return Ok(text);
@@ -809,6 +937,50 @@ impl Upnp {
                 .unwrap_or(""),
         };
         bail!("{action} failed: UPnP error {code} ({detail})")
+    }
+
+    /// Invoke any action on any service, for `raw --upnp`.
+    ///
+    /// Returns the response's out-arguments in the order the player listed
+    /// them. Order rather than a map because some replies carry repeated names
+    /// and because the order is itself information when the argument names are
+    /// the thing being discovered.
+    ///
+    /// A UPnP fault comes back as an `Err` carrying the same decoded message
+    /// every typed call would produce - the caller decides whether a refusal is
+    /// a failure. For a probe it is a result, and `raw` prints it and exits 0.
+    pub async fn raw_action(
+        &self,
+        service: &ServiceEntry,
+        action: &str,
+        args: &[(String, String)],
+    ) -> Result<Vec<(String, String)>> {
+        let borrowed: Vec<(&str, &str)> =
+            args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let text = self.soap_at(service, action, &borrowed).await?;
+        let doc =
+            Document::parse(&text).with_context(|| format!("parsing the {action} response"))?;
+        // The envelope is Envelope > Body > <action>Response > out-args. Finding
+        // the response element by suffix rather than by walking the namespaced
+        // Body keeps this working whatever prefix the player chose.
+        let response = doc
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name().ends_with("Response"));
+        let Some(response) = response else {
+            // An action with no out-arguments answers with an empty response
+            // element, and some answer with none at all. Both are successes.
+            return Ok(Vec::new());
+        };
+        Ok(response
+            .children()
+            .filter(|c| c.is_element())
+            .map(|c| {
+                (
+                    c.tag_name().name().to_owned(),
+                    c.text().unwrap_or("").to_owned(),
+                )
+            })
+            .collect())
     }
 
     /// One page of the queue.
@@ -1580,6 +1752,52 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Service::entry` panics for a variant the table does not name, so the
+    /// panic is kept out of a release by walking every variant here. This is
+    /// the test that makes the "written once" arrangement safe.
+    #[test]
+    fn every_typed_service_is_in_the_raw_table() {
+        for service in [
+            Service::AvTransport,
+            Service::ContentDirectory,
+            Service::MusicServices,
+            Service::AlarmClock,
+            Service::ZoneGroupTopology,
+            Service::RenderingControl,
+        ] {
+            let entry = service.entry();
+            assert!(entry.path.starts_with('/'), "{}", entry.name);
+            assert!(entry.urn.contains(":service:"), "{}", entry.name);
+        }
+    }
+
+    /// The names are what a user types, so they are matched without regard to
+    /// the capitalization the documentation happens to use.
+    #[test]
+    fn services_resolve_case_insensitively() {
+        assert_eq!(service_entry("avtransport").unwrap().name, "AVTransport");
+        assert_eq!(service_entry("HTCONTROL").unwrap().name, "HTControl");
+        assert_eq!(
+            service_entry("DeviceProperties").unwrap().path,
+            "/DeviceProperties/Control"
+        );
+        assert!(service_entry("NotAService").is_none());
+    }
+
+    /// Two services are not `schemas-upnp-org`, and sending them under that URN
+    /// gets a 401 that looks like a permissions problem rather than a typo.
+    #[test]
+    fn the_two_non_upnp_urns_are_preserved() {
+        assert_eq!(
+            service_entry("Queue").unwrap().urn,
+            "urn:schemas-sonos-com:service:Queue:1"
+        );
+        assert_eq!(
+            service_entry("QPlay").unwrap().urn,
+            "urn:schemas-tencent-com:service:QPlay:1"
+        );
+    }
 
     /// A `ZoneGroupState` trimmed from the one an eleven-player household
     /// produced, 2026-09-05, keeping the attributes that decide anything: a

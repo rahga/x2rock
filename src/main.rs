@@ -563,17 +563,37 @@ enum Command {
     /// get wrong on the first try.
     #[command(after_long_help = RAW_EXAMPLES)]
     Raw {
-        /// Namespace, e.g. `musicService:1`.
+        /// Namespace, e.g. `musicService:1`. With --upnp, the service name
+        /// instead, e.g. `DeviceProperties`.
         namespace: String,
-        /// Command within it, e.g. `getSessions`.
+        /// Command within it, e.g. `getSessions`. With --upnp, the action,
+        /// e.g. `GetZoneAttributes`.
         command: String,
         /// The command's parameters, as one JSON object. Defaults to `{}`.
         ///
         /// These go in the message body. The target key does not - it belongs
         /// in the header, so passing `{"groupId": "..."}` here does nothing
         /// and the player still answers "Missing groupId". Use --scope.
+        ///
+        /// With --upnp, `Name=Value` pairs instead, one argument each - SOAP
+        /// takes a flat list of named strings, not a nested object, so there
+        /// is nothing for JSON to express here.
         #[arg(value_name = "PARAMS")]
-        options: Option<String>,
+        options: Vec<String>,
+        /// Speak UPnP/SOAP on port 1400 instead of the Control API.
+        ///
+        /// The older surface, and much the wider one: the Control API never
+        /// got line-in, the physical speaker (LED, touch-button lock, room
+        /// name, stereo pairing), soundbar IR, or the local music library, and
+        /// UPnP has all of it. An unknown service name lists the sixteen there
+        /// are.
+        ///
+        /// Addressed to a player, not a group, so --scope means something
+        /// narrower here: `player` (the default) sends to --room's own speaker,
+        /// `group` to its coordinator, which is the one that answers for
+        /// AVTransport. `household` and `none` have no meaning and are refused.
+        #[arg(long)]
+        upnp: bool,
         /// What the command is addressed to. Per-namespace, and the player
         /// will not infer it: `ERROR_MISSING_PARAMETERS - Missing groupId`
         /// (or playerId, or householdId) means this flag is wrong, not the
@@ -586,12 +606,15 @@ enum Command {
         /// household - groups:1, favorites:1, playlists:1,
         /// musicServiceAccounts:1
         ///
-        /// Household is the default because the namespaces left to explore
-        /// are mostly household-scoped. `group` and `player` resolve through
-        /// --room and connect to the right player themselves, so --ip is
-        /// never needed to reach one.
-        #[arg(long, value_enum, default_value_t = RawScope::Household)]
-        scope: RawScope,
+        /// The default depends on the transport, because what is even
+        /// addressable differs: `household` for the Control API, where the
+        /// namespaces left to explore are mostly household-scoped, and
+        /// `player` for --upnp, which can only ever address one speaker.
+        ///
+        /// `group` and `player` resolve through --room and connect to the
+        /// right player themselves, so --ip is never needed to reach one.
+        #[arg(long, value_enum)]
+        scope: Option<RawScope>,
         /// After the command, keep the socket open this many seconds and print
         /// every event that arrives. How `subscribe` is read: the reply to a
         /// subscribe is empty, and the state it asked for turns up afterwards
@@ -664,7 +687,103 @@ Examples:
 
   # Parameters are one JSON object, in the body.
   x2rock -r Kitchen raw --scope group playback:1 seek '{\"positionMillis\": 30000}'
+
+  # The other surface: UPnP on port 1400, addressed to one speaker.
+  x2rock -r Kitchen raw --upnp DeviceProperties GetZoneAttributes
+
+  # UPnP arguments are Name=Value pairs, not JSON. Most take InstanceID=0.
+  x2rock -r Kitchen raw --upnp RenderingControl GetOutputFixed InstanceID=0
+
+  # AVTransport is answered by the group's coordinator, so aim there.
+  x2rock -r Kitchen raw --upnp --scope group AVTransport GetCurrentTransportActions \\
+      InstanceID=0
 ";
+
+/// `raw --upnp`: one SOAP action against one speaker.
+///
+/// Separate from the Control API path rather than folded into it because
+/// almost nothing is shared: a different transport, a different address (a
+/// player, never a group id), a different argument shape, and a different
+/// answer. What they do share is the contract that **a refusal is a result** -
+/// a UPnP fault prints and exits 0, so a probe that discovers an action is
+/// unsupported has succeeded at what it was for.
+async fn raw_upnp(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &str,
+    action: &str,
+    args: &[String],
+    scope: RawScope,
+) -> Result<()> {
+    let Some(entry) = upnp::service_entry(service) else {
+        let names: Vec<&str> = upnp::SERVICES.iter().map(|s| s.name).collect();
+        bail!(
+            "no UPnP service named {service:?}. There are {}: {}",
+            names.len(),
+            names.join(", ")
+        );
+    };
+
+    // SOAP arguments are a flat list of named strings. Split on the first `=`
+    // only: values carry URIs, and a URI carries `=`.
+    let mut parsed = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some((name, value)) = arg.split_once('=') else {
+            bail!(
+                "UPnP arguments are Name=Value pairs; {arg:?} has no `=`. \
+                 Most actions need InstanceID=0."
+            );
+        };
+        ensure!(!name.is_empty(), "{arg:?} has an empty argument name");
+        parsed.push((name.to_owned(), value.to_owned()));
+    }
+
+    // UPnP addresses a speaker. `group` aims at the coordinator because that is
+    // the only player that answers for the group's transport; `player` at the
+    // room's own speaker, which is what RenderingControl and DeviceProperties
+    // are per. The two Control API scopes have no counterpart and say so rather
+    // than quietly behaving like one of these.
+    let target = session::target(&session.groups, room)?;
+    let ip = match scope {
+        RawScope::Group => target
+            .coordinator_ip
+            .ok_or_else(|| anyhow!("no address for {}'s coordinator", target.name))?,
+        RawScope::Player => match room {
+            Some(room) => session
+                .groups
+                .player_named(room)?
+                .ip()
+                .ok_or_else(|| anyhow!("{room} did not report an address to reach it on"))?,
+            None => target
+                .coordinator_ip
+                .ok_or_else(|| anyhow!("no address for {}", target.name))?,
+        },
+        RawScope::Household | RawScope::None => bail!(
+            "--scope {} has no meaning over UPnP, which addresses one speaker. \
+             Use `player` (the room's own speaker) or `group` (its coordinator).",
+            match scope {
+                RawScope::Household => "household",
+                _ => "none",
+            }
+        ),
+    };
+
+    match Upnp::new(ip).raw_action(entry, action, &parsed).await {
+        Ok(out) if out.is_empty() => println!("{} {action}: ok, no output", entry.name),
+        Ok(out) => {
+            let object: serde_json::Map<String, serde_json::Value> = out
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&object)?);
+        }
+        // The refusal is the finding. Printed to stderr so a probe in a
+        // pipeline keeps a clean stdout, and exit 0 so a shell loop over
+        // candidate actions is not stopped by the first unsupported one.
+        Err(e) => eprintln!("{} {action}: {e:#}", entry.name),
+    }
+    Ok(())
+}
 
 /// Which target key a raw command carries, which is per-namespace and is half
 /// of what a probe is trying to find out.
@@ -5001,12 +5120,24 @@ async fn run(cli: Cli) -> Result<()> {
         namespace,
         command,
         options,
+        upnp,
         scope,
         watch,
         session: session_id,
     } = &cli.command
     {
-        let options: serde_json::Value = match options.as_deref() {
+        if *upnp {
+            let scope = scope.unwrap_or(RawScope::Player);
+            return raw_upnp(&session, room, namespace, command, options, scope).await;
+        }
+        let scope = &scope.unwrap_or(RawScope::Household);
+        ensure!(
+            options.len() <= 1,
+            "a Control API command takes one JSON object; got {} arguments. \
+             (Name=Value pairs are --upnp's shape, not this one.)",
+            options.len()
+        );
+        let options: serde_json::Value = match options.first() {
             None => json!({}),
             Some(text) => serde_json::from_str(text)
                 .with_context(|| format!("options must be a JSON object: {text}"))?,
