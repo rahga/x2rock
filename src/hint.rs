@@ -193,6 +193,79 @@ pub fn no_player_to_play(inner: &Error) -> Error {
     no_player(inner, format!("no player to play it on: {inner:#}"))
 }
 
+/// The error for a network where more than one Sonos household is reachable
+/// and nothing said which one to use.
+///
+/// A room lives in exactly one household - never merged - so guessing would
+/// mean a command landing on the wrong system's speakers the moment two
+/// households share a room name (two Sonos systems in one office, a guest
+/// property on the same LAN). `--household` picks one, by any room name that
+/// belongs to it - the household id printed here is only a fallback for the
+/// one case a room name cannot resolve: two households naming a room the
+/// same thing.
+///
+/// `households` is `(id, rooms)` per household; both ride along in `data` so
+/// `--json` gives an agent enough to build `--household` without a second
+/// call, the same shape `unknown_room` uses for `did_you_mean`/`rooms`.
+fn households_data(households: &[(String, Vec<String>)]) -> Value {
+    json!({
+        "households": households
+            .iter()
+            .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
+    let summary: Vec<String> = households
+        .iter()
+        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
+        .collect();
+    ambiguous_household(
+        &format!(
+            "{} Sonos households are reachable on this network: {}. Pass --household <room> \
+             (or, if that name is in more than one, --household <id>) to choose; `x2rock \
+             households` lists them.",
+            households.len(),
+            summary.join("; "),
+        ),
+        households,
+    )
+}
+
+/// The error for a `--household` selector that narrowed things down but not
+/// all the way - a room name that is itself in more than one household, or an
+/// id prefix that is not unique. Same code as [`multiple_households`], since
+/// to the caller the state is the same one - still ambiguous, look at
+/// `data.households` and try again with something more specific - just
+/// reached with different wording depending on what was tried.
+pub fn ambiguous_household(message: &str, households: &[(String, Vec<String>)]) -> Error {
+    Hint::new(
+        message,
+        "multiple_households",
+        Some("x2rock households".into()),
+    )
+    .with_data(households_data(households))
+    .into()
+}
+
+/// The error for a `--household` that matched none of the households actually
+/// reachable - a stale id, a room name that moved, a typo. Distinct from
+/// [`multiple_households`]/[`ambiguous_household`], which fire when something
+/// still needs narrowing; this fires when what was passed helped not at all.
+pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -> Error {
+    Hint::new(
+        format!(
+            "no household matches --household {selector:?} (checked room names and household \
+             ids); `x2rock households` lists what is actually reachable"
+        ),
+        "unknown_household",
+        Some("x2rock households".into()),
+    )
+    .with_data(households_data(households))
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +394,34 @@ mod tests {
         let silent = no_players_answered(&["Kitchen", "Bedroom"]);
         assert_eq!(of(&silent), ("no_player", None));
         assert!(format!("{silent}").contains("previously: Kitchen, Bedroom"));
+    }
+
+    #[test]
+    fn multiple_households_names_each_ones_rooms_and_carries_the_ids() {
+        // Unlike the unregistered/no_player cases above, `households` is safe
+        // to hand out as a fix: this fires only once we already know real
+        // Sonos systems are on *this*, already-scanned network - it is not
+        // the unprompted-scan-of-a-stranger's-network hazard those guard
+        // against.
+        let e = multiple_households(&[
+            ("hh:1".into(), vec!["Media Room".into(), "Kitchen".into()]),
+            ("hh:2".into(), vec!["Kitchen".into(), "Office".into()]),
+        ]);
+        assert_eq!(
+            of(&e),
+            ("multiple_households", Some("x2rock households".into()))
+        );
+        let msg = format!("{e}");
+        assert!(msg.contains("2 Sonos households"));
+        assert!(msg.contains("--household <room>"));
+
+        let v = error_json(&e);
+        assert_eq!(
+            v["households"],
+            json!([
+                { "id": "hh:1", "rooms": ["Media Room", "Kitchen"] },
+                { "id": "hh:2", "rooms": ["Kitchen", "Office"] },
+            ])
+        );
     }
 }

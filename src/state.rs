@@ -128,6 +128,25 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// Every household remembered on a network, each with its own players -
+    /// the unflattened form of [`Self::players_on`].
+    ///
+    /// Exists for the sites that must not silently merge two households
+    /// sharing a network (an office with two Sonos systems): `players_on`
+    /// is fine for "what could this name resolve to," but picking *which*
+    /// player to attach to needs to know the households stayed separate.
+    pub fn households_on(&self, fingerprint: &str) -> Vec<(String, Vec<KnownPlayer>)> {
+        self.networks
+            .get(fingerprint)
+            .map(|households| {
+                households
+                    .iter()
+                    .map(|(id, players)| (id.clone(), players.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Room / player names remembered for this machine, deduplicated and sorted.
     /// Prefers the current network when a fingerprint is provided and matches;
     /// otherwise returns all players across all networks.
@@ -321,6 +340,16 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["Media Room", "Studio"]);
+
+        // Unlike `players_on`, `households_on` keeps the two apart - the only
+        // way a caller can tell it is looking at two systems, not one.
+        let mut households = state.households_on("net-a");
+        households.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(households.len(), 2);
+        assert_eq!(households[0].0, "hh:1");
+        assert_eq!(households[0].1[0].name, "Media Room");
+        assert_eq!(households[1].0, "hh:2");
+        assert_eq!(households[1].1[0].name, "Studio");
     }
 
     #[test]

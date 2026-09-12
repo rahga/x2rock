@@ -147,7 +147,7 @@ impl StatusLog {
 
 /// Run until the process is stopped. Never returns `Ok` in practice; the `Result`
 /// is for fatal setup errors such as an unreadable state file.
-pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
+pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result<()> {
     let mut state = State::load()?;
 
     // Neither source is required: without them a dead socket is still found by
@@ -177,7 +177,7 @@ pub async fn run(explicit_ip: Option<IpAddr>) -> Result<()> {
         // status change even when the failure text is identical - and connect()
         // returns nothing to read a fingerprint out of anyway.
         let fingerprint = netid::network_fingerprint();
-        match session::connect(explicit_ip, &mut state).await {
+        match session::connect(explicit_ip, &mut state, household).await {
             Ok(session) => {
                 backoff = MIN_BACKOFF;
                 // The publisher logs the rooms by name, so this transition is

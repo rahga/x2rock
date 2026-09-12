@@ -140,7 +140,7 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
-**`accounts` is this machine's tokens, and `accounts --household` is not the household's account
+**`accounts` is this machine's tokens, and `accounts --content` is not the household's account
 list either** - it reports the serials named by favorites and queue content, which is a *proxy*.
 Measured against the Sonos app in one household it recovered **three of eight accounts and named
 one that had been removed**: an account that has never played anything in the current favorites or
@@ -311,6 +311,7 @@ see "Ask before you act".
 | Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
+| Which Sonos household(s) are reachable | `x2rock households --json` — only matters with more than one; see "Addressing a household" |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
@@ -492,6 +493,35 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
 - Volume is **relative** (`vol +5`/`-10`) or absolute (`vol 30`); a relative change **clamps at
   0/100**, never errors.
 
+## Addressing a household — only when there is more than one
+
+**An ordinary home has exactly one Sonos household, and everything above this section already
+covers it.** Do not run `x2rock households` or reach for `--household` speculatively "to be safe" -
+it costs a network scan for a case that essentially never applies at home. This section is for the
+one setting it actually comes up: an office, lab, or showroom running two or more separate Sonos
+systems on the same network (test households included).
+
+- **A room lives in exactly one household, never merged.** Reaching one player is enough for its
+  *own* household's topology (`getGroups` reports the rest) - but a second, unrelated household on
+  the same LAN is invisible to that call. If two households happen to share a room name (both have a
+  "Kitchen"), nothing about `-r Kitchen` alone can tell them apart.
+- **You will only ever see this as an error, never as something to check for up front.** Every
+  command that resolves a household surfaces `multiple_households` (nothing was said which one) or
+  `unknown_household` (something was said and it did not match) exactly like `unknown_room` -
+  `{error, code, fix, households: [{id, rooms}, ...]}`. Read `data.households` rather than re-running
+  `x2rock households` yourself when the error already handed you the list.
+- **Resolve it with a room name first.** `--household <room>` picks whichever household has a room
+  by that name - no id involved, and this is enough whenever the two systems' rooms are named
+  differently (the common case). Only fall back to `--household <id>` when a room name is itself
+  what collides (both households call something "Kitchen") - `x2rock households` is the one place an
+  id is printed; nowhere else names one, matching how `system` never prints a hardware identifier
+  without `--redact`.
+- `x2rock households [--json] [--redact]` always scans fresh (like `discover`, unlike `status`),
+  because the whole point is telling two systems apart *right now*.
+- `--household` is a **global** flag, same footing as `-r`/`--all`/`--ip`, and env-settable as
+  `X2ROCK_HOUSEHOLD`. It is ignored alongside an explicit `--ip`, which already names one player
+  unambiguously.
+
 ## Chimes and announcements: `chime` and `notify`
 
 Different from playing a stream: these **overlay** a short sound on a room and then hand it back.
@@ -578,6 +608,8 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
+| `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household" | `x2rock households` (and see `data.households`) |
+| `unknown_household` | `--household` was given and matched nothing — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry.** **When `fix` is null, do not — read the `error` and

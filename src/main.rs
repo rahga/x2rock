@@ -56,6 +56,16 @@ struct Cli {
     #[arg(long, short = 'i', global = true, env = "X2ROCK_PLAYER")]
     ip: Option<IpAddr>,
 
+    /// Which Sonos household to use, when more than one is reachable on this
+    /// network - an office running two systems, a guest property on the same
+    /// LAN. Any room name belonging to it, or (only when a room name is not
+    /// enough, because it names a room in more than one) a household id from
+    /// `x2rock households`. Ignored on a network with a single household,
+    /// which is every ordinary home; ignored entirely alongside --ip, which
+    /// already names one player unambiguously.
+    #[arg(long, global = true, env = "X2ROCK_HOUSEHOLD")]
+    household: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -565,8 +575,13 @@ enum Command {
     Accounts {
         /// Also show the account serials this household's favorites and queues
         /// name. Needs a player; the rest of this command does not.
+        // Named `content`, not `household`: the latter is the global
+        // `--household` selector (which Sonos household to talk to at all),
+        // and clap refuses two args sharing an id - this one is about what
+        // *content* is inspected once connected, a narrower and unrelated
+        // question.
         #[arg(long)]
-        household: bool,
+        content: bool,
         #[arg(long)]
         json: bool,
     },
@@ -673,6 +688,27 @@ enum Command {
     },
     /// Scan the local network for players and remember them.
     Discover,
+    /// List every Sonos household reachable on this network, each with its
+    /// rooms - the only place a household id is printed.
+    ///
+    /// Only useful when `--household` is: an ordinary home has exactly one
+    /// household, `-r` alone resolves everything, and this just confirms
+    /// that. It matters once two Sonos systems share a network (an office,
+    /// a guest property) and a room name is not enough to tell them apart -
+    /// this is where the id `--household <id>` wants comes from.
+    ///
+    /// **Always scans fresh**, unlike `status`: a stale household list would
+    /// defeat the one thing this exists to get right.
+    Households {
+        /// One object per household: `{id, rooms}`.
+        #[arg(long)]
+        json: bool,
+        /// Mask each household id down to a comparable tail, the same policy
+        /// `system --redact` applies to hardware identifiers - for pasting
+        /// somewhere public.
+        #[arg(long)]
+        redact: bool,
+    },
     /// Publish every room as an MPRIS2 media player, until stopped.
     Daemon,
     /// Every room on one screen, in the terminal. Needs the daemon running.
@@ -2009,7 +2045,52 @@ fn print_queue(queue: &upnp::Queue, current: u32, json: bool) {
     }
 }
 
-async fn discover_and_remember(state: &mut State) -> Result<()> {
+/// Turn a subnet sweep's addresses into every household found, remembering
+/// each one - the part `discover` and `households` both need and must not be
+/// left to drift apart, which already nearly happened once (one bailed on
+/// "found devices but none would talk", the other silently did not).
+///
+/// Errors if devices answered on the Sonos port but none completed a session;
+/// an empty `scan.found` is the caller's own, differently-worded case (a
+/// network with nothing on it at all is not the same news).
+async fn discover_and_remember_households(
+    scan: &discover::Scan,
+) -> Result<Vec<session::Discovered>> {
+    let (mut discovered, _) = session::discover_households(&scan.found).await;
+    if discovered.is_empty() {
+        bail!(
+            "found {} player(s) but none would talk; see the errors above",
+            scan.found.len()
+        );
+    }
+    discovered.sort_by(|a, b| a.household_id.cmp(&b.household_id));
+
+    if let Some(fingerprint) = netid::network_fingerprint() {
+        let mut state = State::load()?;
+        let mut changed = false;
+        for found in &discovered {
+            changed |= state.remember(&fingerprint, &found.household_id, &found.session.groups);
+        }
+        if changed {
+            state.save()?;
+        }
+    } else {
+        eprintln!("Could not identify this network; results will not be remembered.");
+    }
+    Ok(discovered)
+}
+
+/// `x2rock discover`: sweep the network, and print (and remember) every
+/// Sonos household found - not just one.
+///
+/// A rescan is exactly the moment a second household should not go unnoticed:
+/// this is the one command whose whole job is "tell me what's actually out
+/// there," so unlike `connect`'s rescan it never needs `--household` to pick
+/// a winner - there is no session to hand back, only a report. With one
+/// household (every ordinary home) the output is the flat list this always
+/// printed; a second changes only the heading, naming what `x2rock
+/// households` and `--household` are for.
+async fn discover_and_remember() -> Result<()> {
     let network = discover::local_network()?;
     eprintln!("Scanning {}/{} ...", network.ip, network.prefix_len());
     // Sweep it all: the point of stopping early was to avoid opening a session
@@ -2028,26 +2109,88 @@ async fn discover_and_remember(state: &mut State) -> Result<()> {
         return Ok(());
     }
 
-    let fingerprint = netid::network_fingerprint();
-    if fingerprint.is_none() {
-        eprintln!("Could not identify this network; results will not be remembered.");
-    }
-    let session = session::attach_any(&scan.found, state, fingerprint.as_deref())
-        .await
-        .with_context(|| {
-            format!(
-                "found {} player(s) but none would talk; see the errors above",
-                scan.found.len()
-            )
-        })?;
+    let discovered = discover_and_remember_households(&scan).await?;
 
-    let mut players: Vec<_> = session.groups.players.iter().collect();
-    players.sort_by(|a, b| a.name.cmp(&b.name));
-    for player in players {
-        match player.ip() {
-            Some(ip) => println!("{ip}  {}", player.name),
-            None => println!("(no address)  {}", player.name),
+    let several = discovered.len() > 1;
+    if several {
+        println!(
+            "{} Sonos households found on this network - `x2rock households` names them for \
+             --household.",
+            discovered.len()
+        );
+    }
+    for (i, found) in discovered.iter().enumerate() {
+        if several {
+            println!("\nHousehold {}:", i + 1);
         }
+        let mut players: Vec<_> = found.session.groups.players.iter().collect();
+        players.sort_by(|a, b| a.name.cmp(&b.name));
+        for player in players {
+            match player.ip() {
+                Some(ip) => println!("{ip}  {}", player.name),
+                None => println!("(no address)  {}", player.name),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `x2rock households`: name every Sonos household reachable here, for
+/// `--household` to choose between.
+///
+/// Always scans - `discover`'s honesty, not `status`'s - because the one job
+/// this command has is telling two households apart *right now*; a cached
+/// answer could be the reason someone is confused in the first place.
+async fn run_households(json: bool, redact: bool) -> Result<()> {
+    let scan = discover::scan_local_subnet().await?;
+    if scan.found.is_empty() {
+        if json {
+            println!("[]");
+            return Ok(());
+        }
+        println!("No Sonos players found.");
+        return Ok(());
+    }
+
+    let discovered = discover_and_remember_households(&scan).await?;
+
+    let show_id = |id: &str| {
+        if redact {
+            masked_uuid(id)
+        } else {
+            id.to_owned()
+        }
+    };
+
+    if json {
+        let rows: Vec<_> = discovered
+            .iter()
+            .map(|found| {
+                let mut rooms: Vec<_> = found
+                    .session
+                    .groups
+                    .players
+                    .iter()
+                    .map(|p| &p.name)
+                    .collect();
+                rooms.sort();
+                json!({ "id": show_id(&found.household_id), "rooms": rooms })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    for found in &discovered {
+        let mut rooms: Vec<_> = found
+            .session
+            .groups
+            .players
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        rooms.sort();
+        println!("{}  {}", show_id(&found.household_id), rooms.join(", "));
     }
     Ok(())
 }
@@ -2629,6 +2772,7 @@ async fn stream_url(
 #[allow(clippy::too_many_arguments)]
 async fn run_stations(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     query: Option<&str>,
     tag: Option<&str>,
@@ -2654,7 +2798,7 @@ async fn run_stations(
                 )
             })?;
         let mut state = State::load()?;
-        let session = session::connect(ip, &mut state).await?;
+        let session = session::connect(ip, &mut state, household).await?;
         let wait = if no_wait {
             Duration::ZERO
         } else {
@@ -2843,6 +2987,7 @@ async fn play_audio_clip(
 /// next best thing.
 async fn run_play_url(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     url: &str,
     title: Option<&str>,
@@ -2851,7 +2996,7 @@ async fn run_play_url(
 ) -> Result<()> {
     let name = stream_display_name(url, title)?;
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state).await?;
+    let session = session::connect(ip, &mut state, household).await?;
     let wait = if no_wait {
         Duration::ZERO
     } else {
@@ -2871,6 +3016,7 @@ async fn run_play_url(
 /// Anything holding results already - the bar widget - should come here instead.
 async fn run_play_item(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     service: &str,
     kind: Option<&str>,
@@ -2878,7 +3024,7 @@ async fn run_play_item(
     title: Option<&String>,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state).await?;
+    let session = session::connect(ip, &mut state, household).await?;
     let mut catalogue = catalogue::Catalogue::load();
     catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -2903,6 +3049,7 @@ async fn run_play_item(
 /// playing.
 async fn run_queue_item(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     service: &str,
     kind: Option<&str>,
@@ -2910,7 +3057,7 @@ async fn run_queue_item(
     title: Option<&String>,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state).await?;
+    let session = session::connect(ip, &mut state, household).await?;
     let mut catalogue = catalogue::Catalogue::load();
     catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -3019,6 +3166,7 @@ fn announce_link_page(name: &str, url: &str, no_open: bool) {
 /// link, log in, done.
 async fn run_link(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     service: Option<&String>,
     no_open: bool,
     nickname: Option<&String>,
@@ -3027,7 +3175,7 @@ async fn run_link(
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state).await?;
+    let session = session::connect(ip, &mut state, household).await?;
     let mut catalogue = catalogue::Catalogue::load();
     if catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
@@ -3311,6 +3459,7 @@ async fn run_link(
 #[allow(clippy::too_many_arguments)]
 async fn run_browse(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     service: Option<&String>,
     container: Option<&str>,
@@ -3320,7 +3469,7 @@ async fn run_browse(
     json: bool,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state).await;
+    let reached = session::connect(ip, &mut state, household).await;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
@@ -3469,6 +3618,7 @@ async fn run_browse(
 #[allow(clippy::too_many_arguments)]
 async fn run_search(
     ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
     term: Option<&String>,
     service: Option<&String>,
@@ -3479,7 +3629,7 @@ async fn run_search(
     json: bool,
 ) -> Result<()> {
     let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state).await;
+    let reached = session::connect(ip, &mut state, household).await;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
 
@@ -5117,6 +5267,7 @@ impl Command {
             | Command::PlayUrl { json, .. }
             | Command::Accounts { json, .. }
             | Command::Bookmarks { json, .. }
+            | Command::Households { json, .. }
             | Command::Queue { json, .. } => *json,
             _ => false,
         }
@@ -5157,7 +5308,8 @@ async fn run(cli: Cli) -> Result<()> {
         );
     }
     match cli.command {
-        Command::Discover => return discover_and_remember(&mut State::load()?).await,
+        Command::Discover => return discover_and_remember().await,
+        Command::Households { json, redact } => return run_households(json, redact).await,
         Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
         Command::Completions { shell, install } => {
             if install {
@@ -5178,7 +5330,16 @@ async fn run(cli: Cli) -> Result<()> {
             ref title,
             ref kind,
         } => {
-            return run_play_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref()).await;
+            return run_play_item(
+                cli.ip,
+                cli.household.as_deref(),
+                room,
+                service,
+                kind.as_deref(),
+                id,
+                title.as_ref(),
+            )
+            .await;
         }
         Command::Stations {
             ref query,
@@ -5191,6 +5352,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_stations(
                 cli.ip,
+                cli.household.as_deref(),
                 room,
                 query.as_deref(),
                 tag.as_deref(),
@@ -5208,7 +5370,16 @@ async fn run(cli: Cli) -> Result<()> {
             no_wait,
             json,
         } => {
-            return run_play_url(cli.ip, room, url, title.as_deref(), no_wait, json).await;
+            return run_play_url(
+                cli.ip,
+                cli.household.as_deref(),
+                room,
+                url,
+                title.as_deref(),
+                no_wait,
+                json,
+            )
+            .await;
         }
         Command::QueueItem {
             ref service,
@@ -5216,8 +5387,16 @@ async fn run(cli: Cli) -> Result<()> {
             ref title,
             ref kind,
         } => {
-            return run_queue_item(cli.ip, room, service, kind.as_deref(), id, title.as_ref())
-                .await;
+            return run_queue_item(
+                cli.ip,
+                cli.household.as_deref(),
+                room,
+                service,
+                kind.as_deref(),
+                id,
+                title.as_ref(),
+            )
+            .await;
         }
         Command::Browse {
             ref service,
@@ -5229,6 +5408,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_browse(
                 cli.ip,
+                cli.household.as_deref(),
                 room,
                 service.as_ref(),
                 container.as_deref(),
@@ -5248,6 +5428,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_link(
                 cli.ip,
+                cli.household.as_deref(),
                 service.as_ref(),
                 no_open,
                 nickname.as_ref(),
@@ -5279,13 +5460,14 @@ async fn run(cli: Cli) -> Result<()> {
             }
             return Ok(());
         }
-        Command::Accounts { household, json } => {
+        Command::Accounts { content, json } => {
             let linked = credentials::Credentials::load()?;
-            // Only `--household` reaches the network, so the default keeps the
+            // Only `--content` reaches the network, so the default keeps the
             // promise made above: this command reads a file on this machine.
-            let serials = if household {
+            let serials = if content {
                 let mut state = State::load()?;
-                let session = session::connect(cli.ip, &mut state).await?;
+                let session =
+                    session::connect(cli.ip, &mut state, cli.household.as_deref()).await?;
                 // Favorites are household-wide, so any player answers for the
                 // half that matters, and demanding --room to read them would be
                 // a question with no bearing on the answer. A room is honoured
@@ -5413,6 +5595,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return run_search(
                 cli.ip,
+                cli.household.as_deref(),
                 room,
                 term.as_ref(),
                 service.as_ref(),
@@ -5430,7 +5613,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Tui => return tui::run(cli.ip).await,
         Command::Daemon => {
             tokio::select! {
-                result = daemon::run(cli.ip) => return result,
+                result = daemon::run(cli.ip, cli.household.as_deref()) => return result,
                 signal = stop_signal() => {
                     eprintln!("x2rock: stopping on {signal}");
                     return Ok(());
@@ -5441,7 +5624,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let mut state = State::load()?;
-    let session = session::connect(cli.ip, &mut state).await?;
+    let session = session::connect(cli.ip, &mut state, cli.household.as_deref()).await?;
 
     if let Command::Rooms { json } = cli.command {
         print_rooms(&session.groups, json);
@@ -6536,6 +6719,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Unlink { .. }
         | Command::Accounts { .. }
         | Command::Discover
+        | Command::Households { .. }
         | Command::Skill { .. }
         | Command::Completions { .. }
         | Command::Complete { .. }
