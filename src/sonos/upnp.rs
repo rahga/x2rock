@@ -43,6 +43,10 @@ enum Service {
     AlarmClock,
     /// Topology, and the software-update check that lives oddly beside it.
     ZoneGroupTopology,
+    /// The physical speaker rather than what it is playing: status light,
+    /// touch-control lock, room name. Per player, and reachable nowhere else -
+    /// the Control API has no equivalent namespace.
+    DeviceProperties,
     /// Tone controls. Per speaker, and reachable nowhere else: the Control API
     /// has no EQ namespace at all, so this is the only door to bass, treble and
     /// loudness - the Sonos app's own "EQ Settings for <room>" panel.
@@ -64,6 +68,7 @@ impl Service {
             Self::AlarmClock => "AlarmClock",
             Self::ZoneGroupTopology => "ZoneGroupTopology",
             Self::RenderingControl => "RenderingControl",
+            Self::DeviceProperties => "DeviceProperties",
         };
         service_entry(name).expect("every Service variant is in SERVICES")
     }
@@ -671,6 +676,63 @@ impl Upnp {
             Service::AlarmClock,
             "DestroyAlarm",
             &[("ID", &id.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Whether this speaker's status light is lit.
+    ///
+    /// Per speaker, like tone: `DeviceProperties` is a player service, and a
+    /// room that is really four bonded speakers has four lights, of which this
+    /// answers for the one addressed.
+    pub async fn led(&self) -> Result<bool> {
+        let text = self
+            .soap(Service::DeviceProperties, "GetLEDState", &[])
+            .await?;
+        let doc = Document::parse(&text).context("parsing GetLEDState response")?;
+        Ok(text_of(&doc, "CurrentLEDState").is_some_and(|s| s.eq_ignore_ascii_case("On")))
+    }
+
+    /// Turn this speaker's status light on or off.
+    ///
+    /// **The player does not validate this and the caller must.** Anything that
+    /// is not exactly `Off` is taken as on - `DesiredLEDState=Maybe` was
+    /// accepted with a success reply and lit the light - so a typo would
+    /// silently mean "on" rather than failing. Hence a `bool` here and a parsed
+    /// on/off at the CLI edge, never a passed-through string.
+    pub async fn set_led(&self, on: bool) -> Result<()> {
+        self.soap(
+            Service::DeviceProperties,
+            "SetLEDState",
+            &[("DesiredLEDState", if on { "On" } else { "Off" })],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Whether this speaker's touch controls are locked.
+    ///
+    /// `true` means locked - the buttons do nothing - which is the Sonos app's
+    /// "Button Control" switch inverted, and worth naming carefully at every
+    /// layer above this.
+    pub async fn buttons_locked(&self) -> Result<bool> {
+        let text = self
+            .soap(Service::DeviceProperties, "GetButtonLockState", &[])
+            .await?;
+        let doc = Document::parse(&text).context("parsing GetButtonLockState response")?;
+        Ok(text_of(&doc, "CurrentButtonLockState").is_some_and(|s| s.eq_ignore_ascii_case("On")))
+    }
+
+    /// Lock or unlock this speaker's touch controls.
+    ///
+    /// Unvalidated by the player in the same way [`Self::set_led`] is, and
+    /// guarded the same way.
+    pub async fn set_buttons_locked(&self, locked: bool) -> Result<()> {
+        self.soap(
+            Service::DeviceProperties,
+            "SetButtonLockState",
+            &[("DesiredButtonLockState", if locked { "On" } else { "Off" })],
         )
         .await?;
         Ok(())
@@ -1905,6 +1967,7 @@ mod tests {
             Service::AlarmClock,
             Service::ZoneGroupTopology,
             Service::RenderingControl,
+            Service::DeviceProperties,
         ] {
             let entry = service.entry();
             assert!(entry.path.starts_with('/'), "{}", entry.name);

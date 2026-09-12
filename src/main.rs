@@ -247,6 +247,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or set a speaker's status light: on or off.
+    ///
+    /// Per speaker rather than per group, like `eq`: the light is on the
+    /// hardware, and a room backed by a stereo pair has two of them, of which
+    /// `--room` addresses the one it names. With no argument it reads.
+    ///
+    /// The usual reason to want this is a speaker in a bedroom.
+    Led {
+        /// `on` or `off`.
+        mode: Option<String>,
+        /// The resulting `{room, led}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show or set whether a speaker's touch controls are locked.
+    ///
+    /// `lock` makes the play/pause and volume controls on the speaker itself do
+    /// nothing; `unlock` restores them. Playback over the network is unaffected
+    /// either way - this is only about the buttons on the box, and is the Sonos
+    /// app's "Button Control" switch. Per speaker, like `led`. With no argument
+    /// it reads.
+    Buttons {
+        /// `lock` or `unlock`.
+        mode: Option<String>,
+        /// The resulting `{room, buttons_locked}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or set one speaker's tone controls: bass, treble and loudness.
     ///
     /// Per speaker rather than per group - rooms playing together share a group
@@ -3888,6 +3916,122 @@ struct ToneRequest {
 /// Addressed to a player, not a group: two rooms playing together each keep
 /// their own tone, and the Sonos app agrees - its panel is titled "EQ Settings
 /// for <room>".
+/// The speaker `--room` names, for the per-player settings.
+///
+/// `eq`, `led` and `buttons` all address the hardware rather than the group, so
+/// they all resolve the same way and do it here rather than three times.
+fn named_speaker<'a>(
+    session: &'a session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+) -> Result<&'a sonos::proto::Player> {
+    match room {
+        Some(name) => session.groups.player_named(name),
+        // No room named, so the default group resolved; its coordinator is the
+        // speaker meant. By id, because once grouped the group's name
+        // ("Kitchen + 1") is no player's name at all.
+        None => session
+            .groups
+            .player(&target.coordinator_id)
+            .ok_or_else(|| anyhow!("no player for {}", target.name)),
+    }
+}
+
+/// `on`/`off` for the status light.
+///
+/// Parsed here rather than passed to the player, which takes any string and
+/// reads everything but `Off` as on - `DesiredLEDState=Maybe` was accepted and
+/// lit the light. A typo must not quietly mean "on".
+fn parse_led(text: &str) -> Result<bool> {
+    match text {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => bail!("led takes on or off"),
+    }
+}
+
+/// `lock`/`unlock` for the touch controls.
+///
+/// Deliberately **not** on/off. "buttons on" reads as both "the buttons work"
+/// and "the lock is on", and the two are opposites; the wire makes it worse by
+/// calling the locked state `On` where the Sonos app's switch calls the same
+/// state off. Naming the action leaves nothing to guess, so on/off is refused
+/// rather than picked a meaning for.
+fn parse_button_lock(text: &str) -> Result<bool> {
+    match text {
+        "lock" => Ok(true),
+        "unlock" => Ok(false),
+        _ => bail!("buttons takes lock or unlock"),
+    }
+}
+
+/// A speaker's status light, read or set.
+async fn apply_led(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    mode: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let speaker = named_speaker(session, target, room)?;
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    let upnp = Upnp::new(ip);
+    let before = upnp.led().await?;
+    let after = match mode.as_deref() {
+        None => before,
+        Some(text) => {
+            let on = parse_led(text)?;
+            upnp.set_led(on).await?;
+            on
+        }
+    };
+    if json {
+        println!("{}", json!({ "room": speaker.name, "led": after }));
+    } else {
+        let word = |on: bool| if on { "on" } else { "off" };
+        let from = transition(word(before), word(after));
+        println!("{:<24} led {from}{}", speaker.name, word(after));
+    }
+    Ok(())
+}
+
+/// A speaker's touch-control lock, read or set.
+async fn apply_buttons(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    mode: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let speaker = named_speaker(session, target, room)?;
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    let upnp = Upnp::new(ip);
+    let before = upnp.buttons_locked().await?;
+    let after = match mode.as_deref() {
+        None => before,
+        Some(text) => {
+            let locked = parse_button_lock(text)?;
+            upnp.set_buttons_locked(locked).await?;
+            locked
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            json!({ "room": speaker.name, "buttons_locked": after })
+        );
+    } else {
+        let word = |locked: bool| if locked { "locked" } else { "unlocked" };
+        let from = transition(word(before), word(after));
+        println!("{:<24} buttons {from}{}", speaker.name, word(after));
+    }
+    Ok(())
+}
+
 async fn apply_eq(
     session: &session::Session,
     target: &session::Target,
@@ -3903,16 +4047,7 @@ async fn apply_eq(
         night,
         dialog,
     } = want;
-    let speaker = match room {
-        Some(name) => session.groups.player_named(name)?,
-        // No room named, so the default group resolved; its coordinator is the
-        // speaker meant. By id, because once grouped the group's name
-        // ("Kitchen + 1") is no player's name at all.
-        None => session
-            .groups
-            .player(&target.coordinator_id)
-            .ok_or_else(|| anyhow!("no player for {}", target.name))?,
-    };
+    let speaker = named_speaker(session, target, room)?;
     let ip = speaker
         .ip()
         .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
@@ -4713,6 +4848,8 @@ impl Command {
             | Command::Sleep { json, .. }
             | Command::Snooze { json, .. }
             | Command::Crossfade { json, .. }
+            | Command::Led { json, .. }
+            | Command::Buttons { json, .. }
             | Command::Eq { json, .. }
             | Command::Favorites { json, .. }
             | Command::Search { json, .. }
@@ -6092,6 +6229,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
+        Command::Led { mode, json } => apply_led(&session, &target, room, mode, json).await?,
+        Command::Buttons { mode, json } => {
+            apply_buttons(&session, &target, room, mode, json).await?
+        }
         Command::Sleep { duration, json } => {
             apply_sleep(&target, player.ip(), duration, json).await?
         }
@@ -6982,6 +7123,31 @@ mod tests {
         };
         let entry = room_value(&facts, Ok((status, meta, None)), None);
         assert_eq!(entry["audible"], serde_json::Value::Null);
+    }
+
+    /// The player takes any string for these and reads everything but `Off` as
+    /// on, so a typo would silently mean "on". x2rock has to be the thing that
+    /// refuses, and `buttons` in particular must refuse on/off rather than
+    /// pick a meaning for a word that points both ways.
+    #[test]
+    fn the_speaker_toggles_refuse_what_the_player_would_have_accepted() {
+        assert!(parse_led("on").unwrap());
+        assert!(!parse_led("off").unwrap());
+        for bad in ["maybe", "On", "1", "true", "lock", ""] {
+            assert!(parse_led(bad).is_err(), "led accepted {bad:?}");
+        }
+
+        assert!(parse_button_lock("lock").unwrap());
+        assert!(!parse_button_lock("unlock").unwrap());
+        // The whole reason the command is worded `lock`/`unlock`: "on" means
+        // "the buttons work" to one reader and "the lock is on" to another,
+        // and the wire and the Sonos app disagree about which is which.
+        for ambiguous in ["on", "off", "locked", "unlocked", ""] {
+            assert!(
+                parse_button_lock(ambiguous).is_err(),
+                "buttons accepted {ambiguous:?}"
+            );
+        }
     }
 
     /// `--ramp` is per speaker because `GroupRenderingControl` publishes no

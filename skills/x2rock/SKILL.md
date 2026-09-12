@@ -233,6 +233,15 @@ same as null**: zero means the timer has expired and the room is seconds from pa
 observed reading zero while still playing for about seven seconds - while null means no timer is
 set. When it fires the room **pauses**, keeping its place, so `play` resumes it.
 
+**`led` and `buttons` are the physical speaker, not what it is playing.** `led` is the status
+light - the reason to want it off is a speaker in a bedroom - and `buttons` locks the touch controls
+on the box, which is the Sonos app's "Button Control" and does **not** affect playback over the
+network. Both are **per speaker** like `eq`, so `-r` names the speaker and a stereo pair has two of
+each. `buttons` takes `lock`/`unlock` rather than on/off on purpose: "buttons on" means both "they
+work" and "the lock is on", and the wire and the app disagree about which. Note the player accepts
+*any* string for these and treats everything but `Off` as on, so x2rock validates and a typo is
+refused rather than quietly meaning "on".
+
 **`eq` is per speaker, like `vol --player` and unlike everything else.** Bass and treble run
 -10..10 (0 flat) and loudness is on/off; `-r` names the *speaker*, so a grouped room gets its own
 tone rather than its group's, and `--all` does not apply to it. **Loudness is on from the factory**,
@@ -286,6 +295,8 @@ see "Ask before you act".
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
+| Speaker status light | `x2rock -r <Room> led [on\|off] [--json]` |
+| Lock the buttons on the speaker itself | `x2rock -r <Room> buttons [lock\|unlock] [--json]` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
