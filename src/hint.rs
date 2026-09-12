@@ -193,27 +193,24 @@ pub fn no_player_to_play(inner: &Error) -> Error {
     no_player(inner, format!("no player to play it on: {inner:#}"))
 }
 
-/// The error for a network where more than one Sonos household is reachable
-/// and nothing said which one to use.
-///
-/// A room lives in exactly one household - never merged - so guessing would
-/// mean a command landing on the wrong system's speakers the moment two
-/// households share a room name (two Sonos systems in one office, a guest
-/// property on the same LAN). `--household` picks one, by any room name that
-/// belongs to it - the household id printed here is only a fallback for the
-/// one case a room name cannot resolve: two households naming a room the
-/// same thing.
-///
-/// `households` is `(id, rooms)` per household; both ride along in `data` so
-/// `--json` gives an agent enough to build `--household` without a second
-/// call, the same shape `unknown_room` uses for `did_you_mean`/`rooms`.
-fn households_data(households: &[(String, Vec<String>)]) -> Value {
-    json!({
-        "households": households
-            .iter()
-            .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
-            .collect::<Vec<_>>(),
-    })
+/// The household errors share one shape: a message, a code, `x2rock
+/// households` as the fix, and `data.households` as `(id, rooms)` per household
+/// so `--json` gives an agent enough to build `--household` without a second
+/// call - the same shape `unknown_room` uses for `did_you_mean`/`rooms`. One
+/// core, so a fourth household error is one more two-line constructor rather
+/// than a fourth copy of the fix string and the data shape.
+fn household_hint(
+    message: impl Into<String>,
+    code: &'static str,
+    households: &[(String, Vec<String>)],
+) -> Error {
+    let households: Vec<_> = households
+        .iter()
+        .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
+        .collect();
+    Hint::new(message.into(), code, Some("x2rock households".into()))
+        .with_data(json!({ "households": households }))
+        .into()
 }
 
 pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
@@ -222,7 +219,7 @@ pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
         .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
         .collect();
     ambiguous_household(
-        &format!(
+        format!(
             "{} Sonos households are reachable on this network: {}. Pass --household <room> \
              (or, if that name is in more than one, --household <id>) to choose; `x2rock \
              households` lists them.",
@@ -239,14 +236,11 @@ pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
 /// to the caller the state is the same one - still ambiguous, look at
 /// `data.households` and try again with something more specific - just
 /// reached with different wording depending on what was tried.
-pub fn ambiguous_household(message: &str, households: &[(String, Vec<String>)]) -> Error {
-    Hint::new(
-        message,
-        "multiple_households",
-        Some("x2rock households".into()),
-    )
-    .with_data(households_data(households))
-    .into()
+pub fn ambiguous_household(
+    message: impl Into<String>,
+    households: &[(String, Vec<String>)],
+) -> Error {
+    household_hint(message, "multiple_households", households)
 }
 
 /// The error for a `--household` that matched none of the households actually
@@ -254,16 +248,14 @@ pub fn ambiguous_household(message: &str, households: &[(String, Vec<String>)]) 
 /// [`multiple_households`]/[`ambiguous_household`], which fire when something
 /// still needs narrowing; this fires when what was passed helped not at all.
 pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -> Error {
-    Hint::new(
+    household_hint(
         format!(
             "no household matches --household {selector:?} (checked room names and household \
              ids); `x2rock households` lists what is actually reachable"
         ),
         "unknown_household",
-        Some("x2rock households".into()),
+        households,
     )
-    .with_data(households_data(households))
-    .into()
 }
 
 #[cfg(test)]

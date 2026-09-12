@@ -568,11 +568,11 @@ pub async fn media_uri(
 /// One rating a service offers for whichever current-rating state a `Match`
 /// names - a thumb, in every service seen so far.
 ///
-/// Verified against iHeartRadio's real presentation map (2026-09-12):
-/// `AutoSkip` is `"NEVER"` on every rating it declares, kept as the service's
-/// own string rather than parsed into an enum since only that one value has
-/// been seen and it is not the thing to act on anyway - `RateItemResult`'s
-/// live `should_skip` is.
+/// The presentation map also declares an `AutoSkip` per rating (`"NEVER"` on
+/// every one iHeartRadio publishes, verified 2026-09-12). It is deliberately
+/// not carried: it is the service's stated *policy*, and the thing to act on
+/// is `RateResult::should_skip`, the live per-call answer, which need not
+/// agree with it. A field nothing reads would otherwise sit in every cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rating {
     /// What `rateItem` wants back. **Not a fixed per-direction constant** -
@@ -582,7 +582,6 @@ pub struct Rating {
     /// "thumbs up"). Always read from whichever `Match` the track's current
     /// state selected, never cached across tracks.
     pub id: String,
-    pub auto_skip: String,
     /// Untranslated, e.g. `THUMBS_UP_TIP` - no localized-string layer exists
     /// here yet. Matching `"UP"`/`"DOWN"` in this is how a caller tells the
     /// two apart; every service seen names it that plainly.
@@ -604,7 +603,12 @@ impl RatingsMatch {
     /// The `Rating` a caller means by "up" or "down" - matched on
     /// [`Rating::string_id`], the only signal a service gives for which is
     /// which.
-    pub fn find(matches: &[RatingsMatch], propname: &str, value: &str, up: bool) -> Option<Rating> {
+    pub fn find<'a>(
+        matches: &'a [RatingsMatch],
+        propname: &str,
+        value: &str,
+        up: bool,
+    ) -> Option<&'a Rating> {
         let word = if up { "UP" } else { "DOWN" };
         matches
             .iter()
@@ -612,7 +616,6 @@ impl RatingsMatch {
             .ratings
             .iter()
             .find(|r| r.string_id.to_uppercase().contains(word))
-            .cloned()
     }
 }
 
@@ -655,7 +658,6 @@ fn parse_ratings_map(body: &str) -> Result<Vec<RatingsMatch>> {
                 .filter_map(|r| {
                     Some(Rating {
                         id: r.attribute("Id")?.to_string(),
-                        auto_skip: r.attribute("AutoSkip").unwrap_or_default().to_string(),
                         string_id: r.attribute("StringId").unwrap_or_default().to_string(),
                     })
                 })
@@ -715,9 +717,8 @@ fn parse_dynamic_properties(body: &str) -> Result<Vec<(String, String)>> {
 /// What `rateItem` answers.
 pub struct RateResult {
     /// Whether the service wants the room to advance immediately - the live,
-    /// per-call answer, and the one to act on. A `Rating`'s own declared
-    /// `auto_skip` is the service's stated *policy*; this is what actually
-    /// happened this time, and the two need not agree.
+    /// per-call answer, and the one to act on (the presentation map's declared
+    /// `AutoSkip` is only the service's stated policy; see [`Rating`]).
     pub should_skip: Option<bool>,
     /// `messageStringId` - untranslated, and only for logging/`--json`. No
     /// localized-string layer exists here to turn it into the prose a person
@@ -748,18 +749,18 @@ pub async fn rate_item(
 }
 
 /// A `rateItem` response, pure for testing against a captured payload.
+/// One element's text, by tag - the lookup every reply parser in this file
+/// does. Written out longhand six times before it had a name.
+fn element_text<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
+    doc.descendants()
+        .find(|n| n.has_tag_name(tag))
+        .and_then(|n| n.text())
+}
+
 fn parse_rate_result(body: &str) -> Result<RateResult> {
     let doc = Document::parse(body)?;
-    let should_skip = doc
-        .descendants()
-        .find(|n| n.has_tag_name("shouldSkip"))
-        .and_then(|n| n.text())
-        .and_then(|t| t.parse::<bool>().ok());
-    let message_string_id = doc
-        .descendants()
-        .find(|n| n.has_tag_name("messageStringId"))
-        .and_then(|n| n.text())
-        .map(str::to_string);
+    let should_skip = element_text(&doc, "shouldSkip").and_then(|t| t.parse::<bool>().ok());
+    let message_string_id = element_text(&doc, "messageStringId").map(str::to_string);
     Ok(RateResult {
         should_skip,
         message_string_id,
@@ -842,12 +843,7 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
 /// both.
 fn parse_link_code(service_name: &str, action: &str, body: &str) -> Result<LinkCode> {
     let doc = Document::parse(body).with_context(|| format!("parsing {action} response"))?;
-    let field = |tag: &str| {
-        doc.descendants()
-            .find(|n| n.has_tag_name(tag))
-            .and_then(|n| n.text())
-            .map(str::to_string)
-    };
+    let field = |tag: &str| element_text(&doc, tag).map(str::to_string);
     let link_code =
         field("linkCode").ok_or_else(|| anyhow!("{service_name} returned no linkCode"))?;
     Ok(LinkCode {
@@ -905,12 +901,7 @@ pub async fn device_auth_token(
 
 fn parse_device_auth(service_name: &str, body: &str) -> Result<DeviceAuth> {
     let doc = Document::parse(body).context("parsing getDeviceAuthToken response")?;
-    let field = |tag: &str| {
-        doc.descendants()
-            .find(|n| n.has_tag_name(tag))
-            .and_then(|n| n.text())
-            .map(str::to_string)
-    };
+    let field = |tag: &str| element_text(&doc, tag).map(str::to_string);
     Ok(DeviceAuth {
         auth_token: field("authToken")
             .ok_or_else(|| anyhow!("{service_name} linked but returned no authToken"))?,
@@ -1043,12 +1034,7 @@ fn fault_in(text: &str) -> Option<Fault> {
     if !doc.descendants().any(|n| n.has_tag_name("Fault")) {
         return None;
     }
-    let field = |tag: &str| {
-        doc.descendants()
-            .find(|n| n.has_tag_name(tag))
-            .and_then(|n| n.text())
-            .map(str::to_string)
-    };
+    let field = |tag: &str| element_text(&doc, tag).map(str::to_string);
     // SMAPI is specified as SOAP 1.1, and services mostly oblige - but Sonos
     // Radio answers in **1.2**, where a fault has no `faultcode` or
     // `faultstring` at all: the code is `Code/Value` plus an optional
@@ -1745,22 +1731,21 @@ mod tests {
         let unselected = matches.iter().find(|m| m.propname == "unselected").unwrap();
         assert_eq!(unselected.value, "0");
         assert_eq!(unselected.ratings.len(), 2);
-        assert!(unselected.ratings.iter().all(|r| r.auto_skip == "NEVER"));
 
         // The point of the whole exercise: "thumbs up" is id 555 while
         // unrated, 5 while already down, and never the same id twice - a
         // caller that cached "5 means up" from one track would send the
         // wrong id on the next.
         assert_eq!(
-            RatingsMatch::find(&matches, "unselected", "0", true).map(|r| r.id),
+            RatingsMatch::find(&matches, "unselected", "0", true).map(|r| r.id.clone()),
             Some("555".into())
         );
         assert_eq!(
-            RatingsMatch::find(&matches, "thumbs_down_selected", "1", true).map(|r| r.id),
+            RatingsMatch::find(&matches, "thumbs_down_selected", "1", true).map(|r| r.id.clone()),
             Some("55".into())
         );
         assert_eq!(
-            RatingsMatch::find(&matches, "thumbs_up_selected", "5", true).map(|r| r.id),
+            RatingsMatch::find(&matches, "thumbs_up_selected", "5", true).map(|r| r.id.clone()),
             Some("5".into())
         );
     }

@@ -897,7 +897,7 @@ async fn raw_upnp(
         // failure and must propagate, or a script's `|| handle_failure` never
         // fires. The last one matters most for a loop over candidate actions,
         // which would otherwise conclude every service is unsupported.
-        Err(e) if is_refusal(&e) && !is_upnp_off(&e) => {
+        Err(e) if upnp::Fault::of(&e).is_some_and(upnp::Fault::is_per_action) => {
             eprintln!("{} {action}: {e:#}", entry.name)
         }
         Err(e) => return Err(e),
@@ -2071,41 +2071,17 @@ fn print_queue(queue: &upnp::Queue, current: u32, json: bool) {
     }
 }
 
-/// Turn a subnet sweep's addresses into every household found, remembering
-/// each one - the part `discover` and `households` both need and must not be
-/// left to drift apart, which already nearly happened once (one bailed on
-/// "found devices but none would talk", the other silently did not).
-///
-/// Errors if devices answered on the Sonos port but none completed a session;
-/// an empty `scan.found` is the caller's own, differently-worded case (a
-/// network with nothing on it at all is not the same news).
+/// Every household a subnet sweep found, remembered. The `discover` and
+/// `households` half of what `session::connect`'s rescan also does; the
+/// discovering, the "found devices but none would talk" error and the
+/// remembering all live in `session::discover_households`, so the three
+/// callers cannot drift - which they had, once.
 async fn discover_and_remember_households(
     scan: &discover::Scan,
 ) -> Result<Vec<session::Discovered>> {
-    let (mut discovered, last_error) = session::discover_households(&scan.found).await;
-    if discovered.is_empty() {
-        // The same coded error `connect`'s own rescan raises for this exact
-        // state (devices answered on the port, none completed a session) -
-        // sharing the constructor is what keeps `discover`/`households` from
-        // drifting from it the way they already once drifted from each other.
-        let last = last_error.unwrap_or_else(|| anyhow::anyhow!("no address reported a household"));
-        return Err(hint::none_completed_a_session(scan.found.len(), &last));
-    }
-    discovered.sort_by(|a, b| a.household_id.cmp(&b.household_id));
-
-    if let Some(fingerprint) = netid::network_fingerprint() {
-        let mut state = State::load()?;
-        let mut changed = false;
-        for found in &discovered {
-            changed |= state.remember(&fingerprint, &found.household_id, &found.session.groups);
-        }
-        if changed {
-            state.save()?;
-        }
-    } else {
-        eprintln!("Could not identify this network; results will not be remembered.");
-    }
-    Ok(discovered)
+    let mut state = State::load()?;
+    let fingerprint = netid::network_fingerprint();
+    session::discover_households(&scan.found, &mut state, fingerprint.as_deref()).await
 }
 
 /// `x2rock discover`: sweep the network, and print (and remember) every
@@ -2172,11 +2148,14 @@ async fn discover_and_remember() -> Result<()> {
 async fn run_households(json: bool, redact: bool) -> Result<()> {
     let scan = discover::scan_local_subnet().await?;
     if scan.found.is_empty() {
-        if json {
-            println!("[]");
-            return Ok(());
-        }
-        println!("No Sonos players found.");
+        println!(
+            "{}",
+            if json {
+                "[]"
+            } else {
+                "No Sonos players found."
+            }
+        );
         return Ok(());
     }
 
@@ -2190,36 +2169,31 @@ async fn run_households(json: bool, redact: bool) -> Result<()> {
     let show_id = |id: &str| {
         if redact { masked(id) } else { id.to_owned() }
     };
+    let rows: Vec<(String, Vec<&str>)> = discovered
+        .iter()
+        .map(|found| {
+            let mut rooms: Vec<_> = found
+                .session
+                .groups
+                .players
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            rooms.sort_unstable();
+            (show_id(&found.household_id), rooms)
+        })
+        .collect();
 
     if json {
-        let rows: Vec<_> = discovered
+        let rows: Vec<_> = rows
             .iter()
-            .map(|found| {
-                let mut rooms: Vec<_> = found
-                    .session
-                    .groups
-                    .players
-                    .iter()
-                    .map(|p| &p.name)
-                    .collect();
-                rooms.sort();
-                json!({ "id": show_id(&found.household_id), "rooms": rooms })
-            })
+            .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
-    }
-
-    for found in &discovered {
-        let mut rooms: Vec<_> = found
-            .session
-            .groups
-            .players
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
-        rooms.sort();
-        println!("{}  {}", show_id(&found.household_id), rooms.join(", "));
+    } else {
+        for (id, rooms) in &rows {
+            println!("{id}  {}", rooms.join(", "));
+        }
     }
     Ok(())
 }
@@ -3209,7 +3183,13 @@ async fn run_rate(
     direction: RateDirection,
     json: bool,
 ) -> Result<()> {
-    let meta = player.metadata(group).await?;
+    // Independent of each other - one is the Control API over the socket that
+    // is already open, the other a UPnP `ListAvailableServices` to the same
+    // player - so they overlap rather than queue. `refresh` is a no-op when
+    // the player's service-list version has not moved.
+    let mut catalogue = catalogue::Catalogue::load();
+    let upnp = Upnp::new(player.ip());
+    let (meta, dirty) = tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, false))?;
     let track_id = meta
         .current_item
         .as_ref()
@@ -3227,8 +3207,6 @@ async fn run_rate(
         .as_deref()
         .ok_or_else(|| anyhow!("the current track names no service, so it cannot be rated"))?;
 
-    let mut catalogue = catalogue::Catalogue::load();
-    let dirty = catalogue.refresh(&Upnp::new(player.ip()), false).await?;
     let service = catalogue
         .by_id(service_id)
         .ok_or_else(|| anyhow!("service {service_id} is not in this player's service list"))?
@@ -3284,23 +3262,21 @@ async fn run_rate(
         &mut refreshed,
     )
     .await?;
-    if let Some(new_token) = refreshed
-        && let Ok(mut creds) = credentials::Credentials::load()
-    {
-        save_refreshed_token(&mut creds, &service.id, new_token);
-    }
+    // Nothing follows that needs the token; the call is for its save.
+    let _ = use_refreshed_token(&service.id, token, refreshed);
 
     // The rating already landed - a failure here must not read as the rating
     // itself having failed, which `?` would do (and which could send a caller
     // that retries on error back to rate the same track twice). Warn and move
     // on; the room simply keeps playing what it was.
-    let mut skipped = false;
-    if result.should_skip == Some(true) {
-        match player.playback(group, "skipToNextTrack").await {
-            Ok(()) => skipped = true,
-            Err(e) => eprintln!("x2rock: rated successfully, but the requested skip failed: {e:#}"),
-        }
-    }
+    let skipped = result.should_skip == Some(true)
+        && match player.playback(group, "skipToNextTrack").await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("x2rock: rated successfully, but the requested skip failed: {e:#}");
+                false
+            }
+        };
 
     let word = if up { "up" } else { "down" };
     if json {
@@ -4506,15 +4482,7 @@ async fn apply_rename(
 /// spends a second round trip to fail the same way while printing a sentence
 /// that blames the content.
 fn is_refusal(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<upnp::Fault>().is_some()
-}
-
-/// Whether the error is UPnP being switched off for the household - a refusal
-/// of the whole transport, which `raw upnp` must propagate even though the
-/// enqueue fallbacks are right to treat it as "try the stream instead".
-fn is_upnp_off(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<upnp::Fault>()
-        .is_some_and(upnp::Fault::is_upnp_off)
+    upnp::Fault::of(e).is_some()
 }
 
 /// `on`/`off`, for every flag and argument that takes those two words.
@@ -7846,13 +7814,13 @@ mod tests {
     fn only_a_player_refusal_counts_as_a_refusal() {
         let fault = anyhow!(upnp::Fault {
             action: "AddURIToQueue".into(),
-            code: "800".into(),
+            kind: upnp::FaultKind::Action("800".into()),
             detail: String::new(),
         });
         assert!(is_refusal(&fault));
         // A per-action refusal is not the transport being off - checked before
         // `.context()` below consumes `fault`.
-        assert!(!is_upnp_off(&fault));
+        assert!(upnp::Fault::of(&fault).is_some_and(upnp::Fault::is_per_action));
         assert!(
             is_refusal(&fault.context("enqueuing the track")),
             "a refusal must stay recognisable under added context"
@@ -7867,13 +7835,13 @@ mod tests {
         // where every UPnP call is refused.
         let forbidden = anyhow!(upnp::Fault {
             action: "AddURIToQueue".into(),
-            code: "403".into(),
+            kind: upnp::FaultKind::UpnpDisabled,
             detail: "UPnP is turned off".into(),
         });
         assert!(is_refusal(&forbidden));
         // ...but it is the transport being off, not one action refused, which
         // is the distinction `raw upnp` draws and the fallbacks do not.
-        assert!(is_upnp_off(&forbidden));
+        assert!(upnp::Fault::of(&forbidden).is_some_and(|f| !f.is_per_action()));
 
         assert!(!is_refusal(&anyhow!("connection refused")));
         assert!(!is_refusal(

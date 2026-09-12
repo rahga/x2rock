@@ -88,35 +88,68 @@ impl Service {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fault {
     pub action: String,
-    /// The UPnP error code as the player gave it, e.g. `701`, `800`, `402` -
-    /// or `403`, which is not a UPnP code at all but the HTTP status a player
-    /// answers with when UPnP is switched off household-wide. See
-    /// [`Self::is_upnp_off`] for why that one is carried here anyway.
-    pub code: String,
+    pub kind: FaultKind,
     /// Whatever gloss could be put on it; often empty.
     pub detail: String,
 }
 
+/// What kind of no the player said.
+///
+/// Two things arrive on the same path and used to share one string field,
+/// with `"403"` standing in for the second: a *UPnP* error code for one
+/// action, and HTTP 403 for the whole transport being switched off in the
+/// Sonos app. They are the same thing to the enqueue fallbacks - either way
+/// the item will not go in the queue, and `loadStreamUrl` still works - and
+/// different things to `raw upnp`, where a per-action refusal is a finding
+/// worth exit 0 and "UPnP is off" is a failure a probing loop must not read
+/// as sixteen unsupported services. An enum says which without a sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FaultKind {
+    /// One action declined, with the UPnP error code as the player gave it:
+    /// `701`, `800`, `402`, ...
+    Action(String),
+    /// Every action declined: UPnP is turned off for the household.
+    UpnpDisabled,
+}
+
 impl Fault {
-    /// Whether this is the whole transport being refused rather than one action.
+    /// The fault behind an error, if that is what it is.
     ///
-    /// The two are the same thing to the stream fallback - either way the item
-    /// will not go in the queue and `loadStreamUrl`, being Control API, still
-    /// works - and different things to `raw upnp`, where a per-action refusal
-    /// is a finding worth exit 0 and "UPnP is off" is a failure a probing loop
-    /// must not read as sixteen unsupported services.
-    pub fn is_upnp_off(&self) -> bool {
-        self.code == "403"
+    /// The one place the downcast is written, so callers ask about the fault
+    /// rather than about `anyhow`.
+    pub fn of(e: &anyhow::Error) -> Option<&Fault> {
+        e.downcast_ref()
+    }
+
+    /// Whether one action was declined, as opposed to the transport.
+    pub fn is_per_action(&self) -> bool {
+        matches!(self.kind, FaultKind::Action(_))
+    }
+
+    /// The UPnP error code, for the actions that give one a meaning - `800`
+    /// from `GetRunningAlarmProperties` is "no alarm running", not a failure.
+    pub fn upnp_code(&self) -> Option<&str> {
+        match &self.kind {
+            FaultKind::Action(code) => Some(code),
+            FaultKind::UpnpDisabled => None,
+        }
     }
 }
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} failed: UPnP error {}", self.action, self.code)?;
-        if !self.detail.is_empty() {
-            write!(f, " ({})", self.detail)?;
+        match &self.kind {
+            FaultKind::Action(code) => {
+                write!(f, "{} failed: UPnP error {code}", self.action)?;
+                if !self.detail.is_empty() {
+                    write!(f, " ({})", self.detail)?;
+                }
+                Ok(())
+            }
+            // Not "UPnP error 403": that is an HTTP status, and printing it as
+            // a UPnP code sent readers looking up a code that does not exist.
+            FaultKind::UpnpDisabled => write!(f, "{} refused: {}", self.action, self.detail),
         }
-        Ok(())
     }
 }
 
@@ -1036,7 +1069,7 @@ impl Upnp {
             // 800 from this action means "no alarm is running" rather than a
             // failure. Matched on the typed code, so a transport error carrying
             // the digits 800 in an address cannot be read as "none running".
-            Err(e) if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "800") => {
+            Err(e) if Fault::of(&e).is_some_and(|f| f.upnp_code() == Some("800")) => {
                 return Ok(None);
             }
             Err(e) => return Err(e),
@@ -1319,7 +1352,7 @@ impl Upnp {
             // took both of those down with it.
             return Err(Fault {
                 action: action.to_owned(),
-                code: "403".to_owned(),
+                kind: FaultKind::UpnpDisabled,
                 // Path verified against Sonos's own support article, which
                 // puts it under the *Account* menu rather than Settings - the
                 // wording this inherited sent people to the wrong menu. It is
@@ -1361,7 +1394,7 @@ impl Upnp {
         };
         Err(Fault {
             action: action.to_owned(),
-            code: code.to_owned(),
+            kind: FaultKind::Action(code.to_owned()),
             detail: detail.to_owned(),
         }
         .into())

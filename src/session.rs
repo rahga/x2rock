@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{Error, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::discover;
 use crate::netid;
@@ -97,34 +97,15 @@ pub async fn connect(
     // was actually asked for, which ruled out the old `attach_any`-over-the-
     // raw-scan fallback (first responder wins, whoever that is).
     eprintln!("Remembered players did not answer; rescanning...");
+    let nobody_answered = || {
+        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
+        crate::hint::no_players_answered(&names)
+    };
     let scan = discover::scan_local_subnet().await?;
     if scan.found.is_empty() {
-        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
-        return Err(crate::hint::no_players_answered(&names));
+        return Err(nobody_answered());
     }
-
-    let (discovered, last_error) = discover_households(&scan.found).await;
-    if discovered.is_empty() {
-        // Devices answered on the Sonos port but none completed a session -
-        // mid-reboot, or a Boost, which listens there and never will. Distinct
-        // from `no_players_answered` above: something is out there, just not
-        // yet talking.
-        let last = last_error.unwrap_or_else(|| anyhow::anyhow!("no address reported a household"));
-        return Err(crate::hint::none_completed_a_session(
-            scan.found.len(),
-            &last,
-        ));
-    }
-    let mut changed = false;
-    for found in &discovered {
-        changed |= state.remember(fingerprint, &found.household_id, &found.session.groups);
-    }
-    if changed {
-        // Propagated, as `attach` does a few lines up: a save that fails here
-        // silently would leave every following command re-sweeping the subnet
-        // with nothing to say why.
-        state.save()?;
-    }
+    let discovered = discover_households(&scan.found, state, Some(fingerprint)).await?;
 
     // Keep the household that was asked for; close the others rather than
     // drop them (see `discover_households` for why dropping is a leak).
@@ -136,14 +117,12 @@ pub async fn connect(
             found.session.connection.close();
         }
     }
-    selected.ok_or_else(|| {
-        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
-        crate::hint::no_players_answered(&names)
-    })
+    selected.ok_or_else(nobody_answered)
 }
 
 /// Every household visible among already-Sonos-port-reachable addresses, each
-/// with the live connection and topology it reported.
+/// with the live connection and topology it reported - remembered, and never
+/// empty on `Ok`.
 ///
 /// One player per household is enough to name it - `groups()` from any member
 /// reports the whole household - so every address is probed for its household
@@ -164,25 +143,37 @@ pub async fn connect(
 /// when more than one household is out there, not merely that *a* household
 /// is.
 ///
-/// The second half of the return is the last failure seen, if any - not
-/// `attach_any`'s whole running commentary, but enough that a caller reporting
-/// "found N but none would talk" can say what actually went wrong, the way
-/// `attach_any` used to, rather than a placeholder.
-pub async fn discover_households(found: &[Ipv4Addr]) -> (Vec<Discovered>, Option<Error>) {
+/// Like [`attach`], it records what it found before returning, so the two
+/// callers cannot drift on when to remember or whether a failed save is a
+/// failure - which they had, once. With no fingerprint it says so and skips
+/// the remembering, for a network that cannot be identified.
+///
+/// Devices answering on the Sonos port but none completing a session - mid-
+/// reboot, or a Boost, which listens there and never will - is an error, with
+/// the last failure seen as its cause. Distinct from an empty scan, which is
+/// the caller's own, differently-worded news.
+pub async fn discover_households(
+    found: &[Ipv4Addr],
+    state: &mut State,
+    fingerprint: Option<&str>,
+) -> Result<Vec<Discovered>> {
     let probes = found.iter().map(|&ip| async move {
-        match Connection::open(IpAddr::V4(ip)).await {
+        let probed = match Connection::open(IpAddr::V4(ip)).await {
             Ok(connection) => match connection.household_id().await {
                 Ok(id) => Ok((id, connection)),
                 Err(e) => {
-                    eprintln!("{ip}: {e:#}");
+                    // Opened, but not answering for a household: closed, not
+                    // dropped - see the note below on why dropping leaks.
+                    connection.close();
                     Err(e)
                 }
             },
-            Err(e) => {
-                eprintln!("{ip}: {e:#}");
-                Err(e)
-            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &probed {
+            eprintln!("{ip}: {e:#}");
         }
+        probed
     });
 
     let mut last_error = None;
@@ -201,12 +192,14 @@ pub async fn discover_households(found: &[Ipv4Addr]) -> (Vec<Discovered>, Option
 
     let mut discovered = Vec::new();
     for (household_id, connections) in by_household {
-        let mut completed = None;
         let mut connections = connections.into_iter();
         for connection in connections.by_ref() {
             match connection.groups().await {
                 Ok(groups) => {
-                    completed = Some(Session { connection, groups });
+                    discovered.push(Discovered {
+                        household_id,
+                        session: Session { connection, groups },
+                    });
                     break;
                 }
                 Err(e) => {
@@ -222,17 +215,27 @@ pub async fn discover_households(found: &[Ipv4Addr]) -> (Vec<Discovered>, Option
         // and a healthy socket refreshes its own liveness on every pong - so a
         // dropped one lives, and pings, for the rest of the process. The
         // daemon rescans on every reconnect, which made this unbounded.
-        for spare in connections {
-            spare.close();
-        }
-        if let Some(session) = completed {
-            discovered.push(Discovered {
-                household_id,
-                session,
-            });
-        }
+        connections.for_each(|spare| spare.close());
     }
-    (discovered, last_error)
+
+    if discovered.is_empty() {
+        let last = last_error.unwrap_or_else(|| anyhow::anyhow!("no address reported a household"));
+        return Err(crate::hint::none_completed_a_session(found.len(), &last));
+    }
+
+    match fingerprint {
+        Some(fingerprint) => {
+            let mut changed = false;
+            for each in &discovered {
+                changed |= state.remember(fingerprint, &each.household_id, &each.session.groups);
+            }
+            if changed {
+                state.save()?;
+            }
+        }
+        None => eprintln!("Could not identify this network; results will not be remembered."),
+    }
+    Ok(discovered)
 }
 
 /// Which of several households a `--household` selector names: by any room
@@ -302,7 +305,7 @@ fn resolve_household<'a>(
         [one] => Ok(one),
         [] => Err(crate::hint::unknown_household(selector, &summarise())),
         _ => Err(crate::hint::ambiguous_household(
-            &format!("--household {selector:?} matches more than one household id"),
+            format!("--household {selector:?} matches more than one household id"),
             &summarise(),
         )),
     }
