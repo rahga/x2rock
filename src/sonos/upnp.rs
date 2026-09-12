@@ -69,6 +69,24 @@ impl Service {
     }
 }
 
+/// The alarm a room is sounding right now.
+///
+/// Deliberately thin: the fields that identify *which* alarm is going off, so
+/// it can be named, disarmed or snoozed. Everything else about it is already in
+/// `alarms`, keyed by the same id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningAlarm {
+    /// Matches an `id` from `alarms`, so the two can be joined.
+    pub id: u32,
+    /// The group the alarm started, as the player reports it.
+    pub started: String,
+    /// When it actually began, which is not the scheduled time: an alarm
+    /// created with under two minutes' notice fires late (see the alarms
+    /// section of the skill), and its `--duration` still runs from the
+    /// schedule.
+    pub logged_start_time: String,
+}
+
 /// One UPnP service a player exposes: where to POST, and what to call it.
 pub struct ServiceEntry {
     /// The name as the Sonos documentation spells it, which is also what
@@ -653,6 +671,82 @@ impl Upnp {
             Service::AlarmClock,
             "DestroyAlarm",
             &[("ID", &id.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The alarm currently sounding in this group, or `None` when none is.
+    ///
+    /// The only way to ask the question. `alarms` lists what is *scheduled*
+    /// and says nothing about what is going off right now, and a firing alarm
+    /// is otherwise indistinguishable from the room having been started by
+    /// hand - which is exactly the confusion behind "why is this playing and
+    /// why won't turning the alarm off stop it".
+    ///
+    /// **A player with no alarm running answers UPnP 800**, not an empty
+    /// result, so the error is the answer rather than a failure. 800 is UPnP's
+    /// undefined code and means whatever the action decided, which here is
+    /// "nothing is running"; every other fault is still an error.
+    ///
+    /// **"Running" means the alarm's window is open, not that sound is coming
+    /// out.** A snoozed alarm still answers here, with the same id - verified
+    /// by snoozing a live one and asking again. That is what makes re-snoozing
+    /// work, and it is why this must not be used to decide whether a room is
+    /// audible; read the transport state for that.
+    pub async fn running_alarm(&self) -> Result<Option<RunningAlarm>> {
+        let text = match self
+            .soap(
+                Service::AvTransport,
+                "GetRunningAlarmProperties",
+                &[("InstanceID", "0")],
+            )
+            .await
+        {
+            Ok(text) => text,
+            Err(e) if format!("{e}").contains("UPnP error 800") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let doc = Document::parse(&text).context("parsing GetRunningAlarmProperties response")?;
+        // An id of 0 is the player saying "no alarm" in the other shape it has
+        // been seen to use, so it is folded into the same None.
+        let id: u32 = text_of(&doc, "AlarmID")
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        if id == 0 {
+            return Ok(None);
+        }
+        Ok(Some(RunningAlarm {
+            id,
+            started: text_of(&doc, "GroupID").unwrap_or_default().to_owned(),
+            logged_start_time: text_of(&doc, "LoggedStartTime")
+                .unwrap_or_default()
+                .to_owned(),
+        }))
+    }
+
+    /// Silence the alarm that is sounding, for a while.
+    ///
+    /// The answer to the thing `alarm <id> off` cannot do: disarming an alarm
+    /// stops it *scheduling* again, and removing it deletes it, but neither
+    /// touches the one already playing - only this and `pause` do, and this is
+    /// the one that brings it back.
+    ///
+    /// **A player with nothing running answers UPnP 701**, which its own
+    /// message already glosses as "not available in this state" - the honest
+    /// reading, so it is passed through rather than reworded.
+    pub async fn snooze_alarm(&self, duration: Duration) -> Result<()> {
+        let secs = duration.as_secs();
+        let hms = format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        );
+        self.soap(
+            Service::AvTransport,
+            "SnoozeAlarm",
+            &[("InstanceID", "0"), ("Duration", &hms)],
         )
         .await?;
         Ok(())

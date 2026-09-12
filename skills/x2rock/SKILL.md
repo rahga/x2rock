@@ -35,7 +35,7 @@ CLI it came from — if the version has moved since you installed the skill, re-
     "queue_position": 3, "explicit": false, "crossfade": false,
     "next_title": "Blue in Green", "next_artist": "Miles Davis",
     "service": "YouTube Music", "service_id": "284", "art_url": "http://…",
-    "volume": 2, "muted": false, "audible": true,
+    "volume": 2, "muted": false, "audible": true, "fixed": false,
     "repeat": "off", "shuffle": false,
     "on_tv": false, "has_tv": false, "input_format": null, "surround": null,
     "stream_info": null,
@@ -44,12 +44,12 @@ CLI it came from — if the version has moved since you installed the skill, re-
   {
     "room": "Bedroom", "state": "PLAYING", "title": "TV Audio",
     "on_tv": true, "has_tv": true, "input_format": "Dolby Digital 2.0", "surround": false,
-    "service": null, "service_id": null, "volume": 12, "muted": false, "audible": true,
+    "service": null, "service_id": null, "volume": 12, "muted": false, "audible": true, "fixed": false,
     "members": ["Bedroom"], "coordinator": "Bedroom", "repeat": "off", "shuffle": false
   },
   {
     "room": "Dining Room + 1", "state": "PLAYING", "title": "Señorita",
-    "service": "Plex", "service_id": "212", "volume": 1, "muted": false, "audible": true,
+    "service": "Plex", "service_id": "212", "volume": 1, "muted": false, "audible": true, "fixed": false,
     "members": ["Dining Room", "Kitchen"], "coordinator": "Dining Room",
     "repeat": "off", "shuffle": false, "on_tv": false, "has_tv": false
   }
@@ -204,7 +204,12 @@ Several things about alarms that will otherwise surprise a user:
   volume read in the first seconds after firing is really lower than the alarm's setting - measured
   climbing 6 -> 16 for a `--volume 16` alarm. Never report that as `--volume` being ignored; wait
   and re-read.
-- **Removing a running alarm does not stop it**, and neither does disarming it. Use `pause`.
+- **Removing a running alarm does not stop it**, and neither does disarming it - `alarm <id> off`
+  stops it scheduling *again*, not the one already sounding. **`x2rock -r <Room> snooze` is the
+  command for an alarm that is going off**, silencing it for nine minutes by default (`snooze 20m`
+  for longer); `pause` stops it outright without it coming back. Snooze leaves the room `PAUSED`
+  keeping its place, and a snoozed alarm still reads as running, so snoozing again is allowed and
+  is how someone hits the button twice.
 - **An alarm needs about two minutes of lead time.** One created less than that before its own
   start misses its scheduling slot and fires roughly two minutes late, so setting an alarm "for one
   minute from now" to demonstrate it will look broken. Its `--duration` also runs from the
@@ -268,6 +273,7 @@ see "Ask before you act".
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
+| Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
@@ -305,6 +311,16 @@ publish a search category; `x2rock browse` lists every service reachable at all,
 so more - run both rather than assuming they match. A service that answers `no_search_categories` is
 browse-only, not broken: walk it with `x2rock browse -s "<service>"` rather than reporting it as
 unavailable.
+
+**A container cannot be played whole, and this is a limit of Sonos rather than of x2rock.** An album,
+a playlist, a show - anything `browse` marks `"container": true` - can be *opened* and its tracks
+played one at a time, and `--play N` on the container itself is refused. Do not go looking for a
+flag that plays it: there is no way to do it over the local network at all. Four routes were tried
+against real hardware and all four fail, including replaying a player's own stored favorite URI back
+to it verbatim (see docs/architecture.md). **The way through is to say so and name the workaround:
+saved in the Sonos app as a favorite, the same container plays fine with `x2rock favorite "<name>"`,
+because that hands the player an id and lets it resolve the thing itself.** The error message says
+this too; do not promise to find a way round it.
 
 Two shapes worth noting because they are inconsistent: **`favorite` is name/id-addressed**
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).
@@ -557,6 +573,10 @@ or the user is surprised nothing responds.
 
 ## When a field is a trap
 
+- **`fixed:true`**: the room's volume is **not yours to change** - a Port or Amp feeding something
+  with its own control. Every `vol` command is accepted and changes nothing, so a level that will
+  not move is this, not a bug. Different from `audible`, which stays `true`: a fixed room is loud,
+  just not adjustable. Point at the downstream amp rather than retrying.
 - **`audible:false`** (muted or volume 0): a play succeeds but makes no sound. Say so; ask before
   unmuting/raising (never silently unmute in a shared house) — unless the intent is already loud.
   `audible:true` only means *not muted, not zero* — a room at `volume:2` is barely audible, not

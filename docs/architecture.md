@@ -6493,6 +6493,76 @@ Deliberately scoped narrow: this is a retry on one specific, self-identifying fa
 general "retry anything" policy - the existing `NOT_LINKED_RETRY` / device-link-poll handling stays
 completely separate, and a fault with no `refreshAuthTokenResult` still bails exactly as before.
 
+## A service container cannot be played over the LAN at all (settled 2026-09-11)
+
+Prompted by a sweep of [svrooij/sonos-api-docs](https://github.com/svrooij/sonos-api-docs), whose
+`docs/_data/metadata.json` looks like a recipe for playing an album or playlist by id - the thing
+`browse` and `search` refuse today, telling the user to walk in and play a track. It is not a
+recipe. **Four routes were tried against a real household and all four fail**, so the refusal is
+correct and the only thing worth improving is what it says.
+
+### The id prefix decodes, which is what kills the documented approach
+
+Every container URI carries an eight-hex-digit prefix before the service's own object id -
+`1004206c`, `1004004c`, `100c2068`. The docs present six hardcoded Spotify strings and no rule.
+Reading all 43 favorites out of `FV:2` on a real household gives one:
+
+```
+10        04          206c
+^^        ^^          ^^^^
+constant  class        the `flags` query parameter, in hex
+          (04 album, 06 playlist, 09 stream, 0c radio, 03 track, 0e listView)
+```
+
+`flags=8300` ⇔ `206c`, `flags=76` ⇔ `004c`, `flags=8296` ⇔ `2068`, `flags=40` ⇔ `0028`. Twelve out
+of twelve, across seven services. Which is precisely the problem: **`flags` varies per service** -
+Amazon Music writes 8300 where YouTube Music writes 76 for the same container class - and nothing
+in a SMAPI browse response says which value a service wants. There is no constant to hardcode and
+no way to derive one, so a frozen table of six Spotify strings could never have generalized.
+
+### All four playback routes refuse
+
+| Route | Result |
+|---|---|
+| UPnP `AVTransport SetAVTransportURI`, `x-rincon-cpcontainer:` | **714** |
+| UPnP `AVTransport AddURIToQueue`, same URI | **800** |
+| Control API `playback:1 loadContainer` | `success: true`, **no effect** |
+| Control API `playbackSession:1` after `createSession` | namespace has **no** `loadContainer` |
+
+The first is the one that settles it: a **byte-exact replay** of the player's own favorite - the
+`<res>` URI and the `r:resMD` metadata copied verbatim out of `FV:2`, not reconstructed - is
+refused 714 by the very player that stores it. Nothing about the URI construction is wrong, because
+there was no construction. Tried across Amazon Music (a dead account, 714), YouTube Music (a live
+one, 714/800) and Relisten (anonymous, so no account to resolve at all, 800), which rules out
+account resolution as the cause.
+
+`playback:1 loadContainer` deserves its own warning, because it is the most misleading result here.
+It exists, it validates its arguments (walking the schema out of its own error messages gives
+`containerId.objectId` required, then `containerMetadata`), and it answers `success: true` - for a
+**garbage object id**, and for real ones, changing nothing either way. It was briefly believed to
+work on the strength of one room whose queue was never recorded beforehand; a control on a second
+room holding exactly one known track, unchanged after the same call, is what caught it. **A
+`success: true` from this command means nothing.** It belongs with `play-url`'s accepted-then-idle
+trap in the list of replies that have to be verified by reading state back.
+
+`playbackSession:1` is the documented Sonos route for apps, and a session does connect from the LAN
+with an arbitrary `appId`. But it offers only `loadCloudQueue` - which requires *you* to host a
+queue server the player polls - and `loadStreamUrl`, which is what `play-url` already does. Neither
+touches a music service's own catalogue.
+
+### What does play a container, and what to say instead
+
+`favorites:1 loadFavorite` and `playlists:1 loadPlaylist`, both of which take an id for something
+already saved in the household. That is why container favorites play fine today while an identical
+container from `browse` cannot: `favorite` never builds a URI at all, it hands the player an id and
+the player resolves everything itself.
+
+So this is not a missing feature. Browsing a service and playing a container from it is not
+something the local API offers, and no amount of metadata construction reaches it. The refusal in
+`browse`/`search` stays; what changes is that it should name the way through - **save it as a
+favorite in the Sonos app, and `x2rock favorite` will play it** - rather than only offering to
+descend into the container.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

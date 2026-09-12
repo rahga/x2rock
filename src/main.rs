@@ -193,6 +193,25 @@ enum Command {
         #[command(subcommand)]
         action: AlarmAction,
     },
+    /// Silence the alarm that is going off, for a while.
+    ///
+    /// The answer to the one thing the `alarm` subcommands cannot do. Turning
+    /// an alarm off stops it scheduling again and removing it deletes it, but
+    /// **neither stops the one already playing** - only this and `pause` do,
+    /// and this is the one that brings it back.
+    ///
+    /// Addressed per group, like transport, and it acts rather than reads:
+    /// when an alarm is waking the house at 07:00 the useful thing to type is
+    /// one word.
+    Snooze {
+        /// How long to silence it: `9`, `9m`, `1h`, or `HH:MM:SS`. Bare digits
+        /// are minutes. Defaults to 9 minutes, which is what a clock radio has
+        /// meant by snooze since the 1950s.
+        duration: Option<String>,
+        /// The resulting `{room, alarm_id, snoozed_ms}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or set the sleep timer: the room stops playing when it runs out.
     ///
     /// With no argument it reads what is left. Per group, like transport.
@@ -1350,6 +1369,14 @@ fn room_value(
                     "audible".into(),
                     json!(volume.as_ref().map(|v| !v.muted && v.volume > 0)),
                 );
+                // A fixed-volume room - a Port or Amp feeding something with its
+                // own control - takes every volume command and changes nothing.
+                // `vol --json` has always reported it; without it here, the one
+                // call that is meant to be the whole household leaves an agent
+                // to discover the refusal by making it. Distinct from `audible`,
+                // which stays true: a fixed room is not silent, it is just not
+                // yours to turn down.
+                map.insert("fixed".into(), json!(volume.as_ref().map(|v| v.fixed)));
                 map.insert("members".into(), json!(facts.members));
                 map.insert("coordinator".into(), json!(facts.coordinator));
                 map.insert("has_tv".into(), json!(facts.has_tv));
@@ -3213,12 +3240,23 @@ async fn run_browse(
             .ok_or_else(|| anyhow!("no row {nth}; {at} has {}", items.len()))?;
         // A container is a place, and refusing here is kinder than letting
         // getMediaURI refuse it with a grammar error about ids.
+        //
+        // The second sentence is the one that matters: playing a container is
+        // not something x2rock has yet to implement, it is not reachable over
+        // the LAN at all - four routes were tried and all four fail, see "A
+        // service container cannot be played over the LAN at all" in
+        // docs/architecture.md. Saving it in the Sonos app is genuinely the way
+        // through, because `favorite` hands the player an id and lets it
+        // resolve the container itself.
         ensure!(
             !item.container,
-            "{:?} is a container. Open it with: x2rock browse -s {} {}",
+            "{:?} is a container. Open it with: x2rock browse -s {} {}\n\
+             To play the whole thing, save it as a favorite in the Sonos app - \
+             then: x2rock favorite {:?}",
             item.title,
             chosen.name,
-            item.id
+            item.id,
+            item.title
         );
         return play_item(
             live()?,
@@ -3459,10 +3497,13 @@ async fn run_search(
         // getMediaURI refuse it with a grammar error about ids.
         ensure!(
             !item.container,
-            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}",
+            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}\n\
+             To play the whole thing, save it as a favorite in the Sonos app - \
+             then: x2rock favorite {:?}",
             item.title,
             chosen.name,
-            item.id
+            item.id,
+            item.title
         );
         return play_item(
             live()?,
@@ -4082,6 +4123,65 @@ async fn apply_sleep(
     Ok(())
 }
 
+/// What snooze means with no duration given: the clock-radio nine minutes.
+const SNOOZE_DEFAULT: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+
+/// Silence a sounding alarm, and say which one it was.
+///
+/// Reads the running alarm *before* snoozing rather than only handling the
+/// refusal afterwards, for two reasons: the reply can then name the alarm (so
+/// `alarm <id> off` is one obvious step away for someone who wants it to stop
+/// permanently, not just this morning), and "no alarm is running" is a clearer
+/// thing to say than passing UPnP 701 through.
+async fn apply_snooze(
+    target: &session::Target,
+    player_ip: IpAddr,
+    duration: Option<String>,
+    json: bool,
+) -> Result<()> {
+    // AVTransport answers for the group on its coordinator, like the sleep
+    // timer above.
+    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player_ip));
+    let how_long = match duration.as_deref() {
+        None => SNOOZE_DEFAULT,
+        // `parse_sleep` is reused for the grammar, but its `off` arm has no
+        // meaning here - there is no such thing as snoozing for no time - so it
+        // is refused rather than silently treated as the default.
+        Some(text) => parse_sleep(text)?.ok_or_else(|| {
+            anyhow!("snooze takes a duration; to stop an alarm outright use pause")
+        })?,
+    };
+
+    let running = upnp.running_alarm().await?.ok_or_else(|| {
+        anyhow!(
+            "no alarm is running in {}. Snooze silences an alarm that is \
+             sounding; to stop this room use pause, and to stop an alarm \
+             firing again use: x2rock alarm <id> off",
+            target.name
+        )
+    })?;
+    upnp.snooze_alarm(how_long).await?;
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "room": target.name,
+                "alarm_id": running.id,
+                "snoozed_ms": how_long.as_millis(),
+            })
+        );
+    } else {
+        println!(
+            "{:<24} alarm {} snoozed {}",
+            target.name,
+            running.id,
+            hms_short(how_long)
+        );
+    }
+    Ok(())
+}
+
 /// Crossfade, which is a play mode like shuffle and set the same way.
 async fn apply_crossfade(
     session: &session::Session,
@@ -4532,6 +4632,7 @@ impl Command {
             | Command::System { json, .. }
             | Command::Alarms { json, .. }
             | Command::Sleep { json, .. }
+            | Command::Snooze { json, .. }
             | Command::Crossfade { json, .. }
             | Command::Eq { json, .. }
             | Command::Favorites { json, .. }
@@ -5897,6 +5998,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sleep { duration, json } => {
             apply_sleep(&target, player.ip(), duration, json).await?
         }
+        Command::Snooze { duration, json } => {
+            apply_snooze(&target, player.ip(), duration, json).await?
+        }
         Command::Pause => player.playback(group, "pause").await?,
         Command::Toggle => player.playback(group, "togglePlayPause").await?,
         Command::Next => player.playback(group, "skipToNextTrack").await?,
@@ -6697,11 +6801,11 @@ mod tests {
     }
 
     /// The skill documents `now --json` as a **subset** of a `status` entry and
-    /// names the six fields only the latter has. Both directions are pinned:
+    /// names the seven fields only the latter has. Both directions are pinned:
     /// nothing group- or volume-shaped leaks into `now`, and a status entry adds
-    /// nothing beyond those six.
+    /// nothing beyond those seven.
     #[test]
-    fn a_status_entry_is_a_now_entry_plus_exactly_six_room_facts() {
+    fn a_status_entry_is_a_now_entry_plus_exactly_seven_room_facts() {
         let (status, meta) = playing_body();
         let now = now_json("Media Room", &status, &meta, None);
         let members = vec!["Media Room".to_string()];
@@ -6731,6 +6835,7 @@ mod tests {
             [
                 "audible",
                 "coordinator",
+                "fixed",
                 "has_tv",
                 "members",
                 "muted",
@@ -6778,6 +6883,40 @@ mod tests {
         };
         let entry = room_value(&facts, Ok((status, meta, None)), None);
         assert_eq!(entry["audible"], serde_json::Value::Null);
+    }
+
+    /// `fixed` is a different question from `audible` and has to survive
+    /// beside it: a Port feeding an amp is perfectly audible and still refuses
+    /// every volume command. An agent reading only `audible` would try.
+    #[test]
+    fn a_fixed_volume_room_says_so_in_status_without_claiming_silence() {
+        let members = vec!["Study".to_string()];
+        let facts = || RoomFacts {
+            name: "Study",
+            members: &members,
+            coordinator: Some("Study"),
+            has_tv: false,
+        };
+
+        let (status, meta) = playing_body();
+        let fixed = Volume {
+            volume: 40,
+            muted: false,
+            fixed: true,
+        };
+        let entry = room_value(&facts(), Ok((status, meta, Some(fixed))), None);
+        assert_eq!(entry["fixed"], json!(true));
+        assert_eq!(entry["audible"], json!(true), "fixed is not silent");
+
+        let (status, meta) = playing_body();
+        let entry = room_value(&facts(), Ok((status, meta, Some(volume(40, false)))), None);
+        assert_eq!(entry["fixed"], json!(false));
+
+        // Unknown rather than assumed-false when the room never answered, the
+        // same way `volume` and `audible` are.
+        let (status, meta) = playing_body();
+        let entry = room_value(&facts(), Ok((status, meta, None)), None);
+        assert_eq!(entry["fixed"], serde_json::Value::Null);
         assert_eq!(entry["volume"], serde_json::Value::Null);
         assert_eq!(entry["muted"], serde_json::Value::Null);
     }
