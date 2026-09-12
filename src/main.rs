@@ -105,6 +105,22 @@ enum Command {
     Toggle,
     Next,
     Prev,
+    /// Rate the currently playing track up or down, on services that offer it
+    /// (Pandora-style radio, iHeartRadio's Custom Stations) - refused on
+    /// anything else, including a Live broadcast, which has no per-track
+    /// identity to rate at all (verified against a real household,
+    /// 2026-09-12: a Live station's current track carries no id whatsoever,
+    /// not merely an unratable one).
+    Rate {
+        #[arg(value_enum)]
+        direction: RateDirection,
+        /// `{service, rating, should_skip, skipped, message}` on success.
+        /// `should_skip` is the service's live answer; `skipped` is whether
+        /// the room actually advanced - the two can disagree if the skip
+        /// itself failed, which does not undo an already-landed rating.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or change volume: a level (0-100), a change (+5, -5), or mute/unmute.
     Vol {
         #[arg(allow_negative_numbers = true)]
@@ -997,6 +1013,12 @@ enum RawScope {
     /// command is also the cheapest way to see a namespace reject the shape
     /// rather than the address.
     None,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RateDirection {
+    Up,
+    Down,
 }
 
 /// The one thing `bookmarks` does besides list.
@@ -2056,12 +2078,14 @@ fn print_queue(queue: &upnp::Queue, current: u32, json: bool) {
 async fn discover_and_remember_households(
     scan: &discover::Scan,
 ) -> Result<Vec<session::Discovered>> {
-    let (mut discovered, _) = session::discover_households(&scan.found).await;
+    let (mut discovered, last_error) = session::discover_households(&scan.found).await;
     if discovered.is_empty() {
-        bail!(
-            "found {} player(s) but none would talk; see the errors above",
-            scan.found.len()
-        );
+        // The same coded error `connect`'s own rescan raises for this exact
+        // state (devices answered on the port, none completed a session) -
+        // sharing the constructor is what keeps `discover`/`households` from
+        // drifting from it the way they already once drifted from each other.
+        let last = last_error.unwrap_or_else(|| anyhow::anyhow!("no address reported a household"));
+        return Err(hint::none_completed_a_session(scan.found.len(), &last));
     }
     discovered.sort_by(|a, b| a.household_id.cmp(&b.household_id));
 
@@ -2154,12 +2178,13 @@ async fn run_households(json: bool, redact: bool) -> Result<()> {
 
     let discovered = discover_and_remember_households(&scan).await?;
 
+    // `masked`, not `masked_uuid`: a household id (`Sonos_…​.Zv1xanSF--vUn91aMpBs`,
+    // a real one observed 2026-09-12) has real separators, unlike the bare hex
+    // run of a RINCON uuid `masked_uuid` exists for - so the separator-aware
+    // mask is the one built for this shape, keeping more of the tail than a
+    // fixed 7 characters would.
     let show_id = |id: &str| {
-        if redact {
-            masked_uuid(id)
-        } else {
-            id.to_owned()
-        }
+        if redact { masked(id) } else { id.to_owned() }
     };
 
     if json {
@@ -3156,6 +3181,146 @@ fn announce_link_page(name: &str, url: &str, no_open: bool) {
         Ok(()) => println!("Opened {name} in your browser."),
         Err(e) => println!("Could not open a browser ({e:#}). Open this yourself:\n\n  {url}\n"),
     }
+}
+
+/// `x2rock rate`: rate the currently playing track up or down.
+///
+/// Only Pandora-shaped radio features offer this at all, and only on a track
+/// that has one - **not** a Live broadcast, whose current track carries no
+/// per-track id of any kind (verified against a real household, 2026-09-12:
+/// `currentItem.track.id` is simply absent, not merely unratable). That
+/// absence is the whole gate; nothing here special-cases "is this Live".
+///
+/// The id is read once, up front, and the two calls that follow
+/// (`extended_metadata`, `rate_item`) both use it even if the track changes
+/// mid-command. Accepted rather than fixed: a rating sent for the track that
+/// was playing when the command was run is the track the person meant to
+/// rate, and re-checking would only mean rating (or silently not rating)
+/// whatever replaced it - a stranger outcome than the one this leaves in
+/// place.
+async fn run_rate(
+    player: &Connection,
+    group: &str,
+    room_name: &str,
+    direction: RateDirection,
+    json: bool,
+) -> Result<()> {
+    let meta = player.metadata(group).await?;
+    let track_id = meta
+        .current_item
+        .as_ref()
+        .and_then(|i| i.track.as_ref())
+        .and_then(|t| t.id.as_ref())
+        .filter(|id| id.is_real())
+        .ok_or_else(|| {
+            anyhow!(
+                "nothing rateable is playing in {room_name} (a Live broadcast's track carries \
+                 no id to rate)"
+            )
+        })?;
+    let service_id = track_id
+        .service_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("the current track names no service, so it cannot be rated"))?;
+
+    let mut catalogue = catalogue::Catalogue::load();
+    let dirty = catalogue.refresh(&Upnp::new(player.ip()), false).await?;
+    let service = catalogue
+        .by_id(service_id)
+        .ok_or_else(|| anyhow!("service {service_id} is not in this player's service list"))?
+        .clone();
+
+    // Asked before the call for the same reason `search` asks before
+    // `categories_for`: a freshly learned *empty* list is exactly what is
+    // worth writing, and `is_empty()` afterwards cannot tell that from a hit.
+    let learned = !catalogue.ratings_cached(&service.id);
+    let ratings = catalogue.ratings_for(&service).await?;
+    if dirty || learned {
+        catalogue.save()?;
+    }
+    ensure!(
+        !ratings.is_empty(),
+        "{} publishes no ratings, so nothing here can be rated.",
+        service.name
+    );
+
+    let linked = credentials::Credentials::load()?;
+    let token = linked.token_for(&service.id);
+
+    let mut refreshed = None;
+    let properties = sonos::smapi::extended_metadata(
+        &service,
+        token.as_ref(),
+        &track_id.object_id,
+        &mut refreshed,
+    )
+    .await?;
+    let token = use_refreshed_token(&service.id, token, refreshed);
+
+    let up = direction == RateDirection::Up;
+    let chosen = properties
+        .iter()
+        .find_map(|(propname, value)| {
+            sonos::smapi::RatingsMatch::find(&ratings, propname, value, up)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "{} did not report a rating state for the current track, so it cannot be rated \
+                 right now.",
+                service.name
+            )
+        })?;
+
+    let mut refreshed = None;
+    let result = sonos::smapi::rate_item(
+        &service,
+        token.as_ref(),
+        &track_id.object_id,
+        &chosen.id,
+        &mut refreshed,
+    )
+    .await?;
+    if let Some(new_token) = refreshed
+        && let Ok(mut creds) = credentials::Credentials::load()
+    {
+        save_refreshed_token(&mut creds, &service.id, new_token);
+    }
+
+    // The rating already landed - a failure here must not read as the rating
+    // itself having failed, which `?` would do (and which could send a caller
+    // that retries on error back to rate the same track twice). Warn and move
+    // on; the room simply keeps playing what it was.
+    let mut skipped = false;
+    if result.should_skip == Some(true) {
+        match player.playback(group, "skipToNextTrack").await {
+            Ok(()) => skipped = true,
+            Err(e) => eprintln!("x2rock: rated successfully, but the requested skip failed: {e:#}"),
+        }
+    }
+
+    let word = if up { "up" } else { "down" };
+    if json {
+        println!(
+            "{}",
+            json!({
+                "service": service.name,
+                "rating": word,
+                "should_skip": result.should_skip,
+                "skipped": skipped,
+                "message": result.message_string_id,
+            })
+        );
+    } else {
+        let skip_note = if skipped {
+            " — skipping"
+        } else if result.should_skip == Some(true) {
+            " (skip requested but failed; see stderr)"
+        } else {
+            ""
+        };
+        println!("Rated {word} on {}{skip_note}", service.name);
+    }
+    Ok(())
 }
 
 /// `x2rock link`: the device-link flow, end to end.
@@ -5268,6 +5433,7 @@ impl Command {
             | Command::Accounts { json, .. }
             | Command::Bookmarks { json, .. }
             | Command::Households { json, .. }
+            | Command::Rate { json, .. }
             | Command::Queue { json, .. } => *json,
             _ => false,
         }
@@ -6355,6 +6521,9 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", now_line(&status, &meta));
             }
         }
+        Command::Rate { direction, json } => {
+            run_rate(&player, group, &target.name, direction, json).await?
+        }
         Command::Play { track: None } => play_or_resume(&session, &player, &target).await?,
         Command::Play { track: Some(n) } => {
             ensure!(n >= 1, "queue tracks are numbered from 1");
@@ -6766,6 +6935,25 @@ mod tests {
     }
 
     #[test]
+    fn masked_keeps_two_households_apart_by_their_real_shape() {
+        // A real household id, observed 2026-09-12: separators throughout,
+        // unlike a RINCON uuid's bare hex run - `masked`, the separator-aware
+        // mask, is the one built for this shape, and it keeps more than
+        // `masked_uuid`'s fixed 7 characters would.
+        let real = "Sonos_BgzkDDCeWajFguqqdHEXzFKe3x.Zv1xanSF--vUn91aMpBs";
+        assert_eq!(masked(real), "…-vUn91aMpBs");
+
+        // Two households differing only in the segment `masked` keeps must
+        // still read apart - the one property `households --redact` exists
+        // to preserve. Synthetic (only one real household was ever observed
+        // to test against), but exercises the same separator-driven rule.
+        assert_ne!(
+            masked("Sonos_aaaa.bbbb-cccc111"),
+            masked("Sonos_aaaa.bbbb-cccc222")
+        );
+    }
+
+    #[test]
     fn a_time_of_day_is_padded_to_what_the_player_takes() {
         // The player takes the string as given: `7:00` is refused where
         // `07:00:00` is not, so padding is the whole job.
@@ -7017,9 +7205,17 @@ mod tests {
             if cmd.get_arguments().any(|a| a.get_id() == "json") {
                 let mut argv = vec!["x2rock".to_string()];
                 argv.extend(path.iter().cloned());
-                // A required positional gets a placeholder that reads as any type.
-                for _ in cmd.get_arguments().filter(|a| a.is_required_set()) {
-                    argv.push("1".to_string());
+                // A required positional gets a placeholder that reads as any
+                // type - "1" for a bare string or number, or its own first
+                // possible value for a closed enum (`rate <up|down>`), which
+                // "1" is not one of.
+                for arg in cmd.get_arguments().filter(|a| a.is_required_set()) {
+                    let placeholder = arg
+                        .get_possible_values()
+                        .first()
+                        .map(|v| v.get_name().to_string())
+                        .unwrap_or_else(|| "1".to_string());
+                    argv.push(placeholder);
                 }
                 argv.push("--json".to_string());
                 let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));

@@ -307,6 +307,7 @@ see "Ask before you act".
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
+| Rate the current track up/down | `x2rock -r <Room> rate up\|down [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations); see "Rating a track" |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
@@ -521,6 +522,35 @@ systems on the same network (test households included).
 - `--household` is a **global** flag, same footing as `-r`/`--all`/`--ip`, and env-settable as
   `X2ROCK_HOUSEHOLD`. It is ignored alongside an explicit `--ip`, which already names one player
   unambiguously.
+
+## Rating a track: `x2rock -r <Room> rate up|down`
+
+**Only a Pandora-shaped radio feature offers this, and only on a track that has one.** A **Live**
+broadcast station cannot be rated **at all**, structurally - not "usually," not "rarely," not a
+matter of the service being unhelpful. Verified live against a real household (2026-09-12): a Live
+station's current track (`x-sonosapi-stream:live_stations.…`, `upnp:class
+object.item.audioItem.audioBroadcast`) carries **no per-track id whatsoever** - the *station* has
+one, the song currently airing on it does not, because a live simulcast has an ID3-derived
+now-playing label, not a per-listener SMAPI identity. iHeartRadio's **Custom/Artist-Radio** stations
+(a different content type, reached via `browse -s iHeartRadio artist_radio.<id>`, not a station
+favorite) do give each track a real id and were rated successfully in the same session - both
+directions, confirmed against the real service (`{"message":"THUMBS_UP_SUCCESS", "should_skip":
+false, ...}`, matching iHeartRadio's own presentation map). **Do not tell a user rating "should"
+work on whatever is currently playing without checking** - a `rate` refusal naming "no id to rate"
+is the room correctly reporting a Live station, not a bug to work around.
+
+- **The rating id is not a fixed constant per direction.** iHeartRadio hands out a *different* id
+  for "thumbs up" depending on whether the track is currently unrated, already up, or already down
+  - `x2rock` reads the track's live rating state from `getExtendedMetadata` and looks up the
+    matching id every time; never assume "5 means up."
+- **`AutoSkip` is the service's declared policy, not what happened this time.** iHeartRadio
+  declares `AutoSkip="NEVER"` on every rating it offers, and its real responses confirm it:
+  `should_skip` comes back an explicit `false`, not absent. A different service may set it and mean
+  it - check the live `should_skip` field in the response, which `x2rock rate` already acts on
+  (skipping the track immediately when `true`), not the declared policy.
+- No account, no favorite and no fixed id list is involved: this reaches the *music service's* own
+  server (SMAPI), the same way `search`/`browse` do, and needs whatever token the service already
+  requires (`needs_link` if the service is not linked at all).
 
 ## Chimes and announcements: `chime` and `notify`
 

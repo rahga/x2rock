@@ -370,15 +370,15 @@ pub fn parse_services(descriptor_list: &str, type_list: &str) -> Result<Vec<Serv
     Ok(out)
 }
 
-/// The categories a service will accept in `search`, from its presentation map.
-///
-/// The manifest names the presentation map; both are plain documents on Sonos's
-/// CDN, fetched with no credential. A service with no `SearchCategories` cannot
-/// be searched, and says so by returning an empty list rather than by failing -
-/// that is a fact about the service, not an error.
-pub async fn categories(service: &Service) -> Result<Vec<Category>> {
+/// A service's presentation map body, or `None` when it publishes none - a
+/// missing manifest, or a manifest that names no presentation map, both being
+/// facts about the service rather than errors. Shared by [`categories`] and
+/// [`ratings`], which read different elements of the same document: the body
+/// comes back owned, so each caller parses its own copy with no lifetime tying
+/// them together.
+async fn presentation_map(service: &Service) -> Result<Option<String>> {
     let Some(manifest_uri) = &service.manifest_uri else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let (status, body) = http::get(manifest_uri, TIMEOUT).await?;
     if status != 200 {
@@ -391,13 +391,26 @@ pub async fn categories(service: &Service) -> Result<Vec<Category>> {
         .and_then(|m| m.get("uri"))
         .and_then(|u| u.as_str())
     else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
 
     let (status, body) = http::get(map_uri, TIMEOUT).await?;
     if status != 200 {
         bail!("{} presentation map: HTTP {status}", service.name);
     }
+    Ok(Some(body))
+}
+
+/// The categories a service will accept in `search`, from its presentation map.
+///
+/// The manifest names the presentation map; both are plain documents on Sonos's
+/// CDN, fetched with no credential. A service with no `SearchCategories` cannot
+/// be searched, and says so by returning an empty list rather than by failing -
+/// that is a fact about the service, not an error.
+pub async fn categories(service: &Service) -> Result<Vec<Category>> {
+    let Some(body) = presentation_map(service).await? else {
+        return Ok(Vec::new());
+    };
     let doc =
         Document::parse(&body).with_context(|| format!("{} presentation map", service.name))?;
     Ok(doc
@@ -550,6 +563,207 @@ pub async fn media_uri(
         .and_then(|n| n.text())
         .map(str::to_string)
         .ok_or_else(|| anyhow!("{} returned no media URI for {id}", service.name))
+}
+
+/// One rating a service offers for whichever current-rating state a `Match`
+/// names - a thumb, in every service seen so far.
+///
+/// Verified against iHeartRadio's real presentation map (2026-09-12):
+/// `AutoSkip` is `"NEVER"` on every rating it declares, kept as the service's
+/// own string rather than parsed into an enum since only that one value has
+/// been seen and it is not the thing to act on anyway - `RateItemResult`'s
+/// live `should_skip` is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rating {
+    /// What `rateItem` wants back. **Not a fixed per-direction constant** -
+    /// iHeartRadio hands out a different id for "rate this up" depending on
+    /// whether the track is currently unrated, already up, or already down
+    /// (three different ids across the three `Match`es below can all mean
+    /// "thumbs up"). Always read from whichever `Match` the track's current
+    /// state selected, never cached across tracks.
+    pub id: String,
+    pub auto_skip: String,
+    /// Untranslated, e.g. `THUMBS_UP_TIP` - no localized-string layer exists
+    /// here yet. Matching `"UP"`/`"DOWN"` in this is how a caller tells the
+    /// two apart; every service seen names it that plainly.
+    pub string_id: String,
+}
+
+/// "When the current track's rating state matches this property, offer these
+/// ratings" - one row of a service's `NowPlayingRatings` presentation map.
+/// iHeartRadio publishes three: unrated, already-up, already-down, each with
+/// its own pair of ids (see [`Rating::id`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RatingsMatch {
+    pub propname: String,
+    pub value: String,
+    pub ratings: Vec<Rating>,
+}
+
+impl RatingsMatch {
+    /// The `Rating` a caller means by "up" or "down" - matched on
+    /// [`Rating::string_id`], the only signal a service gives for which is
+    /// which.
+    pub fn find(matches: &[RatingsMatch], propname: &str, value: &str, up: bool) -> Option<Rating> {
+        let word = if up { "UP" } else { "DOWN" };
+        matches
+            .iter()
+            .find(|m| m.propname == propname && m.value == value)?
+            .ratings
+            .iter()
+            .find(|r| r.string_id.to_uppercase().contains(word))
+            .cloned()
+    }
+}
+
+/// A service's rating rules, from its presentation map - empty if it
+/// publishes none, which is the ordinary case: ratings are a Pandora/
+/// iHeartRadio-shaped radio feature, not a Sonos-wide capability, and most
+/// services' presentation maps carry no `NowPlayingRatings` block at all.
+///
+/// The fetch is [`presentation_map`], shared with [`categories`]; only the
+/// parse differs.
+pub async fn ratings(service: &Service) -> Result<Vec<RatingsMatch>> {
+    let Some(body) = presentation_map(service).await? else {
+        return Ok(Vec::new());
+    };
+    parse_ratings_map(&body).with_context(|| format!("{} presentation map", service.name))
+}
+
+/// The `NowPlayingRatings` half of a presentation map, pulled out of
+/// [`ratings`] to be tested against a real captured document without a
+/// network round trip.
+fn parse_ratings_map(body: &str) -> Result<Vec<RatingsMatch>> {
+    let doc = Document::parse(body)?;
+
+    // Pandora uses `NowPlayingRatings_v2` rather than the plain name -
+    // matched the way openphonos does, by prefix, so either form is read.
+    Ok(doc
+        .descendants()
+        .filter(|n| n.has_tag_name("PresentationMap"))
+        .filter(|n| {
+            n.attribute("type")
+                .is_some_and(|t| t.starts_with("NowPlayingRatings"))
+        })
+        .flat_map(|map| map.children().filter(|c| c.has_tag_name("Match")))
+        .filter_map(|m| {
+            let propname = m.attribute("propname")?.to_string();
+            let value = m.attribute("value")?.to_string();
+            let ratings = m
+                .descendants()
+                .filter(|r| r.has_tag_name("Rating"))
+                .filter_map(|r| {
+                    Some(Rating {
+                        id: r.attribute("Id")?.to_string(),
+                        auto_skip: r.attribute("AutoSkip").unwrap_or_default().to_string(),
+                        string_id: r.attribute("StringId").unwrap_or_default().to_string(),
+                    })
+                })
+                .collect();
+            Some(RatingsMatch {
+                propname,
+                value,
+                ratings,
+            })
+        })
+        .collect())
+}
+
+/// The dynamic, per-track properties `getExtendedMetadata` carries - a
+/// `(name, value)` pair per `<property>`, `dynamic/property/name` and
+/// `dynamic/property/value` in the response. This is where a current rating
+/// state (`thumbs_up_selected`, `5`, say) is reported; match it against
+/// [`RatingsMatch`] to find which ids to offer right now.
+///
+/// A live broadcast's track carries none of this - there is nothing dynamic
+/// to report about a song with no per-listener identity - which is what makes
+/// an empty result the ordinary, ungated way ratings stay hidden for it: no
+/// special-casing "is this a live station" is needed anywhere in this path.
+pub async fn extended_metadata(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<Vec<(String, String)>> {
+    let body = call(
+        service,
+        token,
+        "getExtendedMetadata",
+        &format!("<id>{}</id>", escape(id)),
+        refreshed,
+    )
+    .await?;
+    parse_dynamic_properties(&body)
+        .with_context(|| format!("{} getExtendedMetadata response", service.name))
+}
+
+/// The `dynamic/property` pairs out of a `getExtendedMetadata` response, pure
+/// for testing against a captured payload.
+fn parse_dynamic_properties(body: &str) -> Result<Vec<(String, String)>> {
+    let doc = Document::parse(body)?;
+    Ok(doc
+        .descendants()
+        .filter(|n| n.has_tag_name("property"))
+        .filter_map(|p| {
+            let name = p.children().find(|c| c.has_tag_name("name"))?.text()?;
+            let value = p.children().find(|c| c.has_tag_name("value"))?.text()?;
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect())
+}
+
+/// What `rateItem` answers.
+pub struct RateResult {
+    /// Whether the service wants the room to advance immediately - the live,
+    /// per-call answer, and the one to act on. A `Rating`'s own declared
+    /// `auto_skip` is the service's stated *policy*; this is what actually
+    /// happened this time, and the two need not agree.
+    pub should_skip: Option<bool>,
+    /// `messageStringId` - untranslated, and only for logging/`--json`. No
+    /// localized-string layer exists here to turn it into the prose a person
+    /// would read.
+    pub message_string_id: Option<String>,
+}
+
+/// Rate the currently playing item. `id` is its SMAPI object id (absent for a
+/// live broadcast, whose track carries none - see [`extended_metadata`]);
+/// `rating` is a [`Rating::id`] from whichever [`RatingsMatch`] the track's
+/// current state selected, not a value invented by the caller.
+pub async fn rate_item(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    rating: &str,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<RateResult> {
+    let body = call(
+        service,
+        token,
+        "rateItem",
+        &format!("<id>{}</id><rating>{}</rating>", escape(id), escape(rating)),
+        refreshed,
+    )
+    .await?;
+    parse_rate_result(&body).with_context(|| format!("{} rateItem response", service.name))
+}
+
+/// A `rateItem` response, pure for testing against a captured payload.
+fn parse_rate_result(body: &str) -> Result<RateResult> {
+    let doc = Document::parse(body)?;
+    let should_skip = doc
+        .descendants()
+        .find(|n| n.has_tag_name("shouldSkip"))
+        .and_then(|n| n.text())
+        .and_then(|t| t.parse::<bool>().ok());
+    let message_string_id = doc
+        .descendants()
+        .find(|n| n.has_tag_name("messageStringId"))
+        .and_then(|n| n.text())
+        .map(str::to_string);
+    Ok(RateResult {
+        should_skip,
+        message_string_id,
+    })
 }
 
 /// Ask a device-link service where to send the person.
@@ -1492,5 +1706,180 @@ mod tests {
     #[test]
     fn search_terms_are_escaped_into_the_envelope() {
         assert_eq!(escape(r#"rock & <roll>"#), "rock &amp; &lt;roll&gt;");
+    }
+
+    /// iHeartRadio's real `NowPlayingRatings` block, trimmed of icon
+    /// sub-elements (irrelevant here) but otherwise verbatim - fetched
+    /// 2026-09-12 from the manifest at
+    /// `https://cf.ws.sonos.com/p/m/36760215-347b-405c-a07e-90b4dff74b92`,
+    /// which named this presentation map. Three states, each with its own
+    /// pair of ids - the fact `find` exists to handle.
+    const IHEART_RATINGS: &str = r#"<Presentation>
+        <PresentationMap type="NowPlayingRatings">
+            <Match propname="thumbs_up_selected" value="5">
+                <Ratings>
+                    <Rating AutoSkip="NEVER" Id="5" StringId="THUMBS_UP_TIP" OnSuccessStringId="THUMBS_UP_SUCCESS"/>
+                    <Rating AutoSkip="NEVER" Id="1" StringId="THUMBS_DOWN_TIP" OnSuccessStringId="THUMBS_DOWN_SUCCESS"/>
+                </Ratings>
+            </Match>
+            <Match propname="thumbs_down_selected" value="1">
+                <Ratings>
+                    <Rating AutoSkip="NEVER" Id="55" StringId="THUMBS_UP_TIP" OnSuccessStringId="THUMBS_UP_SUCCESS"/>
+                    <Rating AutoSkip="NEVER" Id="11" StringId="THUMBS_DOWN_TIP" OnSuccessStringId="THUMBS_DOWN_SUCCESS"/>
+                </Ratings>
+            </Match>
+            <Match propname="unselected" value="0">
+                <Ratings>
+                    <Rating AutoSkip="NEVER" Id="555" StringId="THUMBS_UP_TIP" OnSuccessStringId="THUMBS_UP_SUCCESS"/>
+                    <Rating AutoSkip="NEVER" Id="111" StringId="THUMBS_DOWN_TIP" OnSuccessStringId="THUMBS_DOWN_SUCCESS"/>
+                </Ratings>
+            </Match>
+        </PresentationMap>
+    </Presentation>"#;
+
+    #[test]
+    fn ihearts_three_rating_states_each_carry_their_own_id_pair() {
+        let matches = parse_ratings_map(IHEART_RATINGS).unwrap();
+        assert_eq!(matches.len(), 3);
+
+        let unselected = matches.iter().find(|m| m.propname == "unselected").unwrap();
+        assert_eq!(unselected.value, "0");
+        assert_eq!(unselected.ratings.len(), 2);
+        assert!(unselected.ratings.iter().all(|r| r.auto_skip == "NEVER"));
+
+        // The point of the whole exercise: "thumbs up" is id 555 while
+        // unrated, 5 while already down, and never the same id twice - a
+        // caller that cached "5 means up" from one track would send the
+        // wrong id on the next.
+        assert_eq!(
+            RatingsMatch::find(&matches, "unselected", "0", true).map(|r| r.id),
+            Some("555".into())
+        );
+        assert_eq!(
+            RatingsMatch::find(&matches, "thumbs_down_selected", "1", true).map(|r| r.id),
+            Some("55".into())
+        );
+        assert_eq!(
+            RatingsMatch::find(&matches, "thumbs_up_selected", "5", true).map(|r| r.id),
+            Some("5".into())
+        );
+    }
+
+    #[test]
+    fn find_reads_direction_from_the_string_id_not_position() {
+        let matches = parse_ratings_map(IHEART_RATINGS).unwrap();
+        let down = RatingsMatch::find(&matches, "unselected", "0", false).unwrap();
+        assert_eq!(down.id, "111");
+        assert!(down.string_id.to_uppercase().contains("DOWN"));
+    }
+
+    #[test]
+    fn find_is_none_for_a_property_extended_metadata_never_reported() {
+        // The gate a Live broadcast's track falls through: its
+        // `getExtendedMetadata` reports none of these three properties at
+        // all, so nothing here matches - no special-casing "is this Live"
+        // needed anywhere in this function.
+        let matches = parse_ratings_map(IHEART_RATINGS).unwrap();
+        assert!(RatingsMatch::find(&matches, "some_other_property", "1", true).is_none());
+    }
+
+    #[test]
+    fn a_service_with_no_ratings_block_publishes_none() {
+        let plain = r#"<Presentation>
+            <PresentationMap type="ArtWorkSizeMap">
+                <Match><imageSizeMap/></Match>
+            </PresentationMap>
+        </Presentation>"#;
+        assert!(parse_ratings_map(plain).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rate_item_response_carries_should_skip_and_the_message_id() {
+        let body = r#"<rateItemResponse xmlns="http://www.sonos.com/Services/1.1">
+            <rateItemResult>
+                <shouldSkip>true</shouldSkip>
+                <messageStringId>THUMBS_DOWN_SUCCESS</messageStringId>
+            </rateItemResult>
+        </rateItemResponse>"#;
+        let result = parse_rate_result(body).unwrap();
+        assert_eq!(result.should_skip, Some(true));
+        assert_eq!(
+            result.message_string_id.as_deref(),
+            Some("THUMBS_DOWN_SUCCESS")
+        );
+    }
+
+    #[test]
+    fn ihearts_real_response_reports_should_skip_explicitly_as_false() {
+        // Captured live against a real household's iHeartRadio account
+        // (2026-09-12), rating an actual Custom/Artist-Radio track: `x2rock
+        // -r "Dining Room" rate up --json` answered
+        // `{"message":"THUMBS_UP_SUCCESS","should_skip":false,...}` - not
+        // absent, as `AutoSkip="NEVER"` alone might suggest, but an explicit
+        // `false`. Confirms `should_skip` (the live answer) is read
+        // separately from `AutoSkip` (the declared policy) and the two need
+        // not even differ in *shape*, only in which one is trusted.
+        let body = r#"<rateItemResponse xmlns="http://www.sonos.com/Services/1.1">
+            <rateItemResult>
+                <shouldSkip>false</shouldSkip>
+                <messageStringId>THUMBS_UP_SUCCESS</messageStringId>
+            </rateItemResult>
+        </rateItemResponse>"#;
+        let result = parse_rate_result(body).unwrap();
+        assert_eq!(result.should_skip, Some(false));
+        assert_eq!(
+            result.message_string_id.as_deref(),
+            Some("THUMBS_UP_SUCCESS")
+        );
+    }
+
+    #[test]
+    fn a_rate_item_response_with_neither_field_is_not_an_error() {
+        // Not seen from iHeartRadio in practice (it sends both, explicitly -
+        // see the test above) - this is defensive: a service that omits one
+        // or both must not make parsing fail, since neither field is what a
+        // successful rating actually depends on.
+        let body = r#"<rateItemResponse><rateItemResult/></rateItemResponse>"#;
+        let result = parse_rate_result(body).unwrap();
+        assert!(result.should_skip.is_none());
+        assert!(result.message_string_id.is_none());
+    }
+
+    #[test]
+    fn extended_metadata_dynamic_properties_parse_into_pairs() {
+        let body = r#"<getExtendedMetadataResponse>
+            <getExtendedMetadataResult>
+                <dynamic>
+                    <property><name>thumbs_up_selected</name><value>5</value></property>
+                    <property><name>favorite</name><value>false</value></property>
+                </dynamic>
+            </getExtendedMetadataResult>
+        </getExtendedMetadataResponse>"#;
+        let props = parse_dynamic_properties(body).unwrap();
+        assert_eq!(
+            props,
+            vec![
+                ("thumbs_up_selected".to_string(), "5".to_string()),
+                ("favorite".to_string(), "false".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_response_with_no_dynamic_block_reports_no_properties() {
+        // Not itself a captured Live-broadcast response - `getExtendedMetadata`
+        // was never called against one, since a Live track's Control API id is
+        // already absent (verified on real hardware, 2026-09-12) and this
+        // function is never reached without one. This just pins the shape:
+        // a response naming nothing dynamic parses to an empty list rather
+        // than an error, which is what lets an absent id upstream and an
+        // empty-but-present `dynamic` block downstream read as the same "not
+        // ratable right now" rather than needing two different checks.
+        let body = r#"<getExtendedMetadataResponse>
+            <getExtendedMetadataResult>
+                <mediaMetadata/>
+            </getExtendedMetadataResult>
+        </getExtendedMetadataResponse>"#;
+        assert!(parse_dynamic_properties(body).unwrap().is_empty());
     }
 }

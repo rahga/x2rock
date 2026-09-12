@@ -44,7 +44,13 @@ use crate::store;
 /// 2: `Auth` stopped being Anonymous-or-Linked and became Anonymous, DeviceLink
 /// or AppLink, so every cached `"auth":"Linked"` is unreadable - and a service
 /// wrongly filed as unusable is exactly what linking exists to fix.
-const SCHEMA: u32 = 2;
+///
+/// 3: added `ratings`. Technically a no-op field for an old cache - it just
+/// deserializes empty - but empty is indistinguishable from "asked and there
+/// are none" (see `ratings_cached`), so an old cache would report every
+/// service unrated forever rather than asking once. Bumping forces the one
+/// fresh read that tells the two apart.
+const SCHEMA: u32 = 3;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Catalogue {
@@ -61,6 +67,12 @@ pub struct Catalogue {
     /// because a service's presentation map can change without its id doing so.
     #[serde(default)]
     categories: BTreeMap<String, Vec<Category>>,
+    /// Service id -> its rating rules, the same presentation map `categories`
+    /// reads a different part of. Cleared alongside it for the same reason.
+    /// Empty for the (ordinary) service that publishes none, which is
+    /// knowledge - see [`ratings_cached`](Self::ratings_cached).
+    #[serde(default)]
+    ratings: BTreeMap<String, Vec<smapi::RatingsMatch>>,
 }
 
 fn path() -> Result<PathBuf> {
@@ -118,6 +130,7 @@ impl Catalogue {
         // A category list belongs to a version of the catalogue, not to a
         // service id, so they all go when the version moves.
         self.categories.clear();
+        self.ratings.clear();
         Ok(true)
     }
 
@@ -264,6 +277,27 @@ impl Catalogue {
             Err(e) => Err(e),
         }
     }
+
+    /// Whether [`ratings_for`](Self::ratings_for) would be a cache hit - the
+    /// same "asked and got nothing back, versus never asked" distinction
+    /// [`categories_cached`](Self::categories_cached) makes, for the same
+    /// reason: most services publish no ratings at all, and that is knowledge
+    /// worth keeping rather than a cache miss to retry forever.
+    pub fn ratings_cached(&self, service_id: &str) -> bool {
+        self.ratings.contains_key(service_id)
+    }
+
+    /// A service's rating rules, fetching only on a cache miss - the same
+    /// contract [`categories_for`](Self::categories_for) has, for the sibling
+    /// half of the same presentation map.
+    pub async fn ratings_for(&mut self, service: &Service) -> Result<Vec<smapi::RatingsMatch>> {
+        if let Some(hit) = self.ratings.get(&service.id) {
+            return Ok(hit.clone());
+        }
+        let fetched = smapi::ratings(service).await?;
+        self.ratings.insert(service.id.clone(), fetched.clone());
+        Ok(fetched)
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +357,7 @@ mod tests {
                 service("200", "Bandcamp", smapi::Auth::DeviceLink),
             ],
             categories: BTreeMap::new(),
+            ratings: BTreeMap::new(),
         }
     }
 

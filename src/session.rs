@@ -264,7 +264,13 @@ fn resolve_household<'a>(
 
     // Not a room name anywhere: an id, or an unambiguous prefix of one - the
     // fallback for the one case a room name cannot resolve, two households
-    // naming a room the same thing.
+    // naming a room the same thing. Exact match first, then unique prefix -
+    // the same order `Catalogue::find` resolves a service name in, so an id
+    // copied verbatim from `x2rock households` is never refused merely
+    // because a longer id happens to start with it.
+    if let Some(exact) = households.iter().find(|(id, _)| id == selector) {
+        return Ok(exact);
+    }
     let by_id: Vec<&(String, Vec<KnownPlayer>)> = households
         .iter()
         .filter(|(id, _)| id.starts_with(selector))
@@ -413,6 +419,28 @@ mod tests {
         ];
         assert_eq!(
             resolve_household(&households, Some("hh:1")).unwrap().0,
+            "hh:1abc"
+        );
+    }
+
+    #[test]
+    fn an_id_copied_verbatim_resolves_even_when_it_prefixes_another() {
+        // A selector that is itself a complete, exact id must not be refused
+        // as ambiguous just because some other household's id happens to
+        // start with the same characters - exact match outranks prefix
+        // matching, the same order `Catalogue::find` resolves a service name.
+        let households = vec![
+            (
+                "hh:1abc".to_string(),
+                vec![known("RINCON_1", "Media Room", "192.168.77.94")],
+            ),
+            (
+                "hh:1abcxyz".to_string(),
+                vec![known("RINCON_9", "Studio", "192.168.77.20")],
+            ),
+        ];
+        assert_eq!(
+            resolve_household(&households, Some("hh:1abc")).unwrap().0,
             "hh:1abc"
         );
     }
