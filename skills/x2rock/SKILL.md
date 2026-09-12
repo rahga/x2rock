@@ -301,7 +301,7 @@ see "Ask before you act".
 | Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Flatten a group: every member to one level | `x2rock -r <Room> vol 30 --each` |
-| Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` - one speaker only |
+| Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` - one speaker only; `ramp_seconds` is null when the player does not say |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
@@ -312,7 +312,7 @@ see "Ask before you act".
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
 | Tone: bass, treble, loudness, TruePlay (+ night/dialog on a soundbar) | `x2rock eq --json` (read) / `x2rock -r <Room> eq --bass 2 --loudness off --trueplay off` / `eq --night on --dialog on` |
-| Rename a room | `x2rock -r <Room> rename "<New Name>"` — changes it for every app in the house |
+| Rename a room | `x2rock -r <Room> rename "<New Name>"` — `--room` is required; changes it for every app in the house |
 | Speaker status light | `x2rock -r <Room> led [on\|off] [--json]` |
 | Soundbar TV-remote settings | `x2rock -r <Room> remote [--feedback on\|off] [--repeater on\|off] [--json]` |
 | Lock the buttons on the speaker itself | `x2rock -r <Room> buttons [lock\|unlock] [--json]` |
@@ -611,9 +611,10 @@ or the user is surprised nothing responds.
 ## When a field is a trap
 
 - **`fixed:true`**: the room's volume is **not yours to change** - a Port or Amp feeding something
-  with its own control. Every `vol` command is accepted and changes nothing, so a level that will
-  not move is this, not a bug. Different from `audible`, which stays `true`: a fixed room is loud,
-  just not adjustable. Point at the downstream amp rather than retrying.
+  with its own control. **x2rock refuses the command outright** (`"<Room> has fixed volume; adjust
+  it on the amplifier"`), so this is a hard error rather than a silent no-op - do not retry it, and
+  do not read the error as the room being unreachable. Different from `audible`, which stays `true`:
+  a fixed room is loud, just not adjustable. Point at the downstream amp.
 - **`audible:false`** (muted or volume 0): a play succeeds but makes no sound. Say so; ask before
   unmuting/raising (never silently unmute in a shared house) — unless the intent is already loud.
   `audible:true` only means *not muted, not zero* — a room at `volume:2` is barely audible, not

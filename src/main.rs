@@ -690,7 +690,7 @@ enum Command {
         /// narrower here: `player` (the default) sends to --room's own speaker,
         /// `group` to its coordinator, which is the one that answers for
         /// AVTransport. `household` and `none` have no meaning and are refused.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["watch", "session"])]
         upnp: bool,
         /// What the command is addressed to. Per-namespace, and the player
         /// will not infer it: `ERROR_MISSING_PARAMETERS - Missing groupId`
@@ -813,6 +813,16 @@ async fn raw_upnp(
     args: &[String],
     scope: RawScope,
 ) -> Result<()> {
+    ensure!(
+        !action.is_empty()
+            && action
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && action.chars().all(|c| c.is_ascii_alphanumeric()),
+        "{action:?} is not a usable action name - UPnP action names are letters \
+         and digits, starting with a letter"
+    );
     let Some(entry) = upnp::service_entry(service) else {
         let names: Vec<&str> = upnp::SERVICES.iter().map(|s| s.name).collect();
         bail!(
@@ -832,7 +842,22 @@ async fn raw_upnp(
                  Most actions need InstanceID=0."
             );
         };
-        ensure!(!name.is_empty(), "{arg:?} has an empty argument name");
+        // The name becomes an XML tag verbatim - only the value is escaped -
+        // so anything that is not a valid tag produces an opaque parse failure
+        // from the player instead of a message pointing at the typo.
+        ensure!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
+            "{name:?} is not a usable argument name - UPnP argument names are \
+             letters, digits, _ - and . , starting with a letter. Most actions \
+             need InstanceID=0."
+        );
         parsed.push((name.to_owned(), value.to_owned()));
     }
 
@@ -868,17 +893,29 @@ async fn raw_upnp(
 
     match Upnp::new(ip).raw_action(entry, action, &parsed).await {
         Ok(out) if out.is_empty() => println!("{} {action}: ok, no output", entry.name),
+        // An array of name/value pairs rather than an object, because a probe
+        // is reading a shape it does not know yet: `serde_json::Map` is a
+        // BTreeMap here (no `preserve_order` feature), so an object would
+        // re-sort the player's own argument order alphabetically and keep only
+        // the last of any repeated name. Both are exactly what `raw_action`
+        // returns a Vec to avoid losing.
         Ok(out) => {
-            let object: serde_json::Map<String, serde_json::Value> = out
+            let pairs: Vec<serde_json::Value> = out
                 .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .map(|(name, value)| json!({ "name": name, "value": value }))
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&object)?);
+            println!("{}", serde_json::to_string_pretty(&pairs)?);
         }
-        // The refusal is the finding. Printed to stderr so a probe in a
-        // pipeline keeps a clean stdout, and exit 0 so a shell loop over
-        // candidate actions is not stopped by the first unsupported one.
-        Err(e) => eprintln!("{} {action}: {e:#}", entry.name),
+        // A *refusal* is the finding: the player was reached and said no, which
+        // is a result worth printing and worth exiting 0 for, so a shell loop
+        // over candidate actions is not stopped by the first unsupported one.
+        // Anything else - an unreachable speaker, a timeout, an unparseable
+        // envelope - is a real failure and must propagate, or a script's
+        // `|| handle_failure` never fires for a speaker that has gone away.
+        Err(e) if e.downcast_ref::<upnp::Fault>().is_some() => {
+            eprintln!("{} {action}: {e:#}", entry.name);
+        }
+        Err(e) => return Err(e),
     }
     Ok(())
 }
@@ -3798,7 +3835,12 @@ async fn apply_vol(
             let level = ramp_to.expect("checked just above");
             let ip = speaker_ip
                 .with_context(|| format!("no address for {label} to ramp its volume on"))?;
-            ramp_secs = Some(Upnp::new(ip).ramp_to_volume(level).await?.as_secs());
+            // Stays `None` when the player did not say, so `ramp_seconds` is
+            // null rather than a zero that would read as "already there".
+            ramp_secs = Upnp::new(ip)
+                .ramp_to_volume(level)
+                .await?
+                .map(|d| d.as_secs());
             // A ramp leaves mute alone rather than clearing it the way a plain
             // set does, so a muted speaker would slide silently. Say so instead
             // of letting the level look like it took effect.
@@ -3852,9 +3894,12 @@ async fn apply_vol(
     } else {
         let from = transition(&before.volume.to_string(), &level.to_string());
         let muted = if muted { "  (muted)" } else { "" };
-        let over = ramp_secs
-            .map(|s| format!("  (over ~{s}s)"))
-            .unwrap_or_default();
+        let over = match (ramp_secs, ramp) {
+            (Some(s), _) => format!("  (over ~{s}s)"),
+            // Ramping, but the player did not say for how long.
+            (None, true) => "  (ramping)".to_string(),
+            (None, false) => String::new(),
+        };
         println!("{label:<24} {from}{level}{muted}{over}");
     }
     Ok(())
@@ -4062,6 +4107,16 @@ async fn apply_rename(
     room: Option<&str>,
     new_name: &str,
 ) -> Result<()> {
+    // Every other per-speaker command falls back to the resolved group's
+    // coordinator, which is right for a setting nobody else sees. A rename is
+    // not that: it changes the name for every app in the house, and in a
+    // single-group household the fallback would pick a room and rename it with
+    // nothing typed to say which. Make the caller name it.
+    ensure!(
+        room.is_some(),
+        "rename needs an explicit --room: it changes the name for everyone, \
+         so which room is not something to infer"
+    );
     let speaker = named_speaker(session, target, room)?;
     let id = speaker.id.clone();
     let ip = speaker
@@ -4077,7 +4132,12 @@ async fn apply_rename(
         .groups
         .players
         .iter()
-        .find(|p| p.id != id && p.name.eq_ignore_ascii_case(wanted))
+        // `to_lowercase`, not `eq_ignore_ascii_case`: `player_named` and
+        // `resolve` fold with `to_lowercase`, and a guard that folds less than
+        // the resolver lets through exactly the collision it exists to stop -
+        // "KÜCHE" beside an existing "Küche" passes an ASCII check and then
+        // resolves ambiguously.
+        .find(|p| p.id != id && p.name.to_lowercase() == wanted.to_lowercase())
     {
         bail!(
             "{:?} is already the name of another speaker; \
@@ -7362,6 +7422,31 @@ mod tests {
                 "buttons accepted {ambiguous:?}"
             );
         }
+    }
+
+    /// `--watch` and `--session` belong to the Control API's event socket and
+    /// have no counterpart over UPnP, which is one request and one reply. They
+    /// used to be accepted and silently ignored, which is indistinguishable
+    /// from "no events arrived".
+    #[test]
+    fn the_control_api_only_raw_flags_are_refused_over_upnp() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+        };
+        assert!(parse(&["raw", "--upnp", "AVTransport", "GetTransportInfo"]).is_ok());
+        assert!(parse(&["raw", "--watch", "5", "favorites:1", "getFavorites"]).is_ok());
+        assert!(
+            parse(&[
+                "raw",
+                "--upnp",
+                "--watch",
+                "5",
+                "AVTransport",
+                "GetTransportInfo"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["raw", "--upnp", "--session", "x", "AVTransport", "Play"]).is_err());
     }
 
     /// `--ramp` is per speaker because `GroupRenderingControl` publishes no

@@ -78,6 +78,34 @@ impl Service {
     }
 }
 
+/// A refusal from the player: the action was delivered and declined.
+///
+/// Typed rather than a formatted string so that callers can tell "the speaker
+/// said no" from "the speaker could not be reached". Both used to arrive as the
+/// same `anyhow::Error`, which meant `raw --upnp` reported an unreachable
+/// speaker as a refusal and exited 0, and `running_alarm` decided whether an
+/// alarm was sounding by searching the message text for `UPnP error 800`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fault {
+    pub action: String,
+    /// The UPnP error code as the player gave it, e.g. `701`, `800`, `402`.
+    pub code: String,
+    /// Whatever gloss could be put on it; often empty.
+    pub detail: String,
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} failed: UPnP error {}", self.action, self.code)?;
+        if !self.detail.is_empty() {
+            write!(f, " ({})", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Fault {}
+
 /// A soundbar's TV-remote settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteSettings {
@@ -912,7 +940,7 @@ impl Upnp {
     /// The returned time is the player's own estimate and runs a little long -
     /// it predicted 16 seconds for a ramp that finished in about 12 - so it is
     /// reported as what the player said rather than as a promise.
-    pub async fn ramp_to_volume(&self, level: u8) -> Result<Duration> {
+    pub async fn ramp_to_volume(&self, level: u8) -> Result<Option<Duration>> {
         let text = self
             .soap(
                 Service::RenderingControl,
@@ -928,10 +956,13 @@ impl Upnp {
             )
             .await?;
         let doc = Document::parse(&text).context("parsing RampToVolume response")?;
-        let secs = text_of(&doc, "RampTime")
+        // `None` for absent or unparseable, never zero: zero is a *meaningful*
+        // answer here - `AUTOPLAY_RAMP_TYPE` really does return 0, meaning "no
+        // ramp" - so defaulting a missing value to it would report a ramp that
+        // is still climbing as already finished.
+        Ok(text_of(&doc, "RampTime")
             .and_then(|t| t.parse().ok())
-            .unwrap_or(0);
-        Ok(Duration::from_secs(secs))
+            .map(Duration::from_secs))
     }
 
     /// The alarm currently sounding in this group, or `None` when none is.
@@ -962,7 +993,12 @@ impl Upnp {
             .await
         {
             Ok(text) => text,
-            Err(e) if format!("{e}").contains("UPnP error 800") => return Ok(None),
+            // 800 from this action means "no alarm is running" rather than a
+            // failure. Matched on the typed code, so a transport error carrying
+            // the digits 800 in an address cannot be read as "none running".
+            Err(e) if e.downcast_ref::<Fault>().is_some_and(|f| f.code == "800") => {
+                return Ok(None);
+            }
             Err(e) => return Err(e),
         };
         let doc = Document::parse(&text).context("parsing GetRunningAlarmProperties response")?;
@@ -1288,7 +1324,12 @@ impl Upnp {
                 .and_then(|d| text_of(d, "errorDescription"))
                 .unwrap_or(""),
         };
-        bail!("{action} failed: UPnP error {code} ({detail})")
+        Err(Fault {
+            action: action.to_owned(),
+            code: code.to_owned(),
+            detail: detail.to_owned(),
+        }
+        .into())
     }
 
     /// Invoke any action on any service, for `raw --upnp`.
