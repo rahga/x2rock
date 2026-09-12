@@ -278,7 +278,7 @@ fn resolve_household<'a>(
         [] => {}
         _ => {
             return Err(crate::hint::ambiguous_household(
-                &format!(
+                format!(
                     "\"{selector}\" is a room in {} households; pass --household <id> instead \
                      (see `x2rock households`)",
                     by_room.len()
