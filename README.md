@@ -1,14 +1,10 @@
 # x2rock
 
-Local-first Sonos control for Linux, in Rust.
+Local-first Sonos control for Linux.
 
 x2rock features an MPRIS2 server for your home, CLI and TUI interfaces, and a lightweight Quickshell 
 top bar widget. **No Sonos login required** — x2rock talks to speakers directly on the local
 network.
-
-The bar widget is Omarchy's. The CLI and the daemon are not: they carry no dependency on Omarchy,
-Quickshell or Hyprland and run on any Linux — see [Other Linux
-desktops](#other-linux-desktops).
 
 **Every Sonos room becomes a standard MPRIS media player.** Your media keys, lock screen, GNOME and
 KDE media applets, `playerctl`, and any bar's mpris widget play, pause, skip *and show what's
