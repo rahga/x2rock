@@ -53,29 +53,50 @@ back to the service). **This is the main new plumbing**: a call to fetch
 extended metadata for the current track, which also returns the current
 `Rating` state alongside the id needed for `rateItem`.
 
-## Important caveat — verify before building UI (this is the part most likely to bite)
+## Verified against the real household (2026-09-12)
 
-Ratings/AutoSkip only make sense for a **personalized, skippable station**
-(Pandora-style, or iHeartRadio's "Custom Stations" / "For You" feature) —
-**not** for a fixed live broadcast. A live radio stream has no queue and no
-per-listener next-track decision; there's nothing to rate or skip *to*.
+The caveat below turned out to be exactly right, and is no longer a guess —
+this household's own iHeartRadio manifest was fetched and read directly.
 
-x2rock already has hard-won iHeartRadio knowledge that's directly relevant
-here: iHeartRadio's `live_stations.` item type is explicitly a different
-content type from anything ratable, and it's already rejected by
-`AddURIToQueue` (`src/main.rs:2087`) and handled specially for account-identity
-matching (`src/main.rs:3288`, `src/main.rs:4895`). **If the household is just
-tuned to a Live station (the likely case for "iHeartRadio constantly at
-night" — a specific station/channel, not a personalized mix), none of this
-applies**, and building the UI without checking would mean shipping thumbs
-buttons that do nothing or error confusingly.
+**iHeartRadio (`service_id: 6`) does declare `NowPlayingRatings`.** Its
+manifest (`https://cf.ws.sonos.com/p/m/36760215-347b-405c-a07e-90b4dff74b92`,
+cached in `~/.local/state/x2rock/services.json`) points at a presentation map
+(`https://cf.ws.sonos.com/p/p/<same id>`) containing a
+`<PresentationMap type="NowPlayingRatings">` block. Two things in it change
+the plan:
 
-Action item before implementing: confirm iHeartRadio's presentation map
-*does* declare `NowPlayingRatings` for its Custom Station content type (fetch
-a real household's iHeartRadio presentation map and check — I haven't done
-this, no live household access from this environment). If Custom Stations
-aren't in use, this feature has no visible effect until/unless someone starts
-one.
+- **`AutoSkip="NEVER"` on every single `Rating` iHeartRadio declares** — both
+  thumbs up and thumbs down, in all three state variants below. For this
+  service specifically, rating a track **never** auto-skips it, unlike the
+  Pandora-style assumption in the original write-up. Still implement
+  `shouldSkip` from the live `rateItem` response as the source of truth (a
+  different service may answer differently) — just don't expect to ever see
+  it fire against iHeartRadio.
+- **The rating `Id` to send is not a fixed constant per up/down — it depends
+  on the track's *current* rating state.** The block has three `<Match
+  propname="..." value="...">` children - `thumbs_up_selected`/`5`,
+  `thumbs_down_selected`/`1`, `unselected`/`0` - and each carries its *own*
+  pair of up/down `Rating` ids (`555`/`111` when unselected, `5`/`1` in the
+  up-selected state, `55`/`11` in the down-selected state). Read whichever
+  property `getExtendedMetadata` reports for the current track, use *that*
+  Match's `Ratings`, and send the `Id` from there - not a hardcoded "5 means
+  up." This is the FindRating dictionary-lookup openphonos's `Ratings`/
+  `RatingsMatch` (`MusicService.cs:851-871`) exists to handle; x2rock needs
+  the same lookup, not a fixed pair of ids.
+
+**This household is currently proof of the caveat, not just an illustration
+of it.** `x2rock -r Bedroom raw upnp AVTransport GetMediaInfo InstanceID=0`
+right now returns `CurrentURI: x-sonosapi-stream:live_stations.6790?sid=6...`,
+`upnp:class: object.item.audioItem.audioBroadcast`, title "Love Songs Radio" -
+a live broadcast, playing via iHeartRadio, at the exact moment this was
+checked. Whether *this* track's `getExtendedMetadata` actually reports one of
+the three properties above (making it ratable) or reports none (making
+ratings silently unavailable, the same way a service with no
+`NowPlayingRatings` block at all is) is the one thing still unverified -
+answering it needs `getExtendedMetadata` implemented, which is required
+plumbing either way. No special-casing for "is this a live station" needs
+writing: the per-track property check *is* the gate, for free, once
+`getExtendedMetadata` exists.
 
 ## Concrete integration points in x2rock
 
@@ -84,10 +105,14 @@ pattern — same `call()` helper at line 931, same
 `refreshed: &mut Option<RefreshedToken>` token-refresh threading):
 
 - Extend presentation-map parsing (wherever `categories()` parses it, line
-  379) to also pull `NowPlayingRatings`/`NowPlayingRatings_v2` into a
-  `Vec<RatingOption>` (id, auto_skip, icon, label) on `Service` or a sibling
-  cache — this is the one-time per-service capability check from step 1
-  above.
+  379) to also pull `NowPlayingRatings`/`NowPlayingRatings_v2` into a lookup
+  table keyed by `(propname, value)` — **not a flat up/down pair**: verified
+  against iHeartRadio's real map, the `Id` to send depends on the track's
+  *current* state (three `Match` blocks, three different id pairs - see
+  "Verified against the real household" above). Each match's value is a small
+  `Vec<Rating>` (id, auto_skip, label); this is the one-time per-service
+  capability check from step 1 above, and the per-track lookup happens at
+  rating time against whichever property `getExtendedMetadata` reported.
 - New `pub async fn extended_metadata(service, token, id, refreshed) -> Result<ExtendedMetadata>`
   wrapping `getExtendedMetadata`, returning at least the current rating state
   and the id needed for `rate_item`.
@@ -119,10 +144,12 @@ subcommand.
 
 ## Open questions
 
-- Does iHeartRadio's presentation map actually declare ratings for Custom
-  Stations? (untested — needs a live household)
+- Whether iHeartRadio's `getExtendedMetadata` reports a rating-state property
+  for a *live broadcast* track specifically (answered automatically once it's
+  implemented - see above; no separate investigation needed).
 - Exact `getExtendedMetadata` response shape for iHeartRadio specifically
   (openphonos's parsing is generic XML-to-dict; x2rock will want its own
-  typed parse once we see a real payload)
+  typed parse once we see a real payload).
 - Whether `AutoSkip`-driven skip should be silent or surfaced ("skipped
-  because you rated it down") in each client
+  because you rated it down") in each client - low priority now that
+  iHeartRadio itself never sets it.
