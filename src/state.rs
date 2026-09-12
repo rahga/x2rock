@@ -102,15 +102,19 @@ impl State {
         let mut changed = false;
         for households in self.networks.values_mut() {
             for players in households.values_mut() {
-                for player in players.iter_mut().filter(|p| p.id == id) {
-                    if player.name != new_name {
-                        player.name = new_name.to_string();
-                        changed = true;
-                    }
+                // An id appears at most once per household, and only the list
+                // that actually moved needs re-sorting - `changed` is the
+                // return value, so using it to decide that too re-sorted every
+                // later household as well.
+                let Some(player) = players.iter_mut().find(|p| p.id == id) else {
+                    continue;
+                };
+                if player.name == new_name {
+                    continue;
                 }
-                if changed {
-                    players.sort_by(|a, b| a.name.cmp(&b.name));
-                }
+                player.name = new_name.to_string();
+                players.sort_by(|a, b| a.name.cmp(&b.name));
+                changed = true;
             }
         }
         changed

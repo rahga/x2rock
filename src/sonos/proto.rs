@@ -111,6 +111,16 @@ impl Player {
     pub fn ip(&self) -> Option<IpAddr> {
         super::host_ip(&self.websocket_url)
     }
+
+    /// Whether this speaker has a TV input - a soundbar.
+    ///
+    /// The capability string was written out at six call sites across three
+    /// files, which made it the only thing tying them together; a second name
+    /// for the same idea, or a rename by Sonos, was a six-site grep with two of
+    /// the sites in a file nobody editing the others would open.
+    pub fn has_tv(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "HT_PLAYBACK")
+    }
 }
 
 impl Groups {

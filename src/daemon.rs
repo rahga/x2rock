@@ -556,10 +556,7 @@ async fn publish_group(
     // The TV socket belongs to a player, which need not be the one
     // coordinating: a soundbar that joined a Play:5's group still has its
     // HDMI, and `x2rock tv` finds it among the members the same way.
-    let has_tv_input = groups
-        .members(group)
-        .iter()
-        .any(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+    let has_tv_input = groups.members(group).iter().any(|p| p.has_tv());
     let player = RoomPlayer::new(
         conn.clone(),
         group.id.clone(),
@@ -600,9 +597,7 @@ async fn publish_group(
                 // connection. Seeded here because an event only arrives when
                 // something changes, and a room nobody has touched today would
                 // otherwise publish neither setting at all.
-                let owns_tv = groups
-                    .player(id)
-                    .is_some_and(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+                let owns_tv = groups.player(id).is_some_and(|p| p.has_tv());
                 if owns_tv {
                     match member.player_settings(id).await {
                         Ok(settings) => {

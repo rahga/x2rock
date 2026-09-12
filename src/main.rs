@@ -846,11 +846,9 @@ async fn raw_upnp(
         // so anything that is not a valid tag produces an opaque parse failure
         // from the player instead of a message pointing at the typo.
         ensure!(
-            !name.is_empty()
-                && name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            name.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
@@ -871,16 +869,10 @@ async fn raw_upnp(
         RawScope::Group => target
             .coordinator_ip
             .ok_or_else(|| anyhow!("no address for {}'s coordinator", target.name))?,
-        RawScope::Player => match room {
-            Some(room) => session
-                .groups
-                .player_named(room)?
-                .ip()
-                .ok_or_else(|| anyhow!("{room} did not report an address to reach it on"))?,
-            None => target
-                .coordinator_ip
-                .ok_or_else(|| anyhow!("no address for {}", target.name))?,
-        },
+        // The same resolution every per-player command uses, so `raw --upnp
+        // --scope player` and `led` cannot drift on which speaker `--room`
+        // means.
+        RawScope::Player => named_speaker(session, &target, room)?.1.ip(),
         RawScope::Household | RawScope::None => bail!(
             "--scope {} has no meaning over UPnP, which addresses one speaker. \
              Use `player` (the room's own speaker) or `group` (its coordinator).",
@@ -1373,11 +1365,7 @@ async fn print_status(session: &session::Session, json: bool, full: bool) -> Res
             .collect();
         // A soundbar's HDMI belongs to the player, so the group has a TV input
         // if any member does - the same rule `x2rock tv` uses to find it.
-        let has_tv = session
-            .groups
-            .members(group)
-            .iter()
-            .any(|p| p.capabilities.iter().any(|c| c == "HT_PLAYBACK"));
+        let has_tv = session.groups.members(group).iter().any(|p| p.has_tv());
         let coordinator = session
             .groups
             .player(&group.coordinator_id)
@@ -3751,7 +3739,6 @@ async fn apply_vol(
     // rather than required, because a lone room - the common case - has no
     // meaningful difference between the two and should not have to say both.
     let one_room = one_room || ramp;
-    let player = session::coordinator(session, target).await?;
     // --player names the speaker, so it resolves the room asked for rather than
     // the group's name: once rooms are grouped the group is called after its
     // coordinator ("Dining Room + 1"), which is no player's name at all.
@@ -3767,22 +3754,26 @@ async fn apply_vol(
                 .ok_or_else(|| anyhow!("no player for {}", target.name)),
         })
         .transpose()?;
-    // A player-scoped command is refused by anyone but that player ("Incorrect
-    // playerId"), so it cannot ride the coordinator's connection.
-    let mut speaker_ip = None;
-    let speaker = match this.as_ref() {
-        Some(named) => {
-            let ip = named.ip().with_context(|| {
-                format!("{} did not report an address to reach it on", named.name)
-            })?;
-            speaker_ip = Some(ip);
-            if ip == session.connection.ip() {
-                session.connection.clone()
-            } else {
-                Connection::open(ip).await?
-            }
-        }
-        None => player.clone(),
+    // Resolved before anything is opened, so the address is available without a
+    // mutable written from inside a match arm.
+    let speaker_ip = this
+        .as_ref()
+        .map(|named| {
+            named
+                .ip()
+                .with_context(|| format!("{} did not report an address to reach it on", named.name))
+        })
+        .transpose()?;
+    // One connection, resolved lazily. A player-scoped command is refused by
+    // anyone but that player ("Incorrect playerId") so it cannot ride the
+    // coordinator's; a group-scoped one *is* the coordinator's, which is why
+    // the group calls below use this same handle. Reaching the coordinator is a
+    // full WSS handshake, and `--player`/`--ramp` never need it - opening it
+    // unconditionally spent one per call on nothing.
+    let speaker = match speaker_ip {
+        Some(ip) if ip == session.connection.ip() => session.connection.clone(),
+        Some(ip) => Connection::open(ip).await?,
+        None => session::coordinator(session, target).await?,
     };
     // Name the speaker, not the group: "Dining Room + 1  22" is a confusing way
     // to report what Kitchen was set to.
@@ -3793,7 +3784,7 @@ async fn apply_vol(
     // what was asked instead; the daemon gets the truth from events.
     let before = match &this {
         Some(id) => speaker.player_volume(id).await?,
-        None => player.group_volume(group).await?,
+        None => speaker.group_volume(group).await?,
     };
     let change = change.as_deref().map(parse_volume).transpose()?;
     // Whether this was a set, not a read - so `previous_volume` is present only
@@ -3806,35 +3797,28 @@ async fn apply_vol(
             target.name
         );
     }
-    // A ramp resolves the target itself and then slides to it, so both the
-    // absolute and relative forms funnel into one call. The clamp is the same
-    // one the relative path does, because the player takes an absolute level.
-    let ramp_to = ramp
-        .then(|| match change {
-            Some(VolumeChange::Set(level)) => Some(level),
-            Some(VolumeChange::Adjust(delta)) => {
-                Some((i16::from(before.volume) + i16::from(delta)).clamp(0, 100) as u8)
-            }
-            _ => None,
-        })
-        .flatten();
+    // One pass that both validates the ramp and produces the level it slides
+    // to, so there is a single thing to branch on below rather than a flag, an
+    // Option and two `ensure!`s that re-derive each other. Both the absolute
+    // and relative forms funnel into one call; the clamp is the same one the
+    // relative path does, because the player takes an absolute level.
+    let ramp_to = match (ramp, &change) {
+        (false, _) => None,
+        (true, Some(VolumeChange::Set(level))) => Some(*level),
+        (true, Some(VolumeChange::Adjust(delta))) => {
+            Some((i16::from(before.volume) + i16::from(*delta)).clamp(0, 100) as u8)
+        }
+        (true, Some(VolumeChange::Mute(_))) => {
+            bail!("--ramp does not apply to mute; there is no level to slide to")
+        }
+        (true, None) => bail!("--ramp needs a level to slide to, e.g. `vol 30 --ramp`"),
+    };
     let mut ramp_secs = None;
-    if ramp {
-        ensure!(
-            !matches!(change, Some(VolumeChange::Mute(_))),
-            "--ramp does not apply to mute; there is no level to slide to"
-        );
-        ensure!(
-            ramp_to.is_some(),
-            "--ramp needs a level to slide to, e.g. `vol 30 --ramp`"
-        );
-    }
     let (level, muted) = match change {
-        None => (before.volume, before.muted),
         _ if ramp_to.is_some() => {
-            let level = ramp_to.expect("checked just above");
-            let ip = speaker_ip
-                .with_context(|| format!("no address for {label} to ramp its volume on"))?;
+            let level = ramp_to.expect("matched just above");
+            // `ramp` implies `one_room`, which is what makes `speaker_ip` Some.
+            let ip = speaker_ip.expect("a ramp is always addressed to one speaker");
             // Stays `None` when the player did not say, so `ramp_seconds` is
             // null rather than a zero that would read as "already there".
             ramp_secs = Upnp::new(ip)
@@ -3851,18 +3835,19 @@ async fn apply_vol(
             }
             (level, before.muted)
         }
+        None => (before.volume, before.muted),
         // Both setVolume and setRelativeVolume unmute (verified).
         Some(VolumeChange::Set(level)) => {
             match &this {
                 Some(id) => speaker.set_player_volume(id, level).await?,
-                None => player.set_group_volume(group, level).await?,
+                None => speaker.set_group_volume(group, level).await?,
             }
             (level, false)
         }
         Some(VolumeChange::Adjust(delta)) => {
             match &this {
                 Some(id) => speaker.adjust_player_volume(id, delta).await?,
-                None => player.adjust_group_volume(group, delta).await?,
+                None => speaker.adjust_group_volume(group, delta).await?,
             }
             let level = (i16::from(before.volume) + i16::from(delta)).clamp(0, 100);
             (level as u8, false)
@@ -3871,7 +3856,7 @@ async fn apply_vol(
             // Muting one speaker of a group is not offered: the group mute is
             // what people mean, and a silently muted member is a puzzle later.
             ensure!(this.is_none(), "--player does not apply to mute");
-            player.set_group_mute(group, muted).await?;
+            speaker.set_group_mute(group, muted).await?;
             (before.volume, muted)
         }
     };
@@ -3894,11 +3879,11 @@ async fn apply_vol(
     } else {
         let from = transition(&before.volume.to_string(), &level.to_string());
         let muted = if muted { "  (muted)" } else { "" };
-        let over = match (ramp_secs, ramp) {
-            (Some(s), _) => format!("  (over ~{s}s)"),
+        let over = match ramp_secs {
+            Some(s) => format!("  (over ~{s}s)"),
             // Ramping, but the player did not say for how long.
-            (None, true) => "  (ramping)".to_string(),
-            (None, false) => String::new(),
+            None if ramp => "  (ramping)".to_string(),
+            None => String::new(),
         };
         println!("{label:<24} {from}{level}{muted}{over}");
     }
@@ -3972,9 +3957,8 @@ async fn apply_shuffle(
     if json {
         println!("{}", json!({ "room": target.name, "shuffle": after }));
     } else {
-        let word = |on: bool| if on { "on" } else { "off" };
-        let from = transition(word(before), word(after));
-        println!("{:<24} shuffle {from}{}", target.name, word(after));
+        let from = transition(on_word(before), on_word(after));
+        println!("{:<24} shuffle {from}{}", target.name, on_word(after));
     }
     Ok(())
 }
@@ -3993,30 +3977,33 @@ struct ToneRequest {
     dialog: Option<String>,
 }
 
-/// Bass, treble and loudness on one speaker.
+/// The speaker `--room` names, and a UPnP handle on it.
 ///
-/// Addressed to a player, not a group: two rooms playing together each keep
-/// their own tone, and the Sonos app agrees - its panel is titled "EQ Settings
-/// for <room>".
-/// The speaker `--room` names, for the per-player settings.
-///
-/// `eq`, `led` and `buttons` all address the hardware rather than the group, so
-/// they all resolve the same way and do it here rather than three times.
+/// Every per-player command - `eq`, `led`, `buttons`, `rename`, `remote`, and
+/// `raw --upnp --scope player` - needs exactly this pair, and each used to
+/// resolve it itself: the same three lines and the same "did not report an
+/// address" wording, seven times over. Returning the handle rather than just
+/// the `Player` is what makes "which speaker does `--room` mean" one function
+/// instead of a convention.
 fn named_speaker<'a>(
     session: &'a session::Session,
     target: &session::Target,
     room: Option<&str>,
-) -> Result<&'a sonos::proto::Player> {
-    match room {
-        Some(name) => session.groups.player_named(name),
+) -> Result<(&'a sonos::proto::Player, Upnp)> {
+    let speaker = match room {
+        Some(name) => session.groups.player_named(name)?,
         // No room named, so the default group resolved; its coordinator is the
         // speaker meant. By id, because once grouped the group's name
         // ("Kitchen + 1") is no player's name at all.
         None => session
             .groups
             .player(&target.coordinator_id)
-            .ok_or_else(|| anyhow!("no player for {}", target.name)),
-    }
+            .ok_or_else(|| anyhow!("no player for {}", target.name))?,
+    };
+    let ip = speaker
+        .ip()
+        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    Ok((speaker, Upnp::new(ip)))
 }
 
 /// A soundbar's TV-remote settings, read or set.
@@ -4028,42 +4015,33 @@ async fn apply_remote(
     repeater: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let speaker = named_speaker(session, target, room)?;
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    let (speaker, upnp) = named_speaker(session, target, room)?;
 
     // Gated on the capability rather than on the fault, the way `eq` gates
     // night mode and dialog: a speaker with no TV input answers every one of
     // these with an opaque UPnP code, and relaying that helps nobody. Checked
     // before the reads too, since even reading is meaningless here.
-    let is_soundbar = speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK");
+    let is_soundbar = speaker.has_tv();
     ensure!(
         is_soundbar,
         "{} has no TV input, so it has no TV-remote settings - this is a soundbar command",
         speaker.name
     );
 
-    let on_off = |what: &str, text: Option<&str>| -> Result<Option<bool>> {
-        match text {
-            None => Ok(None),
-            Some("on") => Ok(Some(true)),
-            Some("off") => Ok(Some(false)),
-            Some(_) => bail!("{what} takes on or off"),
-        }
-    };
     let wanted_feedback = on_off("feedback", feedback.as_deref())?;
     let wanted_repeater = on_off("repeater", repeater.as_deref())?;
 
-    let upnp = Upnp::new(ip);
     if let Some(on) = wanted_feedback {
         upnp.set_led_feedback(on).await?;
     }
     if let Some(on) = wanted_repeater {
         upnp.set_ir_repeater(on).await?;
     }
-    // Read back rather than echoing what was asked: three round trips either
-    // way, and the player is the authority on what it now holds.
+    // Read back rather than echoing what was asked. It does cost a wave the
+    // echo would not - `feedback` and `repeater` are known once set, so only
+    // `configured` would have to be fetched - but the player is the authority
+    // on what it now holds, and `remote_settings` fetches all three
+    // concurrently, so the wave is one round trip rather than three.
     let now = upnp.remote_settings().await?;
 
     if json {
@@ -4077,11 +4055,10 @@ async fn apply_remote(
             })
         );
     } else {
-        let word = |on: bool| if on { "on" } else { "off" };
         println!(
             "{:<24} feedback {}  repeater {}  remote {}",
             speaker.name,
-            word(now.feedback),
+            on_word(now.feedback),
             now.repeater.to_lowercase(),
             if now.configured {
                 "configured"
@@ -4117,11 +4094,8 @@ async fn apply_rename(
         "rename needs an explicit --room: it changes the name for everyone, \
          so which room is not something to infer"
     );
-    let speaker = named_speaker(session, target, room)?;
+    let (speaker, upnp) = named_speaker(session, target, room)?;
     let id = speaker.id.clone();
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
 
     let wanted = new_name.trim();
     ensure!(!wanted.is_empty(), "a room needs a name");
@@ -4146,7 +4120,6 @@ async fn apply_rename(
         );
     }
 
-    let upnp = Upnp::new(ip);
     let before = upnp.zone_attributes().await?;
     if before.name == wanted {
         println!("{:<24} already named {wanted:?}", before.name);
@@ -4170,17 +4143,30 @@ async fn apply_rename(
     Ok(())
 }
 
+/// `on`/`off`, for every flag and argument that takes those two words.
+///
+/// Hoisted out of `apply_eq`'s closure once `remote`, `led`, `shuffle` and
+/// `crossfade` all wanted the same three lines and the same message.
+fn on_off(what: &str, text: Option<&str>) -> Result<Option<bool>> {
+    match text {
+        None => Ok(None),
+        Some(word @ ("on" | "off")) => Ok(Some(word == "on")),
+        Some(_) => bail!("{what} takes on or off"),
+    }
+}
+
+/// The word for a boolean, for the read-back lines.
+fn on_word(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
 /// `on`/`off` for the status light.
 ///
 /// Parsed here rather than passed to the player, which takes any string and
 /// reads everything but `Off` as on - `DesiredLEDState=Maybe` was accepted and
 /// lit the light. A typo must not quietly mean "on".
 fn parse_led(text: &str) -> Result<bool> {
-    match text {
-        "on" => Ok(true),
-        "off" => Ok(false),
-        _ => bail!("led takes on or off"),
-    }
+    Ok(on_off("led", Some(text))?.expect("Some in, Some out"))
 }
 
 /// `lock`/`unlock` for the touch controls.
@@ -4206,11 +4192,7 @@ async fn apply_led(
     mode: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let speaker = named_speaker(session, target, room)?;
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
-    let upnp = Upnp::new(ip);
+    let (speaker, upnp) = named_speaker(session, target, room)?;
     let before = upnp.led().await?;
     let after = match mode.as_deref() {
         None => before,
@@ -4223,9 +4205,8 @@ async fn apply_led(
     if json {
         println!("{}", json!({ "room": speaker.name, "led": after }));
     } else {
-        let word = |on: bool| if on { "on" } else { "off" };
-        let from = transition(word(before), word(after));
-        println!("{:<24} led {from}{}", speaker.name, word(after));
+        let from = transition(on_word(before), on_word(after));
+        println!("{:<24} led {from}{}", speaker.name, on_word(after));
     }
     Ok(())
 }
@@ -4238,11 +4219,7 @@ async fn apply_buttons(
     mode: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let speaker = named_speaker(session, target, room)?;
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
-    let upnp = Upnp::new(ip);
+    let (speaker, upnp) = named_speaker(session, target, room)?;
     let before = upnp.buttons_locked().await?;
     let after = match mode.as_deref() {
         None => before,
@@ -4258,13 +4235,20 @@ async fn apply_buttons(
             json!({ "room": speaker.name, "buttons_locked": after })
         );
     } else {
-        let word = |locked: bool| if locked { "locked" } else { "unlocked" };
-        let from = transition(word(before), word(after));
-        println!("{:<24} buttons {from}{}", speaker.name, word(after));
+        // Its own vocabulary, not on/off: see `parse_button_lock` for why the
+        // two words point in opposite directions here.
+        let locked = |locked: bool| if locked { "locked" } else { "unlocked" };
+        let from = transition(locked(before), locked(after));
+        println!("{:<24} buttons {from}{}", speaker.name, locked(after));
     }
     Ok(())
 }
 
+/// Bass, treble and loudness on one speaker.
+///
+/// Addressed to a player, not a group: two rooms playing together each keep
+/// their own tone, and the Sonos app agrees - its panel is titled "EQ Settings
+/// for <room>".
 async fn apply_eq(
     session: &session::Session,
     target: &session::Target,
@@ -4280,11 +4264,7 @@ async fn apply_eq(
         night,
         dialog,
     } = want;
-    let speaker = named_speaker(session, target, room)?;
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
-    let upnp = Upnp::new(ip);
+    let (speaker, upnp) = named_speaker(session, target, room)?;
 
     // Both levels are checked before either is sent, so a bad treble cannot
     // leave a good bass already applied - the same partial-application care the
@@ -4313,7 +4293,7 @@ async fn apply_eq(
     // SetEQ with UPnP 402. Refuse up front with the reason rather than relaying
     // that opaque code, and only when actually setting one: reading them on a
     // non-soundbar already just omits them.
-    let is_soundbar = speaker.capabilities.iter().any(|c| c == "HT_PLAYBACK");
+    let is_soundbar = speaker.has_tv();
     if (wanted_night.is_some() || wanted_dialog.is_some()) && !is_soundbar {
         bail!(
             "{} has no TV input, so night mode and dialog do not apply - they are soundbar settings",
@@ -4365,10 +4345,10 @@ async fn apply_eq(
     // imply a control it does not have. Best-effort: a tone read must not fail
     // because this secondary read did.
     let home_theater = if is_soundbar {
-        let control = if ip == session.connection.ip() {
+        let control = if upnp.ip() == session.connection.ip() {
             session.connection.clone()
         } else {
-            Connection::open(ip).await?
+            Connection::open(upnp.ip()).await?
         };
         control
             .player_settings(&speaker.id)
@@ -4399,14 +4379,13 @@ async fn apply_eq(
         }
         println!("{out}");
     } else {
-        let word = |on: bool| if on { "on" } else { "off" };
         // "unavailable" rather than "off" when there is nothing measured: the
         // two are different answers to "is this room corrected?".
         let calibration = if after.trueplay_available {
             format!(
                 "{}{}",
-                transition(word(before.trueplay), word(after.trueplay)),
-                word(after.trueplay)
+                transition(on_word(before.trueplay), on_word(after.trueplay)),
+                on_word(after.trueplay)
             )
         } else {
             "unavailable".to_string()
@@ -4419,9 +4398,9 @@ async fn apply_eq(
                 let dialog = if ht.enhance_dialog && ht.enhance_dialog_level > 0 {
                     format!("on ({})", ht.enhance_dialog_level)
                 } else {
-                    word(ht.enhance_dialog).to_string()
+                    on_word(ht.enhance_dialog).to_string()
                 };
-                format!("  night {}  dialog {dialog}", word(ht.night_mode))
+                format!("  night {}  dialog {dialog}", on_word(ht.night_mode))
             }
             None => String::new(),
         };
@@ -4432,8 +4411,8 @@ async fn apply_eq(
             after.bass,
             transition(&before.treble.to_string(), &after.treble.to_string()),
             after.treble,
-            transition(word(before.loudness), word(after.loudness)),
-            word(after.loudness),
+            transition(on_word(before.loudness), on_word(after.loudness)),
+            on_word(after.loudness),
         );
     }
     Ok(())
@@ -4636,9 +4615,8 @@ async fn apply_crossfade(
     if json {
         println!("{}", json!({ "room": target.name, "crossfade": after }));
     } else {
-        let word = |on: bool| if on { "on" } else { "off" };
-        let from = transition(word(before), word(after));
-        println!("{:<24} crossfade {from}{}", target.name, word(after));
+        let from = transition(on_word(before), on_word(after));
+        println!("{:<24} crossfade {from}{}", target.name, on_word(after));
     }
     Ok(())
 }
@@ -5588,16 +5566,10 @@ async fn run(cli: Cli) -> Result<()> {
                         (uri.to_string(), item.metadata.clone())
                     }
                 };
-                let secs = plays.as_secs();
                 let mut alarm = upnp::Alarm {
                     id: 0,
                     start,
-                    duration: format!(
-                        "{:02}:{:02}:{:02}",
-                        secs / 3600,
-                        (secs / 60) % 60,
-                        secs % 60
-                    ),
+                    duration: upnp::format_hms(plays),
                     recurrence: recurrence.to_uppercase(),
                     enabled: !off,
                     room_uuid: speaker.id.clone(),
@@ -5663,7 +5635,6 @@ async fn run(cli: Cli) -> Result<()> {
             }
             wanted => {
                 let enabled = matches!(wanted, AlarmAction::On);
-                let word = |on: bool| if on { "on" } else { "off" };
                 if alarm.enabled != enabled {
                     // The whole record goes back, not just this field:
                     // UpdateAlarm refuses a partial one with UPnP 402.
@@ -5673,8 +5644,8 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 println!(
                     "alarm {id} {}{}",
-                    transition(word(alarm.enabled), word(enabled)),
-                    word(enabled)
+                    transition(on_word(alarm.enabled), on_word(enabled)),
+                    on_word(enabled)
                 );
             }
         }
@@ -5695,7 +5666,7 @@ async fn run(cli: Cli) -> Result<()> {
             let scope = scope.unwrap_or(RawScope::Player);
             return raw_upnp(&session, room, namespace, command, options, scope).await;
         }
-        let scope = &scope.unwrap_or(RawScope::Household);
+        let scope = scope.unwrap_or(RawScope::Household);
         ensure!(
             options.len() <= 1,
             "a Control API command takes one JSON object; got {} arguments. \
@@ -6311,7 +6282,7 @@ async fn run(cli: Cli) -> Result<()> {
             // necessarily the one coordinating the group it is in. The room
             // named is asked first; otherwise (or when the widget names the
             // group by its coordinator) it is whichever member has one.
-            let is_soundbar = |p: &&Player| p.capabilities.iter().any(|c| c == "HT_PLAYBACK");
+            let is_soundbar = |p: &&Player| p.has_tv();
             let members = session.groups.members(session.groups.resolve(room)?);
             let named = match room {
                 Some(name) => Some(session.groups.player_named(name)?),

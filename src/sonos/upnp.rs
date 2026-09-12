@@ -149,14 +149,11 @@ pub struct ZoneAttributes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningAlarm {
     /// Matches an `id` from `alarms`, so the two can be joined.
+    ///
+    /// The only field, deliberately. `GetRunningAlarmProperties` also returns a
+    /// group id and a logged start time; they were carried for a while with no
+    /// consumer, and the id is what names the alarm everywhere else.
     pub id: u32,
-    /// The group the alarm started, as the player reports it.
-    pub started: String,
-    /// When it actually began, which is not the scheduled time: an alarm
-    /// created with under two minutes' notice fires late (see the alarms
-    /// section of the skill), and its `--duration` still runs from the
-    /// schedule.
-    pub logged_start_time: String,
 }
 
 /// One UPnP service a player exposes: where to POST, and what to call it.
@@ -559,6 +556,12 @@ pub struct Queue {
 }
 
 impl Upnp {
+    /// The address this handle talks to, for callers that also need to reach
+    /// the same speaker over the Control API.
+    pub fn ip(&self) -> IpAddr {
+        self.ip
+    }
+
     pub fn new(ip: IpAddr) -> Self {
         Self { ip }
     }
@@ -748,40 +751,59 @@ impl Upnp {
         Ok(())
     }
 
+    /// One element's text from a no-argument action.
+    ///
+    /// The shape every On/Off getter here had written out longhand: send, parse,
+    /// pull one tag. Sibling of `tone_number`, which is the same helper for the
+    /// `i8` controls.
+    async fn one_value(&self, service: Service, action: &str, tag: &str) -> Result<String> {
+        let text = self.soap(service, action, &[]).await?;
+        let doc = Document::parse(&text).with_context(|| format!("parsing {action} response"))?;
+        Ok(text_of(&doc, tag).unwrap_or("").to_owned())
+    }
+
+    /// Set one of the On/Off toggles.
+    ///
+    /// Four actions across two services differ only in which service, which
+    /// action and which argument name - so the difference lives in the callers'
+    /// arguments and the envelope is built once. `set_trueplay` is deliberately
+    /// not folded in: it writes `1`/`0`, which is a real difference.
+    async fn set_on_off(&self, service: Service, action: &str, arg: &str, on: bool) -> Result<()> {
+        self.soap(service, action, &[(arg, if on { "On" } else { "Off" })])
+            .await?;
+        Ok(())
+    }
+
     /// A soundbar's TV-remote settings.
     ///
     /// Soundbar-only: a speaker with no TV input answers these with a UPnP
     /// fault, so callers gate on `HT_PLAYBACK` first, the way `eq` does for
     /// night mode and dialog.
     pub async fn remote_settings(&self) -> Result<RemoteSettings> {
-        let led = self
-            .soap(Service::HtControl, "GetLEDFeedbackState", &[])
-            .await?;
-        let repeater = self
-            .soap(Service::HtControl, "GetIRRepeaterState", &[])
-            .await?;
-        let configured = self
-            .soap(Service::HtControl, "IsRemoteConfigured", &[])
-            .await?;
-        let on = |text: &str, tag: &str| -> Result<bool> {
-            let doc = Document::parse(text).with_context(|| format!("parsing {tag}"))?;
-            Ok(text_of(&doc, tag).is_some_and(|s| s.eq_ignore_ascii_case("On")))
-        };
-        let repeater_doc = Document::parse(&repeater).context("parsing GetIRRepeaterState")?;
+        // Three independent reads, so three sequential round trips would be two
+        // wasted waits. `tone()` below does the same for its four.
+        let (feedback, repeater, configured) = tokio::try_join!(
+            self.one_value(
+                Service::HtControl,
+                "GetLEDFeedbackState",
+                "LEDFeedbackState"
+            ),
+            self.one_value(
+                Service::HtControl,
+                "GetIRRepeaterState",
+                "CurrentIRRepeaterState"
+            ),
+            self.one_value(Service::HtControl, "IsRemoteConfigured", "RemoteConfigured"),
+        )?;
         Ok(RemoteSettings {
-            feedback: on(&led, "LEDFeedbackState")?,
+            feedback: feedback.eq_ignore_ascii_case("On"),
             // Reported as the word rather than a bool: the service documents a
             // third value, `Disabled`, beside On and Off. A Beam refuses to be
             // *set* to it (UPnP 402), but nothing promises no player ever
             // reports it, and flattening an unknown third state to "off" would
             // be a lie about hardware nobody here has.
-            repeater: text_of(&repeater_doc, "CurrentIRRepeaterState")
-                .unwrap_or("")
-                .to_owned(),
-            configured: {
-                let doc = Document::parse(&configured).context("parsing IsRemoteConfigured")?;
-                text_of(&doc, "RemoteConfigured").is_some_and(|s| s == "1")
-            },
+            repeater,
+            configured: configured == "1",
         })
     }
 
@@ -795,13 +817,13 @@ impl Upnp {
     /// Unlike the `DeviceProperties` toggles, this one *does* validate: a value
     /// that is not `On` or `Off` is refused rather than coerced.
     pub async fn set_led_feedback(&self, on: bool) -> Result<()> {
-        self.soap(
+        self.set_on_off(
             Service::HtControl,
             "SetLEDFeedbackState",
-            &[("LEDFeedbackState", if on { "On" } else { "Off" })],
+            "LEDFeedbackState",
+            on,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Whether the soundbar passes TV-remote IR through to the TV behind it.
@@ -809,13 +831,13 @@ impl Upnp {
     /// The setting that matters when a soundbar sits in front of the TV's own
     /// IR receiver and swallows the signal.
     pub async fn set_ir_repeater(&self, on: bool) -> Result<()> {
-        self.soap(
+        self.set_on_off(
             Service::HtControl,
             "SetIRRepeaterState",
-            &[("DesiredIRRepeaterState", if on { "On" } else { "Off" })],
+            "DesiredIRRepeaterState",
+            on,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// What a speaker calls itself, and the settings stored beside the name.
@@ -865,11 +887,10 @@ impl Upnp {
     /// room that is really four bonded speakers has four lights, of which this
     /// answers for the one addressed.
     pub async fn led(&self) -> Result<bool> {
-        let text = self
-            .soap(Service::DeviceProperties, "GetLEDState", &[])
-            .await?;
-        let doc = Document::parse(&text).context("parsing GetLEDState response")?;
-        Ok(text_of(&doc, "CurrentLEDState").is_some_and(|s| s.eq_ignore_ascii_case("On")))
+        Ok(self
+            .one_value(Service::DeviceProperties, "GetLEDState", "CurrentLEDState")
+            .await?
+            .eq_ignore_ascii_case("On"))
     }
 
     /// Turn this speaker's status light on or off.
@@ -880,13 +901,13 @@ impl Upnp {
     /// silently mean "on" rather than failing. Hence a `bool` here and a parsed
     /// on/off at the CLI edge, never a passed-through string.
     pub async fn set_led(&self, on: bool) -> Result<()> {
-        self.soap(
+        self.set_on_off(
             Service::DeviceProperties,
             "SetLEDState",
-            &[("DesiredLEDState", if on { "On" } else { "Off" })],
+            "DesiredLEDState",
+            on,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Whether this speaker's touch controls are locked.
@@ -895,11 +916,14 @@ impl Upnp {
     /// "Button Control" switch inverted, and worth naming carefully at every
     /// layer above this.
     pub async fn buttons_locked(&self) -> Result<bool> {
-        let text = self
-            .soap(Service::DeviceProperties, "GetButtonLockState", &[])
-            .await?;
-        let doc = Document::parse(&text).context("parsing GetButtonLockState response")?;
-        Ok(text_of(&doc, "CurrentButtonLockState").is_some_and(|s| s.eq_ignore_ascii_case("On")))
+        Ok(self
+            .one_value(
+                Service::DeviceProperties,
+                "GetButtonLockState",
+                "CurrentButtonLockState",
+            )
+            .await?
+            .eq_ignore_ascii_case("On"))
     }
 
     /// Lock or unlock this speaker's touch controls.
@@ -907,13 +931,13 @@ impl Upnp {
     /// Unvalidated by the player in the same way [`Self::set_led`] is, and
     /// guarded the same way.
     pub async fn set_buttons_locked(&self, locked: bool) -> Result<()> {
-        self.soap(
+        self.set_on_off(
             Service::DeviceProperties,
             "SetButtonLockState",
-            &[("DesiredButtonLockState", if locked { "On" } else { "Off" })],
+            "DesiredButtonLockState",
+            locked,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Slide this speaker's volume to `level` instead of jumping to it, and
@@ -1010,13 +1034,7 @@ impl Upnp {
         if id == 0 {
             return Ok(None);
         }
-        Ok(Some(RunningAlarm {
-            id,
-            started: text_of(&doc, "GroupID").unwrap_or_default().to_owned(),
-            logged_start_time: text_of(&doc, "LoggedStartTime")
-                .unwrap_or_default()
-                .to_owned(),
-        }))
+        Ok(Some(RunningAlarm { id }))
     }
 
     /// Silence the alarm that is sounding, for a while.
@@ -1030,17 +1048,10 @@ impl Upnp {
     /// message already glosses as "not available in this state" - the honest
     /// reading, so it is passed through rather than reworded.
     pub async fn snooze_alarm(&self, duration: Duration) -> Result<()> {
-        let secs = duration.as_secs();
-        let hms = format!(
-            "{:02}:{:02}:{:02}",
-            secs / 3600,
-            (secs % 3600) / 60,
-            secs % 60
-        );
         self.soap(
             Service::AvTransport,
             "SnoozeAlarm",
-            &[("InstanceID", "0"), ("Duration", &hms)],
+            &[("InstanceID", "0"), ("Duration", &format_hms(duration))],
         )
         .await?;
         Ok(())
@@ -1073,15 +1084,7 @@ impl Upnp {
     /// takes an `Option` rather than having a sibling.
     pub async fn set_sleep_timer(&self, after: Option<Duration>) -> Result<()> {
         let value = match after {
-            Some(d) => {
-                let secs = d.as_secs();
-                format!(
-                    "{:02}:{:02}:{:02}",
-                    secs / 3600,
-                    (secs / 60) % 60,
-                    secs % 60
-                )
-            }
+            Some(d) => format_hms(d),
             None => String::new(),
         };
         self.soap(
@@ -1262,9 +1265,7 @@ impl Upnp {
 
     /// Invoke one action and return the response envelope, with UPnP faults as errors.
     async fn soap(&self, service: Service, action: &str, args: &[(&str, &str)]) -> Result<String> {
-        let entry = service.entry();
-        let args: Vec<(&str, &str)> = args.to_vec();
-        self.soap_at(entry, action, &args).await
+        self.soap_at(service.entry(), action, args).await
     }
 
     /// [`Self::soap`] against a service named at runtime rather than by variant.
@@ -2125,6 +2126,21 @@ fn digits_after<'a>(hay: &'a str, key: &str) -> Option<&'a str> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
     (end > 0).then(|| &rest[..end])
+}
+
+/// A duration as the wire wants it: `HH:MM:SS`, zero-padded.
+///
+/// The inverse of [`parse_hms`], and the one place that formatting lives. It
+/// was written out longhand three times - the sleep timer, `SnoozeAlarm` and
+/// alarm creation - with two different spellings of the minutes field.
+pub fn format_hms(d: Duration) -> String {
+    let secs = d.as_secs();
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 pub fn parse_hms(text: &str) -> Option<Duration> {
