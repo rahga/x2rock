@@ -643,11 +643,12 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
 | `stream_unverified` | the stream was loaded but the room's state could not be established for 10s — unknown, and *not* a verdict on the stream | **null** (the message says whether the room answered; act on that, do *not* try another stream) |
 | `playback_failed` | `play` reached the room but it did not start — the player raised a playback error (often an expired direct-stream URL) or sat idle with nothing loaded | null (load a fresh source: `favorite`, `bookmark`, or a search) |
-| `no_player` | speakers were known here but none answered — a rescan already ran and found nothing | **null** (likely powered off; see below) |
+| `no_player` | speakers were known here but none answered — a rescan already ran and found **nothing at all** | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
 | `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household" | `x2rock households` (and see `data.households`) |
 | `unknown_household` | the `-r` room or the `--household` selector matched no household — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
+| `household_unreachable` | a rescan found **other** households but not this one — it is off, or has moved networks. Not `no_player`: the network is fine | `x2rock households` (and see `data.households` for what did answer) |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry.** **When `fix` is null, do not — read the `error` and
@@ -671,7 +672,9 @@ or the user is surprised nothing responds.
 - **`x2rock status` diagnoses it:** `unregistered_network` (an unfamiliar network — the household is
   simply elsewhere) vs `no_player` (a *known* network where a rescan already ran and found nothing —
   the speakers are likely powered off, and another `discover` just repeats that scan, so re-check
-  later rather than looping it).
+  later rather than looping it) vs `household_unreachable` (the rescan found players, just none of
+  *this* household's — so the network is fine and this system is the thing that is gone). Only the
+  third has a fix worth running: `data.households` already lists what did answer.
 - **A background daemon may be running** (Linux/MPRIS): it withdraws and reconnects on its own as the
   laptop moves networks, and logs the state — `journalctl --user -u x2rock.service` shows
   `x2rock: Kitchen -> org.mpris.MediaPlayer2.x2rock-…` when connected, or an hourly

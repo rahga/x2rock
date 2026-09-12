@@ -148,14 +148,6 @@ pub fn unregistered_network(fingerprint: &str) -> Error {
     .into()
 }
 
-/// The error for a known network where the remembered players did not answer
-/// and the rescan `connect` just ran found nothing either.
-///
-/// No `fix`: `x2rock discover` runs the exact same scan that just came back
-/// empty, so handing it out buys a fix-following agent a confident
-/// discover/retry loop, not a resolution. The speakers are most likely powered
-/// off; the message says so, and names `discover` only as the later,
-/// deliberate re-check.
 /// A rescan found devices on the Sonos port, but none would complete a session:
 /// players mid-reboot, or a Boost, which listens there and is not a player.
 /// The same code as [`no_players_answered`], since to the caller it is the
@@ -173,6 +165,18 @@ pub fn none_completed_a_session(found: usize, last: &Error) -> Error {
     .into()
 }
 
+/// The error for a known network where the remembered players did not answer
+/// and the rescan `connect` just ran found nothing either.
+///
+/// No `fix`: `x2rock discover` runs the exact same scan that just came back
+/// empty, so handing it out buys a fix-following agent a confident
+/// discover/retry loop, not a resolution. The speakers are most likely powered
+/// off; the message says so, and names `discover` only as the later,
+/// deliberate re-check.
+///
+/// **Not for a rescan that found players, just not the ones asked for** - that
+/// is [`household_unreachable`], which has a different cause and a fix that
+/// works.
 pub fn no_players_answered(previously: &[&str]) -> Error {
     Hint::new(
         format!(
@@ -243,6 +247,43 @@ pub fn ambiguous_household(
     household_hint(message, "multiple_households", households)
 }
 
+/// The error for a household that did not answer a rescan **that other
+/// households did answer**.
+///
+/// Distinct from [`no_players_answered`] on the evidence, and that distinction
+/// is the whole point: a rescan that comes back empty means the speakers are
+/// off, and `discover` would only repeat it. A rescan that comes back full
+/// means the network is fine and *this* household is the thing that is gone -
+/// powered off, moved to another network, or replaced. So this one carries a
+/// fix that works and `data.households` naming what did answer, where the
+/// other deliberately carries neither.
+///
+/// It had been reporting `no_player` with "a rescan just ran and found
+/// nothing", which was false in exactly this branch and sent a fix-following
+/// agent into a discover loop.
+pub fn household_unreachable(
+    wanted: &str,
+    previously: &[&str],
+    answered: &[(String, Vec<String>)],
+) -> Error {
+    let summary: Vec<String> = answered
+        .iter()
+        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
+        .collect();
+    household_hint(
+        format!(
+            "the household holding {} did not answer, but {} other household(s) on this \
+             network did: {}. It is most likely powered off, or has moved to another network. \
+             (Looking for {wanted:?}.)",
+            previously.join(", "),
+            answered.len(),
+            summary.join("; "),
+        ),
+        "household_unreachable",
+        answered,
+    )
+}
+
 /// The error for a `--household` that matched none of the households actually
 /// reachable - a stale id, a room name that moved, a typo. Distinct from
 /// [`multiple_households`]/[`ambiguous_household`], which fire when something
@@ -310,6 +351,40 @@ mod tests {
         .context("resolving the target")
         .unwrap_err();
         assert_eq!(of(&e).0, "unknown_room");
+    }
+
+    /// The two "could not reach it" errors differ on evidence, and that
+    /// difference is the whole reason the second one exists: an empty rescan
+    /// means the speakers are off and `discover` would only repeat it, while a
+    /// rescan that found *other* households means the network is fine and this
+    /// household is what is missing - which has a fix, and a list worth
+    /// carrying. Reporting the second as the first sent agents into a discover
+    /// loop on a claim ("a rescan found nothing") that was false.
+    #[test]
+    fn an_unreachable_household_is_not_an_empty_network() {
+        let empty = no_players_answered(&["Kitchen", "Bedroom"]);
+        assert_eq!(of(&empty), ("no_player", None));
+        assert!(format!("{empty:#}").contains("found nothing"));
+
+        let answered = vec![("hh:OTHER".to_string(), vec!["Studio".to_string()])];
+        let gone = household_unreachable("hh:MINE", &["Kitchen", "Bedroom"], &answered);
+        let (code, fix) = of(&gone);
+        assert_eq!(code, "household_unreachable");
+        assert_eq!(fix.as_deref(), Some("x2rock households"));
+
+        // It must not repeat the empty-network claim, and must name what did
+        // answer so a caller can see its own household is absent.
+        let text = format!("{gone:#}");
+        assert!(!text.contains("found nothing"), "{text}");
+        assert!(text.contains("Kitchen, Bedroom"), "{text}");
+        assert!(text.contains("Studio"), "{text}");
+
+        // `data.households` is the same shape the other household errors use.
+        let v = error_json(&gone);
+        assert_eq!(
+            v["households"],
+            json!([{ "id": "hh:OTHER", "rooms": ["Studio"] }])
+        );
     }
 
     #[test]

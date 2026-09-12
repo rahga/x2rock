@@ -113,16 +113,36 @@ pub async fn connect(
     let discovered = discover_households(&scan.found, state, Some(fingerprint)).await?;
 
     // Keep the household that was asked for; close the others rather than
-    // drop them (see `discover_households` for why dropping is a leak).
+    // drop them (see `discover_households` for why dropping is a leak). What
+    // the others *were* is collected on the way past, because if the wanted
+    // one is not among them that list is the answer: the network is fine and
+    // this household is the thing that is missing.
     let mut selected = None;
+    let mut answered = Vec::new();
     for found in discovered {
         if selected.is_none() && &found.household_id == household_id {
             selected = Some(found.session);
-        } else {
-            found.session.connection.close();
+            continue;
         }
+        let mut rooms: Vec<String> = found
+            .session
+            .groups
+            .players
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        rooms.sort();
+        answered.push((found.household_id, rooms));
+        found.session.connection.close();
     }
-    selected.ok_or_else(nobody_answered)
+    selected.ok_or_else(|| {
+        // Not `nobody_answered`: players answered, just none of this
+        // household's. Saying "a rescan found nothing" here would be false and
+        // would hand back `discover` as a fix, which repeats a scan that
+        // already worked.
+        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
+        crate::hint::household_unreachable(household_id, &names, &answered)
+    })
 }
 
 /// Every household visible among already-Sonos-port-reachable addresses, each
