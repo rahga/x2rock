@@ -116,6 +116,16 @@ enum Command {
     Rate {
         #[arg(value_enum)]
         direction: RateDirection,
+        /// Re-read the service catalogue even if its version has not moved.
+        ///
+        /// The way out of a cached "publishes no ratings". Whether a service
+        /// offers ratings is learned from its presentation map and cached, and
+        /// that cache is otherwise cleared only when the *player's*
+        /// service-list version moves - which a service turning the feature on
+        /// does not touch. Without this, one trimmed or ratings-less reply
+        /// would be believed indefinitely.
+        #[arg(long)]
+        refresh: bool,
         /// `{service, rating, should_skip, skipped, message}` on success.
         /// `should_skip` is the service's live answer; `skipped` is whether
         /// the room actually advanced - the two can disagree if the skip
@@ -3203,6 +3213,7 @@ async fn run_rate(
     group: &str,
     room_name: &str,
     direction: RateDirection,
+    refresh: bool,
     json: bool,
 ) -> Result<()> {
     // Independent of each other - one is the Control API over the socket that
@@ -3211,7 +3222,8 @@ async fn run_rate(
     // the player's service-list version has not moved.
     let mut catalogue = catalogue::Catalogue::load();
     let upnp = Upnp::new(player.ip());
-    let (meta, dirty) = tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, false))?;
+    let (meta, dirty) =
+        tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, refresh))?;
     let track_id = meta
         .current_item
         .as_ref()
@@ -3244,8 +3256,16 @@ async fn run_rate(
     }
     ensure!(
         !ratings.is_empty(),
-        "{} publishes no ratings, so nothing here can be rated.",
-        service.name
+        "{} publishes no ratings, so nothing here can be rated.{}",
+        service.name,
+        // Only worth suggesting when the answer came from cache: a reply just
+        // fetched says what the service currently says, and re-fetching it is
+        // a round trip that cannot change the outcome.
+        if learned {
+            ""
+        } else {
+            " (Cached; `x2rock rate --refresh` re-reads it if the service has since added them.)"
+        }
     );
 
     let linked = credentials::Credentials::load()?;
@@ -6555,9 +6575,11 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{}", now_line(&status, &meta));
             }
         }
-        Command::Rate { direction, json } => {
-            run_rate(&player, group, &target.name, direction, json).await?
-        }
+        Command::Rate {
+            direction,
+            refresh,
+            json,
+        } => run_rate(&player, group, &target.name, direction, refresh, json).await?,
         Command::Play { track: None } => play_or_resume(&session, &player, &target).await?,
         Command::Play { track: Some(n) } => {
             ensure!(n >= 1, "queue tracks are numbered from 1");
@@ -7906,6 +7928,27 @@ mod tests {
     /// Each transport declares its own grammar, so clap rejects the other's
     /// rather than anything being checked - or silently ignored - at runtime.
     /// `--watch`/`--session` are the event socket and have no counterpart over
+    /// A service that starts offering ratings does not move the player's
+    /// service-list version, which is the only thing that otherwise clears the
+    /// learned-ratings cache - so without this flag one ratings-less reply is
+    /// believed forever and the only escapes are `search --refresh` on an
+    /// unrelated service or deleting the cache by hand.
+    #[test]
+    fn rate_can_force_a_catalogue_re_read_like_search_and_browse() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+        };
+        assert!(matches!(
+            parse(&["rate", "up", "--refresh"]).unwrap().command,
+            Command::Rate { refresh: true, .. }
+        ));
+        // Off by default: the point of the cache is not paying for it twice.
+        assert!(matches!(
+            parse(&["rate", "up"]).unwrap().command,
+            Command::Rate { refresh: false, .. }
+        ));
+    }
+
     /// Paging is the difference between "this container has 20 things" and
     /// "here are the first 20 things there might be more of", and `--json` had
     /// no way to say which. `--index` is 0-based and pairs with `--count`.

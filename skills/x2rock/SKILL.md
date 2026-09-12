@@ -319,7 +319,7 @@ see "Ask before you act".
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
-| Rate the current track up/down | `x2rock -r <Room> rate up\|down [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations); see "Rating a track" |
+| Rate the current track up/down | `x2rock -r <Room> rate up\|down [--refresh] [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations); see "Rating a track" |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
@@ -583,6 +583,13 @@ is the room correctly reporting a Live station, not a bug to work around.
 - No account, no favorite and no fixed id list is involved: this reaches the *music service's* own
   server (SMAPI), the same way `search`/`browse` do, and needs whatever token the service already
   requires (`needs_link` if the service is not linked at all).
+- **"<service> publishes no ratings" can be a stale answer**, and the message says so when it came
+  from cache. Whether a service offers ratings is learned once from its presentation map and kept;
+  that cache is otherwise cleared only when the *player's* service-list version moves, which a
+  service switching the feature on does not touch. `x2rock rate up --refresh` re-reads it - the
+  same flag `search` and `browse` carry, for the same reason. Do not reach for it speculatively: a
+  freshly-learned "no" is a real no, and the message only suggests the flag when the answer was
+  cached.
 
 ## Chimes and announcements: `chime` and `notify`
 
