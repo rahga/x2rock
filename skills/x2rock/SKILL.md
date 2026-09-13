@@ -98,8 +98,14 @@ several). It is the confirm-step after a play. It is a **subset** of a `status` 
 `status --json` (or audibility from `vol --json`).
 
 `bookmarks --json` and `accounts --json` are bare arrays. `queue --json` is an **object**:
-`{"current": <index>, "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
-— indices are 1-based, and `play N` plays item `N`.
+`{"total": <n>, "current": <index>, "in_use": <bool>, "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
+— indices are 1-based, and `play N` plays item `N`. **`in_use` is whether the queue is the group's
+source** — the Sonos app's "Queue" versus "Queue (Not In Use)". When it is `false` the group is on a
+stream, TV or line-in, `current` is `0` and no item is current, but the items are still listed and
+`play N` switches back to the queue. An empty queue can still be in use (`total: 0`,
+`in_use: true`). A change to the queue reports what it became rather than the whole queue:
+`queue add --json` gives `{room, added, source, total}`, `queue remove` `{room, removed, total}`,
+`queue clear` `{room, total}`, `queue move` `{room, from, to}` and `queue save` `{room, name, id}`.
 
 ## Grouping — how `-r` resolves once rooms are joined
 

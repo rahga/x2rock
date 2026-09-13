@@ -394,7 +394,8 @@ enum Command {
     Queue {
         #[command(subcommand)]
         action: Option<QueueAction>,
-        /// The queue, or `sources`, as JSON.
+        /// The queue, or `sources`, as JSON; a change reports what the queue
+        /// became.
         // Global to the queue subcommands, so `queue sources --json` is this
         // same flag rather than a second one `queue --json sources` would miss.
         #[arg(long, global = true)]
@@ -2043,27 +2044,30 @@ fn mmss(duration: Option<std::time::Duration>) -> String {
     }
 }
 
-fn print_queue(queue: &upnp::Queue, current: u32, json: bool) {
-    if json {
-        let items: Vec<_> = queue
-            .items
-            .iter()
-            .map(|i| {
-                json!({
-                    "index": i.index,
-                    "title": i.title,
-                    "artist": i.artist,
-                    "album": i.album,
-                    "duration_ms": i.duration.map(|d| d.as_millis() as u64),
-                    "art_url": i.art_url,
-                    "current": i.index == current,
-                })
+/// `in_use` is the Sonos app's "Queue" versus "Queue (Not In Use)": whether the
+/// group's source is its queue, which an empty queue can still be.
+fn queue_json(queue: &upnp::Queue, current: u32, in_use: bool) -> serde_json::Value {
+    let items: Vec<_> = queue
+        .items
+        .iter()
+        .map(|i| {
+            json!({
+                "index": i.index,
+                "title": i.title,
+                "artist": i.artist,
+                "album": i.album,
+                "duration_ms": i.duration.map(|d| d.as_millis() as u64),
+                "art_url": i.art_url,
+                "current": i.index == current,
             })
-            .collect();
-        println!(
-            "{}",
-            json!({ "total": queue.total, "current": current, "items": items })
-        );
+        })
+        .collect();
+    json!({ "total": queue.total, "current": current, "in_use": in_use, "items": items })
+}
+
+fn print_queue(queue: &upnp::Queue, current: u32, in_use: bool, json: bool) {
+    if json {
+        println!("{}", queue_json(queue, current, in_use));
         return;
     }
     if queue.items.is_empty() {
@@ -5052,7 +5056,7 @@ async fn apply_transport(
 /// with the room still idle. The reasoning is `stream_url`'s - a loaded stream
 /// that never plays says nothing on its own - reached here through resume
 /// rather than a fresh load.
-async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<()> {
+async fn play_confirmed(player: &Connection, upnp: &Upnp, group: &str, room: &str) -> Result<()> {
     // Subscribed, and the receiver attached, before the play is sent: the error
     // can overtake the command's own reply, and a receiver opened afterwards
     // would miss exactly the event this went to see - the rule `raw api --watch`
@@ -5066,7 +5070,7 @@ async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<
     // as `playback_failed`, since that is what the resume waits for.
     if let Err(e) = player.playback(group, "play").await {
         return Err(match refused_play(&e) {
-            Some(error) => playback_failed(room, &error),
+            Some(error) => playback_failed(room, &error, upnp).await,
             None => e,
         });
     }
@@ -5095,7 +5099,7 @@ async fn play_confirmed(player: &Connection, group: &str, room: &str) -> Result<
         // An error deserializes cleanly into a status ("nothing changed"), so it
         // is tested for first, before the body is read as one.
         if let Some(error) = sonos::proto::playback_error(&event.body) {
-            return Err(playback_failed(room, &error));
+            return Err(playback_failed(room, &error, upnp).await);
         }
         if let Ok(status) =
             serde_json::from_value::<sonos::proto::PlaybackStatus>(event.body.clone())
@@ -5131,18 +5135,40 @@ fn refused_play(e: &anyhow::Error) -> Option<sonos::proto::PlaybackError> {
 /// track a service pulled. One code with [`stayed_idle`], since the remedy is
 /// the same - the source is gone, so load a fresh one - and the sentence names
 /// which of the two it was.
-fn playback_failed(room: &str, error: &sonos::proto::PlaybackError) -> anyhow::Error {
-    hint::Hint::new(
+///
+/// Which source failed is asked of the coordinator only now, on the failure
+/// path; a read that fails gives the stream wording rather than hiding the
+/// play's own error.
+async fn playback_failed(
+    room: &str,
+    error: &sonos::proto::PlaybackError,
+    upnp: &Upnp,
+) -> anyhow::Error {
+    let from_queue = upnp.playing_from_queue().await.unwrap_or(false);
+    playback_failed_message(room, error, from_queue)
+}
+
+fn playback_failed_message(
+    room: &str,
+    error: &sonos::proto::PlaybackError,
+    from_queue: bool,
+) -> anyhow::Error {
+    let message = if from_queue {
+        format!(
+            "{room}: {error}. Nothing is playing now. That track is in the room's queue \
+             and its service would not serve it - a queued track can expire or be pulled. \
+             `x2rock queue` lists what else is there: `play N` plays another track, and \
+             `queue remove N` drops this one."
+        )
+    } else {
         format!(
             "{room}: {error}. Nothing is playing now. If the room was on a direct stream \
              (some services have no queue here, so x2rock streams them - Amazon Music on \
              a Prime account among them), its URL has most likely expired; start it again \
              with `favorite`, `bookmark`, or a fresh search to fetch a new one."
-        ),
-        "playback_failed",
-        None,
-    )
-    .into()
+        )
+    };
+    hint::Hint::new(message, "playback_failed", None).into()
 }
 
 /// A play the player accepted without ever leaving idle, and without raising an
@@ -5170,7 +5196,8 @@ async fn play_or_resume(
     player: &Connection,
     target: &session::Target,
 ) -> Result<()> {
-    let failed = match play_confirmed(player, &target.group_id, &target.name).await {
+    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+    let failed = match play_confirmed(player, &upnp, &target.group_id, &target.name).await {
         Ok(()) => return Ok(()),
         Err(e) if hint::of(&e).0 == "playback_failed" => e,
         Err(e) => return Err(e),
@@ -6591,7 +6618,7 @@ async fn run(cli: Cli) -> Result<()> {
                 upnp.use_queue(&target.coordinator_id).await?;
             }
             upnp.seek_track(n).await?;
-            play_confirmed(&player, group, &target.name).await?;
+            play_confirmed(&player, &upnp, group, &target.name).await?;
         }
         Command::Keep { name, container } => {
             let meta = player.metadata(group).await?;
@@ -6803,12 +6830,13 @@ async fn run(cli: Cli) -> Result<()> {
             match action {
                 None => {
                     let queue = upnp.queue().await?;
-                    let current = if upnp.playing_from_queue().await? {
+                    let in_use = upnp.playing_from_queue().await?;
+                    let current = if in_use {
                         upnp.current_track().await?
                     } else {
                         0
                     };
-                    print_queue(&queue, current, json);
+                    print_queue(&queue, current, in_use, json);
                 }
                 // Changes report what the queue became rather than what was
                 // asked for, and read the length cheaply rather than paging the
@@ -6821,8 +6849,15 @@ async fn run(cli: Cli) -> Result<()> {
                         upnp.remove_range(start, count).await?;
                     }
                     let left = upnp.queue_len().await?;
-                    let tracks = if count == 1 { "track" } else { "tracks" };
-                    println!("{room:<24} removed {count} {tracks}, {left} left");
+                    if json {
+                        println!(
+                            "{}",
+                            json!({ "room": room, "removed": count, "total": left })
+                        );
+                    } else {
+                        let tracks = if count == 1 { "track" } else { "tracks" };
+                        println!("{room:<24} removed {count} {tracks}, {left} left");
+                    }
                 }
                 Some(QueueAction::Clear { yes }) => {
                     ensure!(
@@ -6830,12 +6865,20 @@ async fn run(cli: Cli) -> Result<()> {
                         "clearing the queue cannot be undone; pass --yes to confirm"
                     );
                     upnp.clear_queue().await?;
-                    println!("{room:<24} queue cleared");
+                    if json {
+                        println!("{}", json!({ "room": room, "total": 0 }));
+                    } else {
+                        println!("{room:<24} queue cleared");
+                    }
                 }
                 Some(QueueAction::Move { from, to }) => {
                     ensure!(from >= 1 && to >= 1, "queue tracks are numbered from 1");
                     upnp.move_track(from, to).await?;
-                    println!("{room:<24} moved track {from} to {to}");
+                    if json {
+                        println!("{}", json!({ "room": room, "from": from, "to": to }));
+                    } else {
+                        println!("{room:<24} moved track {from} to {to}");
+                    }
                 }
                 Some(QueueAction::Sources { query }) => {
                     let mut sources = upnp.browse_content("SQ:").await?;
@@ -6877,16 +6920,27 @@ async fn run(cli: Cli) -> Result<()> {
                     let before = upnp.queue_len().await?;
                     let after = upnp.add_to_queue(uri, &item.metadata, next).await?;
                     let added = after.saturating_sub(before);
-                    let tracks = if added == 1 { "track" } else { "tracks" };
-                    println!(
-                        "{room:<24} added {added} {tracks} from {:?}, {after} in the queue",
-                        item.title
-                    );
+                    if json {
+                        println!(
+                            "{}",
+                            json!({ "room": room, "added": added, "source": item.title, "total": after })
+                        );
+                    } else {
+                        let tracks = if added == 1 { "track" } else { "tracks" };
+                        println!(
+                            "{room:<24} added {added} {tracks} from {:?}, {after} in the queue",
+                            item.title
+                        );
+                    }
                 }
                 Some(QueueAction::Save { name }) => {
                     ensure!(!name.trim().is_empty(), "a playlist needs a name");
                     let id = upnp.save_queue(&name).await?;
-                    println!("{room:<24} saved as {name:?} ({id})");
+                    if json {
+                        println!("{}", json!({ "room": room, "name": name, "id": id }));
+                    } else {
+                        println!("{room:<24} saved as {name:?} ({id})");
+                    }
                 }
             }
         }
@@ -7318,10 +7372,14 @@ mod tests {
         // The forced live test: a URL that never loaded, refused at the command.
         let error = refused_play(&refused).expect("a playback refusal");
         assert_eq!(error.error_code.as_deref(), Some("ERROR_PLAYBACK_FAILED"));
-        assert_eq!(
-            hint::of(&playback_failed("Media Room", &error)).0,
-            "playback_failed"
-        );
+        for from_queue in [false, true] {
+            assert_eq!(
+                hint::of(&playback_failed_message("Media Room", &error, from_queue)).0,
+                "playback_failed"
+            );
+        }
+        let queued = playback_failed_message("Media Room", &error, true).to_string();
+        assert!(queued.contains("queue remove") && !queued.contains("direct stream"));
         // Context wrapped around it still downcasts - anyhow reaches through.
         let wrapped = refused.context("on room \"Media Room\"");
         assert!(refused_play(&wrapped).is_some());
@@ -7752,6 +7810,35 @@ mod tests {
         assert_eq!(now["next_title"], "Enemies");
         assert_eq!(now["next_artist"], "Offset");
         assert_eq!(now["crossfade"], json!(false));
+    }
+
+    /// A queue that is not the source still lists its items, and marks none of
+    /// them current.
+    #[test]
+    fn a_queue_not_in_use_lists_items_with_none_current() {
+        let queue = upnp::Queue {
+            update_id: "1".to_owned(),
+            items: vec![upnp::QueueItem {
+                index: 1,
+                title: "No More Words".to_owned(),
+                artist: Some("Berlin".to_owned()),
+                album: None,
+                duration: None,
+                art_url: None,
+            }],
+            total: 1,
+        };
+        let q = queue_json(&queue, 0, false);
+        let mut keys: Vec<&str> = q.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["current", "in_use", "items", "total"]);
+        assert_eq!(q["in_use"], json!(false));
+        assert_eq!(q["current"], json!(0));
+        assert_eq!(q["items"][0]["current"], json!(false));
+        assert_eq!(
+            queue_json(&queue, 1, true)["items"][0]["current"],
+            json!(true)
+        );
     }
 
     /// A stream has no position in a queue and nothing after it, and must say
