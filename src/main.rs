@@ -8,6 +8,7 @@ mod hint;
 mod mpris;
 mod netid;
 mod restart;
+mod service;
 mod session;
 mod sonos;
 mod state;
@@ -774,6 +775,18 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Install the daemon as a systemd user service, pointing at this binary.
+    ///
+    /// Writes `~/.config/systemd/user/x2rock.service` from the shipped unit with
+    /// `ExecStart` set to the path this command is running from - so it is right
+    /// whether the binary came from `cargo install`, a clone, or a package, where
+    /// the shipped file assumes one of them. Refuses to overwrite a unit that
+    /// differs from what it would write, so hand edits survive; `--force`
+    /// overwrites. Re-run after moving or reinstalling the binary.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
     ///
     /// Outputs the script to stdout. Room names, bookmarks, and services are
@@ -1063,6 +1076,28 @@ enum RateDirection {
 /// both take something out of a list the same command prints. The cost is that
 /// a bookmark actually named "remove" can no longer be queried by name, which
 /// `queue` has always accepted for the same reason.
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Write the unit (and, with --headless, its drop-in), then `daemon-reload`.
+    Install {
+        /// Also install the drop-in for a machine with no graphical session,
+        /// so the daemon starts from boot. Pair it with `loginctl
+        /// enable-linger`, which this prints but does not run.
+        #[arg(long)]
+        headless: bool,
+        /// Run `systemctl --user enable --now x2rock.service` afterwards.
+        #[arg(long)]
+        enable: bool,
+        /// Overwrite a unit that differs from what would be written. Without
+        /// it, the differing lines are shown and nothing changes.
+        #[arg(long)]
+        force: bool,
+        /// Print the unit to stdout instead of writing it.
+        #[arg(long)]
+        print: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum BookmarksAction {
     /// Forget one, by name. Matches the history too, not just what was kept.
@@ -5613,6 +5648,128 @@ fn install_skill(dir: Option<&std::path::Path>, print: bool) -> Result<()> {
     Ok(())
 }
 
+/// Where the user unit goes: `$XDG_CONFIG_HOME/systemd/user`, which is where
+/// `systemctl --user` looks and where the README told people to copy it.
+fn user_unit_dir() -> Result<PathBuf> {
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow!("no home directory to find ~/.config in"))?;
+    Ok(base.config_dir().join("systemd").join("user"))
+}
+
+/// Write one generated file, refusing to clobber a differing one without
+/// `--force`. Says which of three things happened.
+fn place_generated(path: &std::path::Path, text: &str, force: bool) -> Result<()> {
+    if let Some(existing) = store::read_optional(path)? {
+        if existing == text {
+            println!(
+                "{} is already what this would write; left as is.",
+                path.display()
+            );
+            return Ok(());
+        }
+        if !force {
+            let (gone, added) = service::changed_lines(&existing, text);
+            let mut msg = format!(
+                "{} exists and differs from what `x2rock service install` would write.\n",
+                path.display()
+            );
+            for line in gone.iter().filter(|l| !l.starts_with('#')) {
+                msg.push_str(&format!("  yours:  {line}\n"));
+            }
+            for line in added.iter().filter(|l| !l.starts_with('#')) {
+                msg.push_str(&format!("  new:    {line}\n"));
+            }
+            msg.push_str("Re-run with --force to overwrite it, or --print to see the whole unit.");
+            bail!("{msg}");
+        }
+    }
+    store::write_atomically(path, text, store::PLAIN)?;
+    println!("Wrote {}.", path.display());
+    Ok(())
+}
+
+/// `x2rock service install`: the unit for *this* binary, written where
+/// `systemctl --user` reads it. See `service.rs` for why not a fixed path.
+fn install_service(
+    household: Option<&str>,
+    headless: bool,
+    enable: bool,
+    force: bool,
+    print: bool,
+) -> Result<()> {
+    let exe = std::env::current_exe().context("finding this binary's own path")?;
+    // Resolve symlinks: a unit pointing at `~/.local/bin/x2rock` that is a link
+    // into `~/.cargo/bin` would break the moment the link was removed, and the
+    // point of this command is to name the real thing.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let unit = service::render_unit(&exe, household)?;
+    if print {
+        print!("{unit}");
+        if headless {
+            print!(
+                "\n# --- x2rock.service.d/headless.conf ---\n{}",
+                service::render_headless()
+            );
+        }
+        return Ok(());
+    }
+
+    let dir = user_unit_dir()?;
+    place_generated(&dir.join("x2rock.service"), &unit, force)?;
+    let dropin = dir.join("x2rock.service.d").join("headless.conf");
+    if headless {
+        place_generated(&dropin, &service::render_headless(), force)?;
+    } else if dropin.exists() {
+        println!(
+            "Note: {} is present from an earlier --headless install and was left in place.",
+            dropin.display()
+        );
+    }
+
+    // A reload is what makes systemd read the new file; failing here is worth
+    // saying but not worth failing over, since the file is written and a later
+    // `daemon-reload` fixes it.
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    match reload {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("x2rock: `systemctl --user daemon-reload` exited {status}; run it yourself")
+        }
+        Err(e) => eprintln!(
+            "x2rock: could not run systemctl ({e}); run `systemctl --user daemon-reload` yourself"
+        ),
+    }
+
+    if enable {
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "x2rock.service"])
+            .status()
+            .context("running systemctl --user enable --now x2rock.service")?;
+        ensure!(
+            status.success(),
+            "`systemctl --user enable --now x2rock.service` exited {status}"
+        );
+        println!(
+            "Enabled and started x2rock.service. `journalctl --user -u x2rock` shows what it is doing."
+        );
+    } else {
+        println!("Next: systemctl --user enable --now x2rock.service");
+    }
+    if headless {
+        println!(
+            "Headless: also run `loginctl enable-linger {}` so the daemon outlives your ssh session.",
+            std::env::var("USER").unwrap_or_else(|_| "$USER".into())
+        );
+    }
+    println!(
+        "Running from {}. Re-run `x2rock service install` if the binary moves.",
+        exe.display()
+    );
+    Ok(())
+}
+
 impl Command {
     /// Whether the command was asked for `--json`, so an error can match the
     /// output the caller expected. Every variant with the flag is here - a test
@@ -5689,6 +5846,17 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Discover => return discover_and_remember().await,
         Command::Households { json, redact } => return run_households(json, redact).await,
         Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
+        Command::Service {
+            action:
+                ServiceAction::Install {
+                    headless,
+                    enable,
+                    force,
+                    print,
+                },
+        } => {
+            return install_service(cli.household.as_deref(), headless, enable, force, print);
+        }
         Command::Completions { shell, install } => {
             if install {
                 return completions::install(shell);
@@ -7138,6 +7306,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Discover
         | Command::Households { .. }
         | Command::Skill { .. }
+        | Command::Service { .. }
         | Command::Completions { .. }
         | Command::Complete { .. }
         | Command::Tui

@@ -726,6 +726,9 @@ or the user is surprised nothing responds.
   laptop moves networks, and logs the state — `journalctl --user -u x2rock.service` shows
   `x2rock: Kitchen -> org.mpris.MediaPlayer2.x2rock-…` when connected, or an hourly
   `unregistered network (gateway …)` when away. It is not required for anything you do from the CLI.
+  If a user wants it and it is not installed, `x2rock service install --enable` sets it up as a
+  user service pointing at this binary (`--headless` on a box with no desktop, `--household` on a
+  network with two systems); it refuses to overwrite an edited unit without `--force`.
 - **`discover` is offered, never reflexive** — it scans the local network, so run it only when the
   user confirms this is their own. Away from home, the answer is "your speakers aren't on this
   network", not a scan of it.

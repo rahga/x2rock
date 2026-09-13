@@ -183,6 +183,16 @@ fn connect_failure_line(code: &str, e: &anyhow::Error) -> String {
 /// Run until the process is stopped. Never returns `Ok` in practice; the `Result`
 /// is for fatal setup errors such as an unreadable state file.
 pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result<()> {
+    // One line answering "which binary is this" before anything else is
+    // logged. A unit can point at a stale build after a reinstall by another
+    // route, and the journal is where that question gets asked.
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "?".into());
+    log(&format!(
+        "x2rock {} running from {exe}",
+        env!("CARGO_PKG_VERSION")
+    ));
     let mut state = State::load()?;
 
     // Neither source is required: without them a dead socket is still found by

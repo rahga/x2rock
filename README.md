@@ -37,37 +37,34 @@ the whole surface.
 
 ## Quick start
 
-Build it, find the speakers once, run the daemon. The same on every Linux.
+Three commands, the same on every Linux:
 
 ```sh
-# The binary alone, straight from the repository - no registry, no clone:
-cargo install --git https://github.com/rahga/x2rock
+cargo install --git https://github.com/rahga/x2rock   # the binary, into ~/.cargo/bin
+x2rock discover                     # once per network; every other command reconnects to what this remembers
+x2rock service install --enable     # the daemon as a user service - every room is now an MPRIS player
 ```
 
-That lands in `~/.cargo/bin`. The systemd unit below expects `~/.local/bin/x2rock`, so if you take
-this route and want the daemon as a service, either symlink the binary there or edit `ExecStart`.
-Cloning is what you want for the unit, the desktop entry and the bar widget:
-
-```sh
-git clone https://github.com/rahga/x2rock
-cd x2rock
-cargo build --release
-install -Dm755 target/release/x2rock ~/.local/bin/x2rock
-
-# Optional: so MPRIS clients label each room player with a name and icon.
-install -Dm644 desktop/x2rock.desktop ~/.local/share/applications/x2rock.desktop
-install -Dm644 desktop/x2rock.svg ~/.local/share/icons/hicolor/scalable/apps/x2rock.svg
-
-x2rock discover          # once per network; every other command reconnects to what this remembers
-x2rock rooms             # if this lists your speakers, the CLI is done
-
-mkdir -p ~/.config/systemd/user && cp systemd/x2rock.service ~/.config/systemd/user/
-systemctl --user enable --now x2rock.service     # every room is now an MPRIS player
-```
+`service install` writes the systemd unit pointing at **whichever binary is running it** — from
+`cargo install`, from a clone, from a package — so there is no path to get wrong and nothing to copy
+by hand. It refuses to overwrite a unit you have edited unless told to with `--force`; `--print`
+shows what it would write. Re-run it if you move or reinstall the binary. (`systemd/x2rock.service`
+is the same unit as a file, for anyone who prefers to copy it.)
 
 Discover first: the daemon connects only to players it has been told about and will not scan an
 unfamiliar network on its own. The other order is not fatal — it re-reads the remembered players
-between reconnect attempts, so a later `discover` is picked up within a minute.
+between reconnect attempts, so a later `discover` is picked up within a minute. If `x2rock rooms`
+lists your speakers, the CLI is done.
+
+Cloning gets you the desktop entry, which lets MPRIS clients label each room player with a name
+and icon, and the bar widget:
+
+```sh
+git clone https://github.com/rahga/x2rock && cd x2rock
+cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
+install -Dm644 desktop/x2rock.desktop ~/.local/share/applications/x2rock.desktop
+install -Dm644 desktop/x2rock.svg ~/.local/share/icons/hicolor/scalable/apps/x2rock.svg
+```
 
 Needs Rust 1.89 or newer and a C compiler; see [Requirements](#requirements) for what bites on
 Ubuntu, for a machine with no desktop, and for the one Sonos setting a few commands need.
@@ -352,7 +349,8 @@ machine wakes and NetworkManager says when it lands on a network, so a socket th
 a suspend or a move is replaced within seconds; both are optional, and without them the keepalive
 finds a dead socket a little later. When no player is reachable — a laptop away from home — it
 backs off quietly and republishes when one appears. `journalctl --user -u x2rock` is where it says
-what it is doing.
+what it is doing — starting with which binary it is, since a unit can outlive a reinstall by
+another route.
 
 ### What the daemon publishes beyond MPRIS
 
@@ -619,15 +617,12 @@ the daemon and the service fail with nothing obviously wrong.
 ### On a headless box
 
 A server, or a box that exists to sit on the speakers' LAN and be reached over ssh, is a natural
-home. The shipped unit is tied to the graphical session; a drop-in points it at the target the
-user manager always reaches, and lingering keeps that manager alive with nobody logged in:
+home. The unit is tied to the graphical session by default; on a machine that never has one it
+would never start, so `--headless` adds the drop-in that points it at the target the user manager
+always reaches, and lingering keeps that manager alive with nobody logged in:
 
 ```sh
-mkdir -p ~/.config/systemd/user/x2rock.service.d
-cp systemd/x2rock.service ~/.config/systemd/user/
-cp systemd/x2rock.service.d/headless.conf ~/.config/systemd/user/x2rock.service.d/
-systemctl --user daemon-reload
-systemctl --user enable --now x2rock.service
+x2rock service install --headless --enable
 loginctl enable-linger $USER      # the line that gets missed; sudo it if polkit refuses over ssh
 ```
 
@@ -639,9 +634,10 @@ An office, a lab, a guest system on the same LAN. Every command works out the ho
 room it was given, so `-r Studio` just works; `--household` (or `X2ROCK_HOUSEHOLD`) is for a
 command that names no room — the daemon above all — or for a room name that exists in both
 households, where only an id from `x2rock households` can say. The daemon without it logs
-`multiple_households` and retries forever; the shipped unit carries a commented
-`Environment=X2ROCK_HOUSEHOLD=` line for exactly this. A household that has been factory-reset or
-replaced is forgotten automatically once every one of its old addresses answers for the new one.
+`multiple_households` and retries forever; `x2rock --household Studio service install` writes the
+unit with the `Environment=X2ROCK_HOUSEHOLD=` line filled in. A household that has been
+factory-reset or replaced is forgotten automatically once every one of its old addresses answers
+for the new one.
 
 ## Tested devices
 
