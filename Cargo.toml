@@ -3,7 +3,7 @@ name = "x2rock"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Local-first Sonos control for Linux: CLI and MPRIS2 server, no Sonos account"
+description = "Local-first Sonos control for Linux: a daemon that makes every room an MPRIS2 media player, and a CLI for everything the speakers answer on the LAN. No Sonos account, no cloud."
 license = "0BSD"
 repository = "https://github.com/rahga/x2rock"
 
