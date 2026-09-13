@@ -4,11 +4,13 @@
 //! Sonos is the *client* and the music service is the server, so a controller that
 //! wants search does not ask a player for it - it calls the service itself.
 //!
-//! **This is the only part of x2rock that leaves the LAN**, and it is confined to
-//! the CLI on purpose - `search`, `browse` and `link` all come through here, and
-//! nothing in the daemon does. See "Rule: talking to a service never enters the
-//! daemon" in docs/architecture.md: the daemon publishes MPRIS and must never
-//! acquire an internet timeout in front of play/pause.
+//! **Talking to a music service happens here**, confined to the CLI on purpose -
+//! `search`, `browse`, `link`, `play-item` and `rate` all come through this
+//! module, and nothing in the daemon does. (The other two things that leave the
+//! LAN, Plex's PIN link in [`super::plex`] and the radio directory in
+//! `stations.rs`, keep the same rule.) See "Rule: talking to a service never
+//! enters the daemon" in docs/architecture.md: the daemon publishes MPRIS and
+//! must never acquire an internet timeout in front of play/pause.
 //!
 //! Two kinds of service can be searched. `Policy Auth="Anonymous"` needs nothing
 //! but a `deviceProvider`, which is about a third of the catalogue and most of
@@ -17,39 +19,37 @@
 //! are the device-link flow, driven by the controller, with the browser step
 //! handed to whatever browser the person already uses.
 //!
-//! `AppLink` is designed to expect the Sonos app to launch the service's own
-//! mobile app, and there is no desktop app to hand off to - but `getAppLink`
-//! nests the same browser link a device link uses, so `x2rock link` asks
-//! anyway and lets the service answer. A full sweep (2026-09-10) found most of
-//! what gets *tried* answers with a real browser page: TuneIn, Radio Paradise,
-//! Amazon Music, Pandora, Pandora CloudCover and Spotify all do. YouTube
-//! Music, Apple Music and SoundCloud refuse outright - YouTube Music gates the
-//! endpoint on an API key before user auth is even reached - and Plex's SMAPI
-//! link half is dead, linking instead through its own published PIN flow, in
+//! `AppLink` services are linked through `getAppLink`, which nests the same
+//! browser link a device link uses. Whether a service answers is its own
+//! policy, not a property of the tier - the Sonos desktop controller completes
+//! app-link too, so nothing about it requires a phone. A sweep (2026-09-10)
+//! found a real browser page from TuneIn (New), Radio Paradise, Amazon Music,
+//! Pandora, Pandora CloudCover and Spotify. YouTube Music (HTTP 403, its
+//! endpoint gated on a sealed API key), Apple Music and SoundCloud refuse.
+//! Plex's SMAPI link half is dead; it links through its own PIN flow, in
 //! [`super::plex`].
 //!
-//! **Linking is not playing, for a service with no household account yet.** A
-//! service that answers `getAppLink` still needs `musicServiceAccounts:1
-//! match` to register the account on the household, and `match` normally
-//! cannot be called successfully by a third-party controller at all - it
-//! wants a `userIdHashCode` only the service's own SMAPI server can compute.
-//! An `x2rock link` against a service the household has never linked answers
-//! `match`-less, and playback then comes down entirely to what `getMediaURI`
-//! answers with: a real, self-authorizing stream URL plays with no
-//! registration (Amazon Music, verified on hardware); a native pointer that
-//! needs a trusted account to resolve does not on its own (Spotify's
-//! `x-spotify://spotify:track:…`, which the stream fallback refuses outright
-//! as an unsupported scheme).
+//! **Linking is not playing.** A token opens search and browse. Playback takes
+//! one of two routes, and neither uses the token to enqueue:
 //!
-//! **But that native-pointer case is not a dead end, once the household has
-//! any account for the service at all - from any client.** Verified against
-//! Spotify: once the official Sonos app had linked a real account, an
-//! `x2rock link Spotify` immediately after *did* register successfully
-//! (`match` returned a real account id), and search/browse/playback all work
-//! in full from there - playback via [`crate::bookmarks::service_uri`], which
-//! builds the enqueue URI in the scheme the player itself expects rather than
-//! asking `getMediaURI` for anything directly playable. See "The real fix:
-//! the enqueue URI itself was wrong" in docs/architecture.md.
+//! - **On-demand content is enqueued**, and the *player* resolves it with the
+//!   household's own registration for the service. So it plays only if the
+//!   household already holds an account for that service, added in the Sonos
+//!   app; without one `AddURIToQueue` answers UPnP 800. `musicServiceAccounts:1
+//!   match` does not change that: the controller does receive a
+//!   `userIdHashCode` from `getDeviceAuthToken`, but `match` has only ever
+//!   succeeded for an account the household already held (Spotify, `sn_22`,
+//!   after the Sonos app added it) and has never created one.
+//! - **Anything refused by the queue falls back to a stream**, resolved through
+//!   `getMediaURI` with x2rock's own token. That plays when the service answers
+//!   with a self-authorizing URL (Amazon Music's presigned HLS, TuneIn's
+//!   stations) and not when it answers with a pointer only a trusted player can
+//!   resolve (Spotify's `x-spotify://`, refused as an unsupported scheme) or
+//!   does not implement `getMediaURI` at all (Radio Paradise).
+//!
+//! The enqueue URI itself must be in the scheme the player writes for that
+//! service - see [`crate::bookmarks::service_uri`] and "The real fix: the
+//! enqueue URI itself was wrong" in docs/architecture.md.
 
 use std::time::Duration;
 
@@ -223,10 +223,9 @@ impl Service {
                 crate::hint::shell_arg(&self.name)
             ),
             Auth::AppLink => format!(
-                "{} needs a linked account, and offers no code flow x2rock \
-                 can drive. Some services in this tier answer with a browser \
-                 page anyway: `x2rock link {}` asks, and a refusal costs \
-                 nothing.",
+                "{} needs a linked account. `x2rock link {}` asks it for a \
+                 browser login page; many app-link services give one, some \
+                 refuse, and a refusal costs nothing.",
                 self.name,
                 crate::hint::shell_arg(&self.name)
             ),

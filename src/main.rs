@@ -436,9 +436,10 @@ enum Command {
         /// `--index 20 --play 1` plays the 21st result overall.
         #[arg(long, default_value_t = 0, value_name = "N")]
         index: u32,
-        /// Play the Nth result, 1-based, in --room. Opens a playback session
-        /// rather than enqueuing: a service's content cannot be added to the
-        /// Sonos queue, and Sonos does not intend it to be.
+        /// Play the Nth result, 1-based, in --room. A stream plays in a
+        /// session alongside the queue; anything else is added to the queue and
+        /// played, falling back to a stream if the player refuses it. A
+        /// container is refused: open it with `browse` instead.
         #[arg(long, value_name = "N")]
         play: Option<usize>,
         /// Re-read the service catalogue even if its version has not moved.
@@ -596,8 +597,10 @@ enum Command {
         /// so a household with several machines can tell them apart.
         #[arg(long)]
         nickname: Option<String>,
-        /// Store the token without registering the account on the household.
-        /// Search works either way; only playback needs the household to know.
+        /// Store the token without asking the household to match the account.
+        /// Search and browse work either way. On-demand playback depends on the
+        /// household holding its own account for the service (added in the
+        /// Sonos app), not on this step.
         #[arg(long)]
         no_match: bool,
         /// Plex only: no browser at all - store the token the household's own
@@ -3596,9 +3599,11 @@ async fn run_link(
         // registration - made from the Sonos app - is what playback rides on.
         if link_code.is_some() {
             println!(
-                "{} sent no userIdHashCode, so the household cannot be told about \
-                 the account. Search works; playback through the household may not.",
-                chosen.name
+                "{} sent no userIdHashCode, so the household was not asked about the \
+                 account. Search and browse work. On-demand tracks play only if the \
+                 household already has a {} account, added in the Sonos app; anything \
+                 the service hands back as a playable stream plays either way.",
+                chosen.name, chosen.name
             );
         }
         return Ok(());
@@ -3620,25 +3625,24 @@ async fn run_link(
             }
             linked.save()?;
             match account_id {
-                Some(id) => println!("Registered on the household as account {id}."),
-                None => println!("Registered on the household."),
+                Some(id) => println!("The household knows this account as {id}."),
+                None => println!("The household accepted the account."),
             }
         }
         // The token is already on disk and already useful, so this is a warning
         // and not an error: failing the command here would suggest the whole
         // flow needs repeating, and it does not.
         //
-        // Worded mildly on purpose. Every `match` this project has attempted
-        // has been refused, and nothing has yet needed it: a service's own
-        // stream URL carries the account identity - iHeartRadio's has the
-        // `userIdHashCode` in it as `profileId` - so the household does not have
-        // to know about the account for x2rock to play from it. An alarming
-        // message here would send someone chasing a step that may simply not be
-        // available to a controller.
+        // `match` has only ever succeeded for an account the household already
+        // held (Spotify, after the Sonos app added it). A refusal does not prove
+        // the household has none, though: iHeartRadio refused while the household
+        // held two, and on-demand tracks played from its own.
         Err(e) => println!(
-            "The household would not register the account ({e:#}), which so far \
-             has not mattered: the token is stored and search works. See \
-             docs/architecture.md, \"match, and why nothing needs it yet\".",
+            "The household did not match the account ({e:#}). The token is stored, \
+             and search and browse work. On-demand tracks play only if the household \
+             has its own {} account, added in the Sonos app; anything the service hands \
+             back as a playable stream plays either way.",
+            chosen.name
         ),
     }
     Ok(())

@@ -506,19 +506,21 @@ service's live stream does, so the room's queue is left alone, and `x2rock now` 
 the station says is playing.
 
 The rest need an account, and they split in two. **Fourteen offer device linking**, which x2rock
-can drive — see below. The remaining sixty-two link through the service's own app rather than a
-code — but that tier is not uniformly closed, because the hand-off is the controller's business
-and not every service insists on it. `x2rock link` will ask any of them for a browser page and let
-the service answer; **Plex** is linked through its own PIN flow and then searched and browsed like
-anything else, and **Spotify** links, searches, browses and plays in full through the generic
-`getAppLink` flow — the first major streaming service on this list to work completely. For one that
-never answers, x2rock says so plainly rather than half-working:
+can drive — see below. The remaining sixty-two are "app-link" services, and that tier is not
+uniformly closed: whether one hands a desktop client a browser login is the service's own policy.
+`x2rock link` asks any of them and lets the service answer. **Plex** is linked through its own PIN
+flow; **TuneIn (New), Radio Paradise, Amazon Music, Pandora and Spotify** answered with a browser
+page when last swept; **YouTube Music, Apple Music and SoundCloud** refuse. A link gives you search
+and browse. Playing an on-demand track is a separate matter — see [Linking an
+account](#linking-an-account). For a service that refuses, x2rock says so plainly rather than
+half-working:
 
 ```
 $ x2rock search -s "YouTube Music" jazz
-Error: YouTube Music needs a linked account, and offers no code flow x2rock can drive.
-Some services in this tier answer with a browser page anyway: `x2rock link 'YouTube Music'`
-asks, and a refusal costs nothing.
+Error: YouTube Music needs a linked account. `x2rock link 'YouTube Music'` asks it for a browser
+login page; many app-link services give one, some refuse, and a refusal costs nothing.
+$ x2rock link "YouTube Music"
+Error: YouTube Music refused getAppLink: HTTP 403
 ```
 
 YouTube Music is the closed case worth naming, because it is closed for a reason no amount of
@@ -601,9 +603,15 @@ the art URLs your players already broadcast, which browses everything but dies w
 relinked to Sonos. An app-link service other than Plex can also be *tried* — `x2rock link <name>`
 asks it for a browser page, some services answer, and a refusal costs nothing.
 
-The token is x2rock's own, not the household's — minted for this machine. `x2rock link` also
-registers the account with your household so the speakers know about it, where the service hands
-over the identifier that needs (`--no-match` skips it; Bandcamp does not send one).
+The token is x2rock's own, not the household's — minted for this machine — and it is what search
+and browse use. **Playing an on-demand track is different**: the track is added to the queue and
+the *speaker* fetches it using the household's own account for that service, the one added in the
+Sonos app. So a track plays only if the household has an account for the service. Without one,
+x2rock falls back to streaming the item with its own token, which works where the service hands
+back a playable URL (Amazon Music, TuneIn's stations) and not where it does not (Spotify, until the
+household adds Spotify in the Sonos app — after which it plays normally). `x2rock link` also asks
+the household to match the account (`--no-match` skips that); it has only ever matched an account
+the household already held, and never creates one.
 
 **A caution learned the hard way.** Linking a service does not necessarily give you a catalogue to
 search. Bandcamp's Sonos interface is *your own collection* — purchases, wishlist, followed
@@ -619,10 +627,9 @@ copy; revoking it properly is done from that service's own account page.
 
 ## Keeping things you cannot search for
 
-Most app-link services stay unsearchable — YouTube Music and Apple Music among them (Plex used to
-be on this list, and is not any more; see "Linking an account"). **Spotify is the other exception**:
-`x2rock link Spotify` unlocks full search, browse and playback, with real, stable results. For the
-services that stay unsearchable, *replaying* something needs no credential at all: the id is enough,
+Some services stay unsearchable from here — YouTube Music, Apple Music and SoundCloud refuse to
+link (see "Linking an account"; Plex, Spotify and Amazon Music, among others, do link). For a
+service you cannot search, *replaying* something needs no credential at all: the id is enough,
 and the player resolves the account it already holds. Discovery and repetition are separate
 problems, and this closes the second one for every service, linked or not:
 

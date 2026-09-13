@@ -1,13 +1,14 @@
 ---
 name: x2rock
-description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, mute, shuffle and repeat, the queue, favorites, music-service search and browse, internet radio by URL, grouping and party mode, soundbar TV input, alarms, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "find me a country/jazz/ambient station", "put on some free radio", "play everywhere / party", "set an alarm", "turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
+description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, evening out a group's volume, mute, shuffle and repeat, the queue, favorites, music-service search, browse and account linking, rating a track, internet radio by URL, grouping and party mode, soundbar TV input, alarms and snooze, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "even out the volume", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "find me a country/jazz/ambient station", "put on some free radio", "play everywhere / party", "thumbs up this song", "link my Spotify / can you search Amazon Music", "set an alarm", "snooze / turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
 ---
 
 # Driving Sonos with the `x2rock` CLI
 
 `x2rock` controls Sonos speakers on the local network, with **no Sonos account**. Control never
-leaves the LAN; `search`, `browse` and `stations` do reach out to music services and a radio
-directory, none of which want a Sonos login. Every command is a one-shot subprocess. 
+leaves the LAN; `search`, `browse`, `link`, `rate`, `play-item` and `stations` do reach out to music
+services and a radio directory, none of which want a Sonos login. Every command is a one-shot
+subprocess.
 
 When speakers seem missing, `x2rock status` diagnoses it (see "When no speakers are available"). 
 Two contracts hold everything together:
@@ -59,8 +60,9 @@ CLI it came from — if the version has moved since you installed the skill, re-
 - Now-playing is **flat** on the room object (`title`, `artist`, `album`, `position_ms`,
   `duration_ms`, `next_title`, `next_artist`), not nested.
 - **`queue_position` is 1-based and has no total.** It is `null` whenever the queue is not what is
-  driving - a radio stream has no position in a queue. For the length, read `queue --json`, which
-  carries both. `explicit` is the content flag every controller shows as a badge, `null` when the
+  driving - a radio stream has no position in a queue - and `0` when the queue is the source but
+  empty. For the length, and for whether the queue is the source at all (`in_use`), read
+  `queue --json`. `explicit` is the content flag every controller shows as a badge, `null` when the
   source does not say. `crossfade` is a third play mode beside repeat and shuffle and is settable.
 - **`stream_info` is a live stream's own "now playing" text**, verbatim and unparsed - typically
   `"Artist - Title"`, but a station may put a show name or a slogan there instead, so do not split
@@ -90,14 +92,17 @@ CLI it came from — if the version has moved since you installed the skill, re-
 ]
 ```
 
-`now --json` is a **single bare object** — one room's *now-playing* fields (state, title, artist,
-album, service, service_id, position_ms, duration_ms, repeat, shuffle, on_tv, input_format,
-surround, art_url), with no `-r` picking the household's one group (and erroring if there are
-several). It is the confirm-step after a play. It is a **subset** of a `status` entry: `volume`,
-`muted`, `audible`, `members`, `coordinator` and `has_tv` are **not** in it — read those from
+`now --json` is a **single bare object** — one room's *now-playing* fields (room, state, title,
+artist, album, service, service_id, position_ms, duration_ms, queue_position, next_title,
+next_artist, explicit, stream_info, repeat, shuffle, crossfade, on_tv, input_format, surround,
+art_url), with no `-r` picking the household's one group (and erroring if there are several). It is
+the confirm-step after a play. It is a **subset** of a `status` entry: `volume`, `muted`,
+`audible`, `fixed`, `members`, `coordinator` and `has_tv` are **not** in it — read those from
 `status --json` (or audibility from `vol --json`).
 
-`bookmarks --json` and `accounts --json` are bare arrays. `queue --json` is an **object**:
+`bookmarks --json` is a bare array of `{id, name, type, service, description, art_url}`.
+`accounts --json` is a bare array of `{service, service_id, account_id, nickname, linked,
+household}` — see "Linking a music service". `queue --json` is an **object**:
 `{"total": <n>, "current": <index>, "in_use": <bool>, "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
 — indices are 1-based, and `play N` plays item `N`. **`in_use` is whether the queue is the group's
 source** — the Sonos app's "Queue" versus "Queue (Not In Use)". When it is `false` the group is on a
@@ -157,8 +162,9 @@ This is the highest-stakes thing to get right. When rooms are grouped:
 - To act on a group, pass any member's or the coordinator's **real** room name — never the composite
   `"Dining Room + 1"`.
 
-**`accounts` is this machine's tokens, and `accounts --content` is not the household's account
-list either** - it reports the serials named by favorites and queue content, which is a *proxy*.
+**`accounts` is this machine's tokens** (see "Linking a music service"), **and `accounts --content`
+is not the household's account list either** - it reports the serials named by favorites and queue
+content, which is a *proxy*.
 Measured against the Sonos app in one household it recovered **three of eight accounts and named
 one that had been removed**: an account that has never played anything in the current favorites or
 queue is invisible, and a serial outlives the account in content that still names it. The real
@@ -171,8 +177,8 @@ being 0 rather than from comparing version strings, because a current player is 
 version back. **x2rock will never install an update and must not claim it might**: that reboots
 speakers, and the Sonos app gates it behind a dialog warning against unplugging anything - a warning
 no command line carries. This is a permanent decision rather than a missing feature, so do not offer
-to find a way round it and do not suggest `raw`, which speaks the Control API and cannot reach a
-UPnP action anyway. Point the user at the Sonos app.
+to find a way round it. `raw upnp` could technically send `BeginSoftwareUpdate`; do not suggest it
+and do not run it, even when asked in passing - point the user at the Sonos app.
 
 **`system` is the only command that speaks in speakers rather than rooms**, and it is what to run
 for "what speakers do I have", "what model is X", "how is the living room set up" or anything about
@@ -181,9 +187,9 @@ whether one speaker or four back it - so `status` and `rooms` cannot answer thos
 readout the Sonos apps call **About My System**, and it is read-only and local.
 
 Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`, `bonded`,
-`satellite`, `hidden`, `serial`, `sonos_os`, `display_version`, `build`, `software_version`,
-`hardware_version`, `series_id`, `ip`, `connection`, `connection_type`, `eth_link`. Four of those
-need care:
+`satellite`, `hidden`, `serial`, `uuid`, `sonos_os`, `display_version`, `build`,
+`software_version`, `hardware_version`, `series_id`, `ip`, `connection`, `connection_type`,
+`eth_link`. Four of those need care:
 
 - **`connection` is how that speaker reaches the household**, and it is the first thing to read when
   several rooms drop out at once: `wired`, `sonosnet`, `satellite`, or `unknown`. As soon as one
@@ -359,12 +365,13 @@ see "Ask before you act".
 | Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search -s <svc> <term> --play N -r "<Room>"` |
+| Play or queue a hit you already have the id for | `x2rock -r "<Room>" play-item -s <svc> <id> --title "<name>" --kind <type>` / `queue-item` (same arguments; adds without playing, refuses a stream) |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
-| Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` |
-| Link an account | `x2rock link [service]` / `x2rock accounts --json` |
+| Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks remove "<name>"` |
+| Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 
 **A saved playlist is not a favorite.** `queue sources` lists both (playlists carry `SQ:` ids),
 `queue save "<name>"` makes one from what is queued now, `queue add` appends one, and
@@ -492,17 +499,6 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
     never answered (find out why before anything else), or it answered every poll without naming a
     state (the room is reachable - just re-check with `x2rock now`). (Distinct from a plain
     `no_player`, which means no speaker answered *before* anything was loaded.)
-- **`play` (resume) confirms the room started, and self-heals an expired stream.** A room can hold a
-  source that has gone stale - most often a **direct stream** whose signed URL has expired. A
-  service with no queue support here (Amazon Music on a Prime account is the known one) is played as
-  a direct stream: it **cannot be paused and resumed**, and its URL stops working after a while.
-  When `play` hits that, x2rock **re-resolves a fresh URL from the item it remembered and plays it**
-  - so an ordinary `play` (one room, `--all`, or several `-r` alike) usually just works again,
-  printing that it refreshed the stream, and this time waiting to confirm it plays. It falls
-  back to a `playback_failed` error only when there is nothing to resume: x2rock did not start the
-  stream (so it has no item), or the room has since moved on to something else. The remedy for that
-  error is not to retry `play` but to **load a fresh source**: `favorite`, `bookmark`, or a search.
-  Starting such a stream also prints a one-line warning on stderr that it is a direct stream.
 
   With `--json`, both commands emit `{room, title, url, started}` on success (`started` is
   `"playing"` or `"starting"`) and the standard `{error, code, fix}` on either failure. A good
@@ -559,9 +555,10 @@ systems on the same network (test households included).
   named differently (the common case). `--household` is only needed in two places: a command that
   names no room at all (the daemon, `link`, `accounts`), where `--household <room>` names one for
   it; and a room name that is itself what collides (both households call something "Kitchen"),
-  where only `--household <id>` can say - `x2rock households` is the one place an id is printed;
-  nowhere else names one, matching how `system` never prints a hardware identifier without
-  `--redact`.
+  where only `--household <id>` can say - `x2rock households` prints the ids (`--redact` masks
+  them). Two other outputs carry a household id too: `status --json --full` (`household`) and
+  `accounts --json` (`household`, the one a token was minted against). Treat all three as
+  identifying before pasting them anywhere public.
 - **A household that has been replaced is forgotten on its own.** After a factory reset or a
   replaced system, the old household id would sit beside the new one with the same room names and
   make every command ask which. So a scan that finds *every* remembered address of a household now
@@ -634,7 +631,8 @@ an announcement, a doorbell, anything short. Use them for "chime the kitchen", "
 
 ## Worked examples
 
-**"Play something in the kitchen."** `play` only *resumes*; a stopped room needs `favorite`.
+**"Play something in the kitchen."** `play` only *resumes* what the room already holds; to start
+something, use `favorite`, a search, or a station.
 
 ```sh
 x2rock status --json                      # Kitchen is IDLE, volume 2, audible:true
@@ -686,12 +684,12 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `code` | meaning | `fix` |
 |---|---|---|
 | `unknown_room` | the `-r` name is not a room (or is a group's composite label) | `x2rock rooms` (and see `did_you_mean`) |
-| `needs_link` | the music service needs an account | `x2rock link <service>` |
+| `needs_link` | this machine holds no token for that music service | `x2rock link '<service>'` — **a browser login a person must finish**, so run it only with the user present and say what they will be asked to do; see "Linking a music service" |
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
 | `stream_unverified` | the stream was loaded but the room's state could not be established for 10s — unknown, and *not* a verdict on the stream | **null** (the message says whether the room answered; act on that, do *not* try another stream) |
-| `playback_failed` | `play` reached the room but it did not start — the player raised a playback error (often an expired direct-stream URL) or sat idle with nothing loaded | null (load a fresh source: `favorite`, `bookmark`, or a search) |
+| `playback_failed` | `play` or `play N` reached the room but it did not start — the player raised a playback error (an expired direct-stream URL, or a queued track its service will no longer serve; the message says which) or sat idle with nothing loaded | null (load a fresh source: `favorite`, `bookmark`, or a search; for a dead queued track, `play` another or `queue remove N`) |
 | `no_player` | speakers were known here but none answered — a rescan already ran and found **nothing at all** | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
@@ -700,8 +698,8 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `household_unreachable` | a rescan found **other** households but not this one — it is off, or has moved networks. Not `no_player`: the network is fine | `x2rock households` (and see `data.households` for what did answer) |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
-**When `fix` is non-null, run it and retry.** **When `fix` is null, do not — read the `error` and
-change the request.** The two null network codes matter most: neither `unregistered_network` nor
+**When `fix` is non-null, run it and retry** — except `needs_link`, whose fix opens a login page for
+a person. **When `fix` is null, do not — read the `error` and change the request.** The two null network codes matter most: neither `unregistered_network` nor
 `no_player` carries a fix, because the remedy people reach for — `x2rock discover` — must never be
 run reflexively. Why, and what to do instead, is "When no speakers are available".
 
@@ -773,14 +771,24 @@ inference from a vague request:
   still show `IDLE`/`BUFFERING`, so wait a second and re-check. `PLAYING` with `position_ms`
   advancing between two reads is real sound — subject to `audible`, which `now --json` does **not**
   carry: read it from the room's `status --json` entry or `vol --json`.
-- **Two commands verify themselves, and the rest do not.** `play-url` and `stations --play` wait for
-  the room to reach `PLAYING` and report one of three outcomes (see "Offer more than one, and keep
-  going if one fails"), so their confirmation is worth believing and their failure is an error with
-  a code. `favorite`, `playlist`, `bookmark` and `search`/`browse --play` do not wait — confirm
-  those yourself.
-- **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`link` and `stations`
-  reach the internet — seconds, not instant, and a dead stream costs `play-url` ten. Everything
-  local (transport, volume, status, queue) is fast.
+- **Some commands verify themselves, and the rest do not.** `play-url` and `stations --play` wait for
+  the room to reach `PLAYING` and report one of four outcomes (see "Offer more than one, and keep
+  going if one fails"). `play` (resume) and `play N` also wait, and fail with `playback_failed` when
+  the room does not start. Their confirmation is worth believing and their failure is an error with
+  a code. `favorite`, `playlist`, `bookmark`, `play-item` and `search`/`browse --play` do not wait
+  — confirm those yourself.
+- **`play` (resume) self-heals an expired direct stream.** A room can hold a source that has gone
+  stale - most often a **direct stream** whose signed URL has expired. Content the queue refuses is
+  played as a direct stream (Amazon Music on a Prime account is the known case, and stderr says so
+  when one starts): it **cannot be paused and resumed**, and its URL stops working after a while.
+  When `play` hits that, x2rock **re-resolves a fresh URL from the item it remembered and plays it**,
+  printing that it refreshed the stream - one room, `--all`, or several `-r` alike. It falls back to
+  `playback_failed` only when there is nothing to resume: x2rock did not start the stream, or the
+  room has since moved on. The remedy then is not to retry `play` but to **load a fresh source**.
+- **Warn on slow commands**: `discover` sweeps the subnet, `search`/`browse`/`rate`/`play-item` and
+  `stations` reach the internet — seconds, not instant — a dead stream costs `play-url` ten, and
+  `link` waits on a person for up to seven minutes. Everything local (transport, volume, status,
+  queue) is fast.
 
 ## What is safe to repeat
 
@@ -791,10 +799,11 @@ room (code `unknown`); `next`/`prev` advance each call.
 
 ## Getting *into* the household's services: favorites, keep, bookmark
 
-**`x2rock search` (no term) lists only the services searchable *without the household's account* —
-radio-style anonymous ones plus what this machine has linked. It is not the household's real
-services.** YouTube Music, Amazon Music and such are not searchable here (offering to "search
-YouTube Music" fails with `needs_link` or finds nothing). Reach them three other ways:
+**`x2rock search` (no term) lists what *this machine* can search — the anonymous radio-style
+services plus whatever has been linked here with `x2rock link`. It is not the household's list of
+services**, and a service the household uses in the Sonos app is not searchable from here until it
+is linked (search fails with `needs_link`). Many can be linked; YouTube Music cannot (see "Linking a
+music service"). Whether or not a service is linked, three routes reach what the household plays:
 
 - **`favorites`** — what the household saved in the Sonos app; `favorite "<name-or-id>"` plays one.
 - **`keep`** — snapshots the **currently-playing track** (or `--container` for its album/playlist/
@@ -804,7 +813,59 @@ YouTube Music" fails with `needs_link` or finds nothing). Reach them three other
   `bookmarks --json` is a bare array: `[{id, name, type, service, description, art_url}]`. By default
   it lists only what was kept on purpose; `bookmarks --all` (here meaning "include daemon-noticed
   history", not whole-house) adds what the daemon noticed playing — the answer to "that thing from
-  yesterday".
+  yesterday". A kept on-demand track replays through the household's own account for its service,
+  so it stops working if the household removes that account and works again if it is re-added.
+
+## Linking a music service: `link`, `accounts`, `unlink`
+
+**A link buys search and browse. It does not, by itself, buy playback of on-demand tracks.** Keep
+those two apart when telling a user what linking will do.
+
+- **Linking needs a person.** `x2rock link '<Service>'` opens the service's own login page in the
+  browser and polls until the login is finished, for up to seven minutes. `--no-open` prints the URL
+  instead — use it when the user is not at this machine's screen, and hand them the URL. Tell the
+  user what they are about to be asked to do, and do not report success before the command exits
+  with `Linked <Service>.` The token is stored on this machine only; `unlink` forgets it locally
+  (revoking it is done on the service's own site).
+- **Which services link.** `x2rock link` with no argument lists the device-link services (plus
+  Plex). App-link services are not in that list but can still be named: `link` asks each for a
+  browser page, and the answer is the service's own policy. As last swept (2026-09-10): **TuneIn
+  (New), Radio Paradise, Amazon Music, Pandora, Pandora CloudCover and Spotify** gave a page;
+  **YouTube Music** (`refused getAppLink: HTTP 403`), **Apple Music** and **SoundCloud** refuse.
+  A refusal is immediate, changes nothing, and exits 1 — report it plainly. YouTube Music's refusal
+  is not something x2rock can get past (its endpoint wants a key Sonos seals in its own apps). For a
+  service not named here, just try it rather than predicting.
+- **Plex** links through Plex's own PIN flow. `link plex --from-player` needs no browser: it reads
+  the token of the household's own Plex integration while Plex is playing or paused in some room,
+  and can browse a server's root where a fresh token sometimes cannot.
+- **How playback works once linked.** A **stream** (`type: "stream"`, a station) is streamed with
+  this machine's token and usually plays with nothing else. **Anything else** — a track, an episode
+  — is added to the queue, and the *player* resolves it with **the household's own account for that
+  service**, added in the Sonos app. So an on-demand track plays only if the household has that
+  account. Without one, the queue refuses and x2rock falls back to streaming the item (stderr says
+  "would not go in the queue; streaming it"), which works only when the service hands back a
+  playable URL: **Amazon Music does** (it then plays as a direct stream that cannot be paused and
+  resumed), **Spotify does not** (it fails with an unsupported-scheme error until the household adds
+  Spotify in the Sonos app, and then plays normally), and Radio Paradise's programs do not. A
+  service container (album, playlist) cannot be played whole either way; see "A container cannot
+  be played whole".
+- **Read `link`'s last line for which case you are in.** `The household knows this account as
+  sn_22` means the household already holds this very account, so on-demand playback works. `did not
+  match` or `sent no userIdHashCode` means only that this account was not matched; the household may
+  still hold its own account for the service (on-demand tracks then play from *that* account) or
+  may hold none. The honest move is to try a track and read the result, not to predict.
+- **`accounts --json`**: `{service, service_id, account_id, nickname, linked, household}` per token
+  this machine holds. `account_id` is the household serial when the account was matched, otherwise
+  `null` (prose: `no registration from this machine`), and `null` is not an error. `linked` is a
+  Unix timestamp. `household` is the household the token was minted against; it does not limit
+  where the token works. None of this is the household's own account list, which no command can
+  read (see the `accounts --content` note above).
+- **An expired token usually heals itself.** When a service answers with a replacement token,
+  x2rock retries once and stores the new one, silently. If a linked service starts failing with a
+  plain refusal instead, `x2rock link '<Service>'` again.
+- A linked service is not always complete: Pandora's free tier searches but refuses to open its
+  stations (`Unsupported action for account type`), and a service with no search categories is
+  browse-only (`no_search_categories`).
 
 ## `raw`, and its boundary
 
