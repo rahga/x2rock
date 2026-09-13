@@ -712,6 +712,12 @@ documentation](https://sonos.svrooij.io/) for the UPnP side.
 
 ## Licence
 
-The code is under the [0BSD](LICENSE) permission grant — use it for anything, no attribution
-required, and that extends to packaging: nobody needs to ask. Contributions must be compatible with
-it. The name **x2rock** is a trademark retained by the author.
+[0BSD](LICENSE), Copyright (C) 2026 Richard Hoelscher. Use it for anything, no attribution
+required — and that extends to packaging: nobody needs to ask.
+
+Two clarifications live here rather than in the licence text, so that `LICENSE` stays the canonical
+0BSD that packagers and licence scanners recognise on sight:
+
+- **Contributions.** Pull requests to this repository must be compatible with 0BSD.
+- **The name.** *x2rock* is a trademark retained by the author. The licence covers the code; it
+  does not grant use of the name.
