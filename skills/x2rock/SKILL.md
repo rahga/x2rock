@@ -137,6 +137,17 @@ This is the highest-stakes thing to get right. When rooms are grouped:
   exclusive with `--player`, and is refused for `mute`. Distinct from `--all`, which is per-group
   across the household, and from repeating `-r … --player`, which is the same effect but needs every
   member named.
+- **`vol normalize` evens a group out at the level it already has** — the Sonos app's "Normalize
+  Group Volume". The group volume is the rounded average of its members, so members at 5, 5, 5 and
+  0 read as a group at 4, and `normalize` sets all four to 4, leaving the group level unchanged. An
+  exact half rounds *down* (6 and 1 read as 3; 9 and 2 as 5), so do not predict the level - read it. It
+  is the `--each` flatten with no number to pick, and the right reading of "even out the volume" or
+  "make the grouped rooms match". To know whether it would do anything, read the group: a group
+  `vol --json` carries **`balanced`** — `false` when some member differs (the prose line says so
+  too), `true` for a lone room, and `null` after a set or with `--player`. Members already at the
+  level are left alone; fixed-volume members are skipped. `--json` adds `members`, each
+  `{room, volume, previous_volume}`. `--all vol normalize` normalizes every group. It refuses
+  `--player`, `--ramp` and `--each`.
 - **`--all` fans over groups, not raw rooms**, so a grouped pair is moved **once**, correctly:
   `--all vol -10` takes each group down 10, not each member (a grouped Kitchen+Dining does not go
   down 20). Read "every room" as "every group". `--all` refuses a typed `-r` (code `unknown`), but
@@ -321,6 +332,7 @@ see "Ask before you act".
 | Volume | `x2rock vol --json` (read) / `vol 30` / `vol +5` / `vol mute` / `vol unmute` |
 | Volume, one speaker in a group | `x2rock -r <Room> vol 20 --player` |
 | Flatten a group: every member to one level | `x2rock -r <Room> vol 30 --each` |
+| Even a group out at its own level (app's "Normalize") | `x2rock -r <Room> vol normalize` (check `balanced` in `vol --json` first) |
 | Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` — composes with several `-r` and with `--each`, not with `--all`; `ramp_seconds` is null when the player does not say |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |

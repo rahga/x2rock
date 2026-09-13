@@ -133,7 +133,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show or change volume: a level (0-100), a change (+5, -5), or mute/unmute.
+    /// Show or change volume: a level (0-100), a change (+5, -5), mute/unmute,
+    /// or normalize - every speaker in a group set to the group's level, the
+    /// Sonos app's "Normalize Group Volume".
     Vol {
         #[arg(allow_negative_numbers = true)]
         change: Option<String>,
@@ -168,7 +170,9 @@ enum Command {
         ramp: bool,
         /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
         /// or for confirming a change. With `--ramp`, a `ramp_seconds` beside
-        /// them: the player's own estimate, which runs a little long.
+        /// them: the player's own estimate, which runs a little long. A group
+        /// read adds `balanced`, whether every member is at the group's level;
+        /// `normalize` adds `members`, each `{room, volume, previous_volume}`.
         #[arg(long)]
         json: bool,
     },
@@ -1268,12 +1272,14 @@ enum VolumeChange {
     Set(u8),
     Adjust(i8),
     Mute(bool),
+    Normalize,
 }
 
 fn parse_volume(text: &str) -> Result<VolumeChange> {
     match text {
         "mute" => Ok(VolumeChange::Mute(true)),
         "unmute" => Ok(VolumeChange::Mute(false)),
+        "normalize" => Ok(VolumeChange::Normalize),
         _ if text.starts_with(['+', '-']) => {
             let delta: i16 = text.parse()?;
             ensure!(
@@ -4201,6 +4207,13 @@ async fn apply_vol(
             target.name
         );
     }
+    if matches!(change, Some(VolumeChange::Normalize)) {
+        ensure!(
+            this.is_none(),
+            "normalize sets a whole group to its level; it takes no --player or --ramp"
+        );
+        return normalize_group(session, target, &speaker, &label, before.volume, json).await;
+    }
     // One pass that both validates the ramp and produces the level it slides
     // to, so there is a single thing to branch on below rather than a flag, an
     // Option and two `ensure!`s that re-derive each other. Both the absolute
@@ -4216,6 +4229,7 @@ async fn apply_vol(
             bail!("--ramp does not apply to mute; there is no level to slide to")
         }
         (true, None) => bail!("--ramp needs a level to slide to, e.g. `vol 30 --ramp`"),
+        (true, Some(VolumeChange::Normalize)) => unreachable!("normalize returned above"),
     };
     let mut ramp_secs = None;
     let (level, muted) = match change {
@@ -4263,6 +4277,21 @@ async fn apply_vol(
             speaker.set_group_mute(group, muted).await?;
             (before.volume, muted)
         }
+        Some(VolumeChange::Normalize) => unreachable!("normalize returned above"),
+    };
+    // Only on a group read: after a set the members' levels are not yet
+    // readable, and one speaker has no balance to report.
+    let grouped = session
+        .groups
+        .group_of(&target.coordinator_id)
+        .is_some_and(|g| g.player_ids.len() > 1);
+    let balanced = match (this.is_none() && !was_set, grouped) {
+        (false, _) => None,
+        (true, false) => Some(true),
+        (true, true) => {
+            let members = member_volumes(session, target, &speaker).await?;
+            Some(all_at(before.volume, members.iter().map(|(_, _, v)| v)))
+        }
     };
     if json {
         // previous_volume makes a set distinguishable from a read, and a clamp
@@ -4278,6 +4307,7 @@ async fn apply_vol(
                 "audible": !muted && level > 0,
                 "fixed": before.fixed,
                 "ramp_seconds": ramp_secs,
+                "balanced": balanced,
             })
         );
     } else {
@@ -4289,7 +4319,108 @@ async fn apply_vol(
             None if ramp => "  (ramping)".to_string(),
             None => String::new(),
         };
-        println!("{label:<24} {from}{level}{muted}{over}");
+        let uneven = if balanced == Some(false) {
+            "  (members differ; `vol normalize` evens them)"
+        } else {
+            ""
+        };
+        println!("{label:<24} {from}{level}{muted}{over}{uneven}");
+    }
+    Ok(())
+}
+
+/// Each speaker in the target's group with its own volume, read in parallel.
+///
+/// A player-scoped read is refused by any other player, so each member is
+/// asked over its own connection - the session's or the coordinator's where
+/// one already reaches it.
+async fn member_volumes<'a>(
+    session: &'a session::Session,
+    target: &session::Target,
+    coordinator: &Connection,
+) -> Result<Vec<(&'a Player, Connection, sonos::proto::Volume)>> {
+    let group = session
+        .groups
+        .group_of(&target.coordinator_id)
+        .with_context(|| format!("no group for {}", target.name))?;
+    let reads = session
+        .groups
+        .members(group)
+        .into_iter()
+        .map(|p| async move {
+            let ip = p
+                .ip()
+                .with_context(|| format!("{} did not report an address to reach it on", p.name))?;
+            let connection = if ip == coordinator.ip() {
+                coordinator.clone()
+            } else if ip == session.connection.ip() {
+                session.connection.clone()
+            } else {
+                Connection::open(ip).await?
+            };
+            let volume = connection.player_volume(&p.id).await?;
+            anyhow::Ok((p, connection, volume))
+        });
+    futures_util::future::join_all(reads)
+        .await
+        .into_iter()
+        .collect()
+}
+
+/// Whether every member with a volume of its own sits at the group's level.
+/// A fixed-volume member has no level to even out, so it does not count.
+fn all_at<'a>(level: u8, mut volumes: impl Iterator<Item = &'a sonos::proto::Volume>) -> bool {
+    volumes.all(|v| v.fixed || v.volume == level)
+}
+
+/// `vol normalize`: every speaker in the group set to the group's own level,
+/// the Sonos app's "Normalize Group Volume". The group level is the rounded
+/// average of its members, so writing it back leaves the group level where it
+/// was. Members already there are left alone - a set also unmutes that
+/// speaker, and it has nothing to change.
+async fn normalize_group(
+    session: &session::Session,
+    target: &session::Target,
+    coordinator: &Connection,
+    label: &str,
+    level: u8,
+    json: bool,
+) -> Result<()> {
+    let members = member_volumes(session, target, coordinator).await?;
+    let mut report = Vec::new();
+    for (player, connection, volume) in &members {
+        if !volume.fixed && volume.volume != level {
+            connection.set_player_volume(&player.id, level).await?;
+        }
+        let after = if volume.fixed { volume.volume } else { level };
+        report.push((player.name.as_str(), volume.volume, after));
+    }
+    if json {
+        let members: Vec<_> = report
+            .iter()
+            .map(|(room, before, after)| {
+                json!({ "room": room, "volume": after, "previous_volume": before })
+            })
+            .collect();
+        println!(
+            "{}",
+            json!({ "room": label, "volume": level, "balanced": true, "members": members })
+        );
+    } else if members.len() == 1 {
+        println!("{label:<24} {level}  (not grouped; nothing to normalize)");
+    } else if report.iter().all(|(_, before, after)| before == after) {
+        println!("{label:<24} {level}  (already even)");
+    } else {
+        let each: Vec<String> = report
+            .iter()
+            .map(|(room, before, after)| {
+                format!(
+                    "{room} {}{after}",
+                    transition(&before.to_string(), &after.to_string())
+                )
+            })
+            .collect();
+        println!("{label:<24} {level}  normalized: {}", each.join(", "));
     }
     Ok(())
 }
@@ -6530,11 +6661,14 @@ async fn run(cli: Cli) -> Result<()> {
         // Refused up front, not left to surface per member as a confusing
         // "--player does not apply to mute": muting each speaker is not what
         // --each is for, and group mute is what mute means.
-        if matches!(
-            change.as_deref().map(parse_volume).transpose()?,
-            Some(VolumeChange::Mute(_))
-        ) {
-            bail!("--each does not apply to mute; mute is group-wide");
+        match change.as_deref().map(parse_volume).transpose()? {
+            Some(VolumeChange::Mute(_)) => {
+                bail!("--each does not apply to mute; mute is group-wide")
+            }
+            Some(VolumeChange::Normalize) => {
+                bail!("--each does not apply to normalize, which already sets every member")
+            }
+            _ => {}
         }
         let target = session::target(&session.groups, room)?;
         let members: Vec<String> = session
@@ -7814,6 +7948,24 @@ mod tests {
 
     /// A queue that is not the source still lists its items, and marks none of
     /// them current.
+    #[test]
+    fn normalize_is_a_volume_word_and_fixed_members_do_not_unbalance() {
+        assert!(matches!(
+            parse_volume("normalize"),
+            Ok(VolumeChange::Normalize)
+        ));
+        let at = |volume, fixed| sonos::proto::Volume {
+            volume,
+            muted: false,
+            fixed,
+        };
+        // The screenshots' group: 5, 5, 5 and 0 is a group at 4.
+        let uneven = [at(5, false), at(5, false), at(5, false), at(0, false)];
+        assert!(!all_at(4, uneven.iter()));
+        let even = [at(4, false), at(4, false), at(100, true)];
+        assert!(all_at(4, even.iter()));
+    }
+
     #[test]
     fn a_queue_not_in_use_lists_items_with_none_current() {
         let queue = upnp::Queue {
