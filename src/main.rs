@@ -1070,12 +1070,8 @@ enum RateDirection {
     Down,
 }
 
-/// The one thing `bookmarks` does besides list.
-///
-/// A subcommand rather than a top-level `forget`, to sit beside `queue remove`:
-/// both take something out of a list the same command prints. The cost is that
-/// a bookmark actually named "remove" can no longer be queried by name, which
-/// `queue` has always accepted for the same reason.
+/// What `service` can do to the daemon's unit. One thing so far; a subcommand
+/// so that `uninstall` or `status` have a place to go without a flag soup.
 #[derive(Subcommand)]
 enum ServiceAction {
     /// Write the unit (and, with --headless, its drop-in), then `daemon-reload`.
@@ -1098,6 +1094,12 @@ enum ServiceAction {
     },
 }
 
+/// The one thing `bookmarks` does besides list.
+///
+/// A subcommand rather than a top-level `forget`, to sit beside `queue remove`:
+/// both take something out of a list the same command prints. The cost is that
+/// a bookmark actually named "remove" can no longer be queried by name, which
+/// `queue` has always accepted for the same reason.
 #[derive(Subcommand)]
 enum BookmarksAction {
     /// Forget one, by name. Matches the history too, not just what was kept.
@@ -5656,36 +5658,49 @@ fn user_unit_dir() -> Result<PathBuf> {
     Ok(base.config_dir().join("systemd").join("user"))
 }
 
-/// Write one generated file, refusing to clobber a differing one without
-/// `--force`. Says which of three things happened.
-fn place_generated(path: &std::path::Path, text: &str, force: bool) -> Result<()> {
+/// Write one generated file. Three cases, judged by [`service::classify`]:
+/// identical (say so, do nothing); ours and changed only in the lines this
+/// command owns (overwrite - a re-run after a move or an upgrade is exactly
+/// this); anything else (a hand-copied or hand-edited unit - refuse without
+/// `--force`, showing the person's lines and their replacements).
+///
+/// Returns whether it wrote, because the caller's next move depends on it: a
+/// running daemon is on a stale unit only if the unit actually changed.
+fn place_generated(path: &std::path::Path, text: &str, force: bool) -> Result<bool> {
     if let Some(existing) = store::read_optional(path)? {
-        if existing == text {
-            println!(
-                "{} is already what this would write; left as is.",
-                path.display()
-            );
-            return Ok(());
-        }
-        if !force {
-            let (gone, added) = service::changed_lines(&existing, text);
-            let mut msg = format!(
-                "{} exists and differs from what `x2rock service install` would write.\n",
-                path.display()
-            );
-            for line in gone.iter().filter(|l| !l.starts_with('#')) {
-                msg.push_str(&format!("  yours:  {line}\n"));
+        match service::classify(&existing, text) {
+            service::Existing::Same => {
+                println!("{} is already current; left as is.", path.display());
+                return Ok(false);
             }
-            for line in added.iter().filter(|l| !l.starts_with('#')) {
-                msg.push_str(&format!("  new:    {line}\n"));
+            service::Existing::Generated => {
+                store::write_atomically(path, text, store::PLAIN)?;
+                println!("Updated {}.", path.display());
+                return Ok(true);
             }
-            msg.push_str("Re-run with --force to overwrite it, or --print to see the whole unit.");
-            bail!("{msg}");
+            service::Existing::HandEdited { yours, new } if !force => {
+                let mut msg = format!(
+                    "{} exists and was edited by hand (or copied from systemd/), so it is not \
+                     overwritten.\n",
+                    path.display()
+                );
+                for line in &yours {
+                    msg.push_str(&format!("  yours:  {line}\n"));
+                }
+                for line in &new {
+                    msg.push_str(&format!("  new:    {line}\n"));
+                }
+                msg.push_str(
+                    "Re-run with --force to overwrite it, or --print to see the whole unit.",
+                );
+                bail!("{msg}");
+            }
+            service::Existing::HandEdited { .. } => {}
         }
     }
     store::write_atomically(path, text, store::PLAIN)?;
     println!("Wrote {}.", path.display());
-    Ok(())
+    Ok(true)
 }
 
 /// `x2rock service install`: the unit for *this* binary, written where
@@ -5697,11 +5712,20 @@ fn install_service(
     force: bool,
     print: bool,
 ) -> Result<()> {
-    let exe = std::env::current_exe().context("finding this binary's own path")?;
-    // Resolve symlinks: a unit pointing at `~/.local/bin/x2rock` that is a link
-    // into `~/.cargo/bin` would break the moment the link was removed, and the
-    // point of this command is to name the real thing.
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    // The path as invoked, not as resolved: under Nix, Homebrew or stow the
+    // stable name on PATH is a symlink into a versioned directory that the
+    // next upgrade removes, so resolving it would pin the unit to the thing
+    // that breaks. `current_exe()` is the fallback only because it always
+    // answers; on Linux it has already resolved the link. See `invoked_path`.
+    let exe = std::env::args().next().and_then(|argv0| {
+        let cwd = std::env::current_dir().ok()?;
+        let path = std::env::var("PATH").ok();
+        service::invoked_path(&argv0, &cwd, path.as_deref())
+    });
+    let exe = match exe {
+        Some(p) => p,
+        None => std::env::current_exe().context("finding this binary's own path")?,
+    };
     let unit = service::render_unit(&exe, household)?;
     if print {
         print!("{unit}");
@@ -5714,11 +5738,21 @@ fn install_service(
         return Ok(());
     }
 
+    // Read before writing: `enable --now` does nothing to a unit that is
+    // already active, so a daemon that was running keeps running the *old*
+    // binary unless it is restarted - and "Enabled and started" would then be
+    // a lie about which build is up.
+    let was_active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "x2rock.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
     let dir = user_unit_dir()?;
-    place_generated(&dir.join("x2rock.service"), &unit, force)?;
+    let mut changed = place_generated(&dir.join("x2rock.service"), &unit, force)?;
     let dropin = dir.join("x2rock.service.d").join("headless.conf");
     if headless {
-        place_generated(&dropin, &service::render_headless(), force)?;
+        changed |= place_generated(&dropin, &service::render_headless(), force)?;
     } else if dropin.exists() {
         println!(
             "Note: {} is present from an earlier --headless install and was left in place.",
@@ -5751,10 +5785,31 @@ fn install_service(
             status.success(),
             "`systemctl --user enable --now x2rock.service` exited {status}"
         );
+        // A restart only when the unit actually changed under a running
+        // daemon; `enable --now` already started one that was not running.
+        if was_active && changed {
+            let status = std::process::Command::new("systemctl")
+                .args(["--user", "restart", "x2rock.service"])
+                .status()
+                .context("running systemctl --user restart x2rock.service")?;
+            ensure!(
+                status.success(),
+                "`systemctl --user restart x2rock.service` exited {status}"
+            );
+            println!(
+                "Restarted x2rock.service on the new unit. `journalctl --user -u x2rock` names the binary it came up on."
+            );
+        } else {
+            println!(
+                "Enabled and started x2rock.service. `journalctl --user -u x2rock` shows what it is doing."
+            );
+        }
+    } else if was_active && changed {
         println!(
-            "Enabled and started x2rock.service. `journalctl --user -u x2rock` shows what it is doing."
+            "x2rock.service is running from the old unit; `systemctl --user restart x2rock.service` \
+             switches it to this one."
         );
-    } else {
+    } else if !was_active {
         println!("Next: systemctl --user enable --now x2rock.service");
     }
     if headless {

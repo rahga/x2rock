@@ -13,7 +13,7 @@
 //! Everything here that decides *what* to write is pure and tested; the file
 //! write and the `systemctl` calls live in `main.rs` with the other commands.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
@@ -94,6 +94,87 @@ pub fn render_unit(exe: &Path, household: Option<&str>) -> Result<String> {
 /// The headless drop-in to install, from the shipped template.
 pub fn render_headless() -> String {
     header() + HEADLESS_TEMPLATE
+}
+
+/// The path the binary was invoked by, kept exactly as invoked.
+///
+/// Not `current_exe()`, and not canonicalised - both resolve symlinks, and on
+/// Linux `current_exe()` reads `/proc/self/exe`, which already has. That is
+/// the wrong path to put in a unit: Nix, Homebrew and stow all install a
+/// *stable* symlink on `PATH` whose target is a versioned directory that goes
+/// away on the next upgrade. The symlink is the durable name; its target is
+/// the thing that breaks. So: `argv[0]` if absolute; joined to the working
+/// directory if it has a slash; otherwise found on `PATH` the way the shell
+/// found it - the first directory holding a file of that name.
+///
+/// `None` when none of that produces a path, which the caller answers with
+/// `current_exe()` as the fallback it always was.
+pub fn invoked_path(argv0: &str, cwd: &Path, path_var: Option<&str>) -> Option<PathBuf> {
+    let given = Path::new(argv0);
+    if given.is_absolute() {
+        return Some(given.to_path_buf());
+    }
+    if argv0.contains('/') {
+        return Some(cwd.join(given));
+    }
+    path_var?
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| Path::new(dir).join(argv0))
+        .find(|candidate| candidate.is_file())
+}
+
+/// What is on disk at the unit's path, judged against what would be written.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Existing<'a> {
+    /// Byte-identical: nothing to do.
+    Same,
+    /// Ours, and differing only in the lines this command owns - the header,
+    /// `ExecStart`, the household line. Safe to overwrite: that is what a
+    /// re-run after a move or an upgrade is for.
+    Generated,
+    /// Either not ours at all (no header - a hand-copied unit) or ours with
+    /// edits beyond the lines we own. Refused without `--force`, and these are
+    /// the lines to show: theirs that would go, ours that would replace them.
+    HandEdited {
+        yours: Vec<&'a str>,
+        new: Vec<&'a str>,
+    },
+}
+
+/// The lines this command owns and may rewrite without asking: its own header
+/// and the two substitutions. Everything else in the file is the person's.
+fn is_owned_line(line: &str) -> bool {
+    line.starts_with("# Written by `x2rock service install`")
+        || line.starts_with("# Re-run it after moving or reinstalling")
+        || line.starts_with("# edits unless told to with --force")
+        || line.starts_with("ExecStart=")
+        || line.starts_with("Environment=\"X2ROCK_HOUSEHOLD=")
+        || line.starts_with("#Environment=X2ROCK_HOUSEHOLD=")
+}
+
+/// Judge an existing file. See [`Existing`].
+pub fn classify<'a>(existing: &'a str, proposed: &'a str) -> Existing<'a> {
+    if existing == proposed {
+        return Existing::Same;
+    }
+    let ours = existing.starts_with("# Written by `x2rock service install`");
+    let rest =
+        |text: &'a str| -> Vec<&'a str> { text.lines().filter(|l| !is_owned_line(l)).collect() };
+    if ours && rest(existing) == rest(proposed) {
+        return Existing::Generated;
+    }
+    let (yours, new) = changed_lines(existing, proposed);
+    // The header lines are ours to change and not worth showing as a "diff".
+    let not_header = |l: &&str| {
+        !l.starts_with("# Written by")
+            && !l.starts_with("# Re-run it")
+            && !l.starts_with("# edits unless")
+    };
+    Existing::HandEdited {
+        yours: yours.into_iter().filter(not_header).collect(),
+        new: new.into_iter().filter(not_header).collect(),
+    }
 }
 
 /// The lines that differ between what is on disk and what would be written:
@@ -179,6 +260,94 @@ mod tests {
         let dropin = render_headless();
         assert!(dropin.starts_with("# Written by"));
         assert!(dropin.ends_with(HEADLESS_TEMPLATE));
+    }
+
+    /// The unit must name the path a person's shell used, not where it led.
+    #[test]
+    fn the_invoked_path_is_kept_as_invoked() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            invoked_path("/opt/homebrew/bin/x2rock", cwd, None),
+            Some(PathBuf::from("/opt/homebrew/bin/x2rock"))
+        );
+        assert_eq!(
+            invoked_path("./target/release/x2rock", cwd, None),
+            Some(PathBuf::from("/work/./target/release/x2rock"))
+        );
+        // A bare name is found the way the shell found it: first PATH entry
+        // holding a file of that name. A directory that exists but holds no
+        // such file is skipped, and an empty PATH entry is ignored.
+        let dir = std::env::temp_dir().join(format!("x2rock-invoked-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("has")).unwrap();
+        std::fs::create_dir_all(dir.join("lacks")).unwrap();
+        std::fs::write(dir.join("has").join("x2rock"), b"").unwrap();
+        let path_var = format!(
+            "{}::{}",
+            dir.join("lacks").display(),
+            dir.join("has").display()
+        );
+        assert_eq!(
+            invoked_path("x2rock", cwd, Some(&path_var)),
+            Some(dir.join("has").join("x2rock"))
+        );
+        assert_eq!(
+            invoked_path(
+                "x2rock",
+                cwd,
+                Some(&dir.join("lacks").display().to_string())
+            ),
+            None
+        );
+        assert_eq!(invoked_path("x2rock", cwd, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The three verdicts, and the boundary between them: a re-run after a move
+    /// or an upgrade changes only lines this command owns and must go through;
+    /// a person's edit to anything else must not be silently undone.
+    #[test]
+    fn a_generated_unit_is_overwritten_and_a_hand_edited_one_is_not() {
+        let exe_a = PathBuf::from("/home/me/.cargo/bin/x2rock");
+        let exe_b = PathBuf::from("/usr/bin/x2rock");
+        let a = render_unit(&exe_a, None).unwrap();
+        let b = render_unit(&exe_b, None).unwrap();
+        let a_hh = render_unit(&exe_a, Some("Studio")).unwrap();
+
+        assert_eq!(classify(&a, &a), Existing::Same);
+        // The binary moved: only ExecStart differs. Ours to rewrite.
+        assert_eq!(classify(&a, &b), Existing::Generated);
+        // A household added or removed: ours too.
+        assert_eq!(classify(&a, &a_hh), Existing::Generated);
+        assert_eq!(classify(&a_hh, &a), Existing::Generated);
+        // An upgrade that changed nothing but the version in the header: ours,
+        // and this used to be refused with an empty diff, since the only
+        // differing line was a comment the listing hid.
+        let bumped = a.replacen("(x2rock 0.1.0)", "(x2rock 9.9.9)", 1);
+        assert_ne!(bumped, a, "the fixture must actually differ");
+        assert_eq!(classify(&bumped, &a), Existing::Generated);
+
+        // A person changed the restart policy: not ours. Their line and its
+        // replacement are what gets shown; no header noise.
+        let edited = a.replace("RestartSec=5", "RestartSec=30");
+        match classify(&edited, &a) {
+            Existing::HandEdited { yours, new } => {
+                assert_eq!(yours, ["RestartSec=30"]);
+                assert_eq!(new, ["RestartSec=5"]);
+            }
+            other => panic!("expected HandEdited, got {other:?}"),
+        }
+        // A unit copied from systemd/ by hand has no header: not ours, even
+        // though it differs only in ExecStart. Refused, and the diff says so.
+        match classify(UNIT_TEMPLATE, &a) {
+            Existing::HandEdited { yours, new } => {
+                assert_eq!(yours, [EXEC_MARKER]);
+                assert!(
+                    new.iter().any(|l| l.starts_with("ExecStart=\"/home/me")),
+                    "{new:?}"
+                );
+            }
+            other => panic!("expected HandEdited, got {other:?}"),
+        }
     }
 
     /// What the refusal shows: the person's lines that would be lost, and ours
