@@ -40,6 +40,13 @@ the whole surface.
 Build it, find the speakers once, run the daemon. The same on every Linux.
 
 ```sh
+# The binary alone, straight from the repository - no registry, no clone:
+cargo install --git https://github.com/rahga/x2rock
+```
+
+Or clone it, which is what you want for the systemd unit, the desktop entry and the bar widget:
+
+```sh
 git clone https://github.com/rahga/x2rock
 cd x2rock
 cargo build --release
