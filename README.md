@@ -720,7 +720,5 @@ documentation](https://sonos.svrooij.io/) for the UPnP side.
 [0BSD](LICENSE), Copyright (C) 2026 Richard Hoelscher. Use it for anything, no attribution
 required — and that extends to packaging: nobody needs to ask.
 
-Clarifications:
+Pull requests to this repository must be compatible with 0BSD.
 
-- **Contributions.** Pull requests to this repository must be compatible with 0BSD.
-- **The name.** *x2rock* is a trademark retained by the author. 
