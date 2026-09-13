@@ -44,7 +44,9 @@ Build it, find the speakers once, run the daemon. The same on every Linux.
 cargo install --git https://github.com/rahga/x2rock
 ```
 
-Or clone it, which is what you want for the systemd unit, the desktop entry and the bar widget:
+That lands in `~/.cargo/bin`. The systemd unit below expects `~/.local/bin/x2rock`, so if you take
+this route and want the daemon as a service, either symlink the binary there or edit `ExecStart`.
+Cloning is what you want for the unit, the desktop entry and the bar widget:
 
 ```sh
 git clone https://github.com/rahga/x2rock
