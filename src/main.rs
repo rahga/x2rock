@@ -5658,6 +5658,34 @@ fn user_unit_dir() -> Result<PathBuf> {
     Ok(base.config_dir().join("systemd").join("user"))
 }
 
+/// Whether the running daemon is on a binary other than `exe`: replaced in
+/// place, or started from somewhere else. `false` whenever it cannot tell, so
+/// an unreadable `/proc` never forces a restart.
+fn daemon_runs_stale_binary(exe: &std::path::Path) -> bool {
+    let Ok(out) = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "x2rock.service",
+            "-p",
+            "MainPID",
+            "--value",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    let pid: u32 = match String::from_utf8_lossy(&out.stdout).trim().parse() {
+        Ok(pid) if pid > 0 => pid,
+        _ => return false,
+    };
+    let Ok(running) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let installed = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    service::runs_stale_binary(&running, &installed)
+}
+
 /// Write one generated file. Three cases, judged by [`service::classify`]:
 /// identical (say so, do nothing); ours and changed only in the lines this
 /// command owns (overwrite - a re-run after a move or an upgrade is exactly
@@ -5747,6 +5775,9 @@ fn install_service(
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
+    // An upgrade in place leaves the unit identical, so "changed" alone misses
+    // the commonest reinstall; ask the running process what it is running.
+    let stale = was_active && daemon_runs_stale_binary(&exe);
 
     let dir = user_unit_dir()?;
     let mut changed = place_generated(&dir.join("x2rock.service"), &unit, force)?;
@@ -5785,9 +5816,9 @@ fn install_service(
             status.success(),
             "`systemctl --user enable --now x2rock.service` exited {status}"
         );
-        // A restart only when the unit actually changed under a running
-        // daemon; `enable --now` already started one that was not running.
-        if was_active && changed {
+        // A restart only when a running daemon is on an old unit or an old
+        // binary; `enable --now` already started one that was not running.
+        if was_active && (changed || stale) {
             let status = std::process::Command::new("systemctl")
                 .args(["--user", "restart", "x2rock.service"])
                 .status()
@@ -5797,17 +5828,17 @@ fn install_service(
                 "`systemctl --user restart x2rock.service` exited {status}"
             );
             println!(
-                "Restarted x2rock.service on the new unit. `journalctl --user -u x2rock` names the binary it came up on."
+                "Restarted x2rock.service so it runs this binary. `journalctl --user -u x2rock` names the binary it came up on."
             );
         } else {
             println!(
                 "Enabled and started x2rock.service. `journalctl --user -u x2rock` shows what it is doing."
             );
         }
-    } else if was_active && changed {
+    } else if was_active && (changed || stale) {
         println!(
-            "x2rock.service is running from the old unit; `systemctl --user restart x2rock.service` \
-             switches it to this one."
+            "x2rock.service is still running an older unit or binary; \
+             `systemctl --user restart x2rock.service` switches it to this one."
         );
     } else if !was_active {
         println!("Next: systemctl --user enable --now x2rock.service");

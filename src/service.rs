@@ -190,9 +190,35 @@ pub fn changed_lines<'a>(existing: &'a str, proposed: &'a str) -> (Vec<&'a str>,
     (only_in(existing, proposed), only_in(proposed, existing))
 }
 
+/// Whether a running daemon is on a different binary from the one installed.
+///
+/// `running` is `/proc/<pid>/exe` as `read_link` gives it. Linux appends
+/// ` (deleted)` once the file the process started from has been replaced, which
+/// is what an upgrade in place does (`cargo install` again, or `install` over
+/// the same path) - the unit is then byte-identical, so nothing else would say
+/// the daemon is stale. Otherwise the paths are compared resolved, because
+/// `/proc` names the binary resolved and `installed` is resolved to match.
+pub fn runs_stale_binary(running: &Path, installed: &Path) -> bool {
+    running.to_string_lossy().ends_with(" (deleted)") || running != installed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_or_different_binary_is_stale() {
+        let installed = Path::new("/home/me/.local/bin/x2rock");
+        assert!(!runs_stale_binary(installed, installed));
+        assert!(runs_stale_binary(
+            Path::new("/home/me/.local/bin/x2rock (deleted)"),
+            installed
+        ));
+        assert!(runs_stale_binary(
+            Path::new("/home/me/.cargo/bin/x2rock"),
+            installed
+        ));
+    }
     use std::path::PathBuf;
 
     /// The substitution is a string replacement on the shipped file, so the
