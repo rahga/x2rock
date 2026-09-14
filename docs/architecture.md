@@ -321,6 +321,28 @@ firewall. See "Re-derive, do not inherit: discovery" under the Android TV portin
 4. **SSDP as an opportunistic fast path** was considered and never built; the scan is the only
    mechanism.
 
+**What a household *is*, from Sonos's own Control API docs** (supplied 2026-09-13; dated because it
+is an external claim that can rot): a set of players on one network, defined cloud-side as being
+"under a user account," identified by a stable `householdId` that "only changes if speakers are
+physically moved to a completely different network"; one account can hold several (a home and a
+vacation home), and an app "must ask the user to select a `householdId` if multiple exist before
+sending playback or group commands." Three things this settles for x2rock:
+
+- **The identity is a property of the players, not the account.** x2rock reads the same stable
+  `householdId` off a player over the LAN ([`Connection::household_id`]) with no account at all. The
+  "under a user account" is Sonos's framing; identifying the household needs none of it - which is
+  the axiom, confirmed from Sonos's side.
+- **x2rock already does the "must," and asks less.** The room a command names selects the household
+  in every case but two households sharing a room name, so `-r Studio play` needs no
+  `--household`; the selector and `multiple_households` are the collision-only fallback. See
+  "Addressing a household".
+- **The stability claim underpins `forget_superseded_households` and does not contradict it.** A
+  stable id that changes only on a network move means the forget rule's trigger - *every* remembered
+  address now answering for a *different* id - is not an id "changing" but a **new** household
+  replacing the old one at those addresses (a factory reset, a replacement, DHCP reuse). Speakers
+  that genuinely moved networks stop answering here and stay remembered, which is the conservative
+  branch. The doc reinforces the rule.
+
 Keep any scan to an explicitly-invoked `x2rock discover`, single-port and rate-limited — an
 aggressive full-subnet sweep on every launch is poor manners on an office network and can register
 as reconnaissance on corporate gear.
