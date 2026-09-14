@@ -688,6 +688,11 @@ drawn on purpose, not for want of an action:
   it is on and can turn it off; it does not measure.
 - **Adding a music service to the household.** `link` gives *this machine* search and browse; the
   household's own accounts, which are what play on-demand tracks, are added in the app.
+- **Editing the favorites list.** `x2rock favorites` lists them and `x2rock favorite` plays them,
+  but adding or removing one is not part of the standard Control API — verified on real hardware,
+  the `favorites:1` namespace offers only `getFavorites` and `loadFavorite`. Favorites are
+  app-managed content, the same category as search. (Removal is reachable through a raw UPnP call,
+  left as an escape hatch rather than promoted to a command.)
 
 Everything else a Sonos household will do over the LAN is here, or declined for a reason recorded
 in [docs/architecture.md](docs/architecture.md) — cloud queues, for one, because they would make
