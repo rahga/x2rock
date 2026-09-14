@@ -5328,6 +5328,16 @@ Recorded here as one list so a reader (or an agent) does not re-derive it item b
 - **Content discovery / search** - closed separately as a Control-API limit, not an app-only job;
   see "the Control API will never search". **Cloud queue** likewise - declined, see
   "`loadCloudQueue` is a permanent no".
+- **Managing favorites** - creating or removing them. Probed on real hardware 2026-09-13: the
+  `favorites:1` namespace supports exactly `getFavorites` and `loadFavorite`; every mutation name
+  (`createFavorite`, `removeFavorite`, `deleteFavorite`, add/save/reorder/move) answers
+  `ERROR_UNSUPPORTED_COMMAND`, and `favorite:1` is an alias whose reply header canonicalises to
+  `favorites:1`. So the Control API reads and plays favorites, never edits the set - favorites are
+  app-managed content, not a control operation. Deletion is reachable only through UPnP
+  `ContentDirectory DestroyObject` on `FV:2/<id>` (a bogus id returns UPnP 701, object-not-found,
+  so the action is accepted), and it stays a `raw` escape hatch on purpose: the decision rule is
+  "if the Control API does not sanction it, x2rock does not add it as a command." An agent that
+  truly needs it can drive `raw upnp` itself.
 
 The through-line: x2rock's surface is *operating* the speakers - playback, volume, grouping,
 tone, TruePlay on/off, chimes, TV input, the queue - and reading their state. Anything that
