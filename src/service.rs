@@ -148,9 +148,35 @@ fn is_owned_line(line: &str) -> bool {
     line.starts_with("# Written by `x2rock service install`")
         || line.starts_with("# Re-run it after moving or reinstalling")
         || line.starts_with("# edits unless told to with --force")
-        || line.starts_with("ExecStart=")
+        || is_generated_exec(line)
         || line.starts_with("Environment=\"X2ROCK_HOUSEHOLD=")
         || line.starts_with("#Environment=X2ROCK_HOUSEHOLD=")
+}
+
+/// Whether an `ExecStart` line is exactly the shape [`render_unit`] writes: one
+/// path, quoted and escaped by [`quoted`], then ` daemon` and nothing else.
+///
+/// Only that shape is ours. A flag added after `daemon`, an unquoted path, or a
+/// bare `%` specifier such as `%h` is a person's edit, and rewriting it on a
+/// re-run would silently undo them. A different path *in* the generated shape
+/// is indistinguishable from a moved binary, which is what a re-run is for.
+fn is_generated_exec(line: &str) -> bool {
+    let Some(inner) = line
+        .strip_prefix("ExecStart=\"")
+        .and_then(|rest| rest.strip_suffix("\" daemon"))
+    else {
+        return false;
+    };
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !matches!(chars.next(), Some('\\' | '"')) => return false,
+            '%' if chars.next() != Some('%') => return false,
+            '"' => return false,
+            _ => {}
+        }
+    }
+    !inner.is_empty()
 }
 
 /// Judge an existing file. See [`Existing`].
@@ -374,6 +400,34 @@ mod tests {
             }
             other => panic!("expected HandEdited, got {other:?}"),
         }
+    }
+
+    /// `ExecStart` is ours only in the exact shape we write. A person's flags,
+    /// an unquoted path or a `%h` specifier must survive a re-run.
+    #[test]
+    fn a_hand_edited_exec_start_is_not_ours() {
+        let a = render_unit(Path::new("/home/me/.cargo/bin/x2rock"), None).unwrap();
+        let exec = a.lines().find(|l| l.starts_with("ExecStart=")).unwrap();
+        for edit in [
+            format!("{exec} --verbose"),
+            "ExecStart=/home/me/.cargo/bin/x2rock daemon".to_owned(),
+            "ExecStart=\"%h/.cargo/bin/x2rock\" daemon".to_owned(),
+            format!("-{exec}"),
+        ] {
+            let edited = a.replace(exec, &edit);
+            match classify(&edited, &a) {
+                Existing::HandEdited { yours, new } => {
+                    assert_eq!(yours, [edit.as_str()]);
+                    assert_eq!(new, [exec]);
+                }
+                other => panic!("{edit:?}: expected HandEdited, got {other:?}"),
+            }
+        }
+        // A path needing every escape still reads as generated, so a moved
+        // binary with an awkward name goes through rather than being refused.
+        let odd = render_unit(Path::new("/opt/100% \"x\\y\"/x2rock"), None).unwrap();
+        assert_eq!(classify(&odd, &a), Existing::Generated);
+        assert_eq!(classify(&a, &odd), Existing::Generated);
     }
 
     /// What the refusal shows: the person's lines that would be lost, and ours
