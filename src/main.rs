@@ -1091,6 +1091,10 @@ enum ServiceAction {
         /// Print the unit to stdout instead of writing it.
         #[arg(long)]
         print: bool,
+        /// Drop the `X2ROCK_HOUSEHOLD` line. Without `--household` or this, a
+        /// household already set in the installed unit is kept.
+        #[arg(long)]
+        no_household: bool,
     },
 }
 
@@ -5735,6 +5739,7 @@ fn place_generated(path: &std::path::Path, text: &str, force: bool) -> Result<bo
 /// `systemctl --user` reads it. See `service.rs` for why not a fixed path.
 fn install_service(
     household: Option<&str>,
+    no_household: bool,
     headless: bool,
     enable: bool,
     force: bool,
@@ -5754,7 +5759,29 @@ fn install_service(
         Some(p) => p,
         None => std::env::current_exe().context("finding this binary's own path")?,
     };
-    let unit = service::render_unit(&exe, household)?;
+    // A re-run after a move or an upgrade usually names no household, and on a
+    // network with several Sonos systems dropping the one set earlier leaves
+    // the daemon asking which household forever. So an existing one is kept
+    // unless `--household` replaces it or `--no-household` drops it.
+    let dir = user_unit_dir()?;
+    let household = match (household, no_household) {
+        (Some(_), true) => bail!("--household and --no-household contradict each other"),
+        (Some(given), false) => Some(given.to_owned()),
+        (None, true) => None,
+        (None, false) => {
+            let kept = store::read_optional(&dir.join("x2rock.service"))?
+                .as_deref()
+                .and_then(service::existing_household);
+            if let Some(kept) = &kept {
+                eprintln!(
+                    "Keeping X2ROCK_HOUSEHOLD={kept} from the installed unit; --household \
+                     changes it and --no-household drops it."
+                );
+            }
+            kept
+        }
+    };
+    let unit = service::render_unit(&exe, household.as_deref())?;
     if print {
         print!("{unit}");
         if headless {
@@ -5779,7 +5806,6 @@ fn install_service(
     // the commonest reinstall; ask the running process what it is running.
     let stale = was_active && daemon_runs_stale_binary(&exe);
 
-    let dir = user_unit_dir()?;
     let mut changed = place_generated(&dir.join("x2rock.service"), &unit, force)?;
     let dropin = dir.join("x2rock.service.d").join("headless.conf");
     if headless {
@@ -5939,9 +5965,17 @@ async fn run(cli: Cli) -> Result<()> {
                     enable,
                     force,
                     print,
+                    no_household,
                 },
         } => {
-            return install_service(cli.household.as_deref(), headless, enable, force, print);
+            return install_service(
+                cli.household.as_deref(),
+                no_household,
+                headless,
+                enable,
+                force,
+                print,
+            );
         }
         Command::Completions { shell, install } => {
             if install {

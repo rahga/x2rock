@@ -635,7 +635,8 @@ room it was given, so `-r Studio` just works; `--household` (or `X2ROCK_HOUSEHOL
 command that names no room — the daemon above all — or for a room name that exists in both
 households, where only an id from `x2rock households` can say. The daemon without it logs
 `multiple_households` and retries forever; `x2rock --household Studio service install` writes the
-unit with the `Environment=X2ROCK_HOUSEHOLD=` line filled in. A household that has been
+unit with the `Environment=X2ROCK_HOUSEHOLD=` line filled in. Re-running `service install` later
+keeps that household unless `--household` names another or `--no-household` drops it. A household that has been
 factory-reset or replaced is forgotten automatically once every one of its old addresses answers
 for the new one.
 

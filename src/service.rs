@@ -149,8 +149,56 @@ fn is_owned_line(line: &str) -> bool {
         || line.starts_with("# Re-run it after moving or reinstalling")
         || line.starts_with("# edits unless told to with --force")
         || is_generated_exec(line)
-        || line.starts_with("Environment=\"X2ROCK_HOUSEHOLD=")
+        || is_generated_household(line)
         || line.starts_with("#Environment=X2ROCK_HOUSEHOLD=")
+}
+
+/// The inverse of [`quoted`]: one whole double-quoted word, unescaped. `None`
+/// for anything `quoted` could not have written.
+fn unquoted(word: &str) -> Option<String> {
+    let inner = word.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next().filter(|n| matches!(n, '\\' | '"'))?),
+            '%' => {
+                chars.next().filter(|n| *n == '%')?;
+                out.push('%');
+            }
+            '"' => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// Whether a household line is exactly the shape [`render_unit`] writes,
+/// the same rule [`is_generated_exec`] applies to `ExecStart`.
+fn is_generated_household(line: &str) -> bool {
+    line.strip_prefix("Environment=")
+        .and_then(unquoted)
+        .and_then(|a| a.strip_prefix("X2ROCK_HOUSEHOLD=").map(str::to_owned))
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// The household an installed unit already names, so a re-run can keep it.
+///
+/// Reads the generated quoted form and the unquoted one a person gets by
+/// uncommenting the shipped `#Environment=X2ROCK_HOUSEHOLD=` line by hand.
+pub fn existing_household(unit: &str) -> Option<String> {
+    unit.lines().find_map(|line| {
+        let rest = line.strip_prefix("Environment=")?;
+        let assignment = if rest.starts_with('"') {
+            unquoted(rest)?
+        } else {
+            rest.to_owned()
+        };
+        assignment
+            .strip_prefix("X2ROCK_HOUSEHOLD=")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// Whether an `ExecStart` line is exactly the shape [`render_unit`] writes: one
@@ -428,6 +476,33 @@ mod tests {
         let odd = render_unit(Path::new("/opt/100% \"x\\y\"/x2rock"), None).unwrap();
         assert_eq!(classify(&odd, &a), Existing::Generated);
         assert_eq!(classify(&a, &odd), Existing::Generated);
+    }
+
+    /// A household set earlier is found in either form, and survives the
+    /// round trip through [`render_unit`]'s escaping.
+    #[test]
+    fn an_installed_household_is_read_back() {
+        let exe = Path::new("/usr/bin/x2rock");
+        for selector in ["Studio", "Jazz \"Room\" 50%", "back\\slash"] {
+            let unit = render_unit(exe, Some(selector)).unwrap();
+            assert_eq!(existing_household(&unit).as_deref(), Some(selector));
+        }
+        let by_hand =
+            UNIT_TEMPLATE.replace(HOUSEHOLD_MARKER, "Environment=X2ROCK_HOUSEHOLD=Office");
+        assert_eq!(existing_household(&by_hand).as_deref(), Some("Office"));
+        assert_eq!(existing_household(UNIT_TEMPLATE), None);
+        assert_eq!(existing_household(&render_unit(exe, None).unwrap()), None);
+
+        // Ours only in the generated shape: a hand-written line is the person's.
+        let ours = render_unit(exe, Some("Studio")).unwrap();
+        let edited = ours.replace(
+            "Environment=\"X2ROCK_HOUSEHOLD=Studio\"",
+            "Environment=X2ROCK_HOUSEHOLD=Studio",
+        );
+        assert!(matches!(
+            classify(&edited, &ours),
+            Existing::HandEdited { .. }
+        ));
     }
 
     /// What the refusal shows: the person's lines that would be lost, and ours
