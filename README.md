@@ -47,9 +47,10 @@ x2rock service install --enable     # the daemon as a user service - every room 
 
 `service install` writes the systemd unit pointing at **whichever binary is running it** — from
 `cargo install`, from a clone, from a package — so there is no path to get wrong and nothing to copy
-by hand. It refuses to overwrite a unit you have edited unless told to with `--force`; `--print`
-shows what it would write. Re-run it if you move or reinstall the binary. (`systemd/x2rock.service`
-is the same unit as a file, for anyone who prefers to copy it.)
+by hand. It refuses to overwrite a unit whose settings you have edited unless told to with
+`--force`; `--print` shows what it would write. Re-run it if you move or reinstall the binary.
+(`systemd/x2rock.service` is the same unit as a file, for anyone who prefers to copy it; a later
+`service install` replaces that copy without asking, since it carries nothing you wrote.)
 
 Discover first: the daemon connects only to players it has been told about and will not scan an
 unfamiliar network on its own. The other order is not fatal — it re-reads the remembered players

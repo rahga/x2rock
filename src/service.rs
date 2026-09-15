@@ -10,6 +10,12 @@
 //! `ExecStart` set to `std::env::current_exe()`, which resolves through
 //! symlinks to whatever was installed by whichever route.
 //!
+//! A re-run judges the unit already on disk by its *directives* - the lines
+//! systemd reads - and not by its comments: the shipped explanation changes
+//! between versions, and a unit copied from `systemd/` before the household
+//! block existed must not be refused over prose. Only a directive this command
+//! does not own, changed by a person, is worth stopping for.
+//!
 //! Everything here that decides *what* to write is pure and tested; the file
 //! write and the `systemctl` calls live in `main.rs` with the other commands.
 
@@ -129,28 +135,43 @@ pub fn invoked_path(argv0: &str, cwd: &Path, path_var: Option<&str>) -> Option<P
 pub enum Existing<'a> {
     /// Byte-identical: nothing to do.
     Same,
-    /// Ours, and differing only in the lines this command owns - the header,
+    /// Differing only in comments and in the directives this command owns -
     /// `ExecStart`, the household line. Safe to overwrite: that is what a
-    /// re-run after a move or an upgrade is for.
+    /// re-run after a move or an upgrade is for. A unit copied from `systemd/`
+    /// by hand lands here too, of this version or an earlier one: it carries
+    /// nothing a person wrote, so there is nothing to lose.
     Generated,
-    /// Either not ours at all (no header - a hand-copied unit) or ours with
-    /// edits beyond the lines we own. Refused without `--force`, and these are
-    /// the lines to show: theirs that would go, ours that would replace them.
+    /// A directive we do not own differs: a person changed a setting. Refused
+    /// without `--force`, and these are the lines to show: theirs that would
+    /// go, ours that would replace them. Comments are neither compared nor
+    /// shown - they are not what the refusal is about.
     HandEdited {
         yours: Vec<&'a str>,
         new: Vec<&'a str>,
     },
 }
 
-/// The lines this command owns and may rewrite without asking: its own header
-/// and the two substitutions. Everything else in the file is the person's.
+/// The directives this command owns and may rewrite without asking: the two
+/// substitutions, in the shape it writes them or the shape the shipped file
+/// carries them. Every other directive is the person's.
+///
+/// The shipped `ExecStart=%h/.local/bin/x2rock daemon` is owned as that exact
+/// line only: a `%h` pointing anywhere else, or quoted, is a person's edit (see
+/// [`is_generated_exec`]).
 fn is_owned_line(line: &str) -> bool {
-    line.starts_with("# Written by `x2rock service install`")
-        || line.starts_with("# Re-run it after moving or reinstalling")
-        || line.starts_with("# edits unless told to with --force")
+    line == EXEC_MARKER
         || is_generated_exec(line)
         || is_generated_household(line)
         || line.starts_with("#Environment=X2ROCK_HOUSEHOLD=")
+}
+
+/// The lines systemd acts on: everything but blanks and comments. Unit files
+/// take `#` and `;` comments, at the start of a line only.
+fn directives(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|line| {
+        let line = line.trim_start();
+        !line.is_empty() && !line.starts_with('#') && !line.starts_with(';')
+    })
 }
 
 /// The inverse of [`quoted`]: one whole double-quoted word, unescaped. `None`
@@ -228,27 +249,29 @@ fn is_generated_exec(line: &str) -> bool {
 }
 
 /// Judge an existing file. See [`Existing`].
+///
+/// Directives only, in order, with the owned ones set aside: the header and
+/// the shipped explanation are comments and never decide this, and neither
+/// does a comment a person added - it is rewritten with the rest, which the
+/// header on every generated file says will happen.
 pub fn classify<'a>(existing: &'a str, proposed: &'a str) -> Existing<'a> {
     if existing == proposed {
         return Existing::Same;
     }
-    let ours = existing.starts_with("# Written by `x2rock service install`");
-    let rest =
-        |text: &'a str| -> Vec<&'a str> { text.lines().filter(|l| !is_owned_line(l)).collect() };
-    if ours && rest(existing) == rest(proposed) {
+    let theirs: Vec<&str> = directives(existing).collect();
+    let ours: Vec<&str> = directives(proposed).collect();
+    let unowned = |lines: &[&'a str]| -> Vec<&'a str> {
+        lines
+            .iter()
+            .copied()
+            .filter(|l| !is_owned_line(l))
+            .collect()
+    };
+    if unowned(&theirs) == unowned(&ours) {
         return Existing::Generated;
     }
-    let (yours, new) = changed_lines(existing, proposed);
-    // The header lines are ours to change and not worth showing as a "diff".
-    let not_header = |l: &&str| {
-        !l.starts_with("# Written by")
-            && !l.starts_with("# Re-run it")
-            && !l.starts_with("# edits unless")
-    };
-    Existing::HandEdited {
-        yours: yours.into_iter().filter(not_header).collect(),
-        new: new.into_iter().filter(not_header).collect(),
-    }
+    let (yours, new) = changed_lines(&theirs, &ours);
+    Existing::HandEdited { yours, new }
 }
 
 /// The lines that differ between what is on disk and what would be written:
@@ -256,10 +279,12 @@ pub fn classify<'a>(existing: &'a str, proposed: &'a str) -> Existing<'a> {
 ///
 /// A set difference by line, not a real diff - enough to show a person which
 /// of their edits would be lost, without a dependency for it. Order is kept.
-pub fn changed_lines<'a>(existing: &'a str, proposed: &'a str) -> (Vec<&'a str>, Vec<&'a str>) {
-    let only_in = |a: &'a str, b: &'a str| -> Vec<&'a str> {
-        let b_lines: Vec<&str> = b.lines().collect();
-        a.lines().filter(|l| !b_lines.contains(l)).collect()
+pub fn changed_lines<'a>(
+    existing: &[&'a str],
+    proposed: &[&'a str],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let only_in = |a: &[&'a str], b: &[&'a str]| -> Vec<&'a str> {
+        a.iter().copied().filter(|l| !b.contains(l)).collect()
     };
     (only_in(existing, proposed), only_in(proposed, existing))
 }
@@ -436,15 +461,42 @@ mod tests {
             }
             other => panic!("expected HandEdited, got {other:?}"),
         }
-        // A unit copied from systemd/ by hand has no header: not ours, even
-        // though it differs only in ExecStart. Refused, and the diff says so.
-        match classify(UNIT_TEMPLATE, &a) {
+        // A unit copied from systemd/ by hand has no header and the shipped
+        // `%h` ExecStart, and nothing a person wrote: ours to replace. This
+        // used to be refused over exactly that line.
+        assert_eq!(classify(UNIT_TEMPLATE, &a), Existing::Generated);
+        // The same unit as shipped before the household block existed: fewer
+        // comments, no `#Environment=` line, otherwise identical. Ours - the
+        // shipped prose is not the person's, and refusing over it is what a
+        // real re-run hit (2026-09-15). Comments are never compared, so the
+        // copy keeps that verdict with a comment of the person's added too.
+        let older: String = UNIT_TEMPLATE
+            .lines()
+            .filter(|l| !l.starts_with("# Only for") && !l.starts_with("# a guest"))
+            .filter(|l| !l.starts_with("# out which") && !l.starts_with("# `multiple"))
+            .filter(|l| !l.starts_with("# names, or") && !l.starts_with("# is nearly"))
+            .filter(|l| !l.starts_with("#Environment="))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(
+            !older.contains("X2ROCK_HOUSEHOLD"),
+            "the fixture must drop the block"
+        );
+        assert_eq!(classify(&older, &a), Existing::Generated);
+        let annotated = older.replace("Restart=on-failure", "# mine\nRestart=on-failure");
+        assert_eq!(classify(&annotated, &a), Existing::Generated);
+        // But a copy with a setting changed is the person's, header or not.
+        // The refusal shows every directive the rewrite would change - their
+        // setting and the ExecStart swap that would come with it - and no
+        // comment lines, since comments are not what it is refusing over.
+        let copied_edited = older.replace("RestartSec=5", "RestartSec=30");
+        match classify(&copied_edited, &a) {
             Existing::HandEdited { yours, new } => {
-                assert_eq!(yours, [EXEC_MARKER]);
-                assert!(
-                    new.iter().any(|l| l.starts_with("ExecStart=\"/home/me")),
-                    "{new:?}"
-                );
+                assert_eq!(yours, [EXEC_MARKER, "RestartSec=30"]);
+                assert_eq!(new.len(), 2, "{new:?}");
+                assert!(new[0].starts_with("ExecStart=\"/home/me"), "{new:?}");
+                assert_eq!(new[1], "RestartSec=5");
+                assert!(yours.iter().chain(&new).all(|l| !l.starts_with('#')));
             }
             other => panic!("expected HandEdited, got {other:?}"),
         }
@@ -460,6 +512,7 @@ mod tests {
             format!("{exec} --verbose"),
             "ExecStart=/home/me/.cargo/bin/x2rock daemon".to_owned(),
             "ExecStart=\"%h/.cargo/bin/x2rock\" daemon".to_owned(),
+            "ExecStart=%h/.cargo/bin/x2rock daemon".to_owned(),
             format!("-{exec}"),
         ] {
             let edited = a.replace(exec, &edit);
@@ -509,10 +562,19 @@ mod tests {
     /// that would replace them. Identical files show nothing.
     #[test]
     fn changed_lines_shows_each_sides_own_lines() {
-        let (gone, added) = changed_lines("a\nkeep\nb\n", "keep\nc\n");
+        let (gone, added) = changed_lines(&["a", "keep", "b"], &["keep", "c"]);
         assert_eq!(gone, ["a", "b"]);
         assert_eq!(added, ["c"]);
-        let (gone, added) = changed_lines("same\n", "same\n");
+        let (gone, added) = changed_lines(&["same"], &["same"]);
         assert!(gone.is_empty() && added.is_empty());
+    }
+
+    /// What counts as a directive: blanks and `#`/`;` comments are not, and
+    /// leading whitespace does not hide a comment.
+    #[test]
+    fn directives_skip_blanks_and_comments() {
+        let got: Vec<&str> =
+            directives("[Unit]\n\n# c\n  ; also c\nRestart=on-failure\n  Indented=1\n").collect();
+        assert_eq!(got, ["[Unit]", "Restart=on-failure", "  Indented=1"]);
     }
 }

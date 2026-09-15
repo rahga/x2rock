@@ -780,9 +780,10 @@ enum Command {
     /// Writes `~/.config/systemd/user/x2rock.service` from the shipped unit with
     /// `ExecStart` set to the path this command is running from - so it is right
     /// whether the binary came from `cargo install`, a clone, or a package, where
-    /// the shipped file assumes one of them. Refuses to overwrite a unit that
-    /// differs from what it would write, so hand edits survive; `--force`
-    /// overwrites. Re-run after moving or reinstalling the binary.
+    /// the shipped file assumes one of them. Refuses to overwrite a unit whose
+    /// settings differ from what it would write, so hand edits survive;
+    /// comments and a unit copied from `systemd/` are replaced without asking.
+    /// `--force` overwrites. Re-run after moving or reinstalling the binary.
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -1084,8 +1085,8 @@ enum ServiceAction {
         /// Run `systemctl --user enable --now x2rock.service` afterwards.
         #[arg(long)]
         enable: bool,
-        /// Overwrite a unit that differs from what would be written. Without
-        /// it, the differing lines are shown and nothing changes.
+        /// Overwrite a unit whose settings differ from what would be written.
+        /// Without it, the differing lines are shown and nothing changes.
         #[arg(long)]
         force: bool,
         /// Print the unit to stdout instead of writing it.
@@ -5691,10 +5692,11 @@ fn daemon_runs_stale_binary(exe: &std::path::Path) -> bool {
 }
 
 /// Write one generated file. Three cases, judged by [`service::classify`]:
-/// identical (say so, do nothing); ours and changed only in the lines this
-/// command owns (overwrite - a re-run after a move or an upgrade is exactly
-/// this); anything else (a hand-copied or hand-edited unit - refuse without
-/// `--force`, showing the person's lines and their replacements).
+/// identical (say so, do nothing); differing only in comments and the lines
+/// this command owns (overwrite - a re-run after a move or an upgrade is
+/// exactly this, and so is replacing a unit copied from `systemd/` by hand);
+/// a setting a person changed (refuse without `--force`, showing their lines
+/// and the replacements).
 ///
 /// Returns whether it wrote, because the caller's next move depends on it: a
 /// running daemon is on a stale unit only if the unit actually changed.
@@ -5712,8 +5714,7 @@ fn place_generated(path: &std::path::Path, text: &str, force: bool) -> Result<bo
             }
             service::Existing::HandEdited { yours, new } if !force => {
                 let mut msg = format!(
-                    "{} exists and was edited by hand (or copied from systemd/), so it is not \
-                     overwritten.\n",
+                    "{} exists with settings edited by hand, so it is not overwritten.\n",
                     path.display()
                 );
                 for line in &yours {
