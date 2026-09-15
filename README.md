@@ -49,6 +49,8 @@ x2rock service install --enable     # the daemon as a user service - every room 
 `cargo install`, from a clone, from a package — so there is no path to get wrong and nothing to copy
 by hand. It refuses to overwrite a unit whose settings you have edited unless told to with
 `--force`; `--print` shows what it would write. Re-run it if you move or reinstall the binary.
+(`systemd/x2rock.service` is the same unit as a file, for anyone who prefers to copy it; a later
+`service install` replaces that copy without asking, since it carries nothing you wrote.)
 (`x2rock service` or `x2rock service status` reports unit and daemon health; `x2rock service uninstall`
 disables and removes it.)
 
