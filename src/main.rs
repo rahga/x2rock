@@ -750,7 +750,14 @@ enum Command {
         redact: bool,
     },
     /// Publish every room as an MPRIS2 media player, until stopped.
-    Daemon,
+    Daemon {
+        /// Verbose reconnect logging (also via X2ROCK_LOG_VERBOSE).
+        #[arg(long, env = "X2ROCK_LOG_VERBOSE")]
+        verbose: bool,
+        /// Log every incoming event payload (also via X2ROCK_LOG_EVENTS).
+        #[arg(long, env = "X2ROCK_LOG_EVENTS")]
+        log_events: bool,
+    },
     /// Every room on one screen, in the terminal. Needs the daemon running.
     Tui,
     /// Install the x2rock agent skill so an AI assistant on this machine knows
@@ -1132,18 +1139,28 @@ enum DesktopAction {
     Install,
     /// Remove `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
     Uninstall,
+    /// Check whether the desktop entry and icon files are installed.
+    Status {
+        /// Output desktop file status as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-/// The one thing `bookmarks` does besides list.
+/// What `bookmarks` can do: remove, pin from history, rename, or prune.
 ///
-/// A subcommand rather than a top-level `forget`, to sit beside `queue remove`:
-/// both take something out of a list the same command prints. The cost is that
-/// a bookmark actually named "remove" can no longer be queried by name, which
-/// `queue` has always accepted for the same reason.
+/// Subcommands rather than top-level commands, to sit beside `queue remove`:
+/// they act on the bookmarks file printed by the base command.
 #[derive(Subcommand)]
 enum BookmarksAction {
     /// Forget one, by name. Matches the history too, not just what was kept.
     Remove { query: String },
+    /// Pin an item already in bookmarks or daemon history by name, keeping it permanently.
+    Pin { query: String },
+    /// Rename a kept or history bookmark.
+    Rename { query: String, new_name: String },
+    /// Prune unpinned history entries recorded by the daemon, preserving kept bookmarks.
+    Prune,
 }
 
 #[derive(Subcommand)]
@@ -6226,6 +6243,9 @@ impl Command {
             Command::Service {
                 action: Some(ServiceAction::Status { json }),
             } => *json,
+            Command::Desktop {
+                action: Some(DesktopAction::Status { json }),
+            } => *json,
             _ => false,
         }
     }
@@ -6288,6 +6308,32 @@ async fn run(cli: Cli) -> Result<()> {
                         println!("Removed desktop entry and icon.");
                     } else {
                         println!("Desktop entry and icon were not installed.");
+                    }
+                }
+                Some(DesktopAction::Status { json }) => {
+                    let (desktop_ok, icon_ok) = service::desktop_installed();
+                    let (desktop, icon) = service::desktop_paths()?;
+                    if json {
+                        println!(
+                            "{}",
+                            json!({
+                                "desktop_installed": desktop_ok,
+                                "desktop_path": desktop,
+                                "icon_installed": icon_ok,
+                                "icon_path": icon,
+                            })
+                        );
+                    } else {
+                        println!(
+                            "Desktop entry: {} ({})",
+                            if desktop_ok { "installed" } else { "missing" },
+                            desktop.display()
+                        );
+                        println!(
+                            "Desktop icon:  {} ({})",
+                            if icon_ok { "installed" } else { "missing" },
+                            icon.display()
+                        );
                     }
                 }
             }
@@ -6630,7 +6676,11 @@ async fn run(cli: Cli) -> Result<()> {
         // its own connection, and opening a second one here would be a
         // connection nothing in the TUI ever uses.
         Command::Tui => return tui::run(cli.ip).await,
-        Command::Daemon => {
+        Command::Daemon {
+            verbose,
+            log_events,
+        } => {
+            daemon::init_logging(verbose, log_events);
             tokio::select! {
                 result = daemon::run(cli.ip, cli.household.as_deref()) => return result,
                 signal = stop_signal() => {
@@ -7058,12 +7108,61 @@ async fn run(cli: Cli) -> Result<()> {
         json,
     } = &cli.command
     {
-        // Removing needs no household either, and has to happen before the
+        // Mutations need no household either, and have to happen before the
         // listing below reads the file it is about to change.
-        if let Some(BookmarksAction::Remove { query }) = action {
-            let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
-            println!("Forgot {}.", gone.name);
-            return Ok(());
+        if let Some(act) = action {
+            match act {
+                BookmarksAction::Remove { query } => {
+                    let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
+                    if *json {
+                        println!("{}", json!({ "removed": gone.name }));
+                    } else {
+                        println!("Forgot {}.", gone.name);
+                    }
+                    return Ok(());
+                }
+                BookmarksAction::Pin { query } => {
+                    let (pinned, was_pinned) =
+                        bookmarks::Bookmarks::update(|list| list.pin(query))?;
+                    if *json {
+                        println!(
+                            "{}",
+                            json!({
+                                "name": pinned.name,
+                                "pinned": true,
+                                "already_pinned": was_pinned,
+                            })
+                        );
+                    } else if was_pinned {
+                        println!("Already pinned {}.", pinned.name);
+                    } else {
+                        println!("Pinned {}.", pinned.name);
+                    }
+                    return Ok(());
+                }
+                BookmarksAction::Rename { query, new_name } => {
+                    let (old, new) =
+                        bookmarks::Bookmarks::update(|list| list.rename(query, new_name))?;
+                    if *json {
+                        println!("{}", json!({ "old_name": old, "new_name": new }));
+                    } else {
+                        println!("Renamed {old} to {new}.");
+                    }
+                    return Ok(());
+                }
+                BookmarksAction::Prune => {
+                    let (pruned, kept) = bookmarks::Bookmarks::update(|list| Ok(list.prune()))?;
+                    if *json {
+                        println!("{}", json!({ "pruned": pruned, "total": kept }));
+                    } else if pruned == 0 {
+                        println!("No unpinned history entries to prune ({kept} kept).");
+                    } else {
+                        let entries = if pruned == 1 { "entry" } else { "entries" };
+                        println!("Pruned {pruned} history {entries}, {kept} bookmarks kept.");
+                    }
+                    return Ok(());
+                }
+            }
         }
         let list = bookmarks::Bookmarks::load()?;
         let mut items = list.listed(*all);
@@ -7780,7 +7879,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Completions { .. }
         | Command::Complete { .. }
         | Command::Tui
-        | Command::Daemon => unreachable!("handled above"),
+        | Command::Daemon { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

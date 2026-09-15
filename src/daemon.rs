@@ -38,13 +38,21 @@ fn log(message: &str) {
     eprintln!("x2rock: {message}");
 }
 
+static VERBOSE: OnceLock<bool> = OnceLock::new();
+static EVENTS: OnceLock<bool> = OnceLock::new();
+
+/// Initialize logging flags for the daemon run, combining CLI flags and env vars.
+pub fn init_logging(verbose: bool, log_events: bool) {
+    let _ = VERBOSE.set(verbose || std::env::var_os("X2ROCK_LOG_VERBOSE").is_some());
+    let _ = EVENTS.set(log_events || std::env::var_os("X2ROCK_LOG_EVENTS").is_some());
+}
+
 /// `X2ROCK_LOG_VERBOSE`, read once for the whole run: the reconnect machinery
 /// out loud - every status pass with coalescing off, and the backoff ramp.
 ///
 /// The flag is a knob for the run rather than a per-call cost, so it lives here
 /// instead of being threaded through every call site.
 fn verbose() -> bool {
-    static VERBOSE: OnceLock<bool> = OnceLock::new();
     *VERBOSE.get_or_init(|| std::env::var_os("X2ROCK_LOG_VERBOSE").is_some())
 }
 
@@ -57,7 +65,6 @@ fn verbose() -> bool {
 /// that is actually playing something buries the retry ramp under bodies. They
 /// are asked for separately because they are read separately.
 fn log_events() -> bool {
-    static EVENTS: OnceLock<bool> = OnceLock::new();
     *EVENTS.get_or_init(|| std::env::var_os("X2ROCK_LOG_EVENTS").is_some())
 }
 

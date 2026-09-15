@@ -465,6 +465,41 @@ impl Bookmarks {
         let i = self.position(query)?;
         Ok(self.items.remove(i))
     }
+
+    /// Pin an unpinned bookmark (e.g. from daemon history), keeping it permanently.
+    ///
+    /// Returns the bookmark and whether it was already pinned.
+    pub fn pin(&mut self, query: &str) -> Result<(Bookmark, bool)> {
+        let i = self.position(query)?;
+        let was_pinned = self.items[i].pinned;
+        self.items[i].pinned = true;
+        Ok((self.items[i].clone(), was_pinned))
+    }
+
+    /// Rename a bookmark by name query.
+    ///
+    /// The query matches either pinned or history items.
+    pub fn rename(&mut self, query: &str, new_name: &str) -> Result<(String, String)> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            bail!("new bookmark name cannot be empty");
+        }
+        let i = self.position(query)?;
+        let old = self.items[i].name.clone();
+        self.items[i].name = trimmed.to_string();
+        Ok((old, trimmed.to_string()))
+    }
+
+    /// Prune unpinned history entries, keeping all deliberately pinned bookmarks.
+    ///
+    /// Returns `(pruned_count, remaining_kept_count)`.
+    pub fn prune(&mut self) -> (usize, usize) {
+        let before = self.items.len();
+        self.items.retain(|b| b.pinned);
+        let pruned = before - self.items.len();
+        let kept = self.items.len();
+        (pruned, kept)
+    }
 }
 
 #[cfg(test)]
@@ -797,5 +832,51 @@ mod tests {
         );
         assert_eq!(list.forget("clouds").unwrap().object_id, "a");
         assert!(list.items.is_empty());
+    }
+
+    #[test]
+    fn pin_promotes_history_and_reports_status() {
+        let mut list = Bookmarks::default();
+        list.note(bm("Song", "1"), 100);
+        assert!(!list.find("Song").unwrap().pinned);
+
+        // Pinning promotes it
+        let (pinned, was_pinned) = list.pin("Song").unwrap();
+        assert_eq!(pinned.name, "Song");
+        assert!(!was_pinned);
+        assert!(list.find("Song").unwrap().pinned);
+
+        // Re-pinning reports already pinned
+        let (_, was_pinned) = list.pin("Song").unwrap();
+        assert!(was_pinned);
+    }
+
+    #[test]
+    fn rename_changes_name_and_refuses_empty() {
+        let mut list = Bookmarks::default();
+        list.keep(bm("Long Album Name (Remastered 2024)", "1"));
+
+        assert!(list.rename("Album", "   ").is_err());
+
+        let (old, new) = list.rename("Album", "Album").unwrap();
+        assert_eq!(old, "Long Album Name (Remastered 2024)");
+        assert_eq!(new, "Album");
+        assert_eq!(list.find("Album").unwrap().name, "Album");
+    }
+
+    #[test]
+    fn prune_removes_only_unpinned_history() {
+        let mut list = Bookmarks::default();
+        list.keep(bm("Pinned One", "1"));
+        list.keep(bm("Pinned Two", "2"));
+        list.note(bm("History One", "3"), 10);
+        list.note(bm("History Two", "4"), 20);
+
+        assert_eq!(list.items.len(), 4);
+        let (pruned, kept) = list.prune();
+        assert_eq!(pruned, 2);
+        assert_eq!(kept, 2);
+        assert_eq!(list.items.len(), 2);
+        assert!(list.items.iter().all(|b| b.pinned));
     }
 }

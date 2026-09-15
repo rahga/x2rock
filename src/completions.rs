@@ -177,6 +177,9 @@ fn enhance_bash(script: &str) -> String {
         let positional = match block {
             Some("x2rock__subcmd__bookmark") => Some((2, "bookmarks")),
             Some("x2rock__subcmd__bookmarks__subcmd__remove") => Some((3, "bookmarks")),
+            Some("x2rock__subcmd__bookmarks__subcmd__pin") => Some((3, "bookmarks")),
+            Some("x2rock__subcmd__bookmarks__subcmd__rename") => Some((3, "bookmarks")),
+            Some("x2rock__subcmd__queue__subcmd__add") => Some((3, "bookmarks")),
             Some("x2rock__subcmd__ungroup") => Some((2, "rooms")),
             Some("x2rock__subcmd__group") => Some((2, "rooms")),
             Some("x2rock__subcmd__unlink") => Some((2, "services")),
@@ -253,6 +256,9 @@ fn enhance_fish(script: &str) -> String {
     );
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmark' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from remove' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from rename' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from queue; and __fish_seen_subcommand_from add' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from group' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from link' -x -a '(x2rock __complete services 2>/dev/null)'\n");
@@ -307,7 +313,11 @@ _x2rock_bookmarks() { _x2rock_list bookmarks }
         if matches!(label, Some("link")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_services'");
         }
-        if matches!(label, Some("bookmark" | "remove")) && trimmed == r"':query:_default' \" {
+        if matches!(
+            label,
+            Some("bookmark" | "remove" | "pin" | "rename" | "add")
+        ) && trimmed == r"':query:_default' \"
+        {
             line = line.replace(":query:_default'", ":query:_x2rock_bookmarks'");
         }
         out.push(line);
@@ -409,18 +419,23 @@ mod tests {
         );
         assert_eq!(
             s.matches("__complete bookmarks").count(),
-            2,
-            "the `bookmark` positional and the `bookmarks remove` positional"
+            5,
+            "`bookmark`, `bookmarks remove`, `bookmarks pin`, `bookmarks rename`, and `queue add`"
         );
-        // And specifically the blocks that used to be missed.
-        let remove = s
-            .find("x2rock__subcmd__bookmarks__subcmd__remove)")
-            .expect("a bookmarks remove block");
-        let block_end = s[remove..].find(";;").map(|e| remove + e).unwrap();
-        assert!(
-            s[remove..block_end].contains("__complete bookmarks"),
-            "bookmarks remove completes bookmark names"
-        );
+        // And specifically the blocks that are hooked.
+        for subcmd in [
+            "x2rock__subcmd__bookmarks__subcmd__remove)",
+            "x2rock__subcmd__bookmarks__subcmd__pin)",
+            "x2rock__subcmd__bookmarks__subcmd__rename)",
+            "x2rock__subcmd__queue__subcmd__add)",
+        ] {
+            let block = s.find(subcmd).unwrap_or_else(|| panic!("missing {subcmd}"));
+            let block_end = s[block..].find(";;").map(|e| block + e).unwrap();
+            assert!(
+                s[block..block_end].contains("__complete bookmarks"),
+                "{subcmd} completes bookmark names"
+            );
+        }
 
         let group = s.find("x2rock__subcmd__group)").expect("a group block");
         let group_end = s[group..].find(";;").map(|e| group + e).unwrap();
@@ -472,6 +487,9 @@ mod tests {
         assert!(s.contains("seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms"));
         assert!(s.contains("seen_subcommand_from link' -x -a '(x2rock __complete services"));
         assert!(s.contains("seen_subcommand_from unlink' -x -a '(x2rock __complete services"));
+        assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks"));
+        assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from rename' -x -a '(x2rock __complete bookmarks"));
+        assert!(s.contains("seen_subcommand_from queue; and __fish_seen_subcommand_from add' -x -a '(x2rock __complete bookmarks"));
     }
 
     /// Checked by effect: the helpers are *called*, not merely defined. The
@@ -499,8 +517,8 @@ mod tests {
         assert!(s.contains("::service -- Which service, by name. Omit to list the ones that can be linked:_x2rock_services'"));
         assert_eq!(
             s.matches(":query:_x2rock_bookmarks'").count(),
-            2,
-            "`bookmark` and `bookmarks remove`"
+            5,
+            "`bookmark`, `bookmarks remove`, `bookmarks pin`, `bookmarks rename`, and `queue add`"
         );
         // Other `query` positionals - favorite, search, the bookmarks list - are
         // not bookmark names and keep _default.

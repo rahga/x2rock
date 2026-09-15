@@ -64,6 +64,7 @@ entry and icon (which let MPRIS clients label each room player with a name and i
 git clone https://github.com/rahga/x2rock && cd x2rock
 cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
 x2rock desktop install    # or `x2rock service install --enable`, which installs both
+x2rock desktop status     # checks whether desktop entry and icon are installed
 x2rock desktop uninstall  # removes the desktop entry and icon
 ```
 
@@ -183,7 +184,7 @@ stopped at its first track rather than where it was. `party` reaches every room 
 | `x2rock queue clear --yes` | empty it — Sonos keeps no undo, hence `--yes` |
 | `x2rock queue sources` · `queue add "<name>" [--next]` | what can be appended, and appending it |
 | `x2rock favorites [query] [--json]` | saved favorites, household-wide |
-| `x2rock keep [name] [--container]` · `bookmarks [--all]` · `bookmark "<name>"` | remember what is playing and replay it |
+| `x2rock keep [name] [--container]` · `bookmarks [--all]` · `bookmark "<name>"` · `bookmarks pin|rename|prune|remove` | remember what is playing, replay, and manage saved bookmarks |
 
 See [The queue](#the-queue) for why it is versioned and what can and cannot be appended, and
 [Keeping things you cannot search for](#keeping-things-you-cannot-search-for) for `keep`.
@@ -353,7 +354,8 @@ a suspend or a move is replaced within seconds; both are optional, and without t
 finds a dead socket a little later. When no player is reachable — a laptop away from home — it
 backs off quietly and republishes when one appears. `journalctl --user -u x2rock` is where it says
 what it is doing — starting with which binary it is, since a unit can outlive a reinstall by
-another route.
+another route. For foreground debugging, `x2rock daemon --verbose` logs reconnects and backoff
+progression, while `x2rock daemon --log-events` dumps every incoming event body.
 
 ### What the daemon publishes beyond MPRIS
 
@@ -530,6 +532,9 @@ x2rock keep "Friday mix"     # under a name of your own
 x2rock keep --container      # the album, playlist or station rather than the track
 x2rock bookmarks             # what has been kept
 x2rock bookmarks --all       # ...plus what the daemon noticed playing, newest first
+x2rock bookmarks pin Bodies  # promote an item from history to permanently kept
+x2rock bookmarks rename Bodies "Bodies (Single)" # rename a kept or history item
+x2rock bookmarks prune       # purge unpinned history, keeping saved bookmarks
 x2rock bookmark Bodies       # play it again;  --next queues it after the current track
 x2rock bookmarks remove Bodies
 ```

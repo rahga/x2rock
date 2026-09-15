@@ -370,7 +370,7 @@ see "Ask before you act".
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
-| Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks remove "<name>"` |
+| Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 
 **A saved playlist is not a favorite.** `queue sources` lists both (playlists carry `SQ:` ids),
@@ -816,7 +816,10 @@ music service"). Whether or not a service is linked, three routes reach what the
   `bookmarks --json` is a bare array: `[{id, name, type, service, description, art_url}]`. By default
   it lists only what was kept on purpose; `bookmarks --all` (here meaning "include daemon-noticed
   history", not whole-house) adds what the daemon noticed playing — the answer to "that thing from
-  yesterday". A kept on-demand track replays through the household's own account for its service,
+  yesterday". `bookmarks pin "<name>"` promotes an unpinned history track to permanently kept.
+  `bookmarks rename "<name>" "<new_name>"` renames a bookmark, and `bookmarks prune` clears unpinned
+  daemon history while preserving all kept bookmarks. `bookmarks remove "<name>"` removes a single
+  entry. A kept on-demand track replays through the household's own account for its service,
   so it stops working if the household removes that account and works again if it is re-added.
 
 ## Linking a music service: `link`, `accounts`, `unlink`
