@@ -57,14 +57,13 @@ unfamiliar network on its own. The other order is not fatal — it re-reads the 
 between reconnect attempts, so a later `discover` is picked up within a minute. If `x2rock rooms`
 lists your speakers, the CLI is done.
 
-Cloning gets you the desktop entry, which lets MPRIS clients label each room player with a name
-and icon, and the bar widget:
+Cloning gets you the source and the bar widget; the binary itself can install the desktop
+entry and icon (which let MPRIS clients label each room player with a name and icon):
 
 ```sh
 git clone https://github.com/rahga/x2rock && cd x2rock
 cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
-install -Dm644 desktop/x2rock.desktop ~/.local/share/applications/x2rock.desktop
-install -Dm644 desktop/x2rock.svg ~/.local/share/icons/hicolor/scalable/apps/x2rock.svg
+x2rock desktop install  # or `x2rock service install --enable`, which installs both
 ```
 
 Needs Rust 1.89 or newer and a C compiler; see [Requirements](#requirements) for what bites on
@@ -302,15 +301,16 @@ home the right answer is "your speakers are not on this network", not a scan of 
 
 ### The agent skill
 
-`x2rock skill` installs a [Claude Code](https://claude.com/claude-code) skill teaching an assistant
+`x2rock skill` installs an AI assistant skill teaching an assistant (Claude, Antigravity / Gemini)
 on this machine the whole surface — the `status --json` snapshot, the error contract, grouping
 semantics, the traps (`audible:false`, TV input with no signal, favorite drift), what to confirm
 before acting in a shared house, and what is safe to repeat:
 
 ```sh
-x2rock skill              # → ~/.claude/skills/x2rock/ (or $CLAUDE_CONFIG_DIR/skills/)
-x2rock skill --dir path   # somewhere else, e.g. a project's .claude/skills
-x2rock skill --print      # to stdout, to inspect or to seed a non-Claude agent
+x2rock skill              # auto-detects ~/.claude/skills and ~/.gemini/antigravity-cli/skills
+x2rock skill --agent claude # or antigravity / gemini / all
+x2rock skill --dir path   # somewhere else, e.g. a project's .claude/skills or .agents/skills
+x2rock skill --print      # to stdout, to inspect or to seed another agent
 ```
 
 The skill is embedded in the binary, so it matches the CLI it documents; re-run it after an
@@ -320,9 +320,9 @@ binary to it: every field `status --json` emits must be named there.
 ### Shell completions
 
 `x2rock completions <shell>` generates scripts for Bash, Zsh, Fish, Elvish and PowerShell. Bash,
-Zsh and Fish also complete `-r` from the rooms remembered on this network, `-s` from the cached
-service catalogue and `bookmark` names from what was kept — from local state, so `<Tab>` never
-waits on a speaker.
+Zsh and Fish also dynamically complete room names (for `-r`, `--household`, `group`, `ungroup`),
+service names (for `-s`, `link`, `unlink`) and `bookmark` names — from local state, so `<Tab>`
+never waits on a speaker.
 
 ```sh
 x2rock completions bash --install    # → ~/.local/share/bash-completion/completions/x2rock

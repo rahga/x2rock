@@ -139,10 +139,10 @@ fn enhance_bash(script: &str) -> String {
             block = Some(label);
         }
 
-        // `--room)` / `-r)` and `--service)` / `-s)` arms: the value that
-        // follows is a room or a service, not a file.
+        // `--room)` / `-r)`, `--household)`, and `--service)` / `-s)` arms: the
+        // value that follows is a room or a service, not a file.
         let list = match trimmed {
-            "--room)" | "-r)" => Some("rooms"),
+            "--room)" | "-r)" | "--household)" => Some("rooms"),
             "--service)" | "-s)" => Some("services"),
             _ => None,
         };
@@ -156,14 +156,19 @@ fn enhance_bash(script: &str) -> String {
         }
 
         // The positional of `bookmark` and of `bookmarks remove` is a bookmark
-        // name. clap offers the flags there; split its `if` so a `-` prefix
-        // still gets the flags and anything else gets the names.
+        // name; `ungroup` and `group` take rooms; `unlink` and `link` take services.
+        // clap offers the flags there; split its `if` so a `-` prefix
+        // still gets the flags and anything else gets the dynamic completions.
         let positional = match block {
-            Some("x2rock__subcmd__bookmark") => Some(2),
-            Some("x2rock__subcmd__bookmarks__subcmd__remove") => Some(3),
+            Some("x2rock__subcmd__bookmark") => Some((2, "bookmarks")),
+            Some("x2rock__subcmd__bookmarks__subcmd__remove") => Some((3, "bookmarks")),
+            Some("x2rock__subcmd__ungroup") => Some((2, "rooms")),
+            Some("x2rock__subcmd__group") => Some((2, "rooms")),
+            Some("x2rock__subcmd__unlink") => Some((2, "services")),
+            Some("x2rock__subcmd__link") => Some((2, "services")),
             _ => None,
         };
-        if let Some(n) = positional
+        if let Some((n, what)) = positional
             && trimmed == format!(r#"if [[ ${{cur}} == -* || ${{COMP_CWORD}} -eq {n} ]] ; then"#)
             && lines.get(i + 3).map(|l| l.trim()) == Some("fi")
         {
@@ -173,10 +178,22 @@ fn enhance_bash(script: &str) -> String {
             out.push(lines[i + 1].to_string());
             out.push(lines[i + 2].to_string());
             out.push(format!(r#"{pad}elif [[ ${{COMP_CWORD}} -eq {n} ]] ; then"#));
-            out.extend(dynamic_reply("bookmarks", inner));
+            out.extend(dynamic_reply(what, inner));
             out.push(format!("{inner}return 0"));
             out.push(lines[i + 3].to_string());
             i += 4;
+            continue;
+        }
+
+        // For `group`, subsequent positionals (COMP_CWORD > 2) are also room names.
+        if block == Some("x2rock__subcmd__group")
+            && trimmed == "COMPREPLY=()"
+            && lines.get(i.saturating_sub(1)).map(|l| l.trim()) == Some("*)")
+        {
+            let inner = indent(line);
+            out.extend(dynamic_reply("rooms", inner));
+            out.push(format!("{inner}return 0"));
+            i += 1;
             continue;
         }
 
@@ -213,11 +230,16 @@ fn enhance_fish(script: &str) -> String {
     let mut s = script.to_string();
     s.push_str("\n# Dynamic completions for rooms, services, and bookmarks\n");
     s.push_str("complete -c x2rock -s r -l room -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -l household -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str(
         "complete -c x2rock -s s -l service -x -a '(x2rock __complete services 2>/dev/null)'\n",
     );
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmark' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from remove' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from group' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from link' -x -a '(x2rock __complete services 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from unlink' -x -a '(x2rock __complete services 2>/dev/null)'\n");
     s
 }
 
@@ -259,7 +281,14 @@ _x2rock_bookmarks() { _x2rock_list bookmarks }
         }
         let mut line = line
             .replace(":ROOM:_default'", ":ROOM:_x2rock_rooms'")
-            .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'");
+            .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_rooms'")
+            .replace(":room:_default'", ":room:_x2rock_rooms'")
+            .replace(":rooms:_default'", ":rooms:_x2rock_rooms'")
+            .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'")
+            .replace(":service:_default'", ":service:_x2rock_services'");
+        if matches!(label, Some("link")) && line.starts_with("'::service") {
+            line = line.replace(":_default'", ":_x2rock_services'");
+        }
         if matches!(label, Some("bookmark" | "remove")) && trimmed == r"':query:_default' \" {
             line = line.replace(":query:_default'", ":query:_x2rock_bookmarks'");
         }
@@ -313,7 +342,7 @@ mod tests {
     /// both bookmark positionals got their hook. Counting the hook strings alone
     /// is what let `bookmarks remove` lose its hook unnoticed.
     #[test]
-    fn bash_rewires_every_room_and_service_arm_and_both_bookmark_positionals() {
+    fn bash_rewires_every_room_and_service_arm_and_positionals() {
         let s = script(Shell::Bash);
         let lines: Vec<&str> = s.lines().collect();
         let mut room_arms = 0;
@@ -321,7 +350,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let next = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
             match line.trim() {
-                "--room)" | "-r)" => {
+                "--room)" | "-r)" | "--household)" => {
                     room_arms += 1;
                     assert!(next.starts_with("compopt"), "unhooked room arm at line {i}");
                 }
@@ -353,7 +382,7 @@ mod tests {
             2,
             "the `bookmark` positional and the `bookmarks remove` positional"
         );
-        // And specifically the block that used to be missed.
+        // And specifically the blocks that used to be missed.
         let remove = s
             .find("x2rock__subcmd__bookmarks__subcmd__remove)")
             .expect("a bookmarks remove block");
@@ -362,11 +391,40 @@ mod tests {
             s[remove..block_end].contains("__complete bookmarks"),
             "bookmarks remove completes bookmark names"
         );
+
+        let group = s.find("x2rock__subcmd__group)").expect("a group block");
+        let group_end = s[group..].find(";;").map(|e| group + e).unwrap();
+        assert!(
+            s[group..group_end].contains("__complete rooms"),
+            "group completes room names"
+        );
+
+        let ungroup = s.find("x2rock__subcmd__ungroup)").expect("an ungroup block");
+        let ungroup_end = s[ungroup..].find(";;").map(|e| ungroup + e).unwrap();
+        assert!(
+            s[ungroup..ungroup_end].contains("__complete rooms"),
+            "ungroup completes room names"
+        );
+
+        let unlink = s.find("x2rock__subcmd__unlink)").expect("an unlink block");
+        let unlink_end = s[unlink..].find(";;").map(|e| unlink + e).unwrap();
+        assert!(
+            s[unlink..unlink_end].contains("__complete services"),
+            "unlink completes service names"
+        );
+
+        let link = s.find("x2rock__subcmd__link)").expect("a link block");
+        let link_end = s[link..].find(";;").map(|e| link + e).unwrap();
+        assert!(
+            s[link..link_end].contains("__complete services"),
+            "link completes service names"
+        );
+
         assert!(s.contains("__complete rooms") && s.contains("__complete services"));
     }
 
     #[test]
-    fn fish_appends_the_three_dynamic_hooks() {
+    fn fish_appends_the_dynamic_hooks() {
         let s = script(Shell::Fish);
         for list in ["rooms", "services", "bookmarks"] {
             assert!(
@@ -374,6 +432,10 @@ mod tests {
                 "fish lacks the {list} hook"
             );
         }
+        assert!(s.contains("seen_subcommand_from group' -x -a '(x2rock __complete rooms"));
+        assert!(s.contains("seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms"));
+        assert!(s.contains("seen_subcommand_from link' -x -a '(x2rock __complete services"));
+        assert!(s.contains("seen_subcommand_from unlink' -x -a '(x2rock __complete services"));
     }
 
     /// Checked by effect: the helpers are *called*, not merely defined. The
@@ -387,9 +449,18 @@ mod tests {
             0,
             "a room value still uses _default"
         );
+        assert_eq!(s.matches(":HOUSEHOLD:_default'").count(), 0);
+        assert_eq!(s.matches(":room:_default'").count(), 0);
+        assert_eq!(s.matches(":rooms:_default'").count(), 0);
         assert_eq!(s.matches(":SERVICE:_default'").count(), 0);
+        assert_eq!(s.matches(":service:_default'").count(), 0);
         assert!(s.matches(":ROOM:_x2rock_rooms'").count() > 10);
+        assert!(s.matches(":HOUSEHOLD:_x2rock_rooms'").count() > 10);
+        assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
+        assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
+        assert_eq!(s.matches(":service:_x2rock_services'").count(), 1);
+        assert!(s.contains("::service -- Which service, by name. Omit to list the ones that can be linked:_x2rock_services'"));
         assert_eq!(
             s.matches(":query:_x2rock_bookmarks'").count(),
             2,

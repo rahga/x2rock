@@ -103,10 +103,13 @@ enum Command {
     Play {
         track: Option<u32>,
     },
+    /// Pause playback.
     Pause,
     /// Play if paused, pause if playing.
     Toggle,
+    /// Skip to the next track.
     Next,
+    /// Skip to the previous track.
     Prev,
     /// Rate the currently playing track up or down, on services that offer it
     /// (Pandora-style radio, iHeartRadio's Custom Stations) - refused on
@@ -763,17 +766,31 @@ enum Command {
     /// Every room on one screen, in the terminal. Needs the daemon running.
     Tui,
     /// Install the x2rock agent skill so an AI assistant on this machine knows
-    /// how to drive the CLI. Writes to `~/.claude/skills/x2rock/` by default
-    /// (or `$CLAUDE_CONFIG_DIR/skills/`); the skill is embedded in the binary,
-    /// so it always matches this version.
+    /// how to drive the CLI. Auto-detects installed assistant directories
+    /// (Claude, Antigravity / Gemini) by default; the skill is embedded in the
+    /// binary, so it always matches this version.
     Skill {
-        /// Where to write it, in place of the default Claude skills directory.
+        /// Target agent assistant: `claude` (~/.claude/skills), `antigravity` / `gemini`
+        /// (~/.gemini/antigravity-cli/skills), or `all`. Auto-detects installed
+        /// assistants when omitted.
+        #[arg(long, value_enum)]
+        agent: Option<AgentTarget>,
+        /// Where to write it, in place of the default assistant skills directory.
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
         /// Print the skill to stdout instead of writing it - for inspection, or
-        /// to seed an agent that is not Claude.
+        /// to seed another agent.
         #[arg(long)]
         print: bool,
+    },
+    /// Install the desktop entry and icon for MPRIS media player identity.
+    ///
+    /// Writes `~/.local/share/applications/x2rock.desktop` and
+    /// `~/.local/share/icons/hicolor/scalable/apps/x2rock.svg` so Linux desktop
+    /// shells (GNOME, KDE, Waybar) show the speaker icon and application title.
+    Desktop {
+        #[command(subcommand)]
+        action: Option<DesktopAction>,
     },
     /// Install the daemon as a systemd user service, pointing at this binary.
     ///
@@ -1097,6 +1114,20 @@ enum ServiceAction {
         #[arg(long)]
         no_household: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum AgentTarget {
+    Claude,
+    Antigravity,
+    Gemini,
+    All,
+}
+
+#[derive(Subcommand)]
+enum DesktopAction {
+    /// Install ~/.local/share/applications/x2rock.desktop and ~/.local/share/icons/.../x2rock.svg.
+    Install,
 }
 
 /// The one thing `bookmarks` does besides list.
@@ -5622,36 +5653,69 @@ fn fans_out(command: &Command) -> bool {
 /// the CLI it documents. Written to disk, or printed, by `x2rock skill`.
 const SKILL: &str = include_str!("../skills/x2rock/SKILL.md");
 
-/// Where `x2rock skill` writes, absent `--dir`: `$CLAUDE_CONFIG_DIR/skills` when
-/// that is set (Claude Code honours it), else `~/.claude/skills`.
-fn default_skills_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir).join("skills"));
-    }
+/// Resolve skill directories for the target assistant(s).
+/// Defaults to auto-detecting existing assistant directories (Claude, Antigravity / Gemini)
+/// or falling back to Claude for backwards compatibility.
+fn agent_skills_dirs(agent: Option<AgentTarget>) -> Result<Vec<PathBuf>> {
     let home = directories::BaseDirs::new()
-        .ok_or_else(|| anyhow!("no home directory to find ~/.claude in; pass --dir"))?
+        .ok_or_else(|| anyhow!("no home directory to find assistant skill directories in; pass --dir"))?
         .home_dir()
         .to_path_buf();
-    Ok(home.join(".claude").join("skills"))
+
+    let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(|d| PathBuf::from(d).join("skills"))
+        .unwrap_or_else(|| home.join(".claude").join("skills"));
+
+    let antigravity_dir = std::env::var_os("ANTIGRAVITY_CONFIG_DIR")
+        .map(|d| PathBuf::from(d).join("skills"))
+        .unwrap_or_else(|| home.join(".gemini").join("antigravity-cli").join("skills"));
+
+    match agent {
+        Some(AgentTarget::Claude) => Ok(vec![claude_dir]),
+        Some(AgentTarget::Antigravity | AgentTarget::Gemini) => Ok(vec![antigravity_dir]),
+        Some(AgentTarget::All) => Ok(vec![claude_dir, antigravity_dir]),
+        None => {
+            let mut detected = Vec::new();
+            if home.join(".claude").exists() || std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+                detected.push(claude_dir.clone());
+            }
+            if home.join(".gemini").join("antigravity-cli").exists()
+                || std::env::var_os("ANTIGRAVITY_CONFIG_DIR").is_some()
+            {
+                detected.push(antigravity_dir);
+            }
+            if detected.is_empty() {
+                detected.push(claude_dir);
+            }
+            Ok(detected)
+        }
+    }
 }
 
-/// `x2rock skill`: drop the embedded skill into a Claude skills directory (or
+/// `x2rock skill`: drop the embedded skill into assistant skill directories (or
 /// print it). Needs no network - it is a local file write.
-fn install_skill(dir: Option<&std::path::Path>, print: bool) -> Result<()> {
+fn install_skill(
+    agent: Option<AgentTarget>,
+    dir: Option<&std::path::Path>,
+    print: bool,
+) -> Result<()> {
     if print {
         print!("{SKILL}");
         return Ok(());
     }
-    let base = match dir {
-        Some(d) => d.to_path_buf(),
-        None => default_skills_dir()?,
+    let targets = match dir {
+        Some(d) => vec![d.to_path_buf()],
+        None => agent_skills_dirs(agent)?,
     };
-    let target = base.join("x2rock");
-    std::fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
-    let path = target.join("SKILL.md");
-    std::fs::write(&path, SKILL).with_context(|| format!("writing {}", path.display()))?;
-    println!("Wrote the x2rock skill to {}.", path.display());
-    println!("A Claude assistant on this machine will pick it up for Sonos tasks.");
+    for base in &targets {
+        let target = base.join("x2rock");
+        std::fs::create_dir_all(&target)
+            .with_context(|| format!("creating {}", target.display()))?;
+        let path = target.join("SKILL.md");
+        std::fs::write(&path, SKILL).with_context(|| format!("writing {}", path.display()))?;
+        println!("Wrote the x2rock skill to {}.", path.display());
+    }
+    println!("An AI assistant on this machine will pick it up for Sonos tasks.");
     Ok(())
 }
 
@@ -5817,6 +5881,15 @@ fn install_service(
             dropin.display()
         );
     }
+    if !headless {
+        match service::install_desktop_files() {
+            Ok((desktop, icon)) => {
+                println!("Installed desktop entry to {}.", desktop.display());
+                println!("Installed icon to {}.", icon.display());
+            }
+            Err(e) => eprintln!("Note: could not install desktop files: {e}"),
+        }
+    }
 
     // A reload is what makes systemd read the new file; failing here is worth
     // saying but not worth failing over, since the file is written and a later
@@ -5958,7 +6031,15 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Discover => return discover_and_remember().await,
         Command::Households { json, redact } => return run_households(json, redact).await,
-        Command::Skill { ref dir, print } => return install_skill(dir.as_deref(), print),
+        Command::Skill { agent, ref dir, print } => {
+            return install_skill(agent, dir.as_deref(), print);
+        }
+        Command::Desktop { .. } => {
+            let (desktop, icon) = service::install_desktop_files()?;
+            println!("Installed desktop entry to {}.", desktop.display());
+            println!("Installed icon to {}.", icon.display());
+            return Ok(());
+        }
         Command::Service {
             action:
                 ServiceAction::Install {
@@ -7427,6 +7508,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Discover
         | Command::Households { .. }
         | Command::Skill { .. }
+        | Command::Desktop { .. }
         | Command::Service { .. }
         | Command::Completions { .. }
         | Command::Complete { .. }
@@ -7592,17 +7674,17 @@ mod tests {
 
     #[test]
     fn find_named_disambiguates_two_of_the_same_name() {
-        let items = [
-            ("fv1".to_string(), "That Christmas Channel".to_string()),
-            ("fv2".to_string(), "That Christmas Channel".to_string()),
-            ("fv7".to_string(), "Jazz24".to_string()),
-        ];
         fn id(i: &(String, String)) -> &str {
             i.0.as_str()
         }
         fn name(i: &(String, String)) -> &str {
             i.1.as_str()
         }
+        let items = [
+            ("fv1".to_string(), "That Christmas Channel".to_string()),
+            ("fv2".to_string(), "That Christmas Channel".to_string()),
+            ("fv7".to_string(), "Jazz24".to_string()),
+        ];
         // A unique name resolves; an exact id always resolves.
         assert_eq!(
             find_named(&items, "jazz24", id, name, "f", "h").unwrap().0,
@@ -7751,8 +7833,7 @@ mod tests {
                     let placeholder = arg
                         .get_possible_values()
                         .first()
-                        .map(|v| v.get_name().to_string())
-                        .unwrap_or_else(|| "1".to_string());
+                        .map_or_else(|| "1".to_string(), |v| v.get_name().to_string());
                     argv.push(placeholder);
                 }
                 argv.push("--json".to_string());

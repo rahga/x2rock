@@ -28,6 +28,10 @@ use anyhow::{Result, bail};
 pub const UNIT_TEMPLATE: &str = include_str!("../systemd/x2rock.service");
 /// The drop-in for a machine with no graphical session, likewise.
 pub const HEADLESS_TEMPLATE: &str = include_str!("../systemd/x2rock.service.d/headless.conf");
+/// The desktop entry file as shipped in `desktop/`.
+pub const DESKTOP_ENTRY: &str = include_str!("../desktop/x2rock.desktop");
+/// The application SVG icon as shipped in `desktop/`.
+pub const DESKTOP_ICON: &str = include_str!("../desktop/x2rock.svg");
 
 /// The line in the shipped unit that names the binary. Replaced, never
 /// appended to, so a second `ExecStart` cannot sneak in; a test holds the
@@ -100,6 +104,42 @@ pub fn render_unit(exe: &Path, household: Option<&str>) -> Result<String> {
 /// The headless drop-in to install, from the shipped template.
 pub fn render_headless() -> String {
     header() + HEADLESS_TEMPLATE
+}
+
+/// The default user paths for the desktop entry and icon.
+pub fn desktop_paths() -> Result<(PathBuf, PathBuf)> {
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("no home directory found to install desktop files"))?;
+    let data = base.data_local_dir();
+    let desktop = data.join("applications").join("x2rock.desktop");
+    let icon = data
+        .join("icons")
+        .join("hicolor")
+        .join("scalable")
+        .join("apps")
+        .join("x2rock.svg");
+    Ok((desktop, icon))
+}
+
+/// Install the desktop entry and icon for MPRIS application identity.
+pub fn install_desktop_files() -> Result<(PathBuf, PathBuf)> {
+    use anyhow::Context;
+    let (desktop, icon) = desktop_paths()?;
+    if let Some(parent) = desktop.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    std::fs::write(&desktop, DESKTOP_ENTRY)
+        .with_context(|| format!("writing {}", desktop.display()))?;
+
+    if let Some(parent) = icon.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    std::fs::write(&icon, DESKTOP_ICON)
+        .with_context(|| format!("writing {}", icon.display()))?;
+
+    Ok((desktop, icon))
 }
 
 /// The path the binary was invoked by, kept exactly as invoked.
@@ -576,5 +616,15 @@ mod tests {
         let got: Vec<&str> =
             directives("[Unit]\n\n# c\n  ; also c\nRestart=on-failure\n  Indented=1\n").collect();
         assert_eq!(got, ["[Unit]", "Restart=on-failure", "  Indented=1"]);
+    }
+
+    #[test]
+    fn embedded_desktop_files_are_valid() {
+        assert!(DESKTOP_ENTRY.contains("[Desktop Entry]"));
+        assert!(DESKTOP_ENTRY.contains("Icon=x2rock"));
+        assert!(DESKTOP_ICON.contains("<svg"));
+        let (desktop, icon) = desktop_paths().unwrap();
+        assert!(desktop.ends_with("applications/x2rock.desktop"));
+        assert!(icon.ends_with("icons/hicolor/scalable/apps/x2rock.svg"));
     }
 }
