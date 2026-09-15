@@ -399,7 +399,9 @@ mod tests {
             "group completes room names"
         );
 
-        let ungroup = s.find("x2rock__subcmd__ungroup)").expect("an ungroup block");
+        let ungroup = s
+            .find("x2rock__subcmd__ungroup)")
+            .expect("an ungroup block");
         let ungroup_end = s[ungroup..].find(";;").map(|e| ungroup + e).unwrap();
         assert!(
             s[ungroup..ungroup_end].contains("__complete rooms"),

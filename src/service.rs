@@ -136,8 +136,7 @@ pub fn install_desktop_files() -> Result<(PathBuf, PathBuf)> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
-    std::fs::write(&icon, DESKTOP_ICON)
-        .with_context(|| format!("writing {}", icon.display()))?;
+    std::fs::write(&icon, DESKTOP_ICON).with_context(|| format!("writing {}", icon.display()))?;
 
     Ok((desktop, icon))
 }

@@ -100,9 +100,7 @@ enum Command {
         full: bool,
     },
     /// Resume playback, or play track N from the queue.
-    Play {
-        track: Option<u32>,
-    },
+    Play { track: Option<u32> },
     /// Pause playback.
     Pause,
     /// Play if paused, pause if playing.
@@ -417,9 +415,7 @@ enum Command {
     },
     /// Play a favorite, by name or id. The one way to start a room that has
     /// nothing queued, which `play` cannot do.
-    Favorite {
-        query: String,
-    },
+    Favorite { query: String },
     /// Search a music service. Only services with anonymous access, which is
     /// most of the radio ones; the rest need a linked account x2rock cannot
     /// supply. `--service` with no term lists what can be searched.
@@ -620,9 +616,7 @@ enum Command {
     ///
     /// Local only: it does not revoke anything at the service, which is done
     /// from that service's own account page.
-    Unlink {
-        service: String,
-    },
+    Unlink { service: String },
     /// List the accounts this machine holds a token for.
     Accounts {
         /// Also show the account serials this household's favorites and queues
@@ -672,9 +666,7 @@ enum Command {
     /// Replaces what the room is playing and starts it, the way `favorite`
     /// does. `queue add` appends one to the queue instead, `queue save` creates
     /// one from what is queued now, and `queue sources` lists them.
-    Playlist {
-        query: String,
-    },
+    Playlist { query: String },
     /// Switch a soundbar to its TV input.
     Tv,
     /// Play a short chime on a room, over whatever it is doing.
@@ -711,14 +703,10 @@ enum Command {
         rooms: Vec<String>,
     },
     /// Take a room out of its group, leaving it playing on its own.
-    Ungroup {
-        room: String,
-    },
+    Ungroup { room: String },
     /// Party mode: every room joins --room's group. `party off` breaks it up
     /// and leaves each room on its own.
-    Party {
-        mode: Option<String>,
-    },
+    Party { mode: Option<String> },
     /// Send one command straight to a player and print what comes back.
     ///
     /// A probe, not a feature: both wires are far wider than this CLI covers,
@@ -770,8 +758,8 @@ enum Command {
     /// (Claude, Antigravity / Gemini) by default; the skill is embedded in the
     /// binary, so it always matches this version.
     Skill {
-        /// Target agent assistant: `claude` (~/.claude/skills), `antigravity` / `gemini`
-        /// (~/.gemini/antigravity-cli/skills), or `all`. Auto-detects installed
+        /// Target agent assistant: `claude` (`~/.claude/skills`), `antigravity` / `gemini`
+        /// (`~/.gemini/antigravity-cli/skills`), or `all`. Auto-detects installed
         /// assistants when omitted.
         #[arg(long, value_enum)]
         agent: Option<AgentTarget>,
@@ -1126,7 +1114,7 @@ enum AgentTarget {
 
 #[derive(Subcommand)]
 enum DesktopAction {
-    /// Install ~/.local/share/applications/x2rock.desktop and ~/.local/share/icons/.../x2rock.svg.
+    /// Install `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
     Install,
 }
 
@@ -5658,7 +5646,9 @@ const SKILL: &str = include_str!("../skills/x2rock/SKILL.md");
 /// or falling back to Claude for backwards compatibility.
 fn agent_skills_dirs(agent: Option<AgentTarget>) -> Result<Vec<PathBuf>> {
     let home = directories::BaseDirs::new()
-        .ok_or_else(|| anyhow!("no home directory to find assistant skill directories in; pass --dir"))?
+        .ok_or_else(|| {
+            anyhow!("no home directory to find assistant skill directories in; pass --dir")
+        })?
         .home_dir()
         .to_path_buf();
 
@@ -6031,7 +6021,11 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Discover => return discover_and_remember().await,
         Command::Households { json, redact } => return run_households(json, redact).await,
-        Command::Skill { agent, ref dir, print } => {
+        Command::Skill {
+            agent,
+            ref dir,
+            print,
+        } => {
             return install_skill(agent, dir.as_deref(), print);
         }
         Command::Desktop { .. } => {
