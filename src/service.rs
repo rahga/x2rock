@@ -121,24 +121,77 @@ pub fn desktop_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((desktop, icon))
 }
 
-/// Install the desktop entry and icon for MPRIS application identity.
-pub fn install_desktop_files() -> Result<(PathBuf, PathBuf)> {
+/// Result of placing desktop entry and icon files.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DesktopPlacement {
+    pub desktop_path: PathBuf,
+    pub icon_path: PathBuf,
+    pub desktop_written: bool,
+    pub icon_written: bool,
+    pub desktop_edited: bool,
+    pub icon_edited: bool,
+}
+
+/// Install desktop entry and icon files at specific paths if missing or if forced.
+pub fn place_desktop_files_at(
+    desktop: &Path,
+    icon: &Path,
+    force: bool,
+) -> Result<DesktopPlacement> {
     use anyhow::Context;
+    let mut desktop_written = false;
+    let mut icon_written = false;
+
+    let desktop_content = std::fs::read_to_string(desktop).ok();
+    let desktop_edited = desktop_content
+        .as_deref()
+        .map(|c| c != DESKTOP_ENTRY)
+        .unwrap_or(false);
+
+    if !desktop.exists() || (desktop_edited && force) {
+        if let Some(parent) = desktop.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        std::fs::write(desktop, DESKTOP_ENTRY)
+            .with_context(|| format!("writing {}", desktop.display()))?;
+        desktop_written = true;
+    }
+
+    let icon_content = std::fs::read(icon).ok();
+    let icon_edited = icon_content
+        .as_deref()
+        .map(|c| c != DESKTOP_ICON.as_bytes())
+        .unwrap_or(false);
+
+    if !icon.exists() || (icon_edited && force) {
+        if let Some(parent) = icon.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        std::fs::write(icon, DESKTOP_ICON)
+            .with_context(|| format!("writing {}", icon.display()))?;
+        icon_written = true;
+    }
+
+    Ok(DesktopPlacement {
+        desktop_path: desktop.to_path_buf(),
+        icon_path: icon.to_path_buf(),
+        desktop_written,
+        icon_written,
+        desktop_edited,
+        icon_edited,
+    })
+}
+
+/// Install desktop entry and icon files if missing or if forced.
+///
+/// If files already exist on disk with identical content, writing is skipped.
+/// If an existing file differs from the shipped template (i.e. has been hand-edited),
+/// it is preserved unless `force` is true.
+pub fn place_desktop_files(force: bool) -> Result<DesktopPlacement> {
     let (desktop, icon) = desktop_paths()?;
-    if let Some(parent) = desktop.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    std::fs::write(&desktop, DESKTOP_ENTRY)
-        .with_context(|| format!("writing {}", desktop.display()))?;
-
-    if let Some(parent) = icon.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    std::fs::write(&icon, DESKTOP_ICON).with_context(|| format!("writing {}", icon.display()))?;
-
-    Ok((desktop, icon))
+    place_desktop_files_at(&desktop, &icon, force)
 }
 
 /// Whether desktop entry and icon files are currently present on disk.
@@ -356,7 +409,7 @@ pub fn existing_exec(unit: &str) -> Option<String> {
 
             Some(expanded)
         })
-        .last()
+        .next_back()
 }
 
 /// Unescape a double-quoted executable token from a systemd command line.
@@ -744,6 +797,47 @@ mod tests {
         let (desktop, icon) = desktop_paths().unwrap();
         assert!(desktop.ends_with("applications/x2rock.desktop"));
         assert!(icon.ends_with("icons/hicolor/scalable/apps/x2rock.svg"));
+    }
+
+    #[test]
+    fn place_desktop_files_skips_identical_and_protects_edits() {
+        let dir = std::env::temp_dir().join(format!("x2rock-desktop-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let desktop = dir.join("applications").join("x2rock.desktop");
+        let icon = dir.join("icons").join("x2rock.svg");
+
+        // 1. Initial run: files missing -> created
+        let res = place_desktop_files_at(&desktop, &icon, false).unwrap();
+        assert!(res.desktop_written);
+        assert!(res.icon_written);
+        assert!(!res.desktop_edited);
+        assert!(!res.icon_edited);
+
+        // 2. Re-run: identical content -> skipped
+        let res2 = place_desktop_files_at(&desktop, &icon, false).unwrap();
+        assert!(!res2.desktop_written);
+        assert!(!res2.icon_written);
+        assert!(!res2.desktop_edited);
+        assert!(!res2.icon_edited);
+
+        // 3. User edits desktop file
+        std::fs::write(&desktop, "[Desktop Entry]\nName=Custom\n").unwrap();
+
+        // Re-run without force -> left untouched
+        let res3 = place_desktop_files_at(&desktop, &icon, false).unwrap();
+        assert!(!res3.desktop_written);
+        assert!(res3.desktop_edited);
+        assert_eq!(
+            std::fs::read_to_string(&desktop).unwrap(),
+            "[Desktop Entry]\nName=Custom\n"
+        );
+
+        // Re-run with force -> overwritten
+        let res4 = place_desktop_files_at(&desktop, &icon, true).unwrap();
+        assert!(res4.desktop_written);
+        assert_eq!(std::fs::read_to_string(&desktop).unwrap(), DESKTOP_ENTRY);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

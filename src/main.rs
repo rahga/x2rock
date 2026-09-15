@@ -5933,10 +5933,27 @@ fn install_service(
         );
     }
     if !headless {
-        match service::install_desktop_files() {
-            Ok((desktop, icon)) => {
-                println!("Installed desktop entry to {}.", desktop.display());
-                println!("Installed icon to {}.", icon.display());
+        match service::place_desktop_files(force) {
+            Ok(placed) => {
+                if placed.desktop_written {
+                    println!(
+                        "Installed desktop entry to {}.",
+                        placed.desktop_path.display()
+                    );
+                } else if placed.desktop_edited && !force {
+                    println!(
+                        "Note: {} has been edited and was left in place; use --force to overwrite.",
+                        placed.desktop_path.display()
+                    );
+                }
+                if placed.icon_written {
+                    println!("Installed icon to {}.", placed.icon_path.display());
+                } else if placed.icon_edited && !force {
+                    println!(
+                        "Note: {} has been edited and was left in place; use --force to overwrite.",
+                        placed.icon_path.display()
+                    );
+                }
             }
             Err(e) => eprintln!("Note: could not install desktop files: {e}"),
         }
@@ -6193,8 +6210,7 @@ fn uninstall_service(desktop: bool) -> Result<()> {
             .ok()
             .into_iter()
             .flat_map(|entries| {
-                entries
-                    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                entries.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             })
             .collect();
         if remaining.is_empty() {
@@ -6331,9 +6347,19 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Desktop { action } => {
             match action {
                 None | Some(DesktopAction::Install) => {
-                    let (desktop, icon) = service::install_desktop_files()?;
-                    println!("Installed desktop entry to {}.", desktop.display());
-                    println!("Installed icon to {}.", icon.display());
+                    let placed = service::place_desktop_files(true)?;
+                    if placed.desktop_written {
+                        println!(
+                            "Installed desktop entry to {}.",
+                            placed.desktop_path.display()
+                        );
+                    }
+                    if placed.icon_written {
+                        println!("Installed icon to {}.", placed.icon_path.display());
+                    }
+                    if !placed.desktop_written && !placed.icon_written {
+                        println!("Desktop entry and icon are already up to date.");
+                    }
                 }
                 Some(DesktopAction::Uninstall) => {
                     let (desktop, icon) = service::uninstall_desktop_files()?;
