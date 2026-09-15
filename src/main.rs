@@ -752,10 +752,10 @@ enum Command {
     /// Publish every room as an MPRIS2 media player, until stopped.
     Daemon {
         /// Verbose reconnect logging (also via X2ROCK_LOG_VERBOSE).
-        #[arg(long, env = "X2ROCK_LOG_VERBOSE")]
+        #[arg(long)]
         verbose: bool,
         /// Log every incoming event payload (also via X2ROCK_LOG_EVENTS).
-        #[arg(long, env = "X2ROCK_LOG_EVENTS")]
+        #[arg(long)]
         log_events: bool,
     },
     /// Every room on one screen, in the terminal. Needs the daemon running.
@@ -8141,6 +8141,21 @@ mod tests {
         );
         // And `remote` takes no bare word.
         assert!(Cli::try_parse_from(["x2rock", "-r", "Guest TV", "remote", "off"]).is_err());
+    }
+
+    #[test]
+    fn daemon_flags_parse_from_cli() {
+        let cli = Cli::try_parse_from(["x2rock", "daemon", "--verbose", "--log-events"]).unwrap();
+        match cli.command {
+            Command::Daemon {
+                verbose,
+                log_events,
+            } => {
+                assert!(verbose);
+                assert!(log_events);
+            }
+            _ => panic!("expected Command::Daemon"),
+        }
     }
 
     #[test]
