@@ -297,20 +297,87 @@ pub fn existing_household(unit: &str) -> Option<String> {
 }
 
 /// The binary path an installed unit's ExecStart names, if any.
+///
+/// Extracts the executable token from the last non-empty `ExecStart=` directive,
+/// stripping systemd command prefixes (`-`, `@`, `+`, `!`, `:`), unquoting
+/// if enclosed in quotes, ignoring trailing arguments (such as `daemon`
+/// or flags), and expanding `%h` to the user's home directory so disk-presence
+/// checks do not produce false alarms.
 pub fn existing_exec(unit: &str) -> Option<String> {
-    unit.lines().find_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix("ExecStart=")?;
-        if let Some(inner) = rest.strip_suffix(" daemon") {
-            if inner.starts_with('"') && inner.ends_with('"') {
-                unquoted(inner)
-            } else {
-                Some(inner.to_owned())
+    unit.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("ExecStart=")?;
+            let mut rest = rest.trim_start();
+            if rest.is_empty() {
+                return None;
             }
-        } else {
-            Some(rest.to_owned())
+            // Strip systemd execution prefixes: -, @, +, !, :
+            while let Some(c) = rest.chars().next() {
+                if matches!(c, '-' | '@' | '+' | '!' | ':') {
+                    rest = rest[c.len_utf8()..].trim_start();
+                } else {
+                    break;
+                }
+            }
+            if rest.is_empty() {
+                return None;
+            }
+            let raw_path = if rest.starts_with('"') {
+                let mut escaped = false;
+                let mut end = None;
+                for (idx, c) in rest.char_indices().skip(1) {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        end = Some(idx);
+                        break;
+                    }
+                }
+                let end_idx = end?;
+                let quoted_token = &rest[..=end_idx];
+                unquote_exec_token(quoted_token)?
+            } else {
+                rest.split_whitespace().next()?.to_owned()
+            };
+
+            let expanded = if raw_path.starts_with("%h/") || raw_path == "%h" {
+                if let Some(base) = directories::BaseDirs::new() {
+                    let home = base.home_dir().to_string_lossy();
+                    raw_path.replacen("%h", &home, 1)
+                } else {
+                    raw_path
+                }
+            } else {
+                raw_path
+            };
+
+            Some(expanded)
+        })
+        .last()
+}
+
+/// Unescape a double-quoted executable token from a systemd command line.
+fn unquote_exec_token(token: &str) -> Option<String> {
+    let inner = token.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let next = chars.next()?;
+                out.push(next);
+            }
+            '%' if chars.as_str().starts_with('%') => {
+                chars.next();
+                out.push('%');
+            }
+            c => out.push(c),
         }
-    })
+    }
+    Some(out)
 }
 
 /// Whether an `ExecStart` line is exactly the shape [`render_unit`] writes: one
@@ -687,14 +754,33 @@ mod tests {
             existing_exec(&unit).as_deref(),
             Some("/opt/x2rock/bin/x2rock")
         );
+        let home = directories::BaseDirs::new()
+            .map(|b| b.home_dir().display().to_string())
+            .unwrap_or_else(|| "%h".to_string());
         assert_eq!(
             existing_exec(UNIT_TEMPLATE).as_deref(),
-            Some("%h/.local/bin/x2rock")
+            Some(format!("{home}/.local/bin/x2rock").as_str())
         );
         let custom = "[Service]\nExecStart=/usr/local/bin/x2rock daemon --foo\n";
         assert_eq!(
             existing_exec(custom).as_deref(),
-            Some("/usr/local/bin/x2rock daemon --foo")
+            Some("/usr/local/bin/x2rock")
+        );
+        let custom_quoted =
+            "[Service]\nExecStart=\"/opt/custom bin/x2rock\" daemon --verbose --log-events\n";
+        assert_eq!(
+            existing_exec(custom_quoted).as_deref(),
+            Some("/opt/custom bin/x2rock")
+        );
+        let custom_prefixed = "[Service]\nExecStart=-/usr/bin/x2rock daemon\n";
+        assert_eq!(
+            existing_exec(custom_prefixed).as_deref(),
+            Some("/usr/bin/x2rock")
+        );
+        let override_reset = "[Service]\nExecStart=\nExecStart=/usr/bin/x2rock daemon\n";
+        assert_eq!(
+            existing_exec(override_reset).as_deref(),
+            Some("/usr/bin/x2rock")
         );
     }
 }
