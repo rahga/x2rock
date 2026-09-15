@@ -6166,9 +6166,11 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     let dropin = dir.join("x2rock.service.d").join("headless.conf");
     let dropin_dir = dir.join("x2rock.service.d");
 
-    let _ = std::process::Command::new("systemctl")
+    let disabled = std::process::Command::new("systemctl")
         .args(["--user", "disable", "--now", "x2rock.service"])
-        .status();
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
 
     let mut removed_something = false;
     if unit_path.exists() {
@@ -6183,15 +6185,46 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     if dropin.exists() {
         std::fs::remove_file(&dropin).with_context(|| format!("removing {}", dropin.display()))?;
         println!("Removed {}.", dropin.display());
-        let _ = std::fs::remove_dir(&dropin_dir);
         removed_something = true;
     }
 
+    if dropin_dir.exists() {
+        let remaining: Vec<_> = std::fs::read_dir(&dropin_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            })
+            .collect();
+        if remaining.is_empty() {
+            let _ = std::fs::remove_dir(&dropin_dir);
+        } else {
+            println!(
+                "Note: custom drop-in(s) left in {}: {}",
+                dropin_dir.display(),
+                remaining.join(", ")
+            );
+        }
+    }
+
     if removed_something {
-        let _ = std::process::Command::new("systemctl")
+        let reloaded = std::process::Command::new("systemctl")
             .args(["--user", "daemon-reload"])
-            .status();
-        println!("Disabled x2rock.service and reloaded systemd user daemon.");
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if disabled && reloaded {
+            println!("Disabled x2rock.service and reloaded systemd user daemon.");
+        } else if disabled {
+            println!(
+                "Disabled x2rock.service (reload systemd user daemon with `systemctl --user daemon-reload`)."
+            );
+        } else if reloaded {
+            println!("Reloaded systemd user daemon.");
+        }
+    } else if disabled {
+        println!("Disabled x2rock.service.");
     }
 
     if desktop {
