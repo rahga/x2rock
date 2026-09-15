@@ -141,6 +141,41 @@ pub fn install_desktop_files() -> Result<(PathBuf, PathBuf)> {
     Ok((desktop, icon))
 }
 
+/// Whether desktop entry and icon files are currently present on disk.
+pub fn desktop_installed() -> (bool, bool) {
+    desktop_paths()
+        .map(|(d, i)| (d.exists(), i.exists()))
+        .unwrap_or((false, false))
+}
+
+/// Remove installed desktop entry and icon files if present.
+pub fn uninstall_desktop_files() -> Result<(bool, bool)> {
+    use anyhow::Context;
+    let (desktop, icon) = desktop_paths()?;
+    let desktop_removed = if desktop.exists() {
+        std::fs::remove_file(&desktop)
+            .with_context(|| format!("removing {}", desktop.display()))?;
+        true
+    } else {
+        false
+    };
+    let icon_removed = if icon.exists() {
+        std::fs::remove_file(&icon).with_context(|| format!("removing {}", icon.display()))?;
+        true
+    } else {
+        false
+    };
+    Ok((desktop_removed, icon_removed))
+}
+
+/// Where the user unit goes: `$XDG_CONFIG_HOME/systemd/user`, which is where
+/// `systemctl --user` looks and where the README told people to copy it.
+pub fn user_unit_dir() -> Result<PathBuf> {
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("no home directory to find ~/.config in"))?;
+    Ok(base.config_dir().join("systemd").join("user"))
+}
+
 /// The path the binary was invoked by, kept exactly as invoked.
 ///
 /// Not `current_exe()`, and not canonicalised - both resolve symlinks, and on
@@ -258,6 +293,23 @@ pub fn existing_household(unit: &str) -> Option<String> {
             .strip_prefix("X2ROCK_HOUSEHOLD=")
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
+    })
+}
+
+/// The binary path an installed unit's ExecStart names, if any.
+pub fn existing_exec(unit: &str) -> Option<String> {
+    unit.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("ExecStart=")?;
+        if let Some(inner) = rest.strip_suffix(" daemon") {
+            if inner.starts_with('"') && inner.ends_with('"') {
+                unquoted(inner)
+            } else {
+                Some(inner.to_owned())
+            }
+        } else {
+            Some(rest.to_owned())
+        }
     })
 }
 
@@ -625,5 +677,24 @@ mod tests {
         let (desktop, icon) = desktop_paths().unwrap();
         assert!(desktop.ends_with("applications/x2rock.desktop"));
         assert!(icon.ends_with("icons/hicolor/scalable/apps/x2rock.svg"));
+    }
+
+    #[test]
+    fn existing_exec_extracts_path() {
+        let exe = Path::new("/opt/x2rock/bin/x2rock");
+        let unit = render_unit(exe, None).unwrap();
+        assert_eq!(
+            existing_exec(&unit).as_deref(),
+            Some("/opt/x2rock/bin/x2rock")
+        );
+        assert_eq!(
+            existing_exec(UNIT_TEMPLATE).as_deref(),
+            Some("%h/.local/bin/x2rock")
+        );
+        let custom = "[Service]\nExecStart=/usr/local/bin/x2rock daemon --foo\n";
+        assert_eq!(
+            existing_exec(custom).as_deref(),
+            Some("/usr/local/bin/x2rock daemon --foo")
+        );
     }
 }

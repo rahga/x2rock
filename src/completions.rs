@@ -81,6 +81,20 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
             let fp = netid::network_fingerprint();
             state.room_names(fp.as_deref())
         }
+        "households" => {
+            let state = State::load().unwrap_or_default();
+            let fp = netid::network_fingerprint();
+            if let Some(fp) = fp.as_deref() {
+                let mut list = Vec::new();
+                for (id, _) in state.households_on(fp) {
+                    list.push(id);
+                }
+                list.extend(state.room_names(Some(fp)));
+                list
+            } else {
+                Vec::new()
+            }
+        }
         "bookmarks" => Bookmarks::load()
             .map(|bms| bms.items.into_iter().map(|i| i.name).collect())
             .unwrap_or_default(),
@@ -140,9 +154,10 @@ fn enhance_bash(script: &str) -> String {
         }
 
         // `--room)` / `-r)`, `--household)`, and `--service)` / `-s)` arms: the
-        // value that follows is a room or a service, not a file.
+        // value that follows is a room, household, or service, not a file.
         let list = match trimmed {
-            "--room)" | "-r)" | "--household)" => Some("rooms"),
+            "--room)" | "-r)" => Some("rooms"),
+            "--household)" => Some("households"),
             "--service)" | "-s)" => Some("services"),
             _ => None,
         };
@@ -228,9 +243,11 @@ fn dynamic_reply(list: &str, pad: &str) -> [String; 2] {
 
 fn enhance_fish(script: &str) -> String {
     let mut s = script.to_string();
-    s.push_str("\n# Dynamic completions for rooms, services, and bookmarks\n");
+    s.push_str("\n# Dynamic completions for rooms, households, services, and bookmarks\n");
     s.push_str("complete -c x2rock -s r -l room -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -l household -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
+    s.push_str(
+        "complete -c x2rock -l household -x -a '(x2rock __complete households 2>/dev/null)'\n",
+    );
     s.push_str(
         "complete -c x2rock -s s -l service -x -a '(x2rock __complete services 2>/dev/null)'\n",
     );
@@ -259,6 +276,7 @@ _x2rock_list() {
     compadd -- "${items[@]}"
 }
 _x2rock_rooms() { _x2rock_list rooms }
+_x2rock_households() { _x2rock_list households }
 _x2rock_services() { _x2rock_list services }
 _x2rock_bookmarks() { _x2rock_list bookmarks }
 "#;
@@ -281,7 +299,7 @@ _x2rock_bookmarks() { _x2rock_list bookmarks }
         }
         let mut line = line
             .replace(":ROOM:_default'", ":ROOM:_x2rock_rooms'")
-            .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_rooms'")
+            .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_households'")
             .replace(":room:_default'", ":room:_x2rock_rooms'")
             .replace(":rooms:_default'", ":rooms:_x2rock_rooms'")
             .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'")
@@ -346,13 +364,21 @@ mod tests {
         let s = script(Shell::Bash);
         let lines: Vec<&str> = s.lines().collect();
         let mut room_arms = 0;
+        let mut household_arms = 0;
         let mut service_arms = 0;
         for (i, line) in lines.iter().enumerate() {
             let next = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
             match line.trim() {
-                "--room)" | "-r)" | "--household)" => {
+                "--room)" | "-r)" => {
                     room_arms += 1;
                     assert!(next.starts_with("compopt"), "unhooked room arm at line {i}");
+                }
+                "--household)" => {
+                    household_arms += 1;
+                    assert!(
+                        next.starts_with("compopt"),
+                        "unhooked household arm at line {i}"
+                    );
                 }
                 "--service)" | "-s)" => {
                     service_arms += 1;
@@ -372,6 +398,10 @@ mod tests {
         assert!(
             room_arms > 10,
             "every subcommand has a room arm; saw {room_arms}"
+        );
+        assert!(
+            household_arms >= 1,
+            "global household flag should be hooked; saw {household_arms}"
         );
         assert!(
             service_arms >= 4,
@@ -422,13 +452,17 @@ mod tests {
             "link completes service names"
         );
 
-        assert!(s.contains("__complete rooms") && s.contains("__complete services"));
+        assert!(
+            s.contains("__complete rooms")
+                && s.contains("__complete households")
+                && s.contains("__complete services")
+        );
     }
 
     #[test]
     fn fish_appends_the_dynamic_hooks() {
         let s = script(Shell::Fish);
-        for list in ["rooms", "services", "bookmarks"] {
+        for list in ["rooms", "households", "services", "bookmarks"] {
             assert!(
                 s.contains(&format!("__complete {list}")),
                 "fish lacks the {list} hook"
@@ -457,7 +491,7 @@ mod tests {
         assert_eq!(s.matches(":SERVICE:_default'").count(), 0);
         assert_eq!(s.matches(":service:_default'").count(), 0);
         assert!(s.matches(":ROOM:_x2rock_rooms'").count() > 10);
-        assert!(s.matches(":HOUSEHOLD:_x2rock_rooms'").count() > 10);
+        assert!(s.matches(":HOUSEHOLD:_x2rock_households'").count() > 10);
         assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
@@ -474,6 +508,7 @@ mod tests {
         // Defined once each, before the entry point that autoload reads first.
         for helper in [
             "_x2rock_rooms()",
+            "_x2rock_households()",
             "_x2rock_services()",
             "_x2rock_bookmarks()",
         ] {
@@ -530,6 +565,13 @@ mod tests {
         let mut out = Vec::new();
         complete("rooms", None, &mut out).unwrap();
         // Just verify it doesn't crash or error on this machine:
+        let _ = String::from_utf8(out).unwrap();
+    }
+
+    #[test]
+    fn complete_households_runs_without_error() {
+        let mut out = Vec::new();
+        complete("households", None, &mut out).unwrap();
         let _ = String::from_utf8(out).unwrap();
     }
 

@@ -49,8 +49,8 @@ x2rock service install --enable     # the daemon as a user service - every room 
 `cargo install`, from a clone, from a package — so there is no path to get wrong and nothing to copy
 by hand. It refuses to overwrite a unit whose settings you have edited unless told to with
 `--force`; `--print` shows what it would write. Re-run it if you move or reinstall the binary.
-(`systemd/x2rock.service` is the same unit as a file, for anyone who prefers to copy it; a later
-`service install` replaces that copy without asking, since it carries nothing you wrote.)
+(`x2rock service` or `x2rock service status` reports unit and daemon health; `x2rock service uninstall`
+disables and removes it.)
 
 Discover first: the daemon connects only to players it has been told about and will not scan an
 unfamiliar network on its own. The other order is not fatal — it re-reads the remembered players
@@ -63,7 +63,8 @@ entry and icon (which let MPRIS clients label each room player with a name and i
 ```sh
 git clone https://github.com/rahga/x2rock && cd x2rock
 cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
-x2rock desktop install  # or `x2rock service install --enable`, which installs both
+x2rock desktop install    # or `x2rock service install --enable`, which installs both
+x2rock desktop uninstall  # removes the desktop entry and icon
 ```
 
 Needs Rust 1.89 or newer and a C compiler; see [Requirements](#requirements) for what bites on
@@ -319,12 +320,13 @@ binary to it: every field `status --json` emits must be named there.
 
 ### Shell completions
 
-`x2rock completions <shell>` generates scripts for Bash, Zsh, Fish, Elvish and PowerShell. Bash,
-Zsh and Fish also dynamically complete room names (for `-r`, `--household`, `group`, `ungroup`),
+`x2rock completions [shell]` generates scripts for Bash, Zsh, Fish, Elvish and PowerShell (auto-detecting `$SHELL` when omitted). Bash,
+Zsh and Fish also dynamically complete room and household names (for `-r`, `--household`, `group`, `ungroup`),
 service names (for `-s`, `link`, `unlink`) and `bookmark` names — from local state, so `<Tab>`
 never waits on a speaker.
 
 ```sh
+x2rock completions --install         # auto-detects $SHELL and installs to user dir
 x2rock completions bash --install    # → ~/.local/share/bash-completion/completions/x2rock
 x2rock completions fish --install    # → ~/.config/fish/completions/x2rock.fish
 x2rock completions zsh --install     # → ~/.local/share/zsh/site-functions/_x2rock

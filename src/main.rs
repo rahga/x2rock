@@ -770,6 +770,9 @@ enum Command {
         /// to seed another agent.
         #[arg(long)]
         print: bool,
+        /// Remove the skill from assistant skills directories instead of installing it.
+        #[arg(long, conflicts_with = "print")]
+        remove: bool,
     },
     /// Install the desktop entry and icon for MPRIS media player identity.
     ///
@@ -780,7 +783,7 @@ enum Command {
         #[command(subcommand)]
         action: Option<DesktopAction>,
     },
-    /// Install the daemon as a systemd user service, pointing at this binary.
+    /// Manage the daemon's systemd user service (install, status, uninstall).
     ///
     /// Writes `~/.config/systemd/user/x2rock.service` from the shipped unit with
     /// `ExecStart` set to the path this command is running from - so it is right
@@ -791,15 +794,15 @@ enum Command {
     /// `--force` overwrites. Re-run after moving or reinstalling the binary.
     Service {
         #[command(subcommand)]
-        action: ServiceAction,
+        action: Option<ServiceAction>,
     },
     /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
     ///
     /// Outputs the script to stdout. Room names, bookmarks, and services are
     /// dynamically completed from local state.
     Completions {
-        /// Shell to generate completions for.
-        shell: clap_complete::Shell,
+        /// Shell to generate completions for. Auto-detects from $SHELL when omitted.
+        shell: Option<clap_complete::Shell>,
         /// Install the completion script to the default user directory for the shell.
         #[arg(long)]
         install: bool,
@@ -1076,8 +1079,7 @@ enum RateDirection {
     Down,
 }
 
-/// What `service` can do to the daemon's unit. One thing so far; a subcommand
-/// so that `uninstall` or `status` have a place to go without a flag soup.
+/// What `service` can do to the daemon's unit: install, check status, or uninstall.
 #[derive(Subcommand)]
 enum ServiceAction {
     /// Write the unit (and, with --headless, its drop-in), then `daemon-reload`.
@@ -1102,6 +1104,18 @@ enum ServiceAction {
         #[arg(long)]
         no_household: bool,
     },
+    /// Check whether the systemd user service and daemon are active, enabled, or stale.
+    Status {
+        /// Output status information as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop, disable, and remove the systemd user service and drop-in.
+    Uninstall {
+        /// Also remove installed desktop entry and icon files.
+        #[arg(long)]
+        desktop: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1116,6 +1130,8 @@ enum AgentTarget {
 enum DesktopAction {
     /// Install `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
     Install,
+    /// Remove `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
+    Uninstall,
 }
 
 /// The one thing `bookmarks` does besides list.
@@ -5683,11 +5699,12 @@ fn agent_skills_dirs(agent: Option<AgentTarget>) -> Result<Vec<PathBuf>> {
 }
 
 /// `x2rock skill`: drop the embedded skill into assistant skill directories (or
-/// print it). Needs no network - it is a local file write.
-fn install_skill(
+/// remove or print it). Needs no network - it is a local file operation.
+fn handle_skill(
     agent: Option<AgentTarget>,
     dir: Option<&std::path::Path>,
     print: bool,
+    remove: bool,
 ) -> Result<()> {
     if print {
         print!("{SKILL}");
@@ -5697,6 +5714,21 @@ fn install_skill(
         Some(d) => vec![d.to_path_buf()],
         None => agent_skills_dirs(agent)?,
     };
+    if remove {
+        for base in &targets {
+            let target = base.join("x2rock");
+            let path = target.join("SKILL.md");
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                println!("Removed {}.", path.display());
+                let _ = std::fs::remove_dir(&target);
+            } else {
+                println!("No skill found at {}.", path.display());
+            }
+        }
+        return Ok(());
+    }
     for base in &targets {
         let target = base.join("x2rock");
         std::fs::create_dir_all(&target)
@@ -5712,9 +5744,21 @@ fn install_skill(
 /// Where the user unit goes: `$XDG_CONFIG_HOME/systemd/user`, which is where
 /// `systemctl --user` looks and where the README told people to copy it.
 fn user_unit_dir() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .ok_or_else(|| anyhow!("no home directory to find ~/.config in"))?;
-    Ok(base.config_dir().join("systemd").join("user"))
+    service::user_unit_dir()
+}
+
+/// Auto-detect the current shell from $SHELL environment variable.
+fn detect_shell() -> Option<clap_complete::Shell> {
+    let shell_path = std::env::var("SHELL").ok()?;
+    let name = std::path::Path::new(&shell_path).file_name()?.to_str()?;
+    match name {
+        "bash" => Some(clap_complete::Shell::Bash),
+        "zsh" => Some(clap_complete::Shell::Zsh),
+        "fish" => Some(clap_complete::Shell::Fish),
+        "elvish" => Some(clap_complete::Shell::Elvish),
+        "powershell" | "pwsh" => Some(clap_complete::Shell::PowerShell),
+        _ => None,
+    }
 }
 
 /// Whether the running daemon is on a binary other than `exe`: replaced in
@@ -5946,6 +5990,205 @@ fn install_service(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct ServiceStatusJson {
+    installed: bool,
+    unit_path: String,
+    active: bool,
+    enabled: bool,
+    pid: Option<u32>,
+    stale: bool,
+    exec: Option<String>,
+    household: Option<String>,
+    headless_installed: bool,
+    desktop_installed: bool,
+}
+
+fn status_service(json: bool) -> Result<()> {
+    let dir = service::user_unit_dir()?;
+    let unit_path = dir.join("x2rock.service");
+    let installed = unit_path.exists();
+    let unit_content = if installed {
+        store::read_optional(&unit_path)?
+    } else {
+        None
+    };
+
+    let exec = unit_content.as_deref().and_then(service::existing_exec);
+    let household = unit_content
+        .as_deref()
+        .and_then(service::existing_household);
+
+    let dropin_path = dir.join("x2rock.service.d").join("headless.conf");
+    let headless_installed = dropin_path.exists();
+
+    let active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "x2rock.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let enabled = std::process::Command::new("systemctl")
+        .args(["--user", "is-enabled", "--quiet", "x2rock.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let pid = if active {
+        std::process::Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "x2rock.service",
+                "-p",
+                "MainPID",
+                "--value",
+            ])
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .filter(|&p| p > 0)
+    } else {
+        None
+    };
+
+    let (desktop_file_exists, icon_exists) = service::desktop_installed();
+    let desktop_installed = desktop_file_exists && icon_exists;
+
+    let current_exe = std::env::current_exe().ok();
+    let stale = active
+        && current_exe
+            .as_deref()
+            .map(daemon_runs_stale_binary)
+            .unwrap_or(false);
+
+    if json {
+        let status = ServiceStatusJson {
+            installed,
+            unit_path: unit_path.display().to_string(),
+            active,
+            enabled,
+            pid,
+            stale,
+            exec,
+            household,
+            headless_installed,
+            desktop_installed,
+        };
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
+
+    println!(
+        "Service unit:   {}",
+        if installed {
+            format!("installed ({})", unit_path.display())
+        } else {
+            format!("not installed ({})", unit_path.display())
+        }
+    );
+
+    if let Some(e) = &exec {
+        let exists = std::path::Path::new(e).exists();
+        println!(
+            "ExecStart:      {}{}",
+            e,
+            if exists {
+                ""
+            } else {
+                " (binary not found on disk!)"
+            }
+        );
+    }
+    if let Some(h) = &household {
+        println!("Household:      {h}");
+    }
+    if headless_installed {
+        println!("Drop-in:        installed ({})", dropin_path.display());
+    }
+    println!(
+        "Systemd state:  {}",
+        if active {
+            if let Some(p) = pid {
+                format!("active (running, PID {p})")
+            } else {
+                "active".to_string()
+            }
+        } else {
+            "inactive".to_string()
+        }
+    );
+    println!("Unit enabled:   {}", if enabled { "yes" } else { "no" });
+    if stale {
+        println!(
+            "Note:           running daemon process is on a stale binary; run `systemctl --user restart x2rock.service`"
+        );
+    }
+    println!(
+        "Desktop files:  {}",
+        if desktop_installed {
+            "installed"
+        } else if desktop_file_exists || icon_exists {
+            "partially installed"
+        } else {
+            "not installed"
+        }
+    );
+
+    Ok(())
+}
+
+fn uninstall_service(desktop: bool) -> Result<()> {
+    let dir = service::user_unit_dir()?;
+    let unit_path = dir.join("x2rock.service");
+    let dropin = dir.join("x2rock.service.d").join("headless.conf");
+    let dropin_dir = dir.join("x2rock.service.d");
+
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", "x2rock.service"])
+        .status();
+
+    let mut removed_something = false;
+    if unit_path.exists() {
+        std::fs::remove_file(&unit_path)
+            .with_context(|| format!("removing {}", unit_path.display()))?;
+        println!("Removed {}.", unit_path.display());
+        removed_something = true;
+    } else {
+        println!("Service unit was not installed at {}.", unit_path.display());
+    }
+
+    if dropin.exists() {
+        std::fs::remove_file(&dropin).with_context(|| format!("removing {}", dropin.display()))?;
+        println!("Removed {}.", dropin.display());
+        let _ = std::fs::remove_dir(&dropin_dir);
+        removed_something = true;
+    }
+
+    if removed_something {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        println!("Disabled x2rock.service and reloaded systemd user daemon.");
+    }
+
+    if desktop {
+        let (d_removed, i_removed) = service::uninstall_desktop_files()?;
+        if d_removed || i_removed {
+            println!("Removed desktop entry and icon.");
+        } else {
+            println!("Desktop entry and icon were not installed.");
+        }
+    }
+
+    Ok(())
+}
+
 impl Command {
     /// Whether the command was asked for `--json`, so an error can match the
     /// output the caller expected. Every variant with the flag is here - a test
@@ -5980,6 +6223,9 @@ impl Command {
             | Command::Households { json, .. }
             | Command::Rate { json, .. }
             | Command::Queue { json, .. } => *json,
+            Command::Service {
+                action: Some(ServiceAction::Status { json }),
+            } => *json,
             _ => false,
         }
     }
@@ -6025,39 +6271,66 @@ async fn run(cli: Cli) -> Result<()> {
             agent,
             ref dir,
             print,
+            remove,
         } => {
-            return install_skill(agent, dir.as_deref(), print);
+            return handle_skill(agent, dir.as_deref(), print, remove);
         }
-        Command::Desktop { .. } => {
-            let (desktop, icon) = service::install_desktop_files()?;
-            println!("Installed desktop entry to {}.", desktop.display());
-            println!("Installed icon to {}.", icon.display());
+        Command::Desktop { action } => {
+            match action {
+                None | Some(DesktopAction::Install) => {
+                    let (desktop, icon) = service::install_desktop_files()?;
+                    println!("Installed desktop entry to {}.", desktop.display());
+                    println!("Installed icon to {}.", icon.display());
+                }
+                Some(DesktopAction::Uninstall) => {
+                    let (desktop, icon) = service::uninstall_desktop_files()?;
+                    if desktop || icon {
+                        println!("Removed desktop entry and icon.");
+                    } else {
+                        println!("Desktop entry and icon were not installed.");
+                    }
+                }
+            }
             return Ok(());
         }
-        Command::Service {
-            action:
-                ServiceAction::Install {
-                    headless,
-                    enable,
-                    force,
-                    print,
-                    no_household,
-                },
-        } => {
-            return install_service(
-                cli.household.as_deref(),
-                no_household,
+        Command::Service { action } => match action {
+            Some(ServiceAction::Install {
                 headless,
                 enable,
                 force,
                 print,
-            );
-        }
+                no_household,
+            }) => {
+                return install_service(
+                    cli.household.as_deref(),
+                    no_household,
+                    headless,
+                    enable,
+                    force,
+                    print,
+                );
+            }
+            Some(ServiceAction::Status { json }) => {
+                return status_service(json);
+            }
+            None => {
+                return status_service(false);
+            }
+            Some(ServiceAction::Uninstall { desktop }) => {
+                return uninstall_service(desktop);
+            }
+        },
         Command::Completions { shell, install } => {
+            let target_shell = match shell.or_else(detect_shell) {
+                Some(s) => s,
+                None => bail!(
+                    "could not determine shell from $SHELL; specify one of bash, zsh, fish, elvish, powershell"
+                ),
+            };
             if install {
-                return completions::install(shell);
+                return completions::install(target_shell);
             } else {
-                return completions::generate(shell, &mut std::io::stdout());
+                return completions::generate(target_shell, &mut std::io::stdout());
             }
         }
         Command::Complete {
