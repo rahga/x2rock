@@ -12,8 +12,29 @@
 //! a published tarball, or on a machine with no git - because a version string
 //! is not worth failing a build over.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Ask git for a path under the git directory (e.g. `HEAD`, `index`, `packed-refs`,
+/// or a branch ref). Works across regular checkouts, worktrees, and submodules.
+fn git_path(what: &str) -> Option<PathBuf> {
+    if let Some(path) = Command::new("git")
+        .args(["rev-parse", "--git-path", what])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|text| PathBuf::from(text.trim()))
+        .filter(|p| p.exists())
+    {
+        return Some(path);
+    }
+    let direct = Path::new(".git").join(what);
+    if direct.exists() {
+        return Some(direct);
+    }
+    None
+}
 
 fn main() {
     let package = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
@@ -31,12 +52,29 @@ fn main() {
         None => println!("cargo:rustc-env=X2ROCK_VERSION={package}"),
     }
 
+    // In a worktree or submodule, `.git` is a file pointing to the actual git
+    // directory. Watching the file itself catches relocation or re-pointing.
+    if Path::new(".git").is_file() {
+        println!("cargo:rerun-if-changed=.git");
+    }
+
     // Without these the stamp is cached with the first build, and every later
-    // one reports the commit it was first built at. `index` is what makes
+    // one reports the commit it was first built at. `HEAD` and the ref it
+    // points to catch commits and branch switches; `index` is what makes
     // `--dirty` honest: it moves when the working tree does.
-    for path in [".git/HEAD", ".git/index"] {
-        if Path::new(path).exists() {
-            println!("cargo:rerun-if-changed={path}");
+    for name in ["HEAD", "index", "packed-refs"] {
+        if let Some(path) = git_path(name) {
+            println!("cargo:rerun-if-changed={}", path.display());
         }
+    }
+
+    // If HEAD is a symbolic ref ("ref: refs/heads/..."), watch the ref file
+    // too: HEAD does not change mtime when a commit lands on the current branch.
+    if let Some(head_path) = git_path("HEAD")
+        && let Ok(head_content) = std::fs::read_to_string(&head_path)
+        && let Some(ref_name) = head_content.trim().strip_prefix("ref: ")
+        && let Some(ref_path) = git_path(ref_name.trim())
+    {
+        println!("cargo:rerun-if-changed={}", ref_path.display());
     }
 }
