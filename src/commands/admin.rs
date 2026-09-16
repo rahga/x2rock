@@ -684,10 +684,26 @@ pub fn desktop(action: Option<DesktopAction>) -> Result<()> {
     Ok(())
 }
 
+/// Whether `--json` means anything for a `service` action.
+///
+/// The flag is global on `service` so that `x2rock service --json` works
+/// without naming `status`, which is what a bare `x2rock service` runs. The
+/// other two actions have no JSON form, and a flag that parses and then does
+/// nothing is how a caller comes to trust output it never got - so they refuse
+/// it rather than ignore it.
+fn json_applies(action: &Option<ServiceAction>) -> bool {
+    matches!(action, None | Some(ServiceAction::Status))
+}
+
 /// `x2rock service`: the daemon's systemd unit - install, status (the
 /// default), uninstall. `household` is the global `--household`, kept in
 /// the unit so a daemon on a shared network knows which system is meant.
 pub fn service(action: Option<ServiceAction>, json: bool, household: Option<&str>) -> Result<()> {
+    ensure!(
+        !json || json_applies(&action),
+        "--json applies to `service status`, which is what `x2rock service` runs on its own; \
+         install and uninstall have no JSON form"
+    );
     match action {
         Some(ServiceAction::Install {
             headless,
@@ -727,6 +743,25 @@ pub fn completions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--json` is global on `service` for the sake of a bare `x2rock service
+    /// --json`, so the rule about where it actually means something lives here
+    /// rather than in clap, and is held to it.
+    #[test]
+    fn json_belongs_to_status_and_is_refused_elsewhere() {
+        assert!(json_applies(&None), "a bare `service` is status");
+        assert!(json_applies(&Some(ServiceAction::Status)));
+        assert!(!json_applies(&Some(ServiceAction::Uninstall {
+            desktop: false
+        })));
+        assert!(!json_applies(&Some(ServiceAction::Install {
+            headless: false,
+            enable: false,
+            force: false,
+            print: false,
+            no_household: false,
+        })));
+    }
 
     #[test]
     fn the_embedded_skill_carries_its_frontmatter_and_contracts() {
