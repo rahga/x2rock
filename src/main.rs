@@ -804,6 +804,9 @@ enum Command {
     Service {
         #[command(subcommand)]
         action: Option<ServiceAction>,
+        /// Output status information as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
     ///
@@ -1114,11 +1117,7 @@ enum ServiceAction {
         no_household: bool,
     },
     /// Check whether the systemd user service and daemon are active, enabled, or stale.
-    Status {
-        /// Output status information as JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    Status,
     /// Stop, disable, and remove the systemd user service and drop-in.
     Uninstall {
         /// Also remove installed desktop entry and icon files.
@@ -6290,10 +6289,8 @@ impl Command {
             | Command::Bookmarks { json, .. }
             | Command::Households { json, .. }
             | Command::Rate { json, .. }
+            | Command::Service { json, .. }
             | Command::Queue { json, .. } => *json,
-            Command::Service {
-                action: Some(ServiceAction::Status { json }),
-            } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),
             } => *json,
@@ -6400,7 +6397,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
             return Ok(());
         }
-        Command::Service { action } => match action {
+        Command::Service { action, json } => match action {
             Some(ServiceAction::Install {
                 headless,
                 enable,
@@ -6417,11 +6414,8 @@ async fn run(cli: Cli) -> Result<()> {
                     print,
                 );
             }
-            Some(ServiceAction::Status { json }) => {
+            Some(ServiceAction::Status) | None => {
                 return status_service(json);
-            }
-            None => {
-                return status_service(false);
             }
             Some(ServiceAction::Uninstall { desktop }) => {
                 return uninstall_service(desktop);
@@ -8203,6 +8197,29 @@ mod tests {
         let cli =
             Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
         assert!(cli.command.json());
+    }
+
+    #[test]
+    fn service_accepts_global_json_flag() {
+        let cli = Cli::try_parse_from(["x2rock", "service", "--json"]).unwrap();
+        assert!(cli.command.json());
+        assert!(matches!(
+            cli.command,
+            Command::Service {
+                action: None,
+                json: true,
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "service", "status", "--json"]).unwrap();
+        assert!(cli.command.json());
+        assert!(matches!(
+            cli.command,
+            Command::Service {
+                action: Some(ServiceAction::Status),
+                json: true,
+            }
+        ));
     }
 
     /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is
