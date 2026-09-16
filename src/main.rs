@@ -1140,7 +1140,11 @@ enum AgentTarget {
 #[derive(Subcommand)]
 enum DesktopAction {
     /// Install `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
-    Install,
+    Install {
+        /// Overwrite hand-edited desktop entry or icon files.
+        #[arg(long)]
+        force: bool,
+    },
     /// Remove `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
     Uninstall,
     /// Check whether the desktop entry and icon files are installed.
@@ -6355,18 +6359,36 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Desktop { action } => {
             match action {
-                None | Some(DesktopAction::Install) => {
-                    let placed = service::place_desktop_files(true)?;
+                None | Some(DesktopAction::Install { .. }) => {
+                    let force = match action {
+                        Some(DesktopAction::Install { force }) => force,
+                        _ => false,
+                    };
+                    let placed = service::place_desktop_files(force)?;
                     if placed.desktop_written {
                         println!(
                             "Installed desktop entry to {}.",
                             placed.desktop_path.display()
                         );
+                    } else if placed.desktop_edited && !force {
+                        println!(
+                            "Note: {} has been edited and was left in place; use --force to overwrite.",
+                            placed.desktop_path.display()
+                        );
                     }
                     if placed.icon_written {
                         println!("Installed icon to {}.", placed.icon_path.display());
+                    } else if placed.icon_edited && !force {
+                        println!(
+                            "Note: {} has been edited and was left in place; use --force to overwrite.",
+                            placed.icon_path.display()
+                        );
                     }
-                    if !placed.desktop_written && !placed.icon_written {
+                    if !placed.desktop_written
+                        && !placed.icon_written
+                        && !placed.desktop_edited
+                        && !placed.icon_edited
+                    {
                         println!("Desktop entry and icon are already up to date.");
                     }
                 }
@@ -8264,6 +8286,25 @@ mod tests {
         assert!(
             Cli::try_parse_from(["x2rock", "completions", "--install", "--uninstall"]).is_err()
         );
+    }
+
+    #[test]
+    fn desktop_install_force_flag() {
+        let cli = Cli::try_parse_from(["x2rock", "desktop", "install"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Desktop {
+                action: Some(DesktopAction::Install { force: false })
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "desktop", "install", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Desktop {
+                action: Some(DesktopAction::Install { force: true })
+            }
+        ));
     }
 
     /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is
