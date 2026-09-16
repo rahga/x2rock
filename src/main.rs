@@ -6254,6 +6254,13 @@ fn uninstall_service(desktop: bool) -> Result<()> {
         } else {
             println!("Desktop entry and icon were not installed.");
         }
+    } else {
+        let (d_exists, i_exists) = service::desktop_installed();
+        if d_exists || i_exists {
+            println!(
+                "Note: desktop entry and icon were left in place; pass --desktop to remove them."
+            );
+        }
     }
 
     Ok(())
