@@ -1053,10 +1053,7 @@ pub fn unlink(service: &str) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let (id, _) = linked
         .find_service(service)
-        .map(|(id, a)| (id.to_string(), a))
-        .ok_or_else(|| {
-            anyhow!("no account linked for {service:?}. Run `x2rock accounts` to see them.")
-        })?;
+        .map(|(id, a)| (id.to_string(), a))?;
     let dropped = linked.forget(&id);
     linked.save()?;
     if let Some(account) = dropped {

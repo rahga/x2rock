@@ -27,7 +27,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::smapi::{DeviceAuth, Token};
@@ -171,18 +171,23 @@ impl Credentials {
         self.services.get(service_id)
     }
 
-    /// Find a linked account by service id or service name (exact case-insensitive
-    /// match first, then unique prefix match on service name).
-    pub fn find_service<'a>(&'a self, query: &str) -> Option<(&'a str, &'a Account)> {
+    /// Find a linked account by service id, exact name, or unique name prefix.
+    ///
+    /// Three ways because `accounts` prints both the id and the name, and
+    /// either is a reasonable thing to type back. A prefix that matches
+    /// several is refused **by name** rather than resolved to the first:
+    /// forgetting the wrong token is a quiet mistake, one that only shows up
+    /// the next time that service is asked to play something.
+    pub fn find_service<'a>(&'a self, query: &str) -> Result<(&'a str, &'a Account)> {
         if let Some((id, account)) = self.services.get_key_value(query) {
-            return Some((id.as_str(), account));
+            return Ok((id.as_str(), account));
         }
         if let Some((id, account)) = self
             .services
             .iter()
             .find(|(_, a)| a.service_name.eq_ignore_ascii_case(query))
         {
-            return Some((id.as_str(), account));
+            return Ok((id.as_str(), account));
         }
         let needle = query.to_lowercase();
         let matches: Vec<_> = self
@@ -190,11 +195,24 @@ impl Credentials {
             .iter()
             .filter(|(_, a)| a.service_name.to_lowercase().starts_with(&needle))
             .collect();
-        if matches.len() == 1 {
-            let (id, account) = matches[0];
-            return Some((id.as_str(), account));
+        match matches.len() {
+            0 => bail!("no account linked for {query:?}. Run `x2rock accounts` to see them."),
+            1 => {
+                let (id, account) = matches[0];
+                Ok((id.as_str(), account))
+            }
+            several => {
+                let shown: Vec<_> = matches
+                    .iter()
+                    .map(|(id, a)| format!("{} (id {id})", a.service_name))
+                    .collect();
+                bail!(
+                    "{several} linked services start with {query:?}: {}. \
+                     Give the id, or the whole name.",
+                    shown.join(", ")
+                )
+            }
         }
-        None
     }
 
     /// The token held for a service, if any - what every play path hands SMAPI.
@@ -393,6 +411,15 @@ mod tests {
         assert_eq!(acct.service_name, "Bandcamp");
 
         // Non-existent
-        assert!(creds.find_service("Spotify").is_none());
+        assert!(creds.find_service("Spotify").is_err());
+
+        // A prefix matching two is refused, and names both rather than
+        // forgetting whichever happens to sort first.
+        creds.remember("285", account("YouTube"));
+        let ambiguous = creds.find_service("you").unwrap_err().to_string();
+        assert!(ambiguous.contains("YouTube Music (id 284)"), "{ambiguous}");
+        assert!(ambiguous.contains("YouTube (id 285)"), "{ambiguous}");
+        // The whole name still resolves, though it is a prefix of the other.
+        assert_eq!(creds.find_service("YouTube").unwrap().0, "285");
     }
 }
