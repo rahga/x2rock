@@ -19,15 +19,6 @@ use crate::sonos::proto::{Groups, Player};
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
 
-/// The favorite a query names: its id exactly, else a case-insensitive match on
-/// the name. Several matches are reported rather than guessed between, except
-/// where one of them is the whole name - "Bedtime" should not be ambiguous just
-/// because "Bedtime P5 Mix" also exists.
-/// The household's alarms, one line each.
-///
-/// `RoomUUID` is resolved against the topology for a name, and left as the id
-/// when it does not resolve - an alarm survives its room being switched off, and
-/// hiding it would be worse than showing a raw id.
 /// One alarm as the JSON object `alarms --json` lists and `alarms add --json`
 /// returns, so the id an agent reads off a creation is the id it lists by.
 fn alarm_json(a: &upnp::Alarm, groups: &Groups) -> serde_json::Value {
@@ -46,6 +37,11 @@ fn alarm_json(a: &upnp::Alarm, groups: &Groups) -> serde_json::Value {
     })
 }
 
+/// The household's alarms, one line each.
+///
+/// `RoomUUID` is resolved against the topology for a name, and left as the id
+/// when it does not resolve - an alarm survives its room being switched off, and
+/// hiding it would be worse than showing a raw id.
 fn print_alarms(alarms: &[upnp::Alarm], groups: &Groups, json: bool) {
     let room_of = |uuid: &str| groups.player(uuid).map(|p| p.name.clone());
     if json {
