@@ -9,6 +9,7 @@ pub mod household;
 pub mod playback;
 pub mod services;
 pub mod speaker;
+pub mod status;
 pub mod stream;
 pub mod volume;
 
