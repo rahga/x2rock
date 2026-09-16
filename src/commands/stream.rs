@@ -10,10 +10,11 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
+use super::services::save_refreshed_token;
 use crate::session;
 use crate::sonos::local::Connection;
 use crate::state::State;
-use crate::{credentials, hint, save_refreshed_token, sonos, stations, streams};
+use crate::{credentials, hint, sonos, stations, streams};
 
 /// Whether a stream is starting fresh or replacing one whose URL expired.
 #[derive(Clone, Copy, PartialEq, Eq)]
