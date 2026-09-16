@@ -547,7 +547,9 @@ service the household has linked, since x2rock never sees a token. A kept item l
 long as the household's account for that service does; disconnect the service in the Sonos app
 and the player refuses the same id, re-add it and the same kept item plays again. Kept entries
 never expire; the daemon's history keeps the last fifty. Both live in
-`~/.local/state/x2rock/bookmarks.json`, on this machine.
+`~/.local/state/x2rock/bookmarks.json`, on this machine, so all bookmark management
+commands (`bookmarks`, `bookmarks --all`, `pin`, `rename`, `remove`, `prune`) work
+offline on any network without reaching for a speaker.
 
 ## The queue
 

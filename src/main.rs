@@ -6313,6 +6313,148 @@ impl Command {
     }
 }
 
+fn run_bookmarks(
+    action: Option<&BookmarksAction>,
+    query: Option<&str>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
+    if let Some(act) = action {
+        match act {
+            BookmarksAction::Remove { query } => {
+                let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
+                if json {
+                    println!("{}", json!({ "removed": gone.name }));
+                } else {
+                    println!("Forgot {}.", gone.name);
+                }
+                return Ok(());
+            }
+            BookmarksAction::Pin { query } => {
+                let (pinned, was_pinned) = bookmarks::Bookmarks::update(|list| list.pin(query))?;
+                if json {
+                    println!(
+                        "{}",
+                        json!({
+                            "name": pinned.name,
+                            "pinned": true,
+                            "already_pinned": was_pinned,
+                        })
+                    );
+                } else if was_pinned {
+                    println!("Already pinned {}.", pinned.name);
+                } else {
+                    println!("Pinned {}.", pinned.name);
+                }
+                return Ok(());
+            }
+            BookmarksAction::Rename { query, new_name } => {
+                let (old, new) = bookmarks::Bookmarks::update(|list| list.rename(query, new_name))?;
+                if json {
+                    println!("{}", json!({ "old_name": old, "new_name": new }));
+                } else {
+                    println!("Renamed {old} to {new}.");
+                }
+                return Ok(());
+            }
+            BookmarksAction::Prune => {
+                let (pruned, kept) = bookmarks::Bookmarks::update(|list| Ok(list.prune()))?;
+                if json {
+                    println!("{}", json!({ "pruned": pruned, "total": kept }));
+                } else if pruned == 0 {
+                    println!("No unpinned history entries to prune ({kept} kept).");
+                } else {
+                    let entries = if pruned == 1 { "entry" } else { "entries" };
+                    println!("Pruned {pruned} history {entries}, {kept} bookmarks kept.");
+                }
+                return Ok(());
+            }
+        }
+    }
+    let list = bookmarks::Bookmarks::load()?;
+    let mut items = list.listed(all);
+    if let Some(query) = query {
+        let needle = query.to_lowercase();
+        items.retain(|b| b.name.to_lowercase().contains(&needle));
+    }
+    if json {
+        let rows: Vec<_> = items
+            .iter()
+            .map(|b| {
+                // Same field names as `favorites --json` and `search --json`,
+                // so the widget's picker can concatenate all three.
+                json!({
+                    "id": b.object_id,
+                    "name": b.name,
+                    "type": b.kind,
+                    "description": b.artist,
+                    "service": b.service_name,
+                    "art_url": b.art_url,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&rows)?);
+    } else if items.is_empty() {
+        // Four states were wearing one message, and a query filtering
+        // everything out got the worst of it: "Nothing kept. Play something
+        // and run `x2rock keep`" told someone with a full file that their
+        // file was empty. What is empty, and what to do about it, differ.
+        match query {
+            Some(q) => {
+                // Whether `--all` would have found it is the useful half of
+                // the answer, and it costs one pass over what is loaded.
+                let deeper = if all {
+                    0
+                } else {
+                    let needle = q.to_lowercase();
+                    list.listed(true)
+                        .iter()
+                        .filter(|b| b.name.to_lowercase().contains(&needle))
+                        .count()
+                };
+                if deeper > 0 {
+                    println!(
+                        "Nothing kept matches {q:?}, but {deeper} of what played recently \
+                         does. `x2rock bookmarks --all {q:?}`."
+                    );
+                } else if all {
+                    println!("Nothing kept or played recently matches {q:?}.");
+                } else {
+                    println!("Nothing kept matches {q:?}.");
+                }
+            }
+            None => {
+                let hidden = list.items.len();
+                if hidden > 0 && !all {
+                    println!(
+                        "Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`."
+                    );
+                } else {
+                    println!("Nothing kept. Play something and run `x2rock keep`.");
+                }
+            }
+        }
+    } else {
+        for b in items {
+            let by = b
+                .artist
+                .as_deref()
+                .map(|a| format!(" — {a}"))
+                .unwrap_or_default();
+            let on = b
+                .service_name
+                .as_deref()
+                .map(|s| format!("  [{s}]"))
+                .unwrap_or_default();
+            // A mark for the deliberate ones, so `--all` still tells them
+            // apart from whatever happened to play.
+            let mark = if b.pinned { "*" } else { " " };
+            println!("{mark} {}{by}{on}", b.name);
+        }
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<()> {
     // The single room most commands act on: the first `--room`, bound from the
     // field (not a `&self` method) so it stays disjoint from `match cli.command`
@@ -6614,6 +6756,14 @@ async fn run(cli: Cli) -> Result<()> {
                 );
             }
             return Ok(());
+        }
+        Command::Bookmarks {
+            ref action,
+            ref query,
+            all,
+            json,
+        } => {
+            return run_bookmarks(action.as_ref(), query.as_deref(), all, json);
         }
         Command::Accounts { content, json } => {
             let linked = credentials::Credentials::load()?;
@@ -7176,165 +7326,6 @@ async fn run(cli: Cli) -> Result<()> {
                         );
                     }
                 }
-            }
-        }
-        return Ok(());
-    }
-
-    // Kept items are x2rock's own and live on this machine, so the *data* needs
-    // no household. The command still does, which the older version of this
-    // comment claimed it did not: `session::connect` above is unconditional, so
-    // `bookmarks` on a network with no remembered players fails with "no players
-    // remembered" before ever reaching here. Found by trying to list an empty
-    // store in a scratch `XDG_STATE_HOME`, which had no `networks.json` either.
-    //
-    // Left as it is rather than hoisted above the connect. Doing that would buy
-    // offline listing at the price of a second place deciding which commands are
-    // local-only, and this is a single-user install where the case does not come
-    // up. The comment is corrected instead of the behaviour, so the next reader
-    // is not misled about what actually runs first.
-    if let Command::Bookmarks {
-        action,
-        query,
-        all,
-        json,
-    } = &cli.command
-    {
-        // Mutations need no household either, and have to happen before the
-        // listing below reads the file it is about to change.
-        if let Some(act) = action {
-            match act {
-                BookmarksAction::Remove { query } => {
-                    let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
-                    if *json {
-                        println!("{}", json!({ "removed": gone.name }));
-                    } else {
-                        println!("Forgot {}.", gone.name);
-                    }
-                    return Ok(());
-                }
-                BookmarksAction::Pin { query } => {
-                    let (pinned, was_pinned) =
-                        bookmarks::Bookmarks::update(|list| list.pin(query))?;
-                    if *json {
-                        println!(
-                            "{}",
-                            json!({
-                                "name": pinned.name,
-                                "pinned": true,
-                                "already_pinned": was_pinned,
-                            })
-                        );
-                    } else if was_pinned {
-                        println!("Already pinned {}.", pinned.name);
-                    } else {
-                        println!("Pinned {}.", pinned.name);
-                    }
-                    return Ok(());
-                }
-                BookmarksAction::Rename { query, new_name } => {
-                    let (old, new) =
-                        bookmarks::Bookmarks::update(|list| list.rename(query, new_name))?;
-                    if *json {
-                        println!("{}", json!({ "old_name": old, "new_name": new }));
-                    } else {
-                        println!("Renamed {old} to {new}.");
-                    }
-                    return Ok(());
-                }
-                BookmarksAction::Prune => {
-                    let (pruned, kept) = bookmarks::Bookmarks::update(|list| Ok(list.prune()))?;
-                    if *json {
-                        println!("{}", json!({ "pruned": pruned, "total": kept }));
-                    } else if pruned == 0 {
-                        println!("No unpinned history entries to prune ({kept} kept).");
-                    } else {
-                        let entries = if pruned == 1 { "entry" } else { "entries" };
-                        println!("Pruned {pruned} history {entries}, {kept} bookmarks kept.");
-                    }
-                    return Ok(());
-                }
-            }
-        }
-        let list = bookmarks::Bookmarks::load()?;
-        let mut items = list.listed(*all);
-        if let Some(query) = query {
-            let needle = query.to_lowercase();
-            items.retain(|b| b.name.to_lowercase().contains(&needle));
-        }
-        if *json {
-            let rows: Vec<_> = items
-                .iter()
-                .map(|b| {
-                    // Same field names as `favorites --json` and `search --json`,
-                    // so the widget's picker can concatenate all three.
-                    json!({
-                        "id": b.object_id,
-                        "name": b.name,
-                        "type": b.kind,
-                        "description": b.artist,
-                        "service": b.service_name,
-                        "art_url": b.art_url,
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string(&rows)?);
-        } else if items.is_empty() {
-            // Four states were wearing one message, and a query filtering
-            // everything out got the worst of it: "Nothing kept. Play something
-            // and run `x2rock keep`" told someone with a full file that their
-            // file was empty. What is empty, and what to do about it, differ.
-            match query {
-                Some(q) => {
-                    // Whether `--all` would have found it is the useful half of
-                    // the answer, and it costs one pass over what is loaded.
-                    let deeper = if *all {
-                        0
-                    } else {
-                        let needle = q.to_lowercase();
-                        list.listed(true)
-                            .iter()
-                            .filter(|b| b.name.to_lowercase().contains(&needle))
-                            .count()
-                    };
-                    if deeper > 0 {
-                        println!(
-                            "Nothing kept matches {q:?}, but {deeper} of what played recently \
-                             does. `x2rock bookmarks --all {q:?}`."
-                        );
-                    } else if *all {
-                        println!("Nothing kept or played recently matches {q:?}.");
-                    } else {
-                        println!("Nothing kept matches {q:?}.");
-                    }
-                }
-                None => {
-                    let hidden = list.items.len();
-                    if hidden > 0 && !*all {
-                        println!(
-                            "Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`."
-                        );
-                    } else {
-                        println!("Nothing kept. Play something and run `x2rock keep`.");
-                    }
-                }
-            }
-        } else {
-            for b in items {
-                let by = b
-                    .artist
-                    .as_deref()
-                    .map(|a| format!(" — {a}"))
-                    .unwrap_or_default();
-                let on = b
-                    .service_name
-                    .as_deref()
-                    .map(|s| format!("  [{s}]"))
-                    .unwrap_or_default();
-                // A mark for the deliberate ones, so `--all` still tells them
-                // apart from whatever happened to play.
-                let mark = if b.pinned { "*" } else { " " };
-                println!("{mark} {}{by}{on}", b.name);
             }
         }
         return Ok(());
@@ -8233,6 +8224,13 @@ mod tests {
 
         let cli = Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
         assert!(cli.command.json());
+    }
+
+    #[test]
+    fn run_bookmarks_executes_offline_without_network() {
+        // Bookmarks manages local state and returns Ok(()) without reaching for network or players.
+        let res = run_bookmarks(None, None, false, true);
+        assert!(res.is_ok());
     }
 
     #[test]
