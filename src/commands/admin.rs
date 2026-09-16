@@ -530,11 +530,24 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     let dropin = dir.join("x2rock.service.d").join("headless.conf");
     let dropin_dir = dir.join("x2rock.service.d");
 
+    // Read before the disable, which does not change it, so that a failure can
+    // be told from "there was nothing to disable".
+    let unit_existed = unit_path.exists();
     let disabled = std::process::Command::new("systemctl")
         .args(["--user", "disable", "--now", "x2rock.service"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
+    // A disable that failed while there *was* a unit to disable is worth
+    // saying: the file is removed either way, so a daemon still running from it
+    // would otherwise be a surprise with nothing left on disk to explain it.
+    if unit_existed && !disabled {
+        eprintln!(
+            "x2rock: `systemctl --user disable --now x2rock.service` did not succeed; \
+             if the daemon is still running, stop it with \
+             `systemctl --user stop x2rock.service`."
+        );
+    }
 
     let mut removed_something = false;
     if unit_path.exists() {
