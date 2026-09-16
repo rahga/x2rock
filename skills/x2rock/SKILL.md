@@ -372,6 +372,9 @@ see "Ask before you act".
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
+| Shell completions | `x2rock completions [shell] [--install\|--uninstall]` — auto-detects shell when omitted |
+| Systemd user service | `x2rock service [status\|install\|uninstall] [--json]` |
+| Desktop integration (.desktop & icon) | `x2rock desktop [status\|install\|uninstall] [--json]` |
 
 **A saved playlist is not a favorite.** `queue sources` lists both (playlists carry `SQ:` ids),
 `queue save "<name>"` makes one from what is queued now, `queue add` appends one, and
