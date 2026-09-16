@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod content;
+pub mod playback;
 pub mod services;
 pub mod stream;
 
