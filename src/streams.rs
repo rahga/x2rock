@@ -86,13 +86,7 @@ impl Streams {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("x2rock-streams-test-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("streams.json")
-    }
+    use crate::testdir::TempDir;
 
     fn stream(id: &str, title: &str) -> Stream {
         Stream {
@@ -104,17 +98,18 @@ mod tests {
 
     #[test]
     fn a_remembered_stream_reads_back_by_coordinator() {
-        let path = scratch("roundtrip");
+        let dir = TempDir::new("streams-roundtrip");
+        let path = dir.path().join("streams.json");
         Streams::remember_at(&path, "RINCON_1", stream("i1", "Bodies")).unwrap();
         let back = Streams::load_at(&path);
         assert_eq!(back.get("RINCON_1"), Some(&stream("i1", "Bodies")));
         assert_eq!(back.get("RINCON_2"), None);
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn remembering_a_player_again_replaces_its_stream() {
-        let path = scratch("replace");
+        let dir = TempDir::new("streams-replace");
+        let path = dir.path().join("streams.json");
         Streams::remember_at(&path, "RINCON_1", stream("i1", "Old")).unwrap();
         Streams::remember_at(&path, "RINCON_1", stream("i2", "New")).unwrap();
         // Another player is untouched by the replacement.
@@ -122,17 +117,18 @@ mod tests {
         let back = Streams::load_at(&path);
         assert_eq!(back.get("RINCON_1"), Some(&stream("i2", "New")));
         assert_eq!(back.get("RINCON_2"), Some(&stream("k1", "Kitchen thing")));
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn a_missing_or_stale_schema_file_is_empty_not_an_error() {
-        let missing = scratch("missing").with_file_name("nothing.json");
+        let gone = TempDir::new("streams-missing");
+        let missing = gone.path().join("nothing.json");
         assert!(Streams::load_at(&missing).players.is_empty());
 
         // Schema 1 keyed by room display name, which grouping renamed from
         // under it; discarded rather than read as a set of unknown players.
-        let stale = scratch("stale");
+        let dir = TempDir::new("streams-stale");
+        let stale = dir.path().join("streams.json");
         std::fs::write(
             &stale,
             r#"{"schema":1,"rooms":{"Media Room":{"service_id":"201","item_id":"i","title":"t"}}}"#,
@@ -142,6 +138,5 @@ mod tests {
             Streams::load_at(&stale).players.is_empty(),
             "a schema this build does not understand is discarded, like the catalogue"
         );
-        std::fs::remove_file(&stale).ok();
     }
 }
