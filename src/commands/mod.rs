@@ -8,6 +8,7 @@ pub mod content;
 pub mod playback;
 pub mod services;
 pub mod stream;
+pub mod volume;
 
 use anyhow::{Result, bail};
 
