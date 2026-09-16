@@ -53,3 +53,16 @@ tokio = { version = "1.53.1", features = ["test-util"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+# This tool waits on speakers, not on the CPU: an 8s player timeout dwarfs any
+# instruction count, so optimizing for size costs nothing anyone can feel and
+# takes roughly a fifth off the binary.
+opt-level = "s"
+# A panic here is a bug, never an expected condition - nothing unwraps anything
+# a player sent. Unwinding was the worse answer for a daemon: a panicked
+# forwarder task died quietly, its room stopped updating, and no one noticed,
+# because nothing inspects those join handles. Worse, a panic while holding the
+# MPRIS state lock poisons it, so every later `lock().unwrap()` for that room
+# panics too - an unbounded silent cascade. Aborting hands the whole thing to
+# systemd, which restarts it clean with the panic in the journal. Cargo ignores
+# this for the test profile, so `should_panic` and unwinding tests are safe.
+panic = "abort"
