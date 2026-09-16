@@ -4,6 +4,7 @@
 //! doing - installing, playing, adjusting a speaker - not for a Sonos API.
 
 pub mod admin;
+pub mod content;
 
 use anyhow::{Result, bail};
 
