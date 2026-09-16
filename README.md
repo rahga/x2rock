@@ -327,7 +327,7 @@ binary to it: every field `status --json` emits must be named there.
 
 `x2rock completions [shell]` generates scripts for Bash, Zsh, Fish, Elvish and PowerShell (auto-detecting `$SHELL` when omitted). Bash,
 Zsh and Fish also dynamically complete room and household names (for `-r`, `--household`, `group`, `ungroup`),
-service names (for `-s`, `link`, `unlink`) and `bookmark` names — from local state, so `<Tab>`
+service names (for `-s`, `link`), linked accounts (for `unlink`), and `bookmark` names — from local state, so `<Tab>`
 never waits on a speaker.
 
 ```sh

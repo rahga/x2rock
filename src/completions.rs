@@ -3,7 +3,7 @@
 //! Generates completion scripts for Bash, Zsh, Fish, Elvish, and PowerShell
 //! via `clap_complete`, enhanced with dynamic completion for `--room` / `-r`
 //! (resolving remembered rooms instantaneously from local state), bookmarks,
-//! and music services.
+//! services, and linked accounts.
 
 use std::io::Write;
 
@@ -14,6 +14,7 @@ use clap_complete::Shell;
 use crate::bookmarks::Bookmarks;
 use crate::catalogue::Catalogue;
 use crate::cli::Cli;
+use crate::credentials::Credentials;
 use crate::netid;
 use crate::state::State;
 
@@ -120,6 +121,15 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
             .iter()
             .map(|s| s.name.clone())
             .collect(),
+        "accounts" => Credentials::load()
+            .map(|creds| {
+                creds
+                    .services
+                    .values()
+                    .map(|a| a.service_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
     for name in matching(names, prefix) {
@@ -188,7 +198,8 @@ fn enhance_bash(script: &str) -> String {
         }
 
         // The positional of `bookmark` and of `bookmarks remove` is a bookmark
-        // name; `ungroup` and `group` take rooms; `unlink` and `link` take services.
+        // name; `ungroup` and `group` take rooms; `unlink` takes linked accounts;
+        // `link` takes services.
         // clap offers the flags there; split its `if` so a `-` prefix
         // still gets the flags and anything else gets the dynamic completions.
         let positional = match block {
@@ -198,7 +209,7 @@ fn enhance_bash(script: &str) -> String {
             Some("x2rock__subcmd__bookmarks__subcmd__rename") => Some((3, "bookmarks")),
             Some("x2rock__subcmd__ungroup") => Some((2, "rooms")),
             Some("x2rock__subcmd__group") => Some((2, "rooms")),
-            Some("x2rock__subcmd__unlink") => Some((2, "services")),
+            Some("x2rock__subcmd__unlink") => Some((2, "accounts")),
             Some("x2rock__subcmd__link") => Some((2, "services")),
             _ => None,
         };
@@ -234,16 +245,13 @@ fn enhance_bash(script: &str) -> String {
         out.push(line.to_string());
         i += 1;
     }
-    let mut joined = out.join("\n");
-    if script.ends_with('\n') {
-        joined.push('\n');
-    }
-    joined
+    out.join("\n") + "\n"
 }
 
-/// The leading whitespace of a line.
+/// The indent of `line`, preserved so inserted code aligns with clap's output.
 fn indent(line: &str) -> &str {
-    &line[..line.len() - line.trim_start().len()]
+    let len = line.len() - line.trim_start().len();
+    &line[..len]
 }
 
 /// The bash lines that fill `COMPREPLY` from `x2rock __complete <list> <cur>`.
@@ -262,7 +270,9 @@ fn dynamic_reply(list: &str, pad: &str) -> [String; 2] {
 
 fn enhance_fish(script: &str) -> String {
     let mut s = script.to_string();
-    s.push_str("\n# Dynamic completions for rooms, households, services, and bookmarks\n");
+    s.push_str(
+        "\n# Dynamic completions for rooms, households, services, bookmarks, and accounts\n",
+    );
     s.push_str("complete -c x2rock -s r -l room -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str(
         "complete -c x2rock -l household -x -a '(x2rock __complete households 2>/dev/null)'\n",
@@ -277,7 +287,7 @@ fn enhance_fish(script: &str) -> String {
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from group' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from link' -x -a '(x2rock __complete services 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from unlink' -x -a '(x2rock __complete services 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from unlink' -x -a '(x2rock __complete accounts 2>/dev/null)'\n");
     s
 }
 
@@ -300,6 +310,7 @@ _x2rock_rooms() { _x2rock_list rooms }
 _x2rock_households() { _x2rock_list households }
 _x2rock_services() { _x2rock_list services }
 _x2rock_bookmarks() { _x2rock_list bookmarks }
+_x2rock_accounts() { _x2rock_list accounts }
 "#;
     let mut out: Vec<String> = Vec::new();
     // The nearest `(name)` case label above, indented or not: the top-level
@@ -323,10 +334,12 @@ _x2rock_bookmarks() { _x2rock_list bookmarks }
             .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_households'")
             .replace(":room:_default'", ":room:_x2rock_rooms'")
             .replace(":rooms:_default'", ":rooms:_x2rock_rooms'")
-            .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'")
-            .replace(":service:_default'", ":service:_x2rock_services'");
+            .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'");
         if matches!(label, Some("link")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_services'");
+        }
+        if matches!(label, Some("unlink")) && line.starts_with("':service") {
+            line = line.replace(":_default'", ":_x2rock_accounts'");
         }
         if matches!(label, Some("bookmark" | "remove" | "pin" | "rename"))
             && trimmed == r"':query:_default' \"
@@ -468,8 +481,8 @@ mod tests {
         let unlink = s.find("x2rock__subcmd__unlink)").expect("an unlink block");
         let unlink_end = s[unlink..].find(";;").map(|e| unlink + e).unwrap();
         assert!(
-            s[unlink..unlink_end].contains("__complete services"),
-            "unlink completes service names"
+            s[unlink..unlink_end].contains("__complete accounts"),
+            "unlink completes account names"
         );
 
         let link = s.find("x2rock__subcmd__link)").expect("a link block");
@@ -483,13 +496,14 @@ mod tests {
             s.contains("__complete rooms")
                 && s.contains("__complete households")
                 && s.contains("__complete services")
+                && s.contains("__complete accounts")
         );
     }
 
     #[test]
     fn fish_appends_the_dynamic_hooks() {
         let s = script(Shell::Fish);
-        for list in ["rooms", "households", "services", "bookmarks"] {
+        for list in ["rooms", "households", "services", "bookmarks", "accounts"] {
             assert!(
                 s.contains(&format!("__complete {list}")),
                 "fish lacks the {list} hook"
@@ -498,7 +512,7 @@ mod tests {
         assert!(s.contains("seen_subcommand_from group' -x -a '(x2rock __complete rooms"));
         assert!(s.contains("seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms"));
         assert!(s.contains("seen_subcommand_from link' -x -a '(x2rock __complete services"));
-        assert!(s.contains("seen_subcommand_from unlink' -x -a '(x2rock __complete services"));
+        assert!(s.contains("seen_subcommand_from unlink' -x -a '(x2rock __complete accounts"));
         assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks"));
         assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from rename' -x -a '(x2rock __complete bookmarks"));
     }
@@ -524,7 +538,7 @@ mod tests {
         assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
-        assert_eq!(s.matches(":service:_x2rock_services'").count(), 1);
+        assert_eq!(s.matches(":service:_x2rock_accounts'").count(), 1);
         assert!(s.contains("::service -- Which service, by name. Omit to list the ones that can be linked:_x2rock_services'"));
         assert_eq!(
             s.matches(":query:_x2rock_bookmarks'").count(),
@@ -540,6 +554,7 @@ mod tests {
             "_x2rock_households()",
             "_x2rock_services()",
             "_x2rock_bookmarks()",
+            "_x2rock_accounts()",
         ] {
             assert_eq!(s.matches(helper).count(), 1, "{helper}");
             assert!(s.find(helper).unwrap() < s.find("_x2rock \"$@\"").unwrap());
@@ -601,6 +616,13 @@ mod tests {
     fn complete_households_runs_without_error() {
         let mut out = Vec::new();
         complete("households", None, &mut out).unwrap();
+        let _ = String::from_utf8(out).unwrap();
+    }
+
+    #[test]
+    fn complete_accounts_runs_without_error() {
+        let mut out = Vec::new();
+        complete("accounts", None, &mut out).unwrap();
         let _ = String::from_utf8(out).unwrap();
     }
 
