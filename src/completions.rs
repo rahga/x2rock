@@ -11,9 +11,9 @@ use anyhow::Result;
 use clap::CommandFactory;
 use clap_complete::Shell;
 
-use crate::Cli;
 use crate::bookmarks::Bookmarks;
 use crate::catalogue::Catalogue;
+use crate::cli::Cli;
 use crate::netid;
 use crate::state::State;
 
