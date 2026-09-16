@@ -437,10 +437,14 @@ fn status_service(json: bool) -> Result<()> {
     let (desktop_file_exists, icon_exists) = service::desktop_installed();
     let desktop_installed = desktop_file_exists && icon_exists;
 
-    let current_exe = std::env::current_exe().ok();
+    // Against the unit's own `ExecStart`, not against whichever binary is
+    // answering this command. `service status` run from a build tree asks about
+    // the installed daemon, and "stale" because those two are different
+    // binaries is true of nothing anyone wanted to know.
     let stale = active
-        && current_exe
+        && exec
             .as_deref()
+            .map(std::path::Path::new)
             .map(daemon_runs_stale_binary)
             .unwrap_or(false);
 
