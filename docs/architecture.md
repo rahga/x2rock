@@ -356,7 +356,19 @@ as reconnaissance on corporate gear.
   x2rock/
     Cargo.toml
     src/
-      main.rs        # clap CLI entry point
+      main.rs        # `main` and `run`: parse, resolve the room, dispatch into commands/
+      cli.rs         # the clap tree: `Cli`, `Command`, every subcommand enum - the `--help` text
+      commands/      # one file per command family; `run` calls in, nothing here parses
+        mod.rs       # fan-out over rooms, and the small helpers every family shares
+        admin.rs     # `skill`, `service`, `desktop`, `completions`: installing x2rock itself
+        content.rs   # favorites, playlists, bookmarks, the queue, `play-item`/`queue-item`
+        household.rs # `discover`, `households`, `system`, `update`, `group`/`party`/`ungroup`
+        playback.rs  # transport, and confirming that `play` actually started
+        raw.rs       # the `raw` probe, over both wires
+        services.rs  # `link`/`unlink`/`accounts`, `search`, `browse`, `rate`
+        speaker.rs   # per-speaker settings, sleep/snooze, alarms, the soundbar's TV input
+        status.rs    # `status`, `now`, `rooms`: the snapshot and its JSON shape
+        stream.rs    # `play-url`, `stations`, `chime`/`notify`, and the stream session
       session.rs     # command -> live connection + known household; shared by CLI and daemon
       discover.rs    # finding players: outbound TCP sweep of the local subnet, no multicast
       netid.rs       # identifying the attached network, so cached players are scoped to it
@@ -372,6 +384,7 @@ as reconnaissance on corporate gear.
       streams.rs     # the last direct stream started in a room, so `play` can resume it
       stations.rs    # the Radio Browser directory, deliberately not Sonos's
       completions.rs # shell completions
+      service.rs     # what `service install` writes: the unit, and whether a file on disk is ours
       tui/           # `x2rock tui`: the household on one terminal screen, read off the daemon
       sonos/
         mod.rs
@@ -390,7 +403,9 @@ as reconnaissance on corporate gear.
   The one split that was worth having up front is the transport boundary (`sonos/local.rs` vs
   `sonos/api.rs`), because it is what contains the Authentication-setting risk noted above. The
   rest was split only as files actually got unwieldy, per the project's "no unnecessary
-  abstractions" preference.
+  abstractions" preference. `main.rs` was that file by 2026-09-16 - 9,500 lines, a third of them
+  one `run` function - and was split into `cli.rs` and `commands/` as a pure move: every help
+  page, completion script and JSON snapshot was captured before and diffed after, byte-identical.
 
 ## What this was actually tested on (rewritten 2026-09-05 from the household itself)
 
@@ -757,7 +772,7 @@ Media Room — Deep Space One on SomaFM Radio
 - **`sonos/smapi.rs`** — the SMAPI client. Parses the descriptor list, reads categories out of the
   manifest and presentation map, and does `search` and `getMediaURI`.
 - **`upnp.rs::list_services`** — `ListAvailableServices`, the one LAN call search needs.
-- **`main.rs`** — the `search` command, and nothing else touches any of it.
+- **`commands/services.rs`** — the `search` command, and nothing else touches any of it.
 
 ### Things worth knowing, learned building it
 
@@ -6081,7 +6096,8 @@ the first place; it builds its own enqueue URI, and *that* URI was wrong in a fi
 
 The natural next question — build out `createSession`/`loadStreamUrl` further, or reach for
 `loadCloudQueue` — was asked and closed on the spot. Both are already fully built
-(`stream_url()` in `src/main.rs`, shared by `play-url`, `stations --play`, and `notify`) and were
+(`stream_url()` in `src/commands/stream.rs`, shared by `play-url`, `stations --play`, and `notify`)
+and were
 exercised against this exact Spotify track today with the exact failure above; there was nothing
 left to build. `loadCloudQueue` is a **permanent no** per "`loadCloudQueue` is a permanent no, not a
 backlog item" above — it is scoped to registered Sonos content integrations, which x2rock is not
@@ -6281,7 +6297,8 @@ code or message text, both of which are undocumented and likely vary by service)
 retries once with the refreshed token when a fault carries one, and only bails for real on either a
 refusal with nothing to retry or a retry that fails too. The new token comes back to the caller
 through an out-parameter (`&mut Option<RefreshedToken>`, threaded through `search`/`metadata`/
-`media_uri`) rather than a changed return shape, and `main.rs`'s three call sites persist it to
+`media_uri`) rather than a changed return shape, and the three call sites - `search` and `browse`
+in `commands/services.rs`, `stream_item` in `commands/stream.rs` - persist it to
 `credentials.json` on success via a new `save_refreshed_token()` - best-effort and silent, since the
 refresh already did its job in memory for the call that triggered it either way. The original
 `linked` timestamp is kept: a refresh is not a new link event.
