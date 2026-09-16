@@ -549,10 +549,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Snooze { duration, json } => {
             apply_snooze(&target, player.ip(), duration, json).await?
         }
-        Command::Pause => player.playback(group, "pause").await?,
-        Command::Toggle => player.playback(group, "togglePlayPause").await?,
-        Command::Next => player.playback(group, "skipToNextTrack").await?,
-        Command::Prev => player.playback(group, "skipToPreviousTrack").await?,
+        Command::Pause => playback::transport(&player, group, "pause").await?,
+        Command::Toggle => playback::transport(&player, group, "togglePlayPause").await?,
+        Command::Next => playback::transport(&player, group, "skipToNextTrack").await?,
+        Command::Prev => playback::transport(&player, group, "skipToPreviousTrack").await?,
         Command::Vol {
             change,
             player: one_room,
