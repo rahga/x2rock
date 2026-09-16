@@ -34,7 +34,7 @@ roxmltree = "0.21.1"
 # trades away. `default-features = false` is load-bearing - the default
 # `prefer-post-quantum` feature would pull aws_lc_rs back in - and the backend
 # here must match tokio-rustls below and `sonos::crypto_provider` in code.
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
