@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod content;
+pub mod stream;
 
 use anyhow::{Result, bail};
 

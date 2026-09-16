@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
+use super::stream::{StreamStart, stream_item};
 use super::{find_named, is_refusal, mmss};
 use crate::cli::{BookmarksAction, QueueAction};
 use crate::session::{self, Session, Target};
@@ -16,7 +17,6 @@ use crate::sonos::local::Connection;
 use crate::sonos::proto::Favorite;
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
-use crate::{StreamStart, stream_item};
 use crate::{bookmarks, catalogue, credentials, sonos};
 
 fn print_sources(sources: &[upnp::BrowseItem], json: bool) {
