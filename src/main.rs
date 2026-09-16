@@ -651,7 +651,9 @@ enum Command {
         /// Include what the daemon noticed, not just what was kept on purpose.
         #[arg(long, short = 'a')]
         all: bool,
-        #[arg(long)]
+        // Global to the bookmarks subcommands, so `bookmarks prune --json` is this
+        // same flag rather than a usage error.
+        #[arg(long, global = true)]
         json: bool,
     },
     /// Play something kept earlier, by name.
@@ -8168,6 +8170,39 @@ mod tests {
             cli.command,
             Command::Eq { night: Some(ref n), dialog: Some(ref d), .. } if n == "on" && d == "off"
         ));
+    }
+
+    #[test]
+    fn bookmarks_subcommands_accept_json_flag() {
+        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "prune", "--json"]).unwrap();
+        assert!(cli.command.json());
+        assert!(matches!(
+            cli.command,
+            Command::Bookmarks {
+                action: Some(BookmarksAction::Prune),
+                json: true,
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "pin", "Bodies", "--json"]).unwrap();
+        assert!(cli.command.json());
+        assert!(matches!(
+            cli.command,
+            Command::Bookmarks {
+                action: Some(BookmarksAction::Pin { ref query }),
+                json: true,
+                ..
+            } if query == "Bodies"
+        ));
+
+        let cli =
+            Cli::try_parse_from(["x2rock", "bookmarks", "rename", "A", "B", "--json"]).unwrap();
+        assert!(cli.command.json());
+
+        let cli =
+            Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
+        assert!(cli.command.json());
     }
 
     /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is
