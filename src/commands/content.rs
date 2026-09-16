@@ -937,11 +937,8 @@ mod tests {
 
     #[test]
     fn run_bookmarks_executes_offline_without_network() {
-        let dir =
-            std::env::temp_dir().join(format!("x2rock-bookmarks-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bookmarks.json");
+        let dir = crate::testdir::TempDir::new("bookmarks");
+        let path = dir.path().join("bookmarks.json");
         let sample = r#"{
   "schema": 1,
   "items": [
@@ -969,8 +966,6 @@ mod tests {
         let output = String::from_utf8(out).unwrap();
         assert!(output.contains("Synthetic Track"));
         assert!(!output.contains("Bodies"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

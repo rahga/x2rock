@@ -613,7 +613,8 @@ mod tests {
         // A bare name is found the way the shell found it: first PATH entry
         // holding a file of that name. A directory that exists but holds no
         // such file is skipped, and an empty PATH entry is ignored.
-        let dir = std::env::temp_dir().join(format!("x2rock-invoked-{}", std::process::id()));
+        let dir = crate::testdir::TempDir::new("invoked");
+        let dir = dir.path();
         std::fs::create_dir_all(dir.join("has")).unwrap();
         std::fs::create_dir_all(dir.join("lacks")).unwrap();
         std::fs::write(dir.join("has").join("x2rock"), b"").unwrap();
@@ -635,7 +636,6 @@ mod tests {
             None
         );
         assert_eq!(invoked_path("x2rock", cwd, None), None);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The three verdicts, and the boundary between them: a re-run after a move
@@ -801,10 +801,9 @@ mod tests {
 
     #[test]
     fn place_desktop_files_skips_identical_and_protects_edits() {
-        let dir = std::env::temp_dir().join(format!("x2rock-desktop-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let desktop = dir.join("applications").join("x2rock.desktop");
-        let icon = dir.join("icons").join("x2rock.svg");
+        let dir = crate::testdir::TempDir::new("desktop");
+        let desktop = dir.path().join("applications").join("x2rock.desktop");
+        let icon = dir.path().join("icons").join("x2rock.svg");
 
         // 1. Initial run: files missing -> created
         let res = place_desktop_files_at(&desktop, &icon, false).unwrap();
@@ -836,8 +835,6 @@ mod tests {
         let res4 = place_desktop_files_at(&desktop, &icon, true).unwrap();
         assert!(res4.desktop_written);
         assert_eq!(std::fs::read_to_string(&desktop).unwrap(), DESKTOP_ENTRY);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

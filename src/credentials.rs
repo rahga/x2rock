@@ -272,6 +272,7 @@ pub fn from_device_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TempDir;
 
     fn account(name: &str) -> Account {
         Account {
@@ -286,16 +287,10 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("x2rock-cred-test-{name}-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("credentials.json")
-    }
-
     #[test]
     fn a_saved_token_is_readable_only_by_its_owner() {
-        let path = scratch("mode");
+        let dir = TempDir::new("cred-mode");
+        let path = dir.path().join("credentials.json");
         let mut creds = Credentials::default();
         creds.remember("200", account("Bandcamp"));
         creds.save_to(&path).unwrap();
@@ -309,24 +304,24 @@ mod tests {
         assert_eq!(got.auth_token, "tok");
         assert_eq!(got.private_key, "key");
         assert_eq!(got.household.as_deref(), Some("Sonos_house"));
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn a_loose_file_is_tightened_when_it_is_read() {
-        let path = scratch("loose");
+        let dir = TempDir::new("cred-loose");
+        let path = dir.path().join("credentials.json");
         Credentials::default().save_to(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
         Credentials::load_from(&path).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "got {mode:04o}");
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn a_missing_file_is_no_accounts_and_a_corrupt_one_is_an_error() {
-        let missing = scratch("missing").with_file_name("nothing-here.json");
+        let gone = TempDir::new("cred-missing");
+        let missing = gone.path().join("nothing-here.json");
         assert!(
             Credentials::load_from(&missing)
                 .unwrap()
@@ -334,11 +329,11 @@ mod tests {
                 .is_empty()
         );
 
-        let path = scratch("corrupt");
+        let dir = TempDir::new("cred-corrupt");
+        let path = dir.path().join("credentials.json");
         fs::write(&path, "{ not json").unwrap();
         // Unlike the service catalogue: this cannot be refetched in a second.
         assert!(Credentials::load_from(&path).is_err());
-        fs::remove_file(&path).ok();
     }
 
     #[test]

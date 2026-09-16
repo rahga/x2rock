@@ -17,6 +17,8 @@ mod state;
 mod stations;
 mod store;
 mod streams;
+#[cfg(test)]
+mod testdir;
 mod tui;
 
 use anyhow::{Result, ensure};

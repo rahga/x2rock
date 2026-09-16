@@ -125,14 +125,8 @@ impl Lock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdir::TempDir;
     use std::os::unix::fs::PermissionsExt;
-
-    fn scratch_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("x2rock-store-test-{name}-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     #[test]
     fn a_leftover_scratch_file_does_not_loosen_the_mode() {
@@ -140,8 +134,8 @@ mod tests {
         // crashed writer at the umask's default used to keep its 0644 through
         // the truncate, take the secret, and be renamed into place - the window
         // the doc comment on `Credentials::save` promised did not exist.
-        let dir = scratch_dir("mode");
-        let path = dir.join("credentials.json");
+        let dir = TempDir::new("store-mode");
+        let path = dir.path().join("credentials.json");
         let leftover = scratch(&path);
         fs::write(&leftover, "stale").unwrap();
         fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).unwrap();
@@ -152,7 +146,6 @@ mod tests {
         assert_eq!(mode, 0o600, "got {mode:04o}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"secret\":1}");
         assert!(!leftover.exists(), "the scratch file was renamed away");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -168,20 +161,19 @@ mod tests {
 
     #[test]
     fn the_lock_lives_beside_the_file_and_outlasts_a_rename() {
-        let dir = scratch_dir("lock");
-        let path = dir.join("bookmarks.json");
+        let dir = TempDir::new("store-lock");
+        let path = dir.path().join("bookmarks.json");
         let guard = Lock::exclusive(&path).unwrap();
-        assert!(dir.join("bookmarks.json.lock").exists());
+        assert!(dir.path().join("bookmarks.json.lock").exists());
         // The write replaces the file's inode; the lock file is untouched by it,
         // so a second writer waiting on the lock still waits on the same inode.
-        let before = fs::metadata(dir.join("bookmarks.json.lock")).unwrap();
+        let before = fs::metadata(dir.path().join("bookmarks.json.lock")).unwrap();
         write_atomically(&path, "[]", PLAIN).unwrap();
-        let after = fs::metadata(dir.join("bookmarks.json.lock")).unwrap();
+        let after = fs::metadata(dir.path().join("bookmarks.json.lock")).unwrap();
         assert_eq!(
             std::os::unix::fs::MetadataExt::ino(&before),
             std::os::unix::fs::MetadataExt::ino(&after)
         );
         drop(guard);
-        fs::remove_dir_all(&dir).ok();
     }
 }
