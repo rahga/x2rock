@@ -1,0 +1,36 @@
+name: Sync Plugin Mirror
+
+# Mirrors quickshell/x2rock.sonos to the standalone rahga/x2rock-sonos repository,
+# which satisfies Omarchy's requirement that plugins be isolated git repositories
+# with manifest.json at the repository root.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'quickshell/x2rock.sonos/**'
+      - '.github/workflows/sync-plugin.yml'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Mirror quickshell/x2rock.sonos to rahga/x2rock-sonos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # Full history is required for subtree split
+
+      - name: Configure SSH deploy key
+        env:
+          SSH_KEY: ${{ secrets.X2ROCK_SONOS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+
+      - name: Split and push subtree to mirror repo
+        run: |
+          SPLIT_COMMIT=$(git subtree split --prefix quickshell/x2rock.sonos)
+          git push git@github.com:rahga/x2rock-sonos.git "$SPLIT_COMMIT:refs/heads/main" --force
