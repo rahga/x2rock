@@ -255,7 +255,7 @@ fn encode_object_id(id: &str) -> String {
     out
 }
 
-fn path() -> Result<PathBuf> {
+pub fn path() -> Result<PathBuf> {
     store::path("bookmarks.json")
 }
 
@@ -269,7 +269,7 @@ impl Bookmarks {
         Self::load_from(&path()?)
     }
 
-    fn load_from(path: &Path) -> Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         match store::read_optional(path)? {
             Some(text) => {
                 serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
@@ -289,14 +289,18 @@ impl Bookmarks {
     /// and is held for microseconds; the write is skipped when `change`
     /// changed nothing, which for the daemon is most events.
     pub fn update<T>(change: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let path = path()?;
-        let _lock = store::Lock::exclusive(&path)?;
-        let mut list = Self::load_from(&path)?;
+        Self::update_at(&path()?, change)
+    }
+
+    /// Change the file at `path`: load it, apply `change`, write back whatever changed.
+    pub fn update_at<T>(path: &Path, change: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let _lock = store::Lock::exclusive(path)?;
+        let mut list = Self::load_from(path)?;
         let before = list.serialized()?;
         let outcome = change(&mut list)?;
         let after = list.serialized()?;
         if after != before {
-            store::write_atomically(&path, &after, store::PLAIN)?;
+            store::write_atomically(path, &after, store::PLAIN)?;
         }
         Ok(outcome)
     }
