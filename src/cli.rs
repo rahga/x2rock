@@ -770,6 +770,9 @@ pub enum Command {
     Desktop {
         #[command(subcommand)]
         action: Option<DesktopAction>,
+        /// Overwrite hand-edited desktop entry or icon files.
+        #[arg(long, global = true)]
+        force: bool,
     },
     /// Manage the daemon's systemd user service (install, status, uninstall).
     ///
@@ -1009,11 +1012,7 @@ pub enum AgentTarget {
 #[derive(Subcommand)]
 pub enum DesktopAction {
     /// Install `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
-    Install {
-        /// Overwrite hand-edited desktop entry or icon files.
-        #[arg(long)]
-        force: bool,
-    },
+    Install,
     /// Remove `~/.local/share/applications/x2rock.desktop` and `~/.local/share/icons/.../x2rock.svg`.
     Uninstall,
     /// Check whether the desktop entry and icon files are installed.
@@ -1151,6 +1150,7 @@ impl Command {
             | Command::Queue { json, .. } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),
+                ..
             } => *json,
             _ => false,
         }
@@ -1288,12 +1288,31 @@ mod tests {
     }
 
     #[test]
-    fn desktop_install_force_flag() {
+    fn desktop_force_flag() {
+        let cli = Cli::try_parse_from(["x2rock", "desktop"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Desktop {
+                action: None,
+                force: false,
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "desktop", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Desktop {
+                action: None,
+                force: true,
+            }
+        ));
+
         let cli = Cli::try_parse_from(["x2rock", "desktop", "install"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Desktop {
-                action: Some(DesktopAction::Install { force: false })
+                action: Some(DesktopAction::Install),
+                force: false,
             }
         ));
 
@@ -1301,7 +1320,17 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Desktop {
-                action: Some(DesktopAction::Install { force: true })
+                action: Some(DesktopAction::Install),
+                force: true,
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "desktop", "--force", "install"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Desktop {
+                action: Some(DesktopAction::Install),
+                force: true,
             }
         ));
     }

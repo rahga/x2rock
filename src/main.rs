@@ -139,7 +139,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return admin::handle_skill(agent, dir.as_deref(), print, remove);
         }
-        Command::Desktop { action } => return admin::desktop(action),
+        Command::Desktop { action, force } => return admin::desktop(action, force),
         Command::Service { action, json } => {
             return admin::service(action, json, cli.household.as_deref());
         }

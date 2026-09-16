@@ -622,15 +622,27 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether `--force` means anything for a `desktop` action.
+///
+/// The flag is global on `desktop` so that `x2rock desktop --force` works
+/// without naming `install`, which is what a bare `x2rock desktop` runs. The
+/// other two actions do not overwrite files, and a flag that parses and then
+/// does nothing is how a caller comes to trust a change that never happened -
+/// so they refuse it rather than ignore it.
+fn force_applies(action: &Option<DesktopAction>) -> bool {
+    matches!(action, None | Some(DesktopAction::Install))
+}
+
 /// `x2rock desktop`: install, remove or report the desktop entry and icon.
 /// Local files only; the systemd half is `install_service`.
-pub fn desktop(action: Option<DesktopAction>) -> Result<()> {
+pub fn desktop(action: Option<DesktopAction>, force: bool) -> Result<()> {
+    ensure!(
+        !force || force_applies(&action),
+        "--force applies to `desktop install`, which is what `x2rock desktop` runs on its own; \
+         status and uninstall do not overwrite files"
+    );
     match action {
-        None | Some(DesktopAction::Install { .. }) => {
-            let force = match action {
-                Some(DesktopAction::Install { force }) => force,
-                _ => false,
-            };
+        None | Some(DesktopAction::Install) => {
             let placed = service::place_desktop_files(force)?;
             if placed.desktop_written {
                 println!(
@@ -774,6 +786,18 @@ mod tests {
             print: false,
             no_household: false,
         })));
+    }
+
+    /// `--force` is global on `desktop` for the sake of a bare `x2rock desktop
+    /// --force`, so the rule about where it actually means something lives here
+    /// rather than in clap, and is held to it.
+    #[test]
+    fn force_belongs_to_install_and_is_refused_elsewhere() {
+        assert!(force_applies(&None), "a bare `desktop` is install");
+        assert!(force_applies(&Some(DesktopAction::Install)));
+        assert!(!force_applies(&Some(DesktopAction::Uninstall)));
+        assert!(!force_applies(&Some(DesktopAction::Status { json: false })));
+        assert!(!force_applies(&Some(DesktopAction::Status { json: true })));
     }
 
     #[test]
