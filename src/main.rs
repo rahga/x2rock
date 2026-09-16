@@ -19,20 +19,18 @@ mod store;
 mod streams;
 mod tui;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use clap::{CommandFactory, FromArgMatches};
 
 use cli::{Cli, Command, RawTransport};
-use commands::playback::{
-    apply_crossfade, apply_repeat, apply_shuffle, apply_transport, play_or_resume,
-};
+use commands::playback::{apply_crossfade, apply_repeat, apply_shuffle, play_or_resume};
 use commands::speaker::{
     ToneRequest, apply_buttons, apply_eq, apply_led, apply_remote, apply_rename, apply_sleep,
     apply_snooze,
 };
-use commands::volume::apply_vol;
 use commands::{
-    admin, content, household, playback, raw, services, speaker, status, stream, volume,
+    admin, content, fan_out, fans_out, household, playback, raw, services, speaker, status, stream,
+    too_many_rooms, volume,
 };
 use state::State;
 
@@ -85,137 +83,6 @@ async fn main() {
         }
         std::process::exit(1);
     }
-}
-
-/// Fan a per-room command across several `--room`, topology resolved once. Only
-/// the per-room-state commands accept it; anything else is refused with a clear
-/// message rather than silently acting on the first room. A failure on one room
-/// stops the run - a half-applied "set them all to 10" is worse than a clear
-/// stop naming the room that failed.
-async fn fan_out(session: &session::Session, rooms: &[String], command: &Command) -> Result<()> {
-    let Some(action) = per_room(command) else {
-        return Err(too_many_rooms());
-    };
-    for name in rooms {
-        let target = session::target(&session.groups, Some(name))?;
-        let outcome = match action {
-            PerRoom::Vol {
-                change,
-                one_room,
-                ramp,
-                json,
-            } => {
-                apply_vol(
-                    session,
-                    &target,
-                    Some(name),
-                    change.clone(),
-                    one_room,
-                    ramp,
-                    json,
-                )
-                .await
-            }
-            PerRoom::Repeat { mode, json } => {
-                apply_repeat(session, &target, mode.clone(), json).await
-            }
-            PerRoom::Shuffle { mode, json } => {
-                apply_shuffle(session, &target, mode.clone(), json).await
-            }
-            PerRoom::Crossfade { mode, json } => {
-                apply_crossfade(session, &target, mode.clone(), json).await
-            }
-            // `play` alone confirms and resumes; the other verbs have nothing
-            // to confirm against, and `pause` on an idle room is a no-op that
-            // must not spend the failure budget.
-            PerRoom::Transport("play") => match session::coordinator(session, &target).await {
-                Ok(player) => play_or_resume(session, &player, &target).await,
-                Err(e) => Err(e),
-            },
-            PerRoom::Transport(verb) => apply_transport(session, &target, verb).await,
-        };
-        // Name the room the batch stopped on: a fan-out that halts silently on
-        // the third of five rooms is a debugging puzzle. The rooms before it
-        // already applied; the ones after did not.
-        outcome.with_context(|| format!("on room {name:?}"))?;
-    }
-    Ok(())
-}
-
-/// Several `--room` on a command that takes one. Its own code, not the generic
-/// `error` bucket, so an agent drops the extra `--room` from the code rather
-/// than parsing the sentence. No `fix` command: the remedy is to re-run with a
-/// single `--room`, which is not a canned line.
-fn too_many_rooms() -> anyhow::Error {
-    hint::Hint::new(
-        "several --room were given, but this command takes a single room",
-        "too_many_rooms",
-        None,
-    )
-    .into()
-}
-
-/// What a per-room command does to one room. Borrowed from the `Command`, so
-/// [`fan_out`] can apply it to each room in turn without re-matching.
-#[derive(Clone, Copy)]
-enum PerRoom<'a> {
-    Vol {
-        change: &'a Option<String>,
-        one_room: bool,
-        ramp: bool,
-        json: bool,
-    },
-    Repeat {
-        mode: &'a Option<String>,
-        json: bool,
-    },
-    Shuffle {
-        mode: &'a Option<String>,
-        json: bool,
-    },
-    Crossfade {
-        mode: &'a Option<String>,
-        json: bool,
-    },
-    /// A `playback:1` verb.
-    Transport(&'static str),
-}
-
-/// The per-room reading of a command, or `None` for the read, whole-household
-/// and single-target commands, which several `--room` do not fan out. The one
-/// list: [`fans_out`] asks whether a command is on it and [`fan_out`] applies
-/// what it finds, so a command cannot be admitted by one and missed by the
-/// other - which is how `--all crossfade on` came to fail with "several --room
-/// were given" on a command line that gave none.
-fn per_room(command: &Command) -> Option<PerRoom<'_>> {
-    Some(match command {
-        Command::Vol {
-            change,
-            player,
-            ramp,
-            json,
-            ..
-        } => PerRoom::Vol {
-            change,
-            one_room: *player,
-            ramp: *ramp,
-            json: *json,
-        },
-        Command::Repeat { mode, json } => PerRoom::Repeat { mode, json: *json },
-        Command::Shuffle { mode, json } => PerRoom::Shuffle { mode, json: *json },
-        Command::Crossfade { mode, json } => PerRoom::Crossfade { mode, json: *json },
-        Command::Play { track: None } => PerRoom::Transport("play"),
-        Command::Pause => PerRoom::Transport("pause"),
-        Command::Toggle => PerRoom::Transport("togglePlayPause"),
-        Command::Next => PerRoom::Transport("skipToNextTrack"),
-        Command::Prev => PerRoom::Transport("skipToPreviousTrack"),
-        _ => return None,
-    })
-}
-
-/// Whether a command applies per room, so several `--room` fan it out.
-fn fans_out(command: &Command) -> bool {
-    per_room(command).is_some()
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -719,90 +586,4 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Daemon { .. } => unreachable!("handled above"),
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn only_the_per_room_commands_fan_out() {
-        // These act on one room's state, so several --room fan them out.
-        assert!(fans_out(&Command::Pause));
-        assert!(fans_out(&Command::Toggle));
-        assert!(fans_out(&Command::Next));
-        assert!(fans_out(&Command::Play { track: None }));
-        assert!(fans_out(&Command::Vol {
-            change: None,
-            player: false,
-            each: false,
-            ramp: false,
-            json: false
-        }));
-        assert!(fans_out(&Command::Repeat {
-            mode: None,
-            json: false
-        }));
-        assert!(fans_out(&Command::Shuffle {
-            mode: None,
-            json: false
-        }));
-        assert!(fans_out(&Command::Crossfade {
-            mode: None,
-            json: false
-        }));
-        // Playing a specific queue position is per-queue, not a broadcast.
-        assert!(!fans_out(&Command::Play { track: Some(3) }));
-        // Reads and whole-household commands are not fanned out.
-        assert!(!fans_out(&Command::Now { json: false }));
-        assert!(!fans_out(&Command::Status {
-            json: false,
-            full: false
-        }));
-        assert!(!fans_out(&Command::Rooms { json: false }));
-    }
-
-    /// A ramp slides one speaker, so it composes with the fan-outs that are
-    /// *over speakers* and not with the one that is over groups. Only `--all`
-    /// is refused, and that refusal lives in `run()` rather than in clap
-    /// because `--all` is a global flag - parsing must succeed for the message
-    /// to be able to name the reason.
-    #[test]
-    fn ramp_composes_with_the_per_speaker_fan_outs_but_not_with_all() {
-        let parse = |args: &[&str]| {
-            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
-        };
-        for ok in [
-            vec!["-r", "Kitchen", "vol", "30", "--ramp"],
-            // Several rooms: the fan-out iterates the names as typed, each
-            // resolved to its own speaker.
-            vec!["-r", "a", "-r", "b", "vol", "30", "--ramp"],
-            // --each rebuilds the command as --player over the group's members,
-            // which is the shape a ramp already needs.
-            vec!["vol", "30", "--ramp", "--each"],
-        ] {
-            assert!(parse(&ok).is_ok(), "{ok:?} should parse");
-        }
-        // Parses, then refused in run() - pinned by the fan-out test below.
-        assert!(parse(&["--all", "vol", "30", "--ramp"]).is_ok());
-    }
-
-    /// The flag has to survive `per_room`'s rebuild, which is where it was
-    /// previously dropped: a ramp that silently became a jump would look like
-    /// the command simply ignoring `--ramp`.
-    #[test]
-    fn the_fan_out_carries_ramp_rather_than_dropping_it() {
-        let command = Command::Vol {
-            change: Some("30".into()),
-            player: false,
-            each: false,
-            ramp: true,
-            json: false,
-        };
-        match per_room(&command).expect("vol fans out") {
-            PerRoom::Vol { ramp, .. } => assert!(ramp, "per_room dropped --ramp"),
-            _ => panic!("expected PerRoom::Vol"),
-        }
-    }
 }

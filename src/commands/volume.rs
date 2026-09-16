@@ -388,7 +388,7 @@ pub async fn each(
         ramp,
         json,
     };
-    crate::fan_out(session, &members, &per_member).await
+    super::fan_out(session, &members, &per_member).await
 }
 
 #[cfg(test)]
