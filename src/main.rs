@@ -6319,53 +6319,67 @@ fn run_bookmarks(
     all: bool,
     json: bool,
 ) -> Result<()> {
+    run_bookmarks_to(&mut std::io::stdout(), action, query, all, json)
+}
+
+fn run_bookmarks_to<W: std::io::Write>(
+    out: &mut W,
+    action: Option<&BookmarksAction>,
+    query: Option<&str>,
+    all: bool,
+    json: bool,
+) -> Result<()> {
     if let Some(act) = action {
         match act {
             BookmarksAction::Remove { query } => {
                 let gone = bookmarks::Bookmarks::update(|list| list.forget(query))?;
                 if json {
-                    println!("{}", json!({ "removed": gone.name }));
+                    writeln!(out, "{}", json!({ "removed": gone.name }))?;
                 } else {
-                    println!("Forgot {}.", gone.name);
+                    writeln!(out, "Forgot {}.", gone.name)?;
                 }
                 return Ok(());
             }
             BookmarksAction::Pin { query } => {
                 let (pinned, was_pinned) = bookmarks::Bookmarks::update(|list| list.pin(query))?;
                 if json {
-                    println!(
+                    writeln!(
+                        out,
                         "{}",
                         json!({
                             "name": pinned.name,
                             "pinned": true,
                             "already_pinned": was_pinned,
                         })
-                    );
+                    )?;
                 } else if was_pinned {
-                    println!("Already pinned {}.", pinned.name);
+                    writeln!(out, "Already pinned {}.", pinned.name)?;
                 } else {
-                    println!("Pinned {}.", pinned.name);
+                    writeln!(out, "Pinned {}.", pinned.name)?;
                 }
                 return Ok(());
             }
             BookmarksAction::Rename { query, new_name } => {
                 let (old, new) = bookmarks::Bookmarks::update(|list| list.rename(query, new_name))?;
                 if json {
-                    println!("{}", json!({ "old_name": old, "new_name": new }));
+                    writeln!(out, "{}", json!({ "old_name": old, "new_name": new }))?;
                 } else {
-                    println!("Renamed {old} to {new}.");
+                    writeln!(out, "Renamed {old} to {new}.")?;
                 }
                 return Ok(());
             }
             BookmarksAction::Prune => {
                 let (pruned, kept) = bookmarks::Bookmarks::update(|list| Ok(list.prune()))?;
                 if json {
-                    println!("{}", json!({ "pruned": pruned, "total": kept }));
+                    writeln!(out, "{}", json!({ "pruned": pruned, "total": kept }))?;
                 } else if pruned == 0 {
-                    println!("No unpinned history entries to prune ({kept} kept).");
+                    writeln!(out, "No unpinned history entries to prune ({kept} kept).")?;
                 } else {
                     let entries = if pruned == 1 { "entry" } else { "entries" };
-                    println!("Pruned {pruned} history {entries}, {kept} bookmarks kept.");
+                    writeln!(
+                        out,
+                        "Pruned {pruned} history {entries}, {kept} bookmarks kept."
+                    )?;
                 }
                 return Ok(());
             }
@@ -6393,7 +6407,7 @@ fn run_bookmarks(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string(&rows)?);
+        writeln!(out, "{}", serde_json::to_string(&rows)?)?;
     } else if items.is_empty() {
         // Four states were wearing one message, and a query filtering
         // everything out got the worst of it: "Nothing kept. Play something
@@ -6413,24 +6427,26 @@ fn run_bookmarks(
                         .count()
                 };
                 if deeper > 0 {
-                    println!(
+                    writeln!(
+                        out,
                         "Nothing kept matches {q:?}, but {deeper} of what played recently \
                          does. `x2rock bookmarks --all {q:?}`."
-                    );
+                    )?;
                 } else if all {
-                    println!("Nothing kept or played recently matches {q:?}.");
+                    writeln!(out, "Nothing kept or played recently matches {q:?}.")?;
                 } else {
-                    println!("Nothing kept matches {q:?}.");
+                    writeln!(out, "Nothing kept matches {q:?}.")?;
                 }
             }
             None => {
                 let hidden = list.items.len();
                 if hidden > 0 && !all {
-                    println!(
+                    writeln!(
+                        out,
                         "Nothing kept, but {hidden} played recently. `x2rock bookmarks --all`."
-                    );
+                    )?;
                 } else {
-                    println!("Nothing kept. Play something and run `x2rock keep`.");
+                    writeln!(out, "Nothing kept. Play something and run `x2rock keep`.")?;
                 }
             }
         }
@@ -6449,7 +6465,7 @@ fn run_bookmarks(
             // A mark for the deliberate ones, so `--all` still tells them
             // apart from whatever happened to play.
             let mark = if b.pinned { "*" } else { " " };
-            println!("{mark} {}{by}{on}", b.name);
+            writeln!(out, "{mark} {}{by}{on}", b.name)?;
         }
     }
     Ok(())
@@ -8228,9 +8244,67 @@ mod tests {
 
     #[test]
     fn run_bookmarks_executes_offline_without_network() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let dir =
+            std::env::temp_dir().join(format!("x2rock-bookmarks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let x2rock_dir = dir.join("x2rock");
+        std::fs::create_dir_all(&x2rock_dir).unwrap();
+        let sample = r#"{
+  "schema": 1,
+  "items": [
+    {
+      "name": "Synthetic Track",
+      "object_id": "synthetic:123",
+      "service_id": "284",
+      "account": "1",
+      "service_name": "YouTube Music",
+      "artist": "Synthetic Artist",
+      "art_url": "http://example.com/art.jpg",
+      "kind": "track",
+      "pinned": true,
+      "last_played": 1789157987
+    }
+  ]
+}"#;
+        std::fs::write(x2rock_dir.join("bookmarks.json"), sample).unwrap();
+
+        struct EnvGuard {
+            prev: Option<std::ffi::OsString>,
+            dir: PathBuf,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Restoring original environment variable in test teardown.
+                unsafe {
+                    match &self.prev {
+                        Some(val) => std::env::set_var("XDG_STATE_HOME", val),
+                        None => std::env::remove_var("XDG_STATE_HOME"),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        let _guard = EnvGuard {
+            prev: std::env::var_os("XDG_STATE_HOME"),
+            dir: dir.clone(),
+        };
+        // SAFETY: Point XDG_STATE_HOME at an isolated temporary directory for test.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &dir);
+        }
+
         // Bookmarks manages local state and returns Ok(()) without reaching for network or players.
-        let res = run_bookmarks(None, None, false, true);
+        let mut out = Vec::new();
+        let res = run_bookmarks_to(&mut out, None, None, false, true);
         assert!(res.is_ok());
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("Synthetic Track"));
+        assert!(!output.contains("Bodies"));
     }
 
     #[test]
