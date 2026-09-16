@@ -315,10 +315,12 @@ x2rock skill              # auto-detects ~/.claude/skills and ~/.gemini/antigrav
 x2rock skill --agent claude # or antigravity / gemini / all
 x2rock skill --dir path   # somewhere else, e.g. a project's .claude/skills or .agents/skills
 x2rock skill --print      # to stdout, to inspect or to seed another agent
+x2rock skill --remove     # take it back out of the directories it was written to
 ```
 
 The skill is embedded in the binary, so it matches the CLI it documents; re-run it after an
-upgrade. Its source is [`skills/x2rock/SKILL.md`](skills/x2rock/SKILL.md), and tests hold the
+upgrade — `x2rock --version` names the commit a binary was built from, so you can tell whether
+it has moved. Its source is [`skills/x2rock/SKILL.md`](skills/x2rock/SKILL.md), and tests hold the
 binary to it: every field `status --json` emits must be named there.
 
 ### Shell completions
