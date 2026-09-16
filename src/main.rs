@@ -816,8 +816,11 @@ enum Command {
         /// Shell to generate completions for. Auto-detects from $SHELL when omitted.
         shell: Option<clap_complete::Shell>,
         /// Install the completion script to the default user directory for the shell.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "uninstall")]
         install: bool,
+        /// Remove installed completion script from the default user directory for the shell.
+        #[arg(long, conflicts_with = "install")]
+        uninstall: bool,
     },
     /// Internal completion helper for shell scripts: the names in one list,
     /// one per line, optionally only those starting with `prefix`
@@ -6421,14 +6424,21 @@ async fn run(cli: Cli) -> Result<()> {
                 return uninstall_service(desktop);
             }
         },
-        Command::Completions { shell, install } => {
+        Command::Completions {
+            shell,
+            install,
+            uninstall,
+        } => {
             let target_shell = match shell.or_else(detect_shell) {
                 Some(s) => s,
                 None => bail!(
                     "could not determine shell from $SHELL; specify one of bash, zsh, fish, elvish, powershell"
                 ),
             };
-            if install {
+            if uninstall {
+                completions::uninstall(target_shell)?;
+                return Ok(());
+            } else if install {
                 return completions::install(target_shell);
             } else {
                 return completions::generate(target_shell, &mut std::io::stdout());
@@ -8194,8 +8204,7 @@ mod tests {
             Cli::try_parse_from(["x2rock", "bookmarks", "rename", "A", "B", "--json"]).unwrap();
         assert!(cli.command.json());
 
-        let cli =
-            Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
         assert!(cli.command.json());
     }
 
@@ -8220,6 +8229,34 @@ mod tests {
                 json: true,
             }
         ));
+    }
+
+    #[test]
+    fn completions_uninstall_flag() {
+        let cli = Cli::try_parse_from(["x2rock", "completions", "--uninstall"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions {
+                shell: None,
+                install: false,
+                uninstall: true,
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["x2rock", "completions", "fish", "--uninstall"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions {
+                shell: Some(clap_complete::Shell::Fish),
+                install: false,
+                uninstall: true,
+            }
+        ));
+
+        // --install and --uninstall conflict with each other
+        assert!(
+            Cli::try_parse_from(["x2rock", "completions", "--install", "--uninstall"]).is_err()
+        );
     }
 
     /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is

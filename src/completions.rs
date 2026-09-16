@@ -68,6 +68,23 @@ pub fn install(shell: Shell) -> Result<()> {
     Ok(())
 }
 
+/// Remove completion script from the shell's user completion directory if present.
+pub fn uninstall(shell: Shell) -> Result<bool> {
+    use anyhow::Context;
+    let path = install_path(shell)?;
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        println!("Removed {shell} completions at {}.", path.display());
+        Ok(true)
+    } else {
+        println!(
+            "{shell} completions were not installed at {}.",
+            path.display()
+        );
+        Ok(false)
+    }
+}
+
 /// Dynamic completion helper for shell scripts.
 ///
 /// Reads purely from local state / caches under `$XDG_STATE_HOME/x2rock/` so

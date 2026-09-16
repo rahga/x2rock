@@ -333,6 +333,7 @@ x2rock completions --install         # auto-detects $SHELL and installs to user 
 x2rock completions bash --install    # → ~/.local/share/bash-completion/completions/x2rock
 x2rock completions fish --install    # → ~/.config/fish/completions/x2rock.fish
 x2rock completions zsh --install     # → ~/.local/share/zsh/site-functions/_x2rock
+x2rock completions --uninstall       # removes installed completion script
 # zsh: put `fpath=(~/.local/share/zsh/site-functions $fpath)` in .zshrc before compinit
 ```
 
