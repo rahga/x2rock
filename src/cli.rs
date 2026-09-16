@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "x2rock", version, about = "Local-first Sonos control")]
+#[command(name = "x2rock", version = crate::VERSION, about = "Local-first Sonos control")]
 pub struct Cli {
     /// Room to control. Not needed when the household has a single group.
     /// Repeatable for the per-room commands (volume, transport, repeat,

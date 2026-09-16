@@ -196,10 +196,7 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "?".into());
-    log(&format!(
-        "x2rock {} running from {exe}",
-        env!("CARGO_PKG_VERSION")
-    ));
+    log(&format!("x2rock {} running from {exe}", crate::VERSION));
     let mut state = State::load()?;
 
     // Neither source is required: without them a dead socket is still found by

@@ -34,6 +34,12 @@ use commands::{
 };
 use state::State;
 
+/// What this build is, for `--version`, the daemon's first log line and the
+/// header of the unit `service install` writes. The crate version plus the
+/// commit it was built from, stamped in by `build.rs` - see there for why the
+/// crate version alone cannot answer it.
+pub const VERSION: &str = env!("X2ROCK_VERSION");
+
 /// Wait for whichever asks the daemon to stop, and name it for the log.
 ///
 /// Ctrl-C is not the usual one: as a systemd user service, `systemctl stop` and

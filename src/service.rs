@@ -48,7 +48,7 @@ fn header() -> String {
         "# Written by `x2rock service install` (x2rock {}).\n\
          # Re-run it after moving or reinstalling the binary; it refuses to overwrite\n\
          # edits unless told to with --force.\n",
-        env!("CARGO_PKG_VERSION")
+        crate::VERSION
     )
 }
 
@@ -658,7 +658,7 @@ mod tests {
         // An upgrade that changed nothing but the version in the header: ours,
         // and this used to be refused with an empty diff, since the only
         // differing line was a comment the listing hid.
-        let bumped = a.replacen("(x2rock 0.1.0)", "(x2rock 9.9.9)", 1);
+        let bumped = a.replacen(&format!("(x2rock {})", crate::VERSION), "(x2rock 9.9.9)", 1);
         assert_ne!(bumped, a, "the fixture must actually differ");
         assert_eq!(classify(&bumped, &a), Existing::Generated);
 
