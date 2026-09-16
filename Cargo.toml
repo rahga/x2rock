@@ -6,6 +6,9 @@ rust-version = "1.89"
 description = "Local-first Sonos control for Linux: a daemon that makes every room an MPRIS2 media player, and a CLI for everything the speakers answer on the LAN. No Sonos account, no cloud."
 license = "0BSD"
 repository = "https://github.com/rahga/x2rock"
+readme = "README.md"
+keywords = ["sonos", "mpris", "cli", "audio", "upnp"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 anyhow = "1.0.104"
