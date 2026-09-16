@@ -171,6 +171,32 @@ impl Credentials {
         self.services.get(service_id)
     }
 
+    /// Find a linked account by service id or service name (exact case-insensitive
+    /// match first, then unique prefix match on service name).
+    pub fn find_service<'a>(&'a self, query: &str) -> Option<(&'a str, &'a Account)> {
+        if let Some((id, account)) = self.services.get_key_value(query) {
+            return Some((id.as_str(), account));
+        }
+        if let Some((id, account)) = self
+            .services
+            .iter()
+            .find(|(_, a)| a.service_name.eq_ignore_ascii_case(query))
+        {
+            return Some((id.as_str(), account));
+        }
+        let needle = query.to_lowercase();
+        let matches: Vec<_> = self
+            .services
+            .iter()
+            .filter(|(_, a)| a.service_name.to_lowercase().starts_with(&needle))
+            .collect();
+        if matches.len() == 1 {
+            let (id, account) = matches[0];
+            return Some((id.as_str(), account));
+        }
+        None
+    }
+
     /// The token held for a service, if any - what every play path hands SMAPI.
     pub fn token_for(&self, service_id: &str) -> Option<Token> {
         self.get(service_id).map(Account::token)
@@ -339,5 +365,34 @@ mod tests {
         creds.remember("200", account("Bandcamp"));
         assert!(creds.forget("200").is_some());
         assert!(creds.forget("200").is_none());
+    }
+
+    #[test]
+    fn find_service_matches_by_id_name_and_prefix() {
+        let mut creds = Credentials::default();
+        creds.remember("200", account("Bandcamp"));
+        creds.remember("284", account("YouTube Music"));
+
+        // Match by ID
+        let (id, acct) = creds.find_service("200").unwrap();
+        assert_eq!(id, "200");
+        assert_eq!(acct.service_name, "Bandcamp");
+
+        // Match by exact name (case-insensitive)
+        let (id, acct) = creds.find_service("bandcamp").unwrap();
+        assert_eq!(id, "200");
+        assert_eq!(acct.service_name, "Bandcamp");
+
+        let (id, acct) = creds.find_service("youtube music").unwrap();
+        assert_eq!(id, "284");
+        assert_eq!(acct.service_name, "YouTube Music");
+
+        // Match by unique prefix
+        let (id, acct) = creds.find_service("band").unwrap();
+        assert_eq!(id, "200");
+        assert_eq!(acct.service_name, "Bandcamp");
+
+        // Non-existent
+        assert!(creds.find_service("Spotify").is_none());
     }
 }

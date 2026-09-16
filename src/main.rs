@@ -6598,11 +6598,9 @@ async fn run(cli: Cli) -> Result<()> {
         // player and both work with the household unreachable.
         Command::Unlink { ref service } => {
             let mut linked = credentials::Credentials::load()?;
-            let id = linked
-                .services
-                .iter()
-                .find(|(_, a)| a.service_name.eq_ignore_ascii_case(service))
-                .map(|(id, _)| id.clone())
+            let (id, _) = linked
+                .find_service(service)
+                .map(|(id, a)| (id.to_string(), a))
                 .ok_or_else(|| {
                     anyhow!("no account linked for {service:?}. Run `x2rock accounts` to see them.")
                 })?;
