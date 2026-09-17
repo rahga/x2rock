@@ -6610,6 +6610,33 @@ the Sonos app writes. `sn=` really is optional, as `bookmarks::service_uri` alre
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
 
+4. **Does a service with two accounts break the one-account assumption?** (deferred 2026-09-17,
+   needs the office household and one action in the Sonos app.)
+
+   Sonos does not make you choose between two accounts for the same service — they coexist, with
+   different ids in the app. This household may hold two iHeartRadio accounts, one per person. Two
+   places in this tree assume one:
+
+   - `bookmarks::service_uri` passes `sn=None` and justifies it as "the player does not need it:
+     the cdudn names the account". The supporting evidence is Mixcloud, where a *wrong* serial
+     also played — which shows the player ignored `sn=` and resolved from the cdudn. But the cdudn
+     we build, `SA_RINCON<type>_X_#Svc<type>-0-Token`, names the **service**, not an account, and
+     every one of those verifications ran against a service with exactly one. With two, nothing in
+     the URI says which, and how a player chooses has never been observed.
+   - `credentials.rs` keys the store by service id alone, one token per service, so relinking
+     replaces rather than adding. If Sonos's model is side-by-side accounts, x2rock can represent
+     only one of them.
+
+   **The test.** Favorite an iHeartRadio station in the Sonos app — ideally one from each account —
+   then run `x2rock accounts --content`, which harvests `(service id, account serial)` pairs from
+   the household's favorites and queue. Two serials under `sid 6` confirm it. A favorite is the
+   surer source than playback: that command's own footer notes an account which has only played a
+   station never appears.
+
+   **Not** an explanation for `musicServiceAccounts:1 match` refusing. An earlier guess that the
+   household was declining an extra registration is withdrawn — if accounts coexist, there is no
+   count to decline on.
+
 ## Resolved since the original draft
 
 - ~~Should a bookmark store the account serial?~~ — **closed 2026-08-31: the question dissolved.**
