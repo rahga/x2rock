@@ -25,6 +25,14 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 directories = "6.0.0"
 futures-util = "0.3.34"
 if-addrs = "0.15.0"
+# Gunzip, and nothing else. Deezer answers `getDeviceAuthToken` with
+# `Content-Encoding: gzip` without being asked - it ignores
+# `Accept-Encoding: identity` - and an unreadable body turned its ordinary
+# "keep waiting" fault into a hard HTTP 500, which is why Deezer was recorded
+# for weeks as a service that simply did not work. Pure Rust, no C step, and it
+# brings only adler2 with it; `default-features = false` drops the compressor
+# half, which nothing here sends.
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 mpris-server = { version = "0.10.0", features = ["tokio"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 roxmltree = "0.21.1"

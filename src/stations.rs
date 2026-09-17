@@ -42,8 +42,10 @@ const DIRECTORY: &str = "https://all.api.radio-browser.info";
 /// is in another country and this is invoked from a terminal, not a widget.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Radio Browser asks third-party clients to identify themselves, and it costs
-/// nothing to do. `http::get` sends no `User-Agent` of its own.
+/// Radio Browser asks third-party clients to identify themselves by name, so
+/// this is sent explicitly rather than left to `http::AGENT` - the two happen to
+/// carry the same string today, and this one is the directory's requirement
+/// rather than a default that may be tuned for other reasons.
 const AGENT: &str = concat!("x2rock/", env!("CARGO_PKG_VERSION"));
 
 /// One station, as the directory reports it.

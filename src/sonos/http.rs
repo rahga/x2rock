@@ -23,6 +23,16 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+/// Sent on every request that does not carry its own.
+///
+/// Not politeness. Deezer's SMAPI endpoint answers `getDeviceLinkCode` with an
+/// empty HTTP 200 when the request has no `User-Agent`, which arrives here as
+/// "answered HTTP 200 with an empty body" and made the service look dead - it
+/// was recorded for a fortnight as Deezer being broken. Any non-empty value
+/// satisfies it; verified 2026-09-17 against `api.deezer.com/sonos`, where even
+/// `a` gets the real reply. A caller that sends its own `User-Agent` keeps it.
+const AGENT: &str = concat!("x2rock/", env!("CARGO_PKG_VERSION"));
+
 /// Where a request is going, and how to reach it.
 ///
 /// `Lan` carries an address because players are found by scanning and their
@@ -199,6 +209,12 @@ async fn exchange(
         "{method} {path} HTTP/1.1\r\nHost: {}\r\n",
         endpoint.host_header()
     );
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    {
+        head.push_str(&format!("User-Agent: {AGENT}\r\n"));
+    }
     for (name, value) in headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -271,10 +287,71 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         body.to_vec()
     };
+    // Transfer-Encoding is unwrapped before Content-Encoding, which is the order
+    // they were applied in.
+    //
+    // This client never asks for a compressed body - it sends no
+    // `Accept-Encoding` at all, and HTTP/1.1 says that means any encoding is
+    // acceptable rather than none. Deezer takes it at its word and gzips, and
+    // ignores an explicit `Accept-Encoding: identity` too, so declining is not
+    // on offer: the only way to read the reply is to be able to decompress it.
+    let encoded = head.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("content-encoding:") && (l.contains("gzip") || l.contains("x-gzip"))
+    });
+    let body = if encoded {
+        gunzip(&body).with_context(|| format!("gzip body from {authority}"))?
+    } else {
+        body
+    };
     // Services answer UTF-8 and some of them lead with a BOM, which every XML
     // parser then refuses as content before the declaration.
     let text = String::from_utf8_lossy(&body).into_owned();
     Ok((status, text.trim_start_matches('\u{feff}').to_string()))
+}
+
+/// Unwrap one gzip member (RFC 1952) into the deflate stream inside it.
+///
+/// `miniz_oxide` decompresses raw deflate and zlib, not gzip, and the only
+/// difference is the wrapper: a ten-byte header, up to four optional
+/// variable-length fields, then deflate, then an eight-byte trailer. The
+/// trailer needs no handling - inflate stops at the final block and ignores
+/// what follows - so this is header arithmetic and nothing more. Pulling in a
+/// second crate to do that much would be the larger change.
+fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
+    // Magic, then the compression method: deflate is the only one ever defined.
+    let [0x1f, 0x8b, 0x08, flags, ..] = data else {
+        bail!("not a gzip member");
+    };
+    let flags = *flags;
+    let mut at = 10;
+    // FEXTRA: a two-byte little-endian length, then that many bytes.
+    if flags & 0b0000_0100 != 0 {
+        let len = data
+            .get(at..at + 2)
+            .ok_or_else(|| anyhow!("truncated gzip extra field"))?;
+        at += 2 + u16::from_le_bytes([len[0], len[1]]) as usize;
+    }
+    // FNAME and FCOMMENT: NUL-terminated strings, skipped including the NUL.
+    for flag in [0b0000_1000, 0b0001_0000] {
+        if flags & flag != 0 {
+            let end = data
+                .get(at..)
+                .and_then(|rest| rest.iter().position(|b| *b == 0))
+                .ok_or_else(|| anyhow!("unterminated gzip header string"))?;
+            at += end + 1;
+        }
+    }
+    // FHCRC: a two-byte CRC over the header, which is not checked here - a
+    // corrupt header will fail the inflate that follows anyway.
+    if flags & 0b0000_0010 != 0 {
+        at += 2;
+    }
+    let deflate = data
+        .get(at..)
+        .ok_or_else(|| anyhow!("gzip header runs past the end of the body"))?;
+    miniz_oxide::inflate::decompress_to_vec(deflate)
+        .map_err(|e| anyhow!("would not decompress: {e:?}"))
 }
 
 fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
@@ -306,6 +383,21 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gunzip_reads_a_real_member_with_a_filename_in_its_header() {
+        // Produced by gzip(1) with -N, so FNAME is set and the header is not
+        // the bare ten bytes: the optional fields are the part worth pinning.
+        const GZ: &[u8] = include_bytes!("testdata/hello.gz");
+        assert_eq!(GZ[3] & 0b0000_1000, 0b0000_1000, "FNAME is set");
+        assert_eq!(gunzip(GZ).unwrap(), b"<hello>SMAPI</hello>\n");
+    }
+
+    #[test]
+    fn gunzip_refuses_what_is_not_a_member() {
+        assert!(gunzip(b"<?xml version=\"1.0\"?>").is_err(), "plain XML");
+        assert!(gunzip(&[0x1f, 0x8b]).is_err(), "truncated magic");
+    }
 
     #[test]
     fn dechunk_reassembles_and_ignores_extensions() {

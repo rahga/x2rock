@@ -768,7 +768,9 @@ Media Room — Deep Space One on SomaFM Radio
   both directions: plain to a player on 1400, TLS to a service on 443. `tokio-rustls` and
   `webpki-roots` were **already in the lock file** via `tokio-tungstenite`, so this cost no new
   third-party crate. Timeouts belong to the caller, because 8s against a player on the same switch
-  and 6s against a service in another country are different budgets.
+  and 6s against a service in another country are different budgets. It sends a `User-Agent` and
+  decodes a gzip body; both were added on 2026-09-17 and both are load-bearing — see "Deezer was
+  never broken; this client was".
 - **`sonos/smapi.rs`** — the SMAPI client. Parses the descriptor list, reads categories out of the
   manifest and presentation map, and does `search` and `getMediaURI`.
 - **`upnp.rs::list_services`** — `ListAvailableServices`, the one LAN call search needs.
@@ -1559,7 +1561,9 @@ Tribe of Noise   https://sonos.tribeofnoise.com/sessions/start/4AYWS
 answers fine — a five-digit activation code, the shortest of any of them. Only Deezer does not, and
 the four failures are four different problems, none of them `linkDeviceId`:
 
-- **Deezer** — HTTP 200 with an **empty body**. Not a parse problem; the service says nothing.
+- **Deezer** — HTTP 200 with an **empty body**. *Superseded 2026-09-17: the service was answering
+  all along and this client was sending no `User-Agent`. See "Deezer was never broken; this client
+  was".*
 - **Classical Archives** — a fault whose entire message is `str3`.
 - **Sonos Backgrounds** — a reply with no `linkCode` in it. Plausibly not a real music service.
 - **Sonos Radio** — its SMAPI server **crashes**: `TypeError: method is not a function`, SOAP 1.2,
@@ -1614,7 +1618,9 @@ Neither was reachable from Bandcamp, which is why building against one service w
    values are joined, so a pending check works whichever half carries the word, and a 1.2-shaped
    `NOT_LINKED_RETRY` is now pending too, though nothing has sent one.
 2. **An empty 200 is not a reply.** Deezer's empty body fell through to the XML reader and reported
-   "parsing getDeviceLinkCode response", blaming the parser for a service that said nothing.
+   "parsing getDeviceLinkCode response", blaming the parser for a service that said nothing. The
+   guard was right and the diagnosis was wrong: Deezer sends an empty 200 only to a request with no
+   `User-Agent`. Corrected 2026-09-17.
 
 The pattern in both: an error message that named the wrong culprit. `X2ROCK_DUMP_SMAPI` found each
 in one run.
@@ -3629,7 +3635,8 @@ rediscover these the hard way:
     uses the same namespaces and command shapes, it remains useful prior art for endpoint shapes.
     Maintenance status unconfirmed — reference, not a dependency.
 - **HTTP client**: hand-rolled and minimal (`sonos/http.rs`), plain HTTP to a player and TLS to a
-  service, on the `tokio-rustls` already in the tree. **Sonos OAuth**: not needed and not built.
+  service, on the `tokio-rustls` already in the tree, plus `miniz_oxide` for gunzip alone.
+  **Sonos OAuth**: not needed and not built.
 - A ~60-line dependency-free Python reference implementation of the LAN WebSocket client (handshake,
   framing, command/subscribe) was written during this investigation and is a direct model for the
   Rust port.
@@ -6023,7 +6030,9 @@ works with every speaker off. The connection is made lazily, after the directory
   so the shortcut is a decision rather than an oversight.
 - **A `User-Agent` is sent** (`x2rock/<version>`), because the operators ask third-party clients to
   identify themselves. It is not enforced - requests succeed without one, tested - which is exactly
-  why it is worth sending.
+  why it is worth sending. Since 2026-09-17 `http::AGENT` sends the same string on every request
+  that does not carry its own, so this one is the directory's stated requirement rather than the
+  thing that makes it work.
 - **`urlencode` moved from `sonos/plex.rs` to `sonos/http.rs`** and is shared. It was written for
   Plex's client identifier and a search term needs identical treatment; a second copy would have
   been a second chance to get it wrong. `http::get_with` is new for the same reason - one GET that
@@ -6462,6 +6471,64 @@ because this household has none - Sonos moves the wireless players onto its own 
 player is wired. So there is no fourth row, and `connection()` answers `unknown` for any value it
 has not seen rather than inventing one. `--json` keeps the raw `connection_type` beside the word for
 whoever hits it first.
+
+## Deezer was never broken; this client was (2026-09-17)
+
+Deezer had been recorded here twice as a service that answers `getDeviceLinkCode` with an empty
+HTTP 200 — "the service says nothing at all". It was answering every time. Two bugs in
+`sonos/http.rs`, both invisible until the reply was compared against `curl`:
+
+1. **No `User-Agent`.** Deezer returns an empty 200 to a request carrying none. Any non-empty value
+   is accepted — verified with the literal string `a`. `http::AGENT` now sends
+   `x2rock/<version>` unless the caller supplies its own, which is what `stations.rs` still does.
+2. **No gzip.** Deezer sets `Content-Encoding: gzip` on *some* replies without being asked
+   (`getDeviceAuthToken` yes, `getDeviceLinkCode` no) and **ignores `Accept-Encoding: identity`**,
+   so declining is not on offer. This client sends no `Accept-Encoding` at all, and HTTP/1.1 reads
+   that as "any encoding is acceptable" rather than "none", so Deezer is within its rights.
+
+The second was the damaging one. The unreadable body meant `fault_in` could not parse the fault, so
+an ordinary `Client.NOT_LINKED_RETRY` — *the user has not finished in the browser yet* — fell
+through to `parse_fault` and became a hard HTTP 500. The link aborted on its first poll, seconds
+after opening the browser, every time.
+
+`miniz_oxide` decompresses raw deflate and zlib but has **no gzip entry point**, so `http::gunzip`
+strips the RFC 1952 header (ten bytes, plus FEXTRA/FNAME/FCOMMENT/FHCRC when flagged) and hands the
+rest to `decompress_to_vec`. The eight-byte trailer needs no handling: inflate stops at the final
+block. That is the whole reason for the dependency, and `default-features = false` drops the
+compressor half, which nothing here sends.
+
+**What Deezer turned out to be worth.** It is the first linked service with a *real catalogue* —
+artists, albums, tracks, playlists and stations, in FLAC (`tr-flac`, `protocolInfo`
+`sonos.com-http:*:audio/flac:*`) — rather than Bandcamp's personal library. And unlike Bandcamp it
+returns a `userIdHashCode`, nested in a `userInfo` element alongside a nickname.
+
+### What the household match actually buys, settled
+
+That hash made the long-standing `musicServiceAccounts:1 match` question testable, and the answer
+is that x2rock cannot make `match` succeed by any route tried:
+
+- The namespace answers **only** `match`. `getAccounts`, `getMusicServiceAccounts`, `listAccounts`,
+  `getHouseholdAccounts` and `refreshAccounts` are all `ERROR_UNSUPPORTED_COMMAND`, which is why
+  `accounts --content` has to infer serials from favorites and queue items.
+- Required parameters are `nickname`, `serviceId`, `userIdHashCode`, refused in that order.
+- Anonymous services and unknown ids get `Unsupported account authentication method`. **Both**
+  DeviceLink and AppLink get `Link code required to add guest account` — the household is willing
+  to register an app-link service too, so the tier is not the barrier.
+- Supplied a link code, failures lose their `reason` entirely and arrive as bare
+  `ERROR_COMMAND_FAILED`.
+- **The spent-code theory is dead.** A code was minted, authorized in a browser, and handed to
+  `match` without x2rock ever calling `getDeviceAuthToken` on it; it failed identically, and the
+  code was proven still live afterwards by redeeming it and getting the same hash back.
+
+What *does* work is adding the service in the Sonos app. Before that, `play-item` on a Deezer track
+got `AddURIToQueue` → UPnP 800 and fell back to a direct stream; after it, the identical call queued
+cleanly. So the sentence `run_link` prints is exactly right: search and browse ride on the local
+token, and on-demand content queues only when the household holds its own account.
+
+**The URI shape is not involved**, an earlier suspicion worth recording as disproved. The player
+normalises whatever it is handed: `x-sonosapi-hls-static:<id>?sid=2&flags=65544` with no `sn=` was
+accepted and rewritten to `x-sonos-http:<id>.flac?sid=2&flags=8232&sn=10` — byte-identical to what
+the Sonos app writes. `sn=` really is optional, as `bookmarks::service_uri` already said.
 
 ## Open questions
 

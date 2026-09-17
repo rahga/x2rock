@@ -988,10 +988,15 @@ async fn call_soap(
             without_credentials(&envelope)
         );
     }
-    // An empty 200 is not a reply. Deezer answers `getDeviceLinkCode` with
-    // exactly that, and letting it fall through to the XML reader reported
-    // "parsing getDeviceLinkCode response" - blaming the parser for a service
-    // that said nothing at all.
+    // An empty 200 is not a reply, and letting one fall through to the XML
+    // reader reported "parsing getDeviceLinkCode response" - blaming the parser
+    // for a service that said nothing at all.
+    //
+    // Deezer was the service that produced it, and for two weeks this was read
+    // as Deezer being broken. It was not: its endpoint answers an empty 200 to
+    // any request without a `User-Agent`, and this client sent none. Fixed in
+    // `http::AGENT`. The guard stays, because "said nothing" still needs a
+    // sentence of its own whenever some other service does it.
     if text.trim().is_empty() {
         return Ok(Err(Fault {
             code: String::new(),
