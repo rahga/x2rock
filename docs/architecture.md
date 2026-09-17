@@ -6530,6 +6530,54 @@ normalises whatever it is handed: `x-sonosapi-hls-static:<id>?sid=2&flags=65544`
 accepted and rewritten to `x-sonos-http:<id>.flac?sid=2&flags=8232&sn=10` — byte-identical to what
 the Sonos app writes. `sn=` really is optional, as `bookmarks::service_uri` already said.
 
+## Cross-service search: one term, every service that can answer (built 2026-09-17)
+
+`x2rock search "travis scott"` with no `--service` now asks every searchable service at once and
+merges the answers. That grammar was previously dead - a bare term printed the service list and
+silently dropped the word typed - so nothing had to be given up to take it.
+
+**Three passes, and the middle one is why it is not just a loop.** `Catalogue::categories_for` takes
+`&mut self`, so only one category fetch can ever be in flight; a fan-out needs them all. So
+categories are warmed concurrently through `smapi::categories` and handed to the new
+`Catalogue::remember_categories` afterwards, the plan is built from the cache through the new
+read-only `Catalogue::cached_categories`, and only then do the searches themselves fan out. A warm
+that *fails* is deliberately not recorded: `remember_categories` would write "asked, and it has
+none", which is what drops a service out of `searchable` permanently.
+
+**Linked services sort first, and that is a judgement about quality rather than speed.** Measured
+against the same term on the same day:
+
+| tier | example | albums | plays as | metadata |
+| --- | --- | --- | --- | --- |
+| linked catalogue | Deezer | yes | queued, FLAC | the service's own |
+| station | iHeartRadio, Audacy, TuneIn | no | live stream | station names |
+| blog aggregator | Hype Machine | **never** | expiring 128k MP3 | the blog post's, unverified |
+
+Hype Machine is worth spelling out, because it looks like a catalogue and is not. It indexes
+hand-picked music blogs by RSS and accepts uploads from SoundCloud, Bandcamp and Audiomack; it
+documents that it cannot carry "EPs, albums, playlists, or videos", only individual tracks under
+20 MB and 15 minutes. So it can never answer "what albums are there". Its titles come from the blog
+post rather than the file, and they disagree: `TRACK:384m5`, which both Hype Machine and x2rock
+label "Butterfly Effect (Draye Remix)", plays a Sicko Mode remix. One of five ids sampled was a dead
+404. It belongs in the results as discovery, never above a catalogue hit.
+
+Sorting is stable, so each service keeps the order it answered in - services rank their own hits and
+reordering within one would throw that away.
+
+**The rest of the shape.** `FAN_OUT_TIMEOUT` is 12s, shorter than the single-service budget because
+the slowest of thirty-five decides when anything appears; a service that overruns is named on stderr
+rather than passed off as having found nothing. `--count` became `Option<u32>`, defaulting to 20 for
+one service and `FAN_OUT_COUNT` (5) merged, because twenty rows each across thirty-five services is
+not a list. `--only-linked` skips the long tail. `pick_category` skips a service that has no category
+by the requested name rather than substituting its first, so `-c albums` cannot answer with a radio
+service's stations. Ids are never truncated - they are what `play-item` is handed - so the id column
+is sized to the widest *ordinary* id and a service with 58-character ids pushes only its own rows.
+A refreshed token is saved sequentially after the join, because several tasks rewriting the
+credentials file is a good way to lose one.
+
+Measured on the office household: 0.6s for `--only-linked`, 2.8s for all 35 including a cold
+category warm-up of 32 of them.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

@@ -395,20 +395,35 @@ pub enum Command {
     /// Play a favorite, by name or id. The one way to start a room that has
     /// nothing queued, which `play` cannot do.
     Favorite { query: String },
-    /// Search a music service. Only services with anonymous access, which is
-    /// most of the radio ones; the rest need a linked account x2rock cannot
-    /// supply. `--service` with no term lists what can be searched.
+    /// Search music services. A term with no `--service` asks every service
+    /// that can answer, at once, and merges the results; `--service` asks one.
+    /// Neither, and it lists what can be searched.
+    ///
+    /// Anonymous services need nothing. The rest answer only once `x2rock link`
+    /// has a token for them, and a linked service is listed first in a merged
+    /// search: it is the tier with real albums, real metadata and content the
+    /// player will queue rather than stream.
     Search {
         term: Option<String>,
         /// Service to search, by name. Case-insensitive, and a prefix will do.
+        /// Left out, every searchable service is asked.
         #[arg(long, short = 's')]
         service: Option<String>,
         /// Category within the service, by its own name (`stations`, `tracks`).
-        /// Defaults to `all` where the service offers it, else the first.
+        /// Defaults to `all` where the service offers it, else the first. In a
+        /// merged search, services that have no such category are skipped.
         #[arg(long, short = 'c')]
         category: Option<String>,
-        #[arg(long, default_value_t = 20)]
-        count: u32,
+        /// Only the services with a linked account, in a merged search. Faster,
+        /// and the tier whose answers are worth the most. No effect alongside
+        /// `--service`.
+        #[arg(long)]
+        only_linked: bool,
+        /// Results per service. Defaults to 20 for one service and 5 for a
+        /// merged search, where the rows are summed across everything that
+        /// answered.
+        #[arg(long)]
+        count: Option<u32>,
         /// First result to return, 0-based. Page with `--index 20 --count 20`,
         /// `--index 40`, and so on; `--json` reports `total` so a caller knows
         /// when to stop. **`--play N` counts within the page returned**, so
@@ -1465,6 +1480,49 @@ mod tests {
     /// Paging is the difference between "this container has 20 things" and
     /// "here are the first 20 things there might be more of", and `--json` had
     /// no way to say which. `--index` is 0-based and pairs with `--count`.
+    #[test]
+    fn a_bare_term_is_the_merged_search_and_count_defaults_per_mode() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+                .unwrap()
+                .command
+        };
+        // The shape the fan-out keys off: a term, and no service named.
+        assert!(matches!(
+            parse(&["search", "travis scott"]),
+            Command::Search {
+                service: None,
+                count: None,
+                only_linked: false,
+                ..
+            }
+        ));
+        // `count` is optional rather than defaulted, because 20 is right for one
+        // service and wrong for thirty-five; the two defaults live in the
+        // command, not in clap.
+        assert!(matches!(
+            parse(&["search", "-s", "Deezer", "travis scott", "--count", "7"]),
+            Command::Search { count: Some(7), .. }
+        ));
+        assert!(matches!(
+            parse(&["search", "--only-linked", "travis scott"]),
+            Command::Search {
+                only_linked: true,
+                service: None,
+                ..
+            }
+        ));
+        // Still the listing when there is no term at all.
+        assert!(matches!(
+            parse(&["search"]),
+            Command::Search {
+                term: None,
+                service: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn browse_and_search_take_a_page_to_fetch() {
         let parse = |args: &[&str]| {

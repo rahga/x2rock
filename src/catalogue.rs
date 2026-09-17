@@ -282,6 +282,29 @@ impl Catalogue {
         }
     }
 
+    /// The cached categories for a service, without fetching.
+    ///
+    /// [`categories_for`](Self::categories_for) is the fetching form and takes
+    /// `&mut self`; the fan-out has already warmed everything it could and wants
+    /// to read many services in one pass, including telling "warmed to nothing"
+    /// from "the warm failed and this is still unasked". `None` is the second.
+    pub fn cached_categories(&self, service_id: &str) -> Option<&[Category]> {
+        self.categories.get(service_id).map(Vec::as_slice)
+    }
+
+    /// Store a category list fetched outside [`categories_for`](Self::categories_for).
+    ///
+    /// The cross-service search warms many services at once, which
+    /// `categories_for` cannot do: it takes `&mut self`, so only one call can be
+    /// in flight. The fan-out reads `smapi::categories` concurrently and hands
+    /// each answer here afterwards. An **empty** list is stored like any other,
+    /// for the same reason `categories_for` stores one - "asked and told
+    /// nothing" is knowledge, and it is what drops the service out of
+    /// [`searchable`](Self::searchable) next time.
+    pub fn remember_categories(&mut self, service_id: &str, categories: Vec<Category>) {
+        self.categories.insert(service_id.to_string(), categories);
+    }
+
     /// Whether [`ratings_for`](Self::ratings_for) would be a cache hit - the
     /// same "asked and got nothing back, versus never asked" distinction
     /// [`categories_cached`](Self::categories_cached) makes, for the same

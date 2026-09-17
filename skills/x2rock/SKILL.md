@@ -359,12 +359,13 @@ see "Ask before you act".
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
-| Search a service | `x2rock search --json` (lists services) / `x2rock search -s <svc> <term> --json` |
+| Search every service at once | `x2rock search "<term>" --json` — no `--service`; add `--only-linked` for the good tier |
+| Search one service | `x2rock search -s <svc> <term> --json` / `x2rock search --json` (lists services) |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
 | Page through either | add `--count N --index N` — `--json` answers `{total, index, items}` |
 | Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
-| Play a search/browse hit | `x2rock search -s <svc> <term> --play N -r "<Room>"` |
+| Play a search/browse hit | `x2rock search [-s <svc>] <term> --play N -r "<Room>"` — `N` counts the merged list |
 | Play or queue a hit you already have the id for | `x2rock -r "<Room>" play-item -s <svc> <id> --title "<name>" --kind <type>` / `queue-item` (same arguments; adds without playing, refuses a stream) |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
@@ -387,6 +388,17 @@ queue.
 that list is Sonos's ceiling. `x2rock stations` searches a community directory of tens of thousands
 of internet radio stations that wants no account from anybody. See "Free radio" below - it is the
 answer to most "put something on" requests the household's own services cannot serve.
+
+**A term with no `--service` searches everything at once.** `x2rock search "travis scott"` asks
+every service that can answer, concurrently, and merges the results; the rows name their service and
+`--play N` counts down the merged list. **Linked services sort first, and prefer them**: that tier
+has real albums, metadata the service vouches for, and content a player will *queue* rather than
+stream. The anonymous tier is radio stations and blog aggregators - Hype Machine carries no albums
+at all by construction, its titles come from the blog post rather than the file, and its links rot.
+`--only-linked` skips the tail. `--count` is per service and defaults to 5 merged, 20 for one.
+A named `--category` skips services that have no category by that name rather than substituting one,
+so `-c albums` asks only services that really have albums. First run is slower: services that have
+never been searched are asked for their categories, once, and the answer is cached.
 
 **`search --json` and `browse --json` answer an envelope, not a bare array**: `{total, index,
 items}`. Read `items`. **`total` is the service's whole count and `items` is one page of it**, so

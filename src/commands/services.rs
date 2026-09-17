@@ -6,6 +6,7 @@
 //! callers. Playing a hit is `content::play_item`.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
@@ -776,6 +777,20 @@ pub async fn run_browse(
 /// thing it caches is unavailable is not doing its job. Only `--play`, and a
 /// first run with nothing cached, genuinely need a player.
 #[allow(clippy::too_many_arguments)]
+/// How long one service gets to answer in a merged search.
+///
+/// Shorter than the single-service budget on purpose: thirty-five services are
+/// asked at once and the slowest decides when results appear, so a service
+/// having a bad day costs everyone. Its absence is reported rather than hidden.
+const FAN_OUT_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Results per service when no `--count` is given and no one service was named.
+///
+/// Twenty is right for one service and wrong for thirty-five: the merged list is
+/// read top to bottom, and seven hundred rows is not a list.
+const FAN_OUT_COUNT: u32 = 5;
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_search(
     ip: Option<IpAddr>,
     household: Option<&str>,
@@ -783,7 +798,8 @@ pub async fn run_search(
     term: Option<&String>,
     service: Option<&String>,
     category: Option<&String>,
-    count: u32,
+    only_linked: bool,
+    count: Option<u32>,
     index: u32,
     play: Option<usize>,
     refresh: bool,
@@ -812,6 +828,38 @@ pub async fn run_search(
     }
 
     let linked = credentials::Credentials::load()?;
+
+    // A term with no service is the merged search. Checked before the listing
+    // below, which is what a bare term used to fall into: it printed the
+    // service list and silently dropped the word the person typed.
+    if service.is_none()
+        && let Some(term) = term
+    {
+        let candidates: Vec<sonos::smapi::Service> = catalogue
+            .searchable(&linked)
+            .into_iter()
+            .filter(|s| !only_linked || linked.get(&s.id).is_some())
+            .cloned()
+            .collect();
+        if dirty {
+            catalogue.save()?;
+        }
+        return search_everywhere(
+            &mut catalogue,
+            &linked,
+            &reached,
+            room,
+            candidates,
+            term,
+            category,
+            count.unwrap_or(FAN_OUT_COUNT),
+            index,
+            play,
+            json,
+        )
+        .await;
+    }
+    let count = count.unwrap_or(20);
     let usable = catalogue.searchable(&linked);
 
     let Some(query) = service else {
@@ -1047,6 +1095,286 @@ pub async fn run_search(
     Ok(())
 }
 
+/// Which category of one service a merged search should ask.
+///
+/// Named, and the service must have it by that name - a miss is skipped rather
+/// than substituted, because `-c albums` answered with a radio service's station
+/// list would be a wrong answer wearing the right label. Unnamed, `all` where the
+/// service offers one, else whatever it lists first, which is the same rule the
+/// single-service path follows.
+fn pick_category<'a>(
+    categories: &'a [sonos::smapi::Category],
+    want: Option<&str>,
+) -> Option<&'a sonos::smapi::Category> {
+    match want {
+        Some(want) => categories.iter().find(|c| c.id.eq_ignore_ascii_case(want)),
+        None => categories
+            .iter()
+            .find(|c| c.id.eq_ignore_ascii_case("all"))
+            .or_else(|| categories.first()),
+    }
+}
+
+/// `x2rock search <term>` with no `--service`: ask everything at once.
+///
+/// Three passes, because the middle one cannot be folded into the others.
+/// Categories are warmed concurrently (`categories_for` takes `&mut self`, so
+/// only one of those can be in flight); the plan is then built from the cache;
+/// then the searches themselves fan out.
+///
+/// **Linked services sort first, and that is a judgement about quality rather
+/// than speed.** A linked service is the tier with real albums, metadata the
+/// service itself vouches for, and content a player will queue. The anonymous
+/// tier is stations and aggregators: Hype Machine indexes music blogs, so it
+/// carries no albums at all by construction, its titles come from the blog post
+/// rather than the file, and its links rot. Worth showing, not worth showing
+/// first.
+#[allow(clippy::too_many_arguments)]
+async fn search_everywhere(
+    catalogue: &mut catalogue::Catalogue,
+    linked: &credentials::Credentials,
+    reached: &Result<session::Session>,
+    room: Option<&str>,
+    candidates: Vec<sonos::smapi::Service>,
+    term: &str,
+    category: Option<&String>,
+    count: u32,
+    index: u32,
+    play: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    ensure!(
+        !candidates.is_empty(),
+        "no service can be searched yet. Link one with: x2rock link"
+    );
+
+    // Pass one: learn the categories of anything never asked. A failure is left
+    // unrecorded on purpose - `remember_categories` would write "asked, and it
+    // has none", which is what drops a service out of `searchable` for good.
+    let cold: Vec<&sonos::smapi::Service> = candidates
+        .iter()
+        .filter(|s| !catalogue.categories_cached(&s.id))
+        .collect();
+    if !cold.is_empty() {
+        let warmed = futures_util::future::join_all(cold.iter().map(|s| async move {
+            (
+                s.id.clone(),
+                tokio::time::timeout(FAN_OUT_TIMEOUT, sonos::smapi::categories(s)).await,
+            )
+        }))
+        .await;
+        let mut learned = 0;
+        for (id, got) in warmed {
+            if let Ok(Ok(categories)) = got {
+                catalogue.remember_categories(&id, categories);
+                learned += 1;
+            }
+        }
+        if learned > 0 {
+            catalogue.save()?;
+        }
+    }
+
+    // Pass two: who can answer, and in which category. A service that has no
+    // category by the requested name is skipped rather than searched in the
+    // wrong one - `-c albums` against a radio service would otherwise return
+    // its station list and call it albums.
+    let mut plan: Vec<(&sonos::smapi::Service, String)> = Vec::new();
+    for service in &candidates {
+        let Some(categories) = catalogue.cached_categories(&service.id) else {
+            continue;
+        };
+        if let Some(picked) = pick_category(categories, category.map(String::as_str)) {
+            plan.push((service, picked.mapped_id.clone()));
+        }
+    }
+    if plan.is_empty() {
+        match category {
+            Some(want) => bail!("no searchable service has a category {want:?}"),
+            None => bail!("no service published a category to search"),
+        }
+    }
+
+    // Pass three: the searches. Every service gets the same term and the same
+    // budget, and one that overruns it is named on stderr rather than passed off
+    // as having found nothing.
+    let answers = futures_util::future::join_all(plan.iter().map(|(service, mapped)| {
+        let token = linked.token_for(&service.id);
+        async move {
+            let mut refreshed = None;
+            let got = tokio::time::timeout(
+                FAN_OUT_TIMEOUT,
+                sonos::smapi::search(
+                    service,
+                    token.as_ref(),
+                    mapped,
+                    term,
+                    index,
+                    count,
+                    &mut refreshed,
+                ),
+            )
+            .await;
+            (*service, got, refreshed)
+        }
+    }))
+    .await;
+
+    struct Row<'a> {
+        service: &'a sonos::smapi::Service,
+        item: sonos::smapi::Item,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    let mut total = 0u32;
+    let mut slow: Vec<&str> = Vec::new();
+    let mut refused: Vec<(&str, String)> = Vec::new();
+    for (service, got, refreshed) in answers {
+        // Sequentially, after the fan-out: this writes the credentials file, and
+        // several tasks racing to rewrite it is a good way to lose a token.
+        if refreshed.is_some() {
+            let _ = use_refreshed_token(&service.id, linked.token_for(&service.id), refreshed);
+        }
+        match got {
+            Err(_) => slow.push(&service.name),
+            Ok(Err(e)) => refused.push((&service.name, format!("{e:#}"))),
+            Ok(Ok((items, found))) => {
+                total += found;
+                rows.extend(items.into_iter().map(|item| Row { service, item }));
+            }
+        }
+    }
+
+    // Stable, so each service keeps the order it answered in - services rank
+    // their own hits and reordering within one would discard that.
+    rows.sort_by_key(|r| {
+        (
+            linked.get(&r.service.id).is_none(),
+            r.service.name.to_lowercase(),
+        )
+    });
+
+    if let Some(nth) = play {
+        let row = rows
+            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
+            .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", rows.len()))?;
+        ensure!(
+            !row.item.container,
+            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}",
+            row.item.title,
+            row.service.name,
+            row.item.id
+        );
+        let session = reached.as_ref().map_err(hint::no_player_to_play)?;
+        let token = linked.token_for(&row.service.id);
+        return play_item(
+            session,
+            room,
+            row.service,
+            token.as_ref(),
+            Some(row.item.item_type.as_str()),
+            &row.item.id,
+            &row.item.title,
+        )
+        .await;
+    }
+
+    if json {
+        // The same field names one service's `--json` emits, so the widget can
+        // concatenate the two rather than translate between them. `service` was
+        // always there; here it is the column that matters.
+        let items: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.item.id,
+                    "name": r.item.title,
+                    "type": r.item.item_type,
+                    "description": r.item.summary,
+                    "service": r.service.name,
+                    "art_url": r.item.art_url,
+                    "container": r.item.container,
+                    "queueable": queueable(&r.item, r.service),
+                    "linked": linked.get(&r.service.id).is_some(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "total": total,
+                "index": index,
+                "asked": plan.len(),
+                "items": items,
+            }))?
+        );
+        return Ok(());
+    }
+
+    for name in &slow {
+        eprintln!("x2rock: {name} did not answer within {FAN_OUT_TIMEOUT:?}");
+    }
+    for (name, why) in &refused {
+        eprintln!("x2rock: {name} refused the search ({why})");
+    }
+    if rows.is_empty() {
+        println!(
+            "Nothing for {term:?} on any of the {} services asked.",
+            plan.len()
+        );
+        return Ok(());
+    }
+    // Rendered first, then measured. Measuring the raw title instead leaves a
+    // container's trailing slash hanging past the column, which is how this was
+    // wrong the first time.
+    const NAME_MAX: usize = 44;
+    let names: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let name = match r.item.container {
+                true => format!("{}/", r.item.title),
+                false => r.item.title.clone(),
+            };
+            match name.chars().count() > NAME_MAX {
+                true => name.chars().take(NAME_MAX - 1).chain("…".chars()).collect(),
+                false => name,
+            }
+        })
+        .collect();
+    let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(20);
+    // Ids are never truncated - they are what `play-item` is given, and half an
+    // id is worse than a ragged column. The width is the widest *ordinary* one,
+    // so a service with monstrous ids (NRK Radio's are 58 characters) pushes its
+    // own rows out rather than every other row.
+    const ID_MAX: usize = 30;
+    let id_width = rows
+        .iter()
+        .map(|r| r.item.id.chars().count())
+        .filter(|n| *n <= ID_MAX)
+        .max()
+        .unwrap_or(18);
+    for (n, (row, name)) in rows.iter().zip(&names).enumerate() {
+        // Padded by hand: `{:<width$}` pads to a byte count through Display, so
+        // one accented character in a title shifts the column.
+        let pad = |s: &str, w: usize| " ".repeat(w.saturating_sub(s.chars().count()));
+        println!(
+            "{:>3}. {}{} {:<9} {name}{}  {}",
+            n + 1,
+            row.item.id,
+            pad(&row.item.id, id_width),
+            row.item.item_type,
+            pad(name, width),
+            row.service.name
+        );
+    }
+    println!(
+        "\n{} from {} of {} services asked. Play one with: x2rock search {term:?} --play N",
+        rows.len(),
+        plan.len() - slow.len() - refused.len(),
+        plan.len()
+    );
+    Ok(())
+}
+
 /// `x2rock unlink`: forget a linked account, by id, name or unique prefix.
 /// Local only - the token stays valid at the service.
 pub fn unlink(service: &str) -> Result<()> {
@@ -1193,4 +1521,53 @@ pub async fn accounts(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sonos::smapi::Category;
+
+    fn cats(ids: &[&str]) -> Vec<Category> {
+        ids.iter()
+            .map(|id| Category {
+                id: (*id).to_string(),
+                mapped_id: format!("search:{id}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unnamed_category_prefers_all_and_falls_back_to_the_first() {
+        let with_all = cats(&["artists", "all", "tracks"]);
+        assert_eq!(pick_category(&with_all, None).unwrap().id, "all");
+
+        // iHeartRadio publishes no `all`, so the merged search asks its first -
+        // stations - which is why a music term there answers with radio.
+        let without = cats(&["stations", "artists", "tracks"]);
+        assert_eq!(pick_category(&without, None).unwrap().id, "stations");
+
+        assert!(pick_category(&[], None).is_none(), "nothing to pick");
+    }
+
+    #[test]
+    fn a_named_category_is_matched_by_name_or_skipped_entirely() {
+        let deezer = cats(&["artists", "albums", "tracks"]);
+        assert_eq!(
+            pick_category(&deezer, Some("albums")).unwrap().mapped_id,
+            "search:albums"
+        );
+        assert_eq!(
+            pick_category(&deezer, Some("ALBUMS")).unwrap().id,
+            "albums",
+            "services disagree about case"
+        );
+        // The point of the whole function: a station-only service asked for
+        // albums is left out, rather than answered with its stations.
+        let radio = cats(&["stations", "podcasts"]);
+        assert!(
+            pick_category(&radio, Some("albums")).is_none(),
+            "no substituting a category the caller did not ask for"
+        );
+    }
 }
