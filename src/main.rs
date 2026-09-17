@@ -42,6 +42,41 @@ use state::State;
 /// crate version alone cannot answer it.
 pub const VERSION: &str = env!("X2ROCK_VERSION");
 
+/// Exit quietly when the thing reading our output has gone away.
+///
+/// Rust sets `SIGPIPE` to ignore before `main`, so a write to a pipe whose
+/// reader has exited returns `EPIPE` - and `println!` answers that by
+/// panicking, which `panic = "abort"` then turns into a core dump.
+/// `x2rock favorites --json | head` is an ordinary thing to type and deserves
+/// the ordinary answer, which is to stop without a word.
+///
+/// Restoring the default disposition is the usual fix for a CLI and is the
+/// wrong one here, because this binary is also a daemon. The same signal would
+/// then kill it on a write to a closed *socket*, where today the write returns
+/// an error, `follow` logs "connection lost" and the reconnect machinery takes
+/// over. Ignoring `SIGPIPE` is what keeps that working, so the pipe is answered
+/// where it actually goes wrong - in the panic - and nowhere else.
+///
+/// Matching on the message std uses is the fragile part, and it fails safe: if
+/// that wording ever changes, the panic reaches the default hook and behaves as
+/// it does today.
+fn quiet_broken_pipe() {
+    let inherited = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let printing = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|m| m.starts_with("failed printing to "));
+        if printing {
+            // 128 + SIGPIPE, which is what a shell reports when `head` closes
+            // the pipe. Nothing is said about it: the stream to say it on is
+            // the one that just broke.
+            std::process::exit(141);
+        }
+        inherited(info);
+    }));
+}
+
 /// Wait for whichever asks the daemon to stop, and name it for the log.
 ///
 /// Ctrl-C is not the usual one: as a systemd user service, `systemctl stop` and
@@ -63,6 +98,7 @@ async fn stop_signal() -> &'static str {
 
 #[tokio::main]
 async fn main() {
+    quiet_broken_pipe();
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // `X2ROCK_ROOM` is the default room, and `--all` means every room: the
@@ -77,6 +113,17 @@ async fn main() {
     // Decided before the command runs, so a failure knows how to report itself.
     let json = cli.command.json();
     if let Err(e) = run(cli).await {
+        // The same answer the panic hook gives, for the paths that return a
+        // broken pipe rather than panicking on it - `completions`, which writes
+        // through `io::Write` and `?`. The reader left; there is no failure to
+        // report, and no stream left to report it on.
+        if e.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        }) {
+            std::process::exit(141);
+        }
         if json {
             // Structured for an agent: the message it always printed, plus a
             // stable code, the fix command when the error carried one, and any
