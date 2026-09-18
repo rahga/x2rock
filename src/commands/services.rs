@@ -959,10 +959,18 @@ pub async fn run_search(
     // category on every row - and a second implementation of it here would be a
     // second thing to keep in step. One category keeps the older, plainer
     // output, which is what a script piping a single search still expects.
+    // **On the shape of what was asked, not on what it resolved to.** Keying this
+    // off the number of categories that matched sent a list which happened to
+    // match one - `-c tracks,artists,…` against a stations-only service - down
+    // to the single-category lookup below, which compares the whole comma string
+    // against a category id and refuses it. That is the exact command the
+    // picker's drill-in sends, so "More from ..." failed for every
+    // stations-only service, which is most of the anonymous tier.
+    //
     // A term is required: with none, the listing of what this service can search
     // is still the right answer and is printed below.
     if let Some(term) = term
-        && category.is_some_and(|c| pick_categories(&categories, Some(c)).len() > 1)
+        && asked_for_several(category.map(String::as_str))
     {
         return search_everywhere(
             &mut catalogue,
@@ -1183,6 +1191,20 @@ fn pick_categories<'a>(
         return preferred;
     }
     categories.iter().take(1).collect()
+}
+
+/// Whether `--category` named more than one, which decides how a single service
+/// is searched.
+///
+/// **On the shape of what was asked, not on what it resolved to.** Keying this
+/// off the number of categories that matched sent a list which happened to match
+/// one - `-c tracks,artists,albums,...` against a stations-only service - down
+/// to the single-category lookup, which compares the whole comma string against
+/// a category id and refuses it. That is the command the bar widget's drill-in
+/// sends, so "More from ..." failed for every stations-only service, which is
+/// most of the anonymous tier.
+fn asked_for_several(category: Option<&str>) -> bool {
+    category.is_some_and(|c| c.contains(','))
 }
 
 /// What one service answered, kept per category until it is interleaved.
@@ -1782,6 +1804,26 @@ mod tests {
 
     fn picked(out: &[(&str, sonos::smapi::Item)]) -> Vec<String> {
         out.iter().map(|(c, i)| format!("{c}:{}", i.id)).collect()
+    }
+
+    #[test]
+    fn a_list_that_matches_one_category_is_still_a_list() {
+        // The regression: a stations-only service asked for every standard
+        // category matches exactly one, and routing on that count sent the whole
+        // comma string to a lookup that compares it against a category id.
+        assert!(asked_for_several(Some("tracks,artists,albums,stations")));
+        assert!(!asked_for_several(Some("tracks")));
+        assert!(!asked_for_several(None));
+        // And the resolution of that same list is what the merged path then
+        // searches - one category, not none.
+        let radio = cats(&["stations"]);
+        assert_eq!(
+            ids(&pick_categories(
+                &radio,
+                Some("tracks,artists,albums,stations")
+            )),
+            ["stations"]
+        );
     }
 
     #[test]
