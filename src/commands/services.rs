@@ -946,13 +946,43 @@ pub async fn run_search(
     if dirty {
         catalogue.save()?;
     }
-    let chosen = &chosen;
     // The cold-cache path to the same refusal the `find` arm above gives: on a
     // first encounter nothing had been asked, so the service was still listed
     // and `find` had no reason to object. Same hint, so the two cannot drift.
     if categories.is_empty() {
         return Err(chosen.no_search_categories_hint().into());
     }
+
+    // **A named service asked for several categories takes the merged path**,
+    // scoped to that one service. Everything that makes several categories
+    // readable already lives there - interleaving, the per-service cap, the
+    // category on every row - and a second implementation of it here would be a
+    // second thing to keep in step. One category keeps the older, plainer
+    // output, which is what a script piping a single search still expects.
+    // A term is required: with none, the listing of what this service can search
+    // is still the right answer and is printed below.
+    if let Some(term) = term
+        && category.is_some_and(|c| pick_categories(&categories, Some(c)).len() > 1)
+    {
+        return search_everywhere(
+            &mut catalogue,
+            &linked,
+            &reached,
+            room,
+            vec![chosen.clone()],
+            term,
+            category,
+            // Everything by default: the caller named one service and several
+            // categories, which is a request to see them rather than a sample.
+            per_service.unwrap_or(0),
+            count,
+            index,
+            play,
+            json,
+        )
+        .await;
+    }
+    let chosen = &chosen;
     let picked = match category {
         Some(want) => {
             let want = want.to_lowercase();

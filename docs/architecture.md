@@ -6651,12 +6651,41 @@ wins, which given the priority order is the more specific one) and drops an item
 which nothing can be done with. `--per-service` caps what survives — 3 by default, matching
 what the mobile app shows under a service heading.
 
+**A named service asked for several categories takes the merged path**, scoped to that one
+service. Everything that makes several categories readable already lives there, and a second
+implementation beside it would be a second thing to keep in step. One category keeps the
+older, plainer output, which is what a script piping a single search still expects. This
+exists because the picker's drill-in needs it: `search -s Deezer -c tracks,artists,albums,…
+--per-service 0` is how "everything this service found" is asked for.
+
 **Partial is the normal case.** A failure is per (service, category): a service asked for
 five whose third times out keeps the other four. It is named once on stderr however many of
 its categories failed. `total` sums only the categories that replied, and both printed counts
 are *distinct services*, never `plan.len()`, which is searches — for "jazz" that is 23 asked
 against 32 searches. A refreshed token is written once per service, because the second write
 would say the same thing and risks saying it badly.
+
+### The picker, grouped the way the mobile app groups (2026-09-18)
+
+Two surfaces, because that is what the model needs. At the top level a `serviceHeader` row
+per service, its `searchPerService` rows beneath (3, matching the mobile app), and a
+`moreFromService` row when it filled that quota - which is the only signal available that it
+had more, since the cap is applied in the CLI before the widget ever sees the rows. Drilling
+in opens `serviceResultsFor`, a surface of its own rather than a browse frame: a frame holds
+a container path and this holds search results, and "back" from it means the merged list
+rather than one level up a tree.
+
+Three things were wrong on the first pass and are worth keeping written down. The drill-in's
+grouping **buckets** rather than scanning for runs, because the CLI interleaves and
+consecutive runs are one row long - scanning printed a heading above every single result.
+Headings are not selectable, so the arrows step over them (`stepSelection`) and a rebuilt
+list selects `firstActionable` rather than index 0, which is now a heading. And the category
+headings are keyed by **category id**, which is not always the word shown: the id is `tracks`
+and Sonos's heading is "Songs", so keying it as `kindSongs` silently showed the raw id.
+
+The drill-in deliberately does **not** apply the picker's filter box to its rows, unlike
+every other list there: that box still holds the search term, and filtering "garth brooks"
+over his own results would hide "The Dance" for not repeating his name.
 
 ## Open questions
 
