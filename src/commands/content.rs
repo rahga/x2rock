@@ -243,8 +243,9 @@ pub async fn play_item(
     // artist, which fails silently minutes later at IDLE.
     if kind.is_some_and(bookmarks::container_of_containers) {
         bail!(
-            "{title:?} is a {}, which holds albums and playlists rather than \
+            "{title:?} is {} {}, which holds albums and playlists rather than \
              tracks. Open it with `x2rock browse` and play what is inside.",
+            super::article(kind.unwrap_or_default()),
             kind.unwrap_or_default()
         );
     }
@@ -425,8 +426,9 @@ pub async fn run_queue_item(
     // explains itself.
     if kind.is_some_and(bookmarks::container_of_containers) {
         bail!(
-            "{title:?} is a {}, which holds albums and playlists rather than \
+            "{title:?} is {} {}, which holds albums and playlists rather than \
              tracks. Open it with `x2rock browse` and queue what is inside.",
+            super::article(kind.unwrap_or_default()),
             kind.unwrap_or_default()
         );
     }

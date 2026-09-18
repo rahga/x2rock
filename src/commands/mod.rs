@@ -26,6 +26,19 @@ use volume::apply_vol;
 /// An exact id wins, then a case-insensitive substring of the name; among
 /// several of those, a whole-name match settles it, and anything else is
 /// ambiguous and says so - naming `hint` as the command that lists them.
+/// "a" or "an" for a word about to follow it.
+///
+/// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
+/// which are plain ASCII words where the spelling rule holds. It would be wrong
+/// about "an hour" and "a European", and there is no reason for either to reach
+/// it.
+pub fn article(word: &str) -> &'static str {
+    match word.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    }
+}
+
 pub fn find_named<'a, T>(
     items: &'a [T],
     query: &str,
@@ -267,6 +280,18 @@ pub fn fans_out(command: &Command) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_article_matches_the_word_after_it() {
+        // "is a artist" is what prompted this.
+        assert_eq!(super::article("artist"), "an");
+        assert_eq!(super::article("albumList"), "an");
+        assert_eq!(super::article("Artist"), "an", "case is not the question");
+        assert_eq!(super::article("genre"), "a");
+        assert_eq!(super::article("collection"), "a");
+        assert_eq!(super::article("playlist"), "a");
+        assert_eq!(super::article(""), "a", "nothing to look at");
+    }
+
     use super::*;
     use crate::cli::Cli;
     use anyhow::anyhow;

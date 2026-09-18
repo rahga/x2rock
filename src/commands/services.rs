@@ -1072,9 +1072,10 @@ pub async fn run_search(
         // has nothing to play.
         ensure!(
             !item.container || bookmarks::container_holds_tracks(&item.item_type),
-            "{:?} is a {}, which holds other containers rather than tracks. \
+            "{:?} is {} {}, which holds other containers rather than tracks. \
              Open it with: x2rock browse -s {} {}",
             item.title,
+            super::article(&item.item_type),
             item.item_type,
             chosen.name,
             item.id
@@ -1513,9 +1514,10 @@ async fn search_everywhere(
             .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", rows.len()))?;
         ensure!(
             !row.item.container || bookmarks::container_holds_tracks(&row.item.item_type),
-            "{:?} is a {}, which holds other containers rather than tracks. \
+            "{:?} is {} {}, which holds other containers rather than tracks. \
              Open it with: x2rock browse -s {} {}",
             row.item.title,
+            super::article(&row.item.item_type),
             row.item.item_type,
             row.service.name,
             row.item.id
