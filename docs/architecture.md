@@ -75,6 +75,10 @@ lines below record the reversals rather than warn about text that still says oth
   category. See "A third of the anonymous tier cannot be searched at all".
 - **The bar widget can be driven from a script through the keyboard** (`summon` plus `wtype`), just
   not the pointer.
+- **A player does serve a `/status` index**, and `/status/accounts` is not an endpoint: any unknown
+  name under `/status` answers with the same empty `ZPSupportInfo`. Neither changes the conclusion
+  that the household's account registry cannot be read over the LAN, re-probed on 97.1-80312. See
+  "How good the serial proxy actually is".
 - **The Control API *can* switch a soundbar to its TV input.** Early notes say it cannot; that was
   only true of `loadLineIn` (analog line-in). `homeTheater:1 loadHomeTheaterPlayback` does it -
   though x2rock still uses UPnP for the group-preserving handoff. See "Soundbars: the TV input".
@@ -2251,9 +2255,8 @@ the same error as reading the 108-service catalogue as the household's list. Pro
 | `GetWebCode` type=44551, and type=0 | 800 |
 
 A real service type holding a real account fails **identically** to a type that does not exist, so
-the type is not being resolved at all. With `/status/accounts` also returning an empty
-`ZPSupportInfo`, the legacy account surface looks vestigial: declared in the SCPD, gutted in the
-firmware.
+the type is not being resolved at all. The legacy account surface looks vestigial: declared in the
+SCPD, gutted in the firmware.
 
 Stated honestly: this does not separate "the right `AccountID` was never guessed" from "the action
 does nothing", because 806 covers both. What it does establish is that **removing an account from
@@ -2268,8 +2271,9 @@ catalogue is what a household may *add*, not what it has, and it is not a supers
 
 ### Where the registry can be read, and what that method cannot tell you
 
-`S:` browses empty on this firmware, `/status/accounts` returns an empty `ZPSupportInfo`, and
-`musicServices:1` is not a namespace the player answers. `musicServiceAccounts:1` has no read
+`S:` browses empty on this firmware, `/status/accounts` says nothing (and is not an endpoint at all
+- see the note under "How good the serial proxy actually is"), and `musicServices:1` is not a
+namespace the player answers. `musicServiceAccounts:1` has no read
 command at all — `getAccounts`, `getMusicServiceAccounts`, `list` and `getAccountList` are each
 `ERROR_UNSUPPORTED_COMMAND`. What works is harvesting `sid`/`sn` out of `FV:2` and `Q:0` URIs, and
 `playbackMetadata:1 getMetadataStatus` reports the live one directly as
@@ -2298,7 +2302,7 @@ as a search. Done properly, against a real player, every route fails:
 | UPnP `SystemProperties:1`, from its own SCPD | account **mutations** only — `AddAccountX`, `AddOAuthAccountX`, `RemoveAccount`, `ReplaceAccountX`, `SetAccountNicknameX`, `EditAccountMd`, `RefreshAccountCredentialsX` |
 | `SystemProperties GetString` on `R_SvcAccounts`, `R_Accounts`, `AccountList`, `Accounts`, `R_TrialAccount`, `sonos_accounts`, `McAccountsVersion` | UPnP 800 |
 | ContentDirectory `S:` | empty result, 0 matches |
-| `http://<player>:1400/status/accounts` | empty `ZPSupportInfo` |
+| `http://<player>:1400/status/accounts` | empty `ZPSupportInfo` - which is what *any* unknown `/status/<name>` answers, so it is a 404 in disguise rather than a gutted page |
 
 Reading the SCPDs rather than guessing verbs is what makes this a search and not another four
 guesses: `/xml/MusicServices1.xml` and `/xml/SystemProperties1.xml` enumerate every action the
@@ -2954,9 +2958,9 @@ trailing `Token` the player resolves itself).
   — service 303, Sonos Radio. But that only names services which happen to have a favorite. The
   phone app on this household also lists YouTube Music, which has no favorite here and so leaves no
   trace in `FV:2`. `ListAvailableServices` returns all 108 services Sonos knows about rather than
-  the household's, and `/status/accounts` — the S1-era endpoint for exactly this — returns an empty
-  `ZPSupportInfo` on this firmware. No other route exists either; see "Searched properly: there is
-  no listing anywhere".
+  the household's, and `/status/accounts` — the S1-era endpoint for exactly this — is not served at
+  all any more (it answers the same empty `ZPSupportInfo` every unknown `/status` name does). No
+  other route exists either; see "Searched properly: there is no listing anywhere".
 - Note the household difference: the office household has **3** favorites and one linked service.
   The 41-favorite count and the `Svc51463` token recorded elsewhere in this document are the home
   household. Numbers in this document are per-household; the mechanisms are not.
@@ -5246,11 +5250,31 @@ means nothing across time (see "Household registration is per *account*"). Anoth
 the proxy as evidence about *content* rather than about accounts.
 
 **The registry itself is not readable from the LAN on 96.1-79270.** Two doors were tried and both
-are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportInfo></ZPSupportInfo>`
-(the endpoint survives, its content does not), and `musicServiceAccounts:1` refuses
-`getAccounts`, `listAccounts`, `getMusicServiceAccounts` and `getAccountList` alike with
-`ERROR_UNSUPPORTED_COMMAND` - it takes `match` and nothing else. There is no `/status` index to
-enumerate what else might exist.
+are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportInfo></ZPSupportInfo>`,
+and `musicServiceAccounts:1` refuses `getAccounts`, `listAccounts`, `getMusicServiceAccounts` and
+`getAccountList` alike with `ERROR_UNSUPPORTED_COMMAND` - it takes `match` and nothing else.
+
+**Re-probed on 97.1-80312, at home, 2026-09-17, and nothing has moved** - worth doing because the
+original probes were one household and two firmwares ago. Eleven verbs on `musicServiceAccounts:1`
+(`getAccounts`, `getAccountList`, `getHouseholdAccounts`, `list`, `getAll`, `getRegisteredServices`,
+`getServices`, `refresh`, `getVersion`, `getHousehold`, `getMusicServiceAccounts`) answer
+`ERROR_UNSUPPORTED_COMMAND`; `accounts:1`, `userAccounts:1` and `serviceAccounts:1` are not
+namespaces; `households:1` and `settings:1` exist and have no account verb. `MusicServices:1` still
+publishes exactly three actions and `SystemProperties:1` still publishes mutations only, so the
+firmware grew nothing. `GetString` still refuses all six account keys with 800, and `S:` still
+browses to nothing.
+
+**Two corrections to what was written above about `/status`**, both found in that re-probe:
+
+- **There *is* a `/status` index.** It lists eight pages - `enetports`, `leds`, `wireless`, `zp`,
+  `VERSION`, `proc/ath_rincon/status`, `ifconfig`, `showstp` - and not one of them is about
+  accounts or services, so the conclusion is unchanged and only the "no index to enumerate" line
+  was wrong.
+- **`/status/accounts` is not a surviving-but-empty endpoint.** `/status/services`, `/status/msvcs`,
+  `/status/mslist` and even `/status/perf` return the *same* `<ZPSupportInfo></ZPSupportInfo>`: any
+  unknown name under `/status` does. So the empty reply is this server's 404, and reading it as
+  "the endpoint survives, its content does not" credited it with more than it says. The negative
+  result is cleaner than it was recorded as, not weaker.
 
 So `accounts --content` stays as it is. It is the best available answer and its own output says
 what it is not; what changed here is that "not the account list" now has a number attached.
