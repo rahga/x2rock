@@ -1352,12 +1352,33 @@ async fn search_everywhere(
         .filter(|n| *n <= ID_MAX)
         .max()
         .unwrap_or(18);
-    for (n, (row, name)) in rows.iter().zip(&names).enumerate() {
+    // The artist, where the service gave one. Four rows reading "Moon River" and
+    // nothing else are not four results a person can choose between, and this is
+    // the column that tells Frank Ocean from Frank Sinatra. Omitted entirely
+    // when nothing has one, rather than printing a column of blanks: a search
+    // that answers in stations has no artists and should not imply it does.
+    const BY_MAX: usize = 24;
+    let artists: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let by = r.item.summary.clone().unwrap_or_default();
+            match by.chars().count() > BY_MAX {
+                true => by.chars().take(BY_MAX - 1).chain("…".chars()).collect(),
+                false => by,
+            }
+        })
+        .collect();
+    let by_width = artists.iter().map(|a| a.chars().count()).max().unwrap_or(0);
+    for (n, ((row, name), by)) in rows.iter().zip(&names).zip(&artists).enumerate() {
         // Padded by hand: `{:<width$}` pads to a byte count through Display, so
         // one accented character in a title shifts the column.
         let pad = |s: &str, w: usize| " ".repeat(w.saturating_sub(s.chars().count()));
+        let by = match by_width {
+            0 => String::new(),
+            _ => format!("{by}{}  ", pad(by, by_width)),
+        };
         println!(
-            "{:>3}. {}{} {:<9} {name}{}  {}",
+            "{:>3}. {}{} {:<9} {name}{}  {by}{}",
             n + 1,
             row.item.id,
             pad(&row.item.id, id_width),

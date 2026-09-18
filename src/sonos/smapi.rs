@@ -529,11 +529,21 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
                 item_type,
                 // Whatever the service offers as a second line; services differ
                 // on which of these they populate, and most populate one.
+                //
+                // **`trackMetadata` is where a track keeps everything.** Deezer
+                // puts `artist`, `album`, `duration` and `albumArtURI` inside
+                // it and leaves the element itself bare, so reading only direct
+                // children found nothing: every Deezer track searched came back
+                // with no second line and no cover at all, which read as a
+                // service that publishes neither.
                 summary: child("summary")
                     .or_else(|| child("artist"))
+                    .or_else(|| nested("trackMetadata", "artist"))
                     .or_else(|| child("genre"))
                     .or_else(|| child("country")),
-                art_url: child("albumArtURI").or_else(|| nested("streamMetadata", "logo")),
+                art_url: child("albumArtURI")
+                    .or_else(|| nested("trackMetadata", "albumArtURI"))
+                    .or_else(|| nested("streamMetadata", "logo")),
                 container,
             })
         })
@@ -1430,6 +1440,52 @@ mod tests {
         assert_eq!(total, 2);
         assert!(!items[0].container, "a track hit must be playable");
         assert!(items[1].container, "an album stays a place to open");
+    }
+
+    #[test]
+    fn a_track_keeps_its_artist_and_cover_inside_track_metadata() {
+        // Deezer's real shape, trimmed: the element itself carries only id,
+        // itemType and title, and everything a picker wants to show is one
+        // level down. Reading direct children alone returned no artist and no
+        // art for every Deezer track there is.
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>
+            <searchResponse><searchResult><index>0</index><count>1</count><total>1</total>
+              <mediaMetadata>
+                <id>tr-flac:536421002</id><itemType>track</itemType><title>SICKO MODE</title>
+                <trackMetadata>
+                  <artist>Travis Scott</artist><album>ASTROWORLD</album>
+                  <albumArtURI>https://cdn-images.dzcdn.net/cover.jpg</albumArtURI>
+                  <duration>313</duration>
+                </trackMetadata>
+              </mediaMetadata>
+            </searchResult></searchResponse></s:Body></s:Envelope>"#;
+        let (items, total) = parse_items(body, "search").unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].summary.as_deref(), Some("Travis Scott"));
+        assert_eq!(
+            items[0].art_url.as_deref(),
+            Some("https://cdn-images.dzcdn.net/cover.jpg")
+        );
+        assert!(!items[0].container, "a track is not a place to open");
+    }
+
+    #[test]
+    fn a_direct_summary_still_outranks_the_nested_artist() {
+        // The nested read is a fallback, not a replacement: a service that says
+        // what the second line should be keeps saying it.
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>
+            <searchResponse><searchResult><total>1</total>
+              <mediaMetadata>
+                <id>x:1</id><itemType>track</itemType><title>Señorita</title>
+                <summary>Various Artists on Prime</summary>
+                <trackMetadata><artist>Shawn Mendes</artist></trackMetadata>
+              </mediaMetadata>
+            </searchResult></searchResponse></s:Body></s:Envelope>"#;
+        let (items, _) = parse_items(body, "search").unwrap();
+        assert_eq!(
+            items[0].summary.as_deref(),
+            Some("Various Artists on Prime")
+        );
     }
 
     #[test]
