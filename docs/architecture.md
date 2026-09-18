@@ -1574,6 +1574,12 @@ the four failures are four different problems, none of them `linkDeviceId`:
 - **Sonos Radio** — its SMAPI server **crashes**: `TypeError: method is not a function`, SOAP 1.2,
   HTTP 500. Sonos's own service is the only one that returns a stack-trace-shaped error, which
   closes the hopeful guess that Sonos Radio would be the device-link service with a real catalogue.
+  **Still crashing 2026-09-18** on 97.1 from the home household, and `getAppLink` crashes
+  identically - so neither link flow is implemented, not merely the tier's one. The server is
+  otherwise alive: `getMetadata` on `root` with no credential answers HTTP 200 with an empty
+  (`xsi:nil`) body rather than a fault. The household's Sonos Radio favorites play regardless,
+  since `favorite` resolves through the household's own registration; what a link would add is
+  search, and that stays closed until Sonos fixes its own handler.
 
 So `linkDeviceId` is no longer the leading hypothesis for anything, and the deferred question is
 not "make more services answer" — 10 of 14 already do.
@@ -2363,6 +2369,9 @@ one, which is not worth manufacturing.
 
 This matters more than the taxonomy does. Knowing the household holds an account for a service is
 not enough to use it — with several present, choosing wrong plays from the wrong account.
+
+**Answered 2026-09-18 on a household that really has two**: the chooser is the Sonos app's **Set
+Primary**, and the enqueue path follows it. See "Two accounts for one service, one per person".
 
 ### The two playback paths use two different identities (verified 2026-08-31)
 
@@ -6847,6 +6856,11 @@ So the corrected model, which is simpler than the one it replaces:
 | `match` | **associates** this machine's account with a registration that already exists |
 | `x2rock link` | mints the local token, then calls `match`, which succeeds when the app has been there first |
 
+**One reading of "still the only thing that can" is open again**, from the same evening: on a
+household holding two iHeartRadio accounts, `match` answered with a serial that was neither of the
+two known ones and the app's account list did not grow. See "Two accounts for one service, one per
+person" for both readings and the one relink that separates them.
+
 This is exactly what the comment in `run_link` had recorded as the single case ever seen to
 work - "an account the household already held (Spotify, after the Sonos app added it)" - and
 what README.md has said all along. The mistake was in the sections here that read a
@@ -6860,15 +6874,96 @@ its content queues, but it sends no `userIdHashCode`, so `match` cannot be attem
 and its account id is still `None`. Registration and association are separate, and a service
 can have the first without the second.
 
+## Two accounts for one service, one per person (home household, 2026-09-18)
+
+The case the 09-17 slate said nothing here had covered: **one household, one service, two
+accounts, two people**. This household holds two iHeartRadio accounts — the owner's and their
+wife's — and both were playing at once, which is what makes the measurements below possible
+rather than inferred. Firmware 97.1-80312 throughout.
+
+**They coexist, and each room plays under one of them.** Read live from
+`getMetadataStatus`, both rooms playing simultaneously:
+
+| room | whose account | serial | playing |
+|---|---|---|---|
+| Bedroom | wife's | **`sn_24`** | Love Songs Radio |
+| Dining Room | owner's | **`sn_25`** | 98.7 WMZQ |
+
+Meanwhile `accounts --content` harvested `sn_15` for iHeartRadio out of saved favorites — a third
+serial for the same service, and nothing playing under it. So a household can carry several serials
+for one sid at once, and the harvest's fossils sit among the live ones exactly as recorded.
+
+**The two Sonos apps disagree about what is there.** The iPhone app lists the two accounts. The
+Android app lists **one**, and offers **Set Primary** where several exist. Neither ever showed a
+third. So the app lists *accounts*, and the serials this file keeps reading are *registrations* -
+not the same count, which is worth holding on to before treating a serial as an identity.
+
+### `match` returned a serial that was neither of the two
+
+`x2rock link iHeartRadio` completed against this household and `match` answered **`sn_25`** - not
+`sn_15`, not `sn_24`, and `sn_24 + 1`, exactly where the allocation model puts a *new*
+registration. The Sonos app's account list did not grow.
+
+That sits awkwardly beside "`match` works, and the name was literal all along", which concluded
+from Deezer that `match` only ever associates with a registration the app made first. Two readings
+survive tonight's evidence and this file should not pick one:
+
+- **Association.** The household already held a third iHeartRadio registration nobody had seen -
+  the harvest only sees accounts that saved or queued something, so an unseen one is entirely
+  possible - and `match` associated with it. That it happened to be `sn_24 + 1` would be a
+  coincidence.
+- **Creation.** `match` minted a registration for the account that had just authorised the link,
+  which is why the serial is the next one up and why the app's *account* count did not move: the
+  same account gained a second registration rather than the household gaining an account.
+
+**The test that separates them, and it is cheap**: link iHeartRadio again with the same account. An
+association returns `sn_25` a second time; a creation returns `sn_26`. Nobody has run it, and it
+wants the owner's hands in a browser, so it is written down rather than guessed at.
+
+### The identity split is not cosmetic: it breaks playback across accounts
+
+"The two playback paths use two different identities" was recorded on a household with one account
+per service, where the split cost nothing. With two accounts it is a failure, and the shape is
+worth stating exactly:
+
+- A search made with **this machine's token** returns ids minted for *its* account (`sn_25`).
+- The **enqueue path** hands the id to the player, which resolves it with the household's
+  **primary** - `sn_24` here, the other person's account.
+- An iHeartRadio personal id minted for one account and resolved by another is refused:
+  `browse -s iHeartRadio artist_radio.44512 --play 1` queued "Turn On The Lights" and the room
+  never started, `play` then naming it **`ERROR_CANT_REACH_SERVER`**.
+- The **stream path** resolves the same id through `getMediaURI` with our own token, and it
+  **plays** (verified, position advancing after a ~25s buffer).
+
+So on a multi-account household, x2rock reaches a service's *personal* content (artist stations,
+custom playlists) only through the stream path, unless the primary happens to be the account that
+searched. Live stations are streams anyway and are unaffected; the household's own favorites are
+unaffected too, since `favorite` hands the player an id it resolves entirely on its own.
+
+**Set Primary is therefore the chooser**, which answers "Choosing between several accounts is an
+open question" above: the household does have a default, the Android app sets it, and the enqueue
+path follows it. x2rock cannot read it - no command reports the primary - but it can be *inferred*
+the way it was here, by enqueuing something and reading back the `accountId` the player filled in.
+
+### A side effect of linking worth warning about
+
+Whatever `match` did, the owner's own playback came back under `sn_25` afterwards - the serial the
+link produced - where its saved content still names `sn_15`. Linking is therefore not purely local
+to this machine, as `unlink`'s "local only" wording implies: it reaches the household's registration
+set, and on a shared household that is someone else's system too. Worth saying before a second link
+is run casually.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
    "which services the picker should offer" — the picker half is decided, see "The picker discovers
    linked services" above).
 
-   One loose end that blocks nothing. **`match`** is settled: it matches an account the
-   household already holds and never creates one, reproduced deliberately on 2026-09-18 - see
-   "`match` works, and the name was literal all along". **Bandcamp** is no longer deferred
+   One loose end that blocks nothing. **`match`** associates this machine with a registration the
+   Sonos app made first - reproduced deliberately on 2026-09-18 against Deezer, see "`match` works,
+   and the name was literal all along". Whether it can also *create* one is open again the same
+   evening: on a household with two iHeartRadio accounts it answered with a serial that was neither
+   of the two, and one relink would settle it. See "Two accounts for one service, one per person". **Bandcamp** is no longer deferred
    either; one purchase finished that test.
 
    The 62 app-link services remain a separate call — though no longer a uniform one: **Plex fell
