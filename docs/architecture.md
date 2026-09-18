@@ -6656,7 +6656,7 @@ what the mobile app shows under a service heading.
 service. Everything that makes several categories readable already lives there, and a second
 implementation beside it would be a second thing to keep in step. One category keeps the
 older, plainer output, which is what a script piping a single search still expects. This
-exists because the picker's drill-in needs it: `search -s Deezer -c tracks,artists,albums,…
+exists because the picker's drill-in needs it: `search -s Deezer --all-categories
 --per-service 0` is how "everything this service found" is asked for.
 
 **Partial is the normal case.** A failure is per (service, category): a service asked for
@@ -6725,6 +6725,38 @@ because `match` is the one route x2rock could in principle drive itself.
 `client_id=0g8Ygsaw3ZrKCOI9Xlet`, which is the clearest evidence available that `link` is
 doing what a controller does. Four search categories - artists, albums, tracks, playlists -
 and no `all`, so a merged search asks it for tracks, artists and albums. FLAC.
+
+## A category Sonos never standardised (found 2026-09-18, by reading the spec)
+
+`smapi::categories` read `<Category>` elements and nothing else. The presentation map has a
+second kind: **`<CustomCategory stringId="…" mappedId="…"/>`**, a shelf the service invented,
+carrying no `id` at all because there is no canonical name for it. Every one was dropped.
+
+Three of the twenty-four services whose maps were fetched publish one, and they are not
+obscure corners: **Hype Machine** searches *Blogs* (`SBLG`), **Sveriges Radio** searches
+*RadioShows* (`programs`), **PowerApp** has two. None had ever been searched. Both now
+answer - `-c Blogs "indie"` returns blog playlists, `-c RadioShows "jazz"` returns
+*Jazzradion*.
+
+A custom category takes its `stringId` as its id, which is the service's own word rather
+than a canonical one; that is the point, since nothing else knows what a "Blog" is here. It
+is matched case-insensitively like any other, so `-c blogs` works.
+
+**`--all-categories` exists because of this.** A fixed list of the six standard names can
+never reach a custom category, by construction - the widget's drill-in was sending exactly
+such a list and so could not show them. The flag asks for whatever the service publishes,
+and puts that knowledge on the side that reads the presentation map.
+
+Parsing is now also scoped to `PresentationMap type="Search"` where there is one, falling
+back to the whole document otherwise. No service here puts a `Category` in another map, but
+one is free to, and the maps that would - display types, artwork sizes - are about showing
+rather than searching.
+
+**Still unfixed, and untriggered here: Multiple Library Search.** Sonos documents declaring
+the same category id twice, `mappedId` suffixed `:0` and `:1`, to search a global and a
+personal library in one category. `pick_categories` resolves a name with `find` - first match
+only - so one library would be searched and the other silently ignored. No service in this
+catalogue does it.
 
 ## Open questions
 

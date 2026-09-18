@@ -403,7 +403,10 @@ the service's `all` where it declares one (Sonos's Universal Search marker, whic
 else `tracks`/`artists`/`albums` where it has them, else whatever it lists first - which is what
 keeps a stations-only service answering. `--category` takes a list in priority order
 (`-c artists,tracks`) and **skips a service that has none of those names** rather than substituting
-one, so `-c albums` asks only services that really have albums. `--per-service N` caps the rows one
+one, so `-c albums` asks only services that really have albums. `--all-categories` asks each service for
+*everything* it publishes, which is the only way to reach a category Sonos never
+standardised - Hype Machine searches blogs, Sveriges Radio searches radio shows, and those
+are named by the service so no fixed list can name them. `--per-service N` caps the rows one
 service contributes after interleaving (default 3, the number Sonos's mobile app shows under a
 service heading; `0` keeps everything), and `--count` is per service *per category* (5 merged, 20
 for one). First run is slower: services never searched before are asked for their categories once,

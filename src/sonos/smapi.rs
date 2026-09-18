@@ -412,17 +412,50 @@ pub async fn categories(service: &Service) -> Result<Vec<Category>> {
     };
     let doc =
         Document::parse(&body).with_context(|| format!("{} presentation map", service.name))?;
-    Ok(doc
+    Ok(search_categories(&doc))
+}
+
+/// The searchable categories of one presentation map.
+///
+/// **Two element names, not one.** `<Category>` maps a canonical Sonos id to the
+/// service's own (`id="artists" mappedId="SART"`), and `<CustomCategory>` is a
+/// shelf Sonos never standardised, which carries no `id` at all - only a
+/// `stringId` naming it and the `mappedId` to send. Reading just the first
+/// dropped Hype Machine's "Blogs", Sveriges Radio's "RadioShows" and two of
+/// PowerApp's: three of the twenty-four services here publish one, and they were
+/// never once searched.
+///
+/// A custom category takes its `stringId` as its id, so it can be named to `-c`
+/// and shown as a heading. That is the service's own word for it rather than a
+/// canonical one, which is the point: nothing else knows what a "Blog" is here.
+///
+/// Scoped to `PresentationMap type="Search"` where there is one. The whole
+/// document is read otherwise, which is what this always did - no service here
+/// puts a `Category` anywhere else, but a map is free to, and the ones that
+/// would are about display rather than search.
+fn search_categories(doc: &Document) -> Vec<Category> {
+    let search = doc
         .descendants()
-        .filter(|n| n.has_tag_name("Category"))
-        .filter_map(|n| {
-            let id = n.attribute("id")?;
-            Some(Category {
+        .find(|n| n.has_tag_name("PresentationMap") && n.attribute("type") == Some("Search"));
+    let within = search.unwrap_or(doc.root());
+    within
+        .descendants()
+        .filter(|n| n.has_tag_name("Category") || n.has_tag_name("CustomCategory"))
+        .filter_map(|n| match n.attribute("id") {
+            // `mappedId` is optional on a standard category: omitted, the
+            // canonical id is what the service answers to.
+            Some(id) => Some(Category {
                 id: id.to_string(),
                 mapped_id: n.attribute("mappedId").unwrap_or(id).to_string(),
-            })
+            }),
+            // A custom one is useless without both: no name to ask for, or
+            // nothing to send.
+            None => Some(Category {
+                id: n.attribute("stringId")?.to_string(),
+                mapped_id: n.attribute("mappedId")?.to_string(),
+            }),
         })
-        .collect())
+        .collect()
 }
 
 /// `search`, returning the hits and the total the service claims.
@@ -1440,6 +1473,82 @@ mod tests {
         assert_eq!(total, 2);
         assert!(!items[0].container, "a track hit must be playable");
         assert!(items[1].container, "an album stays a place to open");
+    }
+
+    #[test]
+    fn a_custom_category_is_searchable_under_the_name_the_service_gave_it() {
+        // Hype Machine's real map. `Blogs` is a shelf Sonos never standardised,
+        // so it carries a stringId and no id at all - and reading only
+        // `<Category>` meant it was never searched.
+        let body = r#"<Presentation>
+          <PresentationMap type="Search">
+            <Match><SearchCategories>
+              <Category id="artists" mappedId="SART"/>
+              <Category id="tracks" mappedId="STRK"/>
+              <CustomCategory stringId="Blogs" mappedId="SBLG"/>
+            </SearchCategories></Match>
+          </PresentationMap>
+        </Presentation>"#;
+        let doc = Document::parse(body).unwrap();
+        let got = search_categories(&doc);
+        let names: Vec<(&str, &str)> = got
+            .iter()
+            .map(|c| (c.id.as_str(), c.mapped_id.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("artists", "SART"), ("tracks", "STRK"), ("Blogs", "SBLG")]
+        );
+    }
+
+    #[test]
+    fn a_standard_category_may_leave_its_mapped_id_out() {
+        // Documented: omit `mappedId` and the canonical id is what is sent.
+        let doc = Document::parse(
+            r#"<PresentationMap type="Search"><Match><SearchCategories>
+                 <Category id="albums"/>
+               </SearchCategories></Match></PresentationMap>"#,
+        )
+        .unwrap();
+        let got = search_categories(&doc);
+        assert_eq!(got[0].id, "albums");
+        assert_eq!(got[0].mapped_id, "albums", "sent as itself");
+    }
+
+    #[test]
+    fn categories_come_only_from_the_search_map_when_there_is_one() {
+        // A map is free to use `Category` for something that is not searching;
+        // taking one of those would search a category nothing can answer.
+        let doc = Document::parse(
+            r#"<Presentation>
+                 <PresentationMap type="DisplayType">
+                   <Category id="not-a-search-category" mappedId="nope"/>
+                 </PresentationMap>
+                 <PresentationMap type="Search"><Match><SearchCategories>
+                   <Category id="tracks" mappedId="STRK"/>
+                 </SearchCategories></Match></PresentationMap>
+               </Presentation>"#,
+        )
+        .unwrap();
+        let got = search_categories(&doc);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "tracks");
+    }
+
+    #[test]
+    fn a_half_declared_custom_category_is_skipped_rather_than_guessed_at() {
+        // No mappedId is nothing to send; no stringId is nothing to ask for.
+        let doc = Document::parse(
+            r#"<PresentationMap type="Search"><Match><SearchCategories>
+                 <CustomCategory stringId="Blogs"/>
+                 <CustomCategory mappedId="SBLG"/>
+                 <Category id="tracks" mappedId="STRK"/>
+               </SearchCategories></Match></PresentationMap>"#,
+        )
+        .unwrap();
+        let got = search_categories(&doc);
+        assert_eq!(got.len(), 1, "only the whole one survives");
+        assert_eq!(got[0].id, "tracks");
     }
 
     #[test]

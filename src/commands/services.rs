@@ -807,6 +807,7 @@ pub async fn run_search(
     term: Option<&String>,
     service: Option<&String>,
     category: Option<&String>,
+    all_categories: bool,
     only_linked: bool,
     per_service: Option<usize>,
     count: Option<u32>,
@@ -862,6 +863,7 @@ pub async fn run_search(
             candidates,
             term,
             category,
+            all_categories,
             per_service.unwrap_or(FAN_OUT_PER_SERVICE),
             count.unwrap_or(FAN_OUT_COUNT),
             index,
@@ -970,7 +972,7 @@ pub async fn run_search(
     // A term is required: with none, the listing of what this service can search
     // is still the right answer and is printed below.
     if let Some(term) = term
-        && asked_for_several(category.map(String::as_str))
+        && (all_categories || asked_for_several(category.map(String::as_str)))
     {
         return search_everywhere(
             &mut catalogue,
@@ -980,6 +982,7 @@ pub async fn run_search(
             vec![chosen.clone()],
             term,
             category,
+            all_categories,
             // Everything by default: the caller named one service and several
             // categories, which is a request to see them rather than a sample.
             per_service.unwrap_or(0),
@@ -995,7 +998,7 @@ pub async fn run_search(
         // Through `pick_categories`, so one matcher decides what a name means:
         // hand-rolling it here meant `-c " tracks"` resolved in a merged search
         // and was refused in a single-service one, for a leading space.
-        Some(want) => pick_categories(&categories, Some(want))
+        Some(want) => pick_categories(&categories, Some(want), false)
             .first()
             .copied()
             .ok_or_else(|| {
@@ -1169,7 +1172,13 @@ const DEFAULT_CATEGORIES: [&str; 3] = ["tracks", "artists", "albums"];
 fn pick_categories<'a>(
     categories: &'a [sonos::smapi::Category],
     want: Option<&str>,
+    every: bool,
 ) -> Vec<&'a sonos::smapi::Category> {
+    // The only way to reach a category Sonos never standardised: its name is the
+    // service's own, so no list written here could name it.
+    if every {
+        return categories.iter().collect();
+    }
     let by_name = |name: &str| categories.iter().find(|c| c.id.eq_ignore_ascii_case(name));
     if let Some(want) = want {
         // The caller's order, not the service's: they said what mattered most.
@@ -1294,6 +1303,7 @@ async fn search_everywhere(
     candidates: Vec<sonos::smapi::Service>,
     term: &str,
     category: Option<&String>,
+    all_categories: bool,
     per_service: usize,
     count: u32,
     index: u32,
@@ -1348,7 +1358,7 @@ async fn search_everywhere(
             continue;
         };
         let asking: Vec<(String, String)> =
-            pick_categories(categories, category.map(String::as_str))
+            pick_categories(categories, category.map(String::as_str), all_categories)
                 .into_iter()
                 .map(|c| (c.id.clone(), c.mapped_id.clone()))
                 .collect();
@@ -1825,6 +1835,32 @@ mod tests {
     }
 
     #[test]
+    fn asking_for_every_category_reaches_the_ones_with_no_canonical_name() {
+        // Hype Machine's shape: two standard shelves and one of its own. No
+        // list written here could name "Blogs", so this is the only way to it.
+        let mut hype = cats(&["artists", "tracks"]);
+        hype.push(Category {
+            id: "Blogs".into(),
+            mapped_id: "SBLG".into(),
+        });
+        assert_eq!(
+            ids(&pick_categories(&hype, None, true)),
+            ["artists", "tracks", "Blogs"]
+        );
+        // And it outranks a named list, which could only ever name the standard
+        // ones by accident.
+        assert_eq!(
+            ids(&pick_categories(&hype, Some("tracks"), true)),
+            ["artists", "tracks", "Blogs"]
+        );
+        // Off, the defaults still apply and the custom shelf is not asked for.
+        assert_eq!(
+            ids(&pick_categories(&hype, None, false)),
+            ["tracks", "artists"]
+        );
+    }
+
+    #[test]
     fn a_list_that_matches_one_category_is_still_a_list() {
         // The regression: a stations-only service asked for every standard
         // category matches exactly one, and routing on that count sent the whole
@@ -1838,7 +1874,8 @@ mod tests {
         assert_eq!(
             ids(&pick_categories(
                 &radio,
-                Some("tracks,artists,albums,stations")
+                Some("tracks,artists,albums,stations"),
+                false
             )),
             ["stations"]
         );
@@ -1922,8 +1959,11 @@ mod tests {
     fn an_unnamed_search_prefers_all_which_is_the_universal_search_declaration() {
         // One request that already means "anything", so nothing else is asked.
         let with_all = cats(&["artists", "all", "tracks"]);
-        assert_eq!(ids(&pick_categories(&with_all, None)), ["all"]);
-        assert!(pick_categories(&[], None).is_empty(), "nothing to pick");
+        assert_eq!(ids(&pick_categories(&with_all, None, false)), ["all"]);
+        assert!(
+            pick_categories(&[], None, false).is_empty(),
+            "nothing to pick"
+        );
     }
 
     #[test]
@@ -1932,12 +1972,15 @@ mod tests {
         // tracks-first, because that is what survives a small per-service cap.
         let deezer = cats(&["artists", "albums", "tracks", "playlists", "stations"]);
         assert_eq!(
-            ids(&pick_categories(&deezer, None)),
+            ids(&pick_categories(&deezer, None, false)),
             ["tracks", "artists", "albums"]
         );
         // Hype Machine has no albums, and is asked only for what it has.
         let partial = cats(&["artists", "tracks"]);
-        assert_eq!(ids(&pick_categories(&partial, None)), ["tracks", "artists"]);
+        assert_eq!(
+            ids(&pick_categories(&partial, None, false)),
+            ["tracks", "artists"]
+        );
     }
 
     #[test]
@@ -1945,24 +1988,24 @@ mod tests {
         // Thirteen services here are stations-only. Without this arm every one
         // of them would drop out of a merged search that used to include them.
         let radio = cats(&["stations", "podcasts"]);
-        assert_eq!(ids(&pick_categories(&radio, None)), ["stations"]);
+        assert_eq!(ids(&pick_categories(&radio, None, false)), ["stations"]);
     }
 
     #[test]
     fn a_named_list_keeps_the_callers_order_and_skips_what_is_missing() {
         let deezer = cats(&["artists", "albums", "tracks"]);
         assert_eq!(
-            ids(&pick_categories(&deezer, Some("albums,tracks"))),
+            ids(&pick_categories(&deezer, Some("albums,tracks"), false)),
             ["albums", "tracks"],
             "the caller said what mattered most, not the service"
         );
         assert_eq!(
-            ids(&pick_categories(&deezer, Some(" ALBUMS , ,tracks "))),
+            ids(&pick_categories(&deezer, Some(" ALBUMS , ,tracks "), false)),
             ["albums", "tracks"],
             "services disagree about case, and people leave spaces"
         );
         assert_eq!(
-            ids(&pick_categories(&deezer, Some("albums,podcasts"))),
+            ids(&pick_categories(&deezer, Some("albums,podcasts"), false)),
             ["albums"],
             "a name this service lacks is dropped, not substituted"
         );
@@ -1970,7 +2013,7 @@ mod tests {
         // albums is left out, rather than answered with its stations.
         let radio = cats(&["stations", "podcasts"]);
         assert!(
-            pick_categories(&radio, Some("albums")).is_empty(),
+            pick_categories(&radio, Some("albums"), false).is_empty(),
             "no substituting a category the caller did not ask for"
         );
     }

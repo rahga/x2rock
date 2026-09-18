@@ -421,6 +421,13 @@ pub enum Command {
         /// first, which is what keeps a stations-only service answering.
         #[arg(long, short = 'c')]
         category: Option<String>,
+        /// Ask every category a service publishes, including the ones it made
+        /// up. A service may declare a shelf Sonos never standardised - Hype
+        /// Machine searches blogs, Sveriges Radio searches radio shows - and
+        /// those have service-specific names, so no fixed list can reach them.
+        /// Overrides `--category`.
+        #[arg(long)]
+        all_categories: bool,
         /// How many rows one service contributes to a merged search, after its
         /// categories are interleaved. Defaults to 3, the number Sonos's own
         /// mobile app shows under a service heading; 0 keeps everything. No
