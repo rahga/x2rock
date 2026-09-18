@@ -6856,10 +6856,11 @@ So the corrected model, which is simpler than the one it replaces:
 | `match` | **associates** this machine's account with a registration that already exists |
 | `x2rock link` | mints the local token, then calls `match`, which succeeds when the app has been there first |
 
-**One reading of "still the only thing that can" is open again**, from the same evening: on a
-household holding two iHeartRadio accounts, `match` answered with a serial that was neither of the
-two known ones and the app's account list did not grow. See "Two accounts for one service, one per
-person" for both readings and the one relink that separates them.
+**Re-tested the same evening on a household with two accounts for one service, and it holds.**
+`match` there answered with a serial neither known nor previously seen, which looked like creation
+until a second link returned the same serial and the Sonos app's account list stayed at two - it was
+an existing registration this file had only ever seen through an older, fossil serial. See "Two
+accounts for one service, one per person".
 
 This is exactly what the comment in `run_link` had recorded as the single case ever seen to
 work - "an account the household already held (Spotify, after the Sonos app added it)" - and
@@ -6890,35 +6891,40 @@ rather than inferred. Firmware 97.1-80312 throughout.
 | Dining Room | owner's | **`sn_25`** | 98.7 WMZQ |
 
 Meanwhile `accounts --content` harvested `sn_15` for iHeartRadio out of saved favorites — a third
-serial for the same service, and nothing playing under it. So a household can carry several serials
-for one sid at once, and the harvest's fossils sit among the live ones exactly as recorded.
+serial for the same service, with nothing playing under it. That one is a **fossil**: an older
+registration of the owner's account that saved content still names, whose live serial is `sn_25`.
+So the harvest mixes dead serials among the live ones exactly as recorded, and on a household with
+two accounts that is no longer a curiosity - it is what made the live pair hard to read.
 
 **The two Sonos apps disagree about what is there.** The iPhone app lists the two accounts. The
 Android app lists **one**, and offers **Set Primary** where several exist. Neither ever showed a
 third. So the app lists *accounts*, and the serials this file keeps reading are *registrations* -
 not the same count, which is worth holding on to before treating a serial as an identity.
 
-### `match` returned a serial that was neither of the two
+### `match` answered with a serial we had not seen, and it was one of the two
 
 `x2rock link iHeartRadio` completed against this household and `match` answered **`sn_25`** - not
 `sn_15`, not `sn_24`, and `sn_24 + 1`, exactly where the allocation model puts a *new*
-registration. The Sonos app's account list did not grow.
+registration. For an hour that looked like `match` creating one, against the Deezer finding of the
+same morning.
 
-That sits awkwardly beside "`match` works, and the name was literal all along", which concluded
-from Deezer that `match` only ever associates with a registration the app made first. Two readings
-survive tonight's evidence and this file should not pick one:
+It was not. Two checks settled it:
 
-- **Association.** The household already held a third iHeartRadio registration nobody had seen -
-  the harvest only sees accounts that saved or queued something, so an unseen one is entirely
-  possible - and `match` associated with it. That it happened to be `sn_24 + 1` would be a
-  coincidence.
-- **Creation.** `match` minted a registration for the account that had just authorised the link,
-  which is why the serial is the next one up and why the app's *account* count did not move: the
-  same account gained a second registration rather than the household gaining an account.
+- **A second link returned `sn_25` again**, not `sn_26`. So nothing is minted per link.
+- **The Sonos app still lists two accounts**, with no entry named for this machine's nickname
+  (`x2rock on x2lap`), which a registration created for us would have carried.
 
-**The test that separates them, and it is cheap**: link iHeartRadio again with the same account. An
-association returns `sn_25` a second time; a creation returns `sn_26`. Nobody has run it, and it
-wants the owner's hands in a browser, so it is written down rather than guessed at.
+So `sn_25` *is* the owner's account, and the puzzle was an artifact of what had been read. Before
+the link this file had only ever seen that account as **`sn_15`, a fossil in saved favorites** - the
+Dining Room was idle when the serials were harvested, so its live registration was never read. The
+household's live pair is `sn_24` (wife) and `sn_25` (owner); `sn_15` is an old registration of the
+owner's that content still names, exactly the staleness "How good the serial proxy actually is"
+measures.
+
+**`match` associates and does not create**, as "`match` works, and the name was literal all along"
+concluded. Worth keeping as a lesson about this file's favourite mistake: a serial nobody has seen
+is not a serial that did not exist, and the harvest is the reason - it shows an account only once
+that account has saved or queued something.
 
 ### The identity split is not cosmetic: it breaks playback across accounts
 
@@ -6945,13 +6951,14 @@ open question" above: the household does have a default, the Android app sets it
 path follows it. x2rock cannot read it - no command reports the primary - but it can be *inferred*
 the way it was here, by enqueuing something and reading back the `accountId` the player filled in.
 
-### A side effect of linking worth warning about
+### What linking did *not* do
 
-Whatever `match` did, the owner's own playback came back under `sn_25` afterwards - the serial the
-link produced - where its saved content still names `sn_15`. Linking is therefore not purely local
-to this machine, as `unlink`'s "local only" wording implies: it reaches the household's registration
-set, and on a shared household that is someone else's system too. Worth saying before a second link
-is run casually.
+An earlier draft of this section warned that linking had changed the household - the owner's room
+played under `sn_25` afterwards, where its saved content named `sn_15`. That reading is withdrawn:
+`sn_25` was the owner's live registration before the link too, and the link only associated this
+machine's token with it. A second link changed nothing either, so **linking is idempotent from the
+household's side** and `unlink`'s "local only" wording is accurate. What a link does reach is this
+machine's `credentials.json`: relinking replaced the stored token and moved its `linked` stamp.
 
 ## Open questions
 
@@ -6961,9 +6968,9 @@ is run casually.
 
    One loose end that blocks nothing. **`match`** associates this machine with a registration the
    Sonos app made first - reproduced deliberately on 2026-09-18 against Deezer, see "`match` works,
-   and the name was literal all along". Whether it can also *create* one is open again the same
-   evening: on a household with two iHeartRadio accounts it answered with a serial that was neither
-   of the two, and one relink would settle it. See "Two accounts for one service, one per person". **Bandcamp** is no longer deferred
+   and the name was literal all along", and again the same evening against a household holding two
+   iHeartRadio accounts, where a serial that looked new turned out to be one of them: see "Two
+   accounts for one service, one per person". **Bandcamp** is no longer deferred
    either; one purchase finished that test.
 
    The 62 app-link services remain a separate call — though no longer a uniform one: **Plex fell
