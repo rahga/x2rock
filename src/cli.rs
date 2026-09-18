@@ -605,6 +605,13 @@ pub enum Command {
     Link {
         /// Which service, by name. Omit to list the ones that can be linked.
         service: Option<String>,
+        /// With no service named, print that list as JSON: `id`, `name` and
+        /// whether it is already `linked`. For a caller offering to link one -
+        /// the bar widget's service list is the only surface where a service
+        /// with no token is visible at all, since every other listing filters
+        /// to what can already be reached.
+        #[arg(long)]
+        json: bool,
         /// Print the URL instead of opening it. What to use over ssh.
         #[arg(long)]
         no_open: bool,
@@ -1179,6 +1186,7 @@ impl Command {
             | Command::Stations { json, .. }
             | Command::PlayUrl { json, .. }
             | Command::Accounts { json, .. }
+            | Command::Link { json, .. }
             | Command::Bookmarks { json, .. }
             | Command::Households { json, .. }
             | Command::Rate { json, .. }

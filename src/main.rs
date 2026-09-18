@@ -300,6 +300,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Link {
             ref service,
+            json,
             no_open,
             ref nickname,
             no_match,
@@ -309,6 +310,7 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.ip,
                 cli.household.as_deref(),
                 service.as_ref(),
+                json,
                 no_open,
                 nickname.as_ref(),
                 no_match,

@@ -310,10 +310,12 @@ pub async fn run_rate(
 /// and its id is in both SMAPI calls. The browser step is the person's own
 /// browser, and the whole interaction for a service like Bandcamp is: open a
 /// link, log in, done.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_link(
     ip: Option<IpAddr>,
     household: Option<&str>,
     service: Option<&String>,
+    json: bool,
     no_open: bool,
     nickname: Option<&String>,
     no_match: bool,
@@ -332,6 +334,25 @@ pub async fn run_link(
 
     let Some(query) = service else {
         let linkable = catalogue.linkable();
+        if json {
+            // What a caller needs to offer linking: the name to pass back, and
+            // whether it would be a link or a re-link. The bar widget lists these
+            // beside the services it can already reach, which is the only place
+            // an unlinked one is visible at all - every other listing filters to
+            // what has a token.
+            let rows: Vec<_> = linkable
+                .iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "linked": linked.get(&s.id).is_some(),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            return Ok(());
+        }
         println!("{} services can be linked:", linkable.len());
         for s in &linkable {
             let mark = match linked.get(&s.id) {
