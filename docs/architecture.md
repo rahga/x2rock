@@ -6707,8 +6707,9 @@ x-sonos-http:track%2f84777633.flac?sid=174&flags=24616&sn=11
 
 So the registration and the hash are independent:
 
-- **`match` is not the mechanism, only one route to it** - and a route that has never once
-  succeeded from here. The Sonos app is another route, and it works.
+- **`match` is not the mechanism, only one route to it.** The Sonos app is the other, and it
+  is the one that *creates* a registration. *Superseded the same day - see "`match` works,
+  and the name was literal all along" below.*
 - **A service that cannot send a hash is not locked out of the queue.** Bandcamp streams
   because nobody has registered it with the household, not because its reply lacks a field.
   Registered, it would queue like TIDAL.
@@ -6821,16 +6822,54 @@ accepted, the player resolving the service from the cdudn, which is the same fin
 `0004206c`. Both are sent as the player writes them, on the principle that matching what a
 controller does costs nothing.
 
+## `match` works, and the name was literal all along (2026-09-18)
+
+`musicServiceAccounts:1 match` succeeded, for the first time in a week of asking, and the
+reason is the word this document kept reading as "register".
+
+Deezer was unlinked and linked again, through the bar widget's new **Link** row. The link
+flow ran `match` as it always has, and this time it returned `sn_10` - the household's own
+Deezer serial - which `credentials.rs` stored as the account id. `accounts` now prints
+**"registered from here as sn_10"** where every other service still says "no registration
+from this machine".
+
+What was different was not the request. It was that **the household already had a Deezer
+account**, created in the Sonos app the day before. Every earlier attempt - Deezer in the
+morning, iHeartRadio, the bogus-hash probes, the fresh unredeemed link code - was made
+against a household with no account for that service, so there was nothing to match
+*against*, and the refusal was the reasonless `ERROR_COMMAND_FAILED` recorded above.
+
+So the corrected model, which is simpler than the one it replaces:
+
+| | what it does |
+| --- | --- |
+| the Sonos app | **creates** the household registration; still the only thing that can |
+| `match` | **associates** this machine's account with a registration that already exists |
+| `x2rock link` | mints the local token, then calls `match`, which succeeds when the app has been there first |
+
+This is exactly what the comment in `run_link` had recorded as the single case ever seen to
+work - "an account the household already held (Spotify, after the Sonos app added it)" - and
+what README.md has said all along. The mistake was in the sections here that read a
+never-yet-succeeded call as a call that *cannot* succeed.
+
+**The order matters, then**: Sonos app first, then `x2rock link`. Linked first and registered
+after, `match` runs against nothing and the account id stays empty until the next relink.
+
+TIDAL is the counter-example that keeps the two apart: its household registration exists and
+its content queues, but it sends no `userIdHashCode`, so `match` cannot be attempted at all
+and its account id is still `None`. Registration and association are separate, and a service
+can have the first without the second.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
    "which services the picker should offer" — the picker half is decided, see "The picker discovers
    linked services" above).
 
-   Two loose ends that block nothing. **`match`** has succeeded once, for Spotify, and only by
-   matching an account the household had already registered through the Sonos app; it has never
-   created one — see "`match`, and why nothing needs it yet". **Bandcamp** stays deferred until
-   there is something in the collection.
+   One loose end that blocks nothing. **`match`** is settled: it matches an account the
+   household already holds and never creates one, reproduced deliberately on 2026-09-18 - see
+   "`match` works, and the name was literal all along". **Bandcamp** is no longer deferred
+   either; one purchase finished that test.
 
    The 62 app-link services remain a separate call — though no longer a uniform one: **Plex fell
    outright** (searched, browsed and played the same day it was asked for; see "Plex: the first
