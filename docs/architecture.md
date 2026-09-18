@@ -6902,9 +6902,21 @@ So the harvest mixes dead serials among the live ones exactly as recorded, and o
 two accounts that is no longer a curiosity - it is what made the live pair hard to read.
 
 **The two Sonos apps disagree about what is there.** The iPhone app lists the two accounts. The
-Android app lists **one**, and offers **Set Primary** where several exist. Neither ever showed a
-third. So the app lists *accounts*, and the serials this file keeps reading are *registrations* -
-not the same count, which is worth holding on to before treating a serial as an identity.
+Android app listed **one** - until the owner opened *Add iHeartRadio → Add a new account*, reached
+the "I have an account" screen and backed out, after which it listed both and offered **Set
+Primary**. Nothing was added; entering the flow is what refreshed the list. Neither app ever showed
+a third.
+
+Two things follow, and the second is the uncomfortable one:
+
+- The app lists *accounts* while this file reads *registrations*. Not the same count, which is
+  worth holding on to before treating a serial as an identity.
+- **An app screen is not a census either.** This file has leaned on one for exactly that - "How
+  good the serial proxy actually is" measured the content harvest against a screenshot of the
+  Windows controller's Service Settings and scored it "three of eight". That comparison is only as
+  good as the controller's own list, and one controller here under-reported until it was nudged. It
+  stays the best ground truth available; it is not an oracle, and a household that looks like it
+  holds fewer accounts than the serials suggest may simply not have been asked the right way.
 
 ### `match` answered with a serial we had not seen, and it was one of the two
 
