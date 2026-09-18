@@ -6506,7 +6506,7 @@ player is wired. So there is no fourth row, and `connection()` answers `unknown`
 has not seen rather than inventing one. `--json` keeps the raw `connection_type` beside the word for
 whoever hits it first.
 
-## Deezer was never broken; this client was (2026-09-17)
+## Deezer was never broken; this client was (2026-09-17, office household)
 
 Deezer had been recorded here twice as a service that answers `getDeviceLinkCode` with an empty
 HTTP 200 — "the service says nothing at all". It was answering every time. Two bugs in
@@ -6770,7 +6770,8 @@ catalogue does it.
 
 ## Every searchable service was played, and every one works (2026-09-18)
 
-All 24 services `x2rock search` lists were exercised against the Media Room: find something
+All 24 services `x2rock search` lists were exercised against the Media Room — the **office**
+household, whose linked set is what makes 24 searchable in the first place: find something
 playable, play it, then read `GetPositionInfo` twice four seconds apart and require the
 position to have moved. A command exiting 0 is not evidence.
 
@@ -6836,8 +6837,12 @@ controller does costs nothing.
 `musicServiceAccounts:1 match` succeeded, for the first time in a week of asking, and the
 reason is the word this document kept reading as "register".
 
+**On the office household**, where this whole Deezer arc happened; the home household has no
+Deezer account at all, in the Sonos app or anywhere else (checked 2026-09-18), so the same
+commands there refuse exactly as they should and that is not a regression.
+
 Deezer was unlinked and linked again, through the bar widget's new **Link** row. The link
-flow ran `match` as it always has, and this time it returned `sn_10` - the household's own
+flow ran `match` as it always has, and this time it returned `sn_10` - that household's own
 Deezer serial - which `credentials.rs` stored as the account id. `accounts` now prints
 **"registered from here as sn_10"** where every other service still says "no registration
 from this machine".
