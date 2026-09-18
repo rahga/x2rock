@@ -364,7 +364,33 @@ fn install_service(
         "Running from {}. Re-run `x2rock service install` if the binary moves.",
         exe.display()
     );
+    widget_hint();
     Ok(())
+}
+
+/// Name the bar widget once, to the person who can use it and has not got it.
+///
+/// The widget is a directory of QML rather than a file this binary writes, so
+/// there is nothing to install here - only somewhere to point. It is worth
+/// pointing at because `cargo install x2rock` leaves no obvious trace of it:
+/// the files ship inside the crate and land in cargo's source cache, which
+/// nobody would think to look in.
+///
+/// Said only when Omarchy is on this machine and the plugin is not already
+/// there: a person on GNOME has no use for the line, and one who already
+/// installed it does not need telling.
+fn widget_hint() {
+    let Some(base) = directories::BaseDirs::new() else {
+        return;
+    };
+    let omarchy = base.config_dir().join("omarchy");
+    if !omarchy.is_dir() || omarchy.join("plugins").join("x2rock.sonos").is_dir() {
+        return;
+    }
+    println!(
+        "Omarchy bar widget: `omarchy plugin add https://github.com/rahga/x2rock-sonos`, \
+         or copy `quickshell/x2rock.sonos` from the source tree."
+    );
 }
 
 #[derive(serde::Serialize)]
