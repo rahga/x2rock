@@ -6758,6 +6758,38 @@ personal library in one category. `pick_categories` resolves a name with `find` 
 only - so one library would be searched and the other silently ignored. No service in this
 catalogue does it.
 
+## Every searchable service was played, and every one works (2026-09-18)
+
+All 24 services `x2rock search` lists were exercised against the Media Room: find something
+playable, play it, then read `GetPositionInfo` twice four seconds apart and require the
+position to have moved. A command exiting 0 is not evidence.
+
+**All 24 played.** Fourteen from a search for "love" - 80s80s, 90s90s, Audacy, Deezer,
+Global Player, iHeartRadio, myTuner, NRK Radio, Radio France, RauteMusik.FM, Sveriges Radio,
+TIDAL, TuneIn. The other ten needed only a different way in: browsing the root with no term
+covered eight, and Bandcamp, PowerApp and radioPup needed one or two levels of their own
+trees (`tracks`, `/radios/`, `genres` → `genre_AC`).
+
+**The two false failures were in the method, and both are worth remembering**, because they
+are the shape of mistake this survey exists to catch:
+
+1. **Searching with no `--category` uses the service's *first* one.** For Deezer, TIDAL and
+   Bandcamp that is `artists`, every artist is a container, and a harness looking for the
+   first playable hit finds none - reporting the three best services in the household as
+   dead. `--all-categories` is the fix, and this was its first real use.
+2. **"No hit for *love*" is not "service broken".** Nine services simply lack the word;
+   SomaFM names its stations Groove Salad and Synphaera Radio. A term-free browse cleared
+   eight of them at once.
+
+Two known weaknesses were reproduced rather than discovered. Hype Machine failed on its
+first item and played on its second, which is the link rot already measured at roughly one
+in five. Community Radio Plus's first track did not start where a station did - the same
+aggregator-and-station pattern.
+
+**Nothing in the pipeline is broken for any reachable service.** Where one looks empty it is
+the search term or the default category, and both are adjustable - which is what the merged
+search and `--all-categories` were built for.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
