@@ -992,20 +992,20 @@ pub async fn run_search(
     }
     let chosen = &chosen;
     let picked = match category {
-        Some(want) => {
-            let want = want.to_lowercase();
-            categories
-                .iter()
-                .find(|c| c.id.to_lowercase() == want)
-                .ok_or_else(|| {
-                    let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
-                    anyhow!(
-                        "{} has no category {want:?}. It has: {}",
-                        chosen.name,
-                        known.join(", ")
-                    )
-                })?
-        }
+        // Through `pick_categories`, so one matcher decides what a name means:
+        // hand-rolling it here meant `-c " tracks"` resolved in a merged search
+        // and was refused in a single-service one, for a leading space.
+        Some(want) => pick_categories(&categories, Some(want))
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
+                anyhow!(
+                    "{} has no category {want:?}. It has: {}",
+                    chosen.name,
+                    known.join(", ")
+                )
+            })?,
         None => categories
             .iter()
             .find(|c| c.id.eq_ignore_ascii_case("all"))
@@ -1207,6 +1207,18 @@ fn asked_for_several(category: Option<&str>) -> bool {
     category.is_some_and(|c| c.contains(','))
 }
 
+/// One service and the categories it will be asked in.
+///
+/// Grouped rather than flattened to one entry per search: the searches are per
+/// (service, category) but every consumer is per service, so a flat plan meant
+/// re-deriving the grouping by hand at four separate sites.
+struct Search<'a> {
+    service: &'a sonos::smapi::Service,
+    /// `(category id, mapped id)` - the first is what a row is labelled with,
+    /// the second is what `search` is actually sent.
+    asking: Vec<(String, String)>,
+}
+
 /// What one service answered, kept per category until it is interleaved.
 ///
 /// Named because the shape is three deep and reads badly inline: for each
@@ -1235,13 +1247,15 @@ fn interleave(per_category: ByCategory<'_>, cap: usize) -> Vec<(&str, sonos::sma
         .collect();
     let mut out: Vec<(&str, sonos::smapi::Item)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    while !queues.is_empty() {
-        let mut exhausted = Vec::new();
-        for (slot, (id, items)) in queues.iter_mut().enumerate() {
-            let Some(item) = items.next() else {
-                exhausted.push(slot);
-                continue;
-            };
+    // A spent iterator answers `None` for ever, so an exhausted category needs
+    // no removing - polling it again is the whole cost, and it is nothing. The
+    // rounds stop when one produces nothing at all.
+    let mut progressed = true;
+    while progressed {
+        progressed = false;
+        for (id, items) in queues.iter_mut() {
+            let Some(item) = items.next() else { continue };
+            progressed = true;
             // An item nothing can be done with is not a result. Observed: a
             // service answering with an element carrying no id at all.
             if item.id.is_empty() || seen.contains(&item.id) {
@@ -1252,10 +1266,6 @@ fn interleave(per_category: ByCategory<'_>, cap: usize) -> Vec<(&str, sonos::sma
             if cap > 0 && out.len() >= cap {
                 return out;
             }
-        }
-        // Back to front, so the earlier removals do not shift the later indices.
-        for slot in exhausted.into_iter().rev() {
-            queues.remove(slot);
         }
     }
     out
@@ -1325,15 +1335,25 @@ async fn search_everywhere(
     // Pass two: who can answer, and in which categories. A service that has no
     // category by a requested name is skipped rather than searched in the wrong
     // one - `-c albums` against a radio service would otherwise return its
-    // station list and call it albums. One entry per (service, category), so a
-    // service with five of them is five searches.
-    let mut plan: Vec<(&sonos::smapi::Service, String, String)> = Vec::new();
+    // station list and call it albums.
+    //
+    // **Kept grouped by service**, not flattened to one entry per search. The
+    // searches are per (service, category) but everything downstream is per
+    // service - one row group, one failure line, one token write - and a flat
+    // plan meant folding the service back together by hand four separate times,
+    // with three different dedup idioms for the one idea.
+    let mut plan: Vec<Search<'_>> = Vec::new();
     for service in &candidates {
         let Some(categories) = catalogue.cached_categories(&service.id) else {
             continue;
         };
-        for picked in pick_categories(categories, category.map(String::as_str)) {
-            plan.push((service, picked.id.clone(), picked.mapped_id.clone()));
+        let asking: Vec<(String, String)> =
+            pick_categories(categories, category.map(String::as_str))
+                .into_iter()
+                .map(|c| (c.id.clone(), c.mapped_id.clone()))
+                .collect();
+        if !asking.is_empty() {
+            plan.push(Search { service, asking });
         }
     }
     if plan.is_empty() {
@@ -1342,29 +1362,41 @@ async fn search_everywhere(
             None => bail!("no service published a category to search"),
         }
     }
+    let asked_services = plan.len();
+    let searches: usize = plan.iter().map(|s| s.asking.len()).sum();
 
-    // Pass three: the searches. Every one gets the same term and the same
-    // budget, and one that overruns it is named on stderr rather than passed off
-    // as having found nothing. **A failure is per category, not per service**:
-    // a service asked for five whose third times out still keeps the other four.
-    let answers = futures_util::future::join_all(plan.iter().map(|(service, id, mapped)| {
-        let token = linked.token_for(&service.id);
+    // Pass three: the searches. One future per service, fanning out over its own
+    // categories inside - so every search still starts at once, and a failure is
+    // still per category: a service asked for five whose third times out keeps
+    // the other four. What the nesting buys is that an answer arrives already
+    // belonging to one service, so nothing downstream has to put it back
+    // together.
+    let answers = futures_util::future::join_all(plan.iter().map(|search| {
+        let token = linked.token_for(&search.service.id);
         async move {
-            let mut refreshed = None;
-            let got = tokio::time::timeout(
-                FAN_OUT_TIMEOUT,
-                sonos::smapi::search(
-                    service,
-                    token.as_ref(),
-                    mapped,
-                    term,
-                    index,
-                    count,
-                    &mut refreshed,
-                ),
-            )
-            .await;
-            (*service, id.as_str(), got, refreshed)
+            let per_category =
+                futures_util::future::join_all(search.asking.iter().map(|(id, mapped)| {
+                    let token = token.clone();
+                    async move {
+                        let mut refreshed = None;
+                        let got = tokio::time::timeout(
+                            FAN_OUT_TIMEOUT,
+                            sonos::smapi::search(
+                                search.service,
+                                token.as_ref(),
+                                mapped,
+                                term,
+                                index,
+                                count,
+                                &mut refreshed,
+                            ),
+                        )
+                        .await;
+                        (id.as_str(), got, refreshed)
+                    }
+                }))
+                .await;
+            (search.service, per_category)
         }
     }))
     .await;
@@ -1374,57 +1406,51 @@ async fn search_everywhere(
         category: &'a str,
         item: sonos::smapi::Item,
     }
-    // Grouped by service, in the order the plan visited them, because the
-    // interleave and the cap are per service. A `Vec` rather than a map: there
-    // are tens of services, and the order is the point.
     let mut grouped: Vec<(&sonos::smapi::Service, ByCategory)> = Vec::new();
     let mut total = 0u32;
     let mut slow: Vec<&str> = Vec::new();
     let mut refused: Vec<(&str, String)> = Vec::new();
-    let mut token_written: Vec<&str> = Vec::new();
-    for (service, id, got, refreshed) in answers {
+    for (service, per_category) in answers {
+        let mut answered: ByCategory = Vec::new();
+        let mut failed: Option<String> = None;
+        let mut timed_out = false;
+        let mut refresh = None;
+        for (id, got, refreshed) in per_category {
+            // The first is kept and the rest dropped: several categories of one
+            // service can each come back with the same refreshed token, and
+            // writing it repeatedly says the same thing while risking saying it
+            // badly. The write itself happens once, below.
+            refresh = refresh.or(refreshed);
+            match got {
+                Err(_) => timed_out = true,
+                Ok(Err(e)) => {
+                    failed.get_or_insert_with(|| format!("{e:#}"));
+                }
+                Ok(Ok((items, found))) => {
+                    // Summed only over the categories that actually replied, so
+                    // the number never quietly omits one that did not.
+                    total += found;
+                    answered.push((id, items));
+                }
+            }
+        }
         // Sequentially, after the fan-out: this writes the credentials file, and
-        // several tasks racing to rewrite it is a good way to lose a token. Once
-        // per service however many of its categories came back with one - the
-        // second write would say the same thing and risks saying it badly.
-        if refreshed.is_some() && !token_written.contains(&service.id.as_str()) {
-            token_written.push(&service.id);
-            let _ = use_refreshed_token(&service.id, linked.token_for(&service.id), refreshed);
+        // several tasks racing to rewrite it is a good way to lose a token.
+        if refresh.is_some() {
+            let _ = use_refreshed_token(&service.id, linked.token_for(&service.id), refresh);
         }
         // Named once however many of its categories failed. Five timeout lines
         // for one service hide the other thirty.
-        match got {
-            Err(_) => {
-                if !slow.contains(&service.name.as_str()) {
-                    slow.push(&service.name);
-                }
+        if answered.is_empty() {
+            match failed {
+                Some(why) => refused.push((&service.name, why)),
+                None if timed_out => slow.push(&service.name),
+                None => {}
             }
-            Ok(Err(e)) => {
-                if !refused.iter().any(|(n, _)| *n == service.name) {
-                    refused.push((&service.name, format!("{e:#}")));
-                }
-            }
-            Ok(Ok((items, found))) => {
-                // Summed only over the categories that actually replied, so the
-                // number never quietly omits one that did not.
-                total += found;
-                match grouped.iter_mut().find(|(s, _)| s.id == service.id) {
-                    Some((_, per_category)) => per_category.push((id, items)),
-                    None => grouped.push((service, vec![(id, items)])),
-                }
-            }
+        } else {
+            grouped.push((service, answered));
         }
     }
-
-    // Distinct services, not searches: every count printed below is about
-    // services, because that is what a person asked about.
-    let mut seen_service: Vec<&str> = Vec::new();
-    for (service, _, _) in &plan {
-        if !seen_service.contains(&service.id.as_str()) {
-            seen_service.push(&service.id);
-        }
-    }
-    let asked_services = seen_service.len();
     let answered_services = grouped.len();
 
     let mut rows: Vec<Row> = Vec::new();
@@ -1501,11 +1527,10 @@ async fn search_everywhere(
             serde_json::to_string_pretty(&json!({
                 "total": total,
                 "index": index,
-                // Services, not searches. `plan` is one entry per
-                // (service, category), so reporting its length would claim to
-                // have asked thirty-two services when there are twenty-three.
+                // Services, not searches: there are twenty-three of the first
+                // and thirty-two of the second for an ordinary merged term.
                 "asked": asked_services,
-                "searches": plan.len(),
+                "searches": searches,
                 "items": items,
             }))?
         );
@@ -1542,15 +1567,15 @@ async fn search_everywhere(
     let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(20);
     // The category each row came from, shown only when more than one is in play.
     // With one it is the same word on every line, which is a column of noise.
-    let categories: Vec<&str> = rows.iter().map(|r| r.category).collect();
-    let many = categories.iter().any(|c| *c != categories[0]);
-    let cat_width = match many {
-        true => categories
+    // Measured off `rows` directly - unlike `names` and `artists`, which hold
+    // rendered strings and so earn their vectors, this is a plain borrow.
+    let cat_width = match rows.iter().all(|r| r.category == rows[0].category) {
+        true => 0,
+        false => rows
             .iter()
-            .map(|c| c.chars().count())
+            .map(|r| r.category.chars().count())
             .max()
             .unwrap_or(0),
-        false => 0,
     };
     // Ids are never truncated - they are what `play-item` is given, and half an
     // id is worse than a ragged column. The width is the widest *ordinary* one,
@@ -1589,24 +1614,17 @@ async fn search_everywhere(
         })
         .collect();
     let by_width = artists.iter().map(|a| a.chars().count()).max().unwrap_or(0);
-    for (n, (((row, name), by), category)) in rows
-        .iter()
-        .zip(&names)
-        .zip(&artists)
-        .zip(&categories)
-        .enumerate()
-    {
+    for (n, ((row, name), by)) in rows.iter().zip(&names).zip(&artists).enumerate() {
         // Padded by hand: `{:<width$}` pads to a byte count through Display, so
         // one accented character in a title shifts the column.
         let pad = |s: &str, w: usize| " ".repeat(w.saturating_sub(s.chars().count()));
-        let by = match by_width {
+        // Width 0 means the column was suppressed, so it renders as nothing.
+        let column = |s: &str, w: usize| match w {
             0 => String::new(),
-            _ => format!("{by}{}  ", pad(by, by_width)),
+            _ => format!("{s}{}  ", pad(s, w)),
         };
-        let cat = match cat_width {
-            0 => String::new(),
-            _ => format!("{category}{}  ", pad(category, cat_width)),
-        };
+        let by = column(by, by_width);
+        let cat = column(row.category, cat_width);
         println!(
             "{:>3}. {}{} {:<9} {name}{}  {by}{cat}{}",
             n + 1,

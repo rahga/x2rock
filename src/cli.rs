@@ -1529,10 +1529,6 @@ mod tests {
         // A comma list is one argument to clap; the splitting is the command's,
         // so that an unknown name can be dropped per service rather than
         // rejected outright for everyone.
-        assert!(matches!(
-            parse(&["search", "-c", "artists,tracks", "sum 41"]),
-            Command::Search { .. }
-        ));
         let Command::Search {
             category,
             per_service,
