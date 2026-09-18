@@ -1352,11 +1352,20 @@ async fn search_everywhere(
         .filter(|n| *n <= ID_MAX)
         .max()
         .unwrap_or(18);
-    // The artist, where the service gave one. Four rows reading "Moon River" and
-    // nothing else are not four results a person can choose between, and this is
-    // the column that tells Frank Ocean from Frank Sinatra. Omitted entirely
-    // when nothing has one, rather than printing a column of blanks: a search
-    // that answers in stations has no artists and should not imply it does.
+    // What the service says about the row, which for a catalogue is the artist:
+    // four hits reading "Moon River" and nothing else are not four results a
+    // person can choose between, and this is the column that tells Frank Ocean
+    // from Frank Sinatra.
+    //
+    // **It is not always an artist**, and calling it one would be a promise the
+    // data does not keep. `parse_items` fills `summary` from whichever of
+    // `summary`, `artist`, `genre` or `country` a service populates, so a merged
+    // search puts genres and programme blurbs in the same column - 55 of 95 rows
+    // for "jazz", including NRK Radio's Norwegian synopses. Restricting it by
+    // item type would not sort that out either, since those arrive as `track`.
+    // It still earns its place: whatever a service offers here distinguishes one
+    // row from the next, which is the whole job of the column. Omitted entirely
+    // when no row has one, rather than printing a column of blanks.
     const BY_MAX: usize = 24;
     let artists: Vec<String> = rows
         .iter()
