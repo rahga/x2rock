@@ -359,7 +359,7 @@ see "Ask before you act".
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
-| Search every service at once | `x2rock search "<term>" --json` — no `--service`; add `--only-linked` for the good tier |
+| Search every service at once | `x2rock search "<term>" --json` — no `--service`; `--only-linked` for the good tier, `-c artists,tracks` to choose categories, `--per-service N` to cap each |
 | Search one service | `x2rock search -s <svc> <term> --json` / `x2rock search --json` (lists services) |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
 | Page through either | add `--count N --index N` — `--json` answers `{total, index, items}` |
@@ -391,14 +391,23 @@ answer to most "put something on" requests the household's own services cannot s
 
 **A term with no `--service` searches everything at once.** `x2rock search "travis scott"` asks
 every service that can answer, concurrently, and merges the results; the rows name their service and
-`--play N` counts down the merged list. **Linked services sort first, and prefer them**: that tier
-has real albums, metadata the service vouches for, and content a player will *queue* rather than
-stream. The anonymous tier is radio stations and blog aggregators - Hype Machine carries no albums
-at all by construction, its titles come from the blog post rather than the file, and its links rot.
-`--only-linked` skips the tail. `--count` is per service and defaults to 5 merged, 20 for one.
-A named `--category` skips services that have no category by that name rather than substituting one,
-so `-c albums` asks only services that really have albums. First run is slower: services that have
-never been searched are asked for their categories, once, and the answer is cached.
+their category, and `--play N` counts down the merged list. **Linked services sort first, and prefer
+them**: that tier has real albums, metadata the service vouches for, and content a player will
+*queue* rather than stream. The anonymous tier is radio stations and blog aggregators - Hype Machine
+carries no albums at all by construction, its titles come from the blog post rather than the file,
+and its links rot. `--only-linked` skips the tail.
+
+**Each service is asked in several categories at once, and its answers are interleaved**, so three
+rows from one service are a track, an artist and an album rather than three tracks. Unasked, that is
+the service's `all` where it declares one (Sonos's Universal Search marker, which few services set),
+else `tracks`/`artists`/`albums` where it has them, else whatever it lists first - which is what
+keeps a stations-only service answering. `--category` takes a list in priority order
+(`-c artists,tracks`) and **skips a service that has none of those names** rather than substituting
+one, so `-c albums` asks only services that really have albums. `--per-service N` caps the rows one
+service contributes after interleaving (default 3, the number Sonos's mobile app shows under a
+service heading; `0` keeps everything), and `--count` is per service *per category* (5 merged, 20
+for one). First run is slower: services never searched before are asked for their categories once,
+and the answer is cached.
 
 **`search --json` and `browse --json` answer an envelope, not a bare array**: `{total, index,
 items}`. Read `items`. **`total` is the service's whole count and `items` is one page of it**, so

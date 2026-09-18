@@ -409,19 +409,33 @@ pub enum Command {
         /// Left out, every searchable service is asked.
         #[arg(long, short = 's')]
         service: Option<String>,
-        /// Category within the service, by its own name (`stations`, `tracks`).
-        /// Defaults to `all` where the service offers it, else the first. In a
-        /// merged search, services that have no such category are skipped.
+        /// Category within the service, by its own name (`stations`, `tracks`),
+        /// or several separated by commas (`artists,tracks`) in the order that
+        /// matters most. A service is asked once per category it actually has,
+        /// and one that has none of them is skipped rather than searched in a
+        /// category nobody asked for.
+        ///
+        /// Left out: the service's `all` where it declares one - which is how a
+        /// service says it supports Sonos's Universal Search - else `tracks`,
+        /// `artists` and `albums` where it has them, else whatever it lists
+        /// first, which is what keeps a stations-only service answering.
         #[arg(long, short = 'c')]
         category: Option<String>,
+        /// How many rows one service contributes to a merged search, after its
+        /// categories are interleaved. Defaults to 3, the number Sonos's own
+        /// mobile app shows under a service heading; 0 keeps everything. No
+        /// effect alongside `--service`.
+        #[arg(long, value_name = "N")]
+        per_service: Option<usize>,
         /// Only the services with a linked account, in a merged search. Faster,
         /// and the tier whose answers are worth the most. No effect alongside
         /// `--service`.
         #[arg(long)]
         only_linked: bool,
-        /// Results per service. Defaults to 20 for one service and 5 for a
-        /// merged search, where the rows are summed across everything that
-        /// answered.
+        /// Results per service **per category**. Defaults to 20 for one service
+        /// and 5 for a merged search, where several categories of several
+        /// services are asked and `--per-service` decides how many of each
+        /// service's rows survive.
         #[arg(long)]
         count: Option<u32>,
         /// First result to return, 0-based. Page with `--index 20 --count 20`,
@@ -1512,6 +1526,36 @@ mod tests {
                 ..
             }
         ));
+        // A comma list is one argument to clap; the splitting is the command's,
+        // so that an unknown name can be dropped per service rather than
+        // rejected outright for everyone.
+        assert!(matches!(
+            parse(&["search", "-c", "artists,tracks", "sum 41"]),
+            Command::Search { .. }
+        ));
+        let Command::Search {
+            category,
+            per_service,
+            ..
+        } = parse(&[
+            "search",
+            "-c",
+            "artists,tracks",
+            "--per-service",
+            "5",
+            "sum 41",
+        ])
+        else {
+            panic!("not a search")
+        };
+        assert_eq!(category.as_deref(), Some("artists,tracks"));
+        assert_eq!(per_service, Some(5));
+        // Absent rather than defaulted, so the command can tell 3-for-merged
+        // from 20-for-one the way `count` already does.
+        let Command::Search { per_service, .. } = parse(&["search", "sum 41"]) else {
+            panic!("not a search")
+        };
+        assert_eq!(per_service, None);
         // Still the listing when there is no term at all.
         assert!(matches!(
             parse(&["search"]),

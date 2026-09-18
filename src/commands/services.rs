@@ -784,11 +784,20 @@ pub async fn run_browse(
 /// having a bad day costs everyone. Its absence is reported rather than hidden.
 const FAN_OUT_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// Results per service when no `--count` is given and no one service was named.
+/// Results per service *per category* when no `--count` is given and no one
+/// service was named.
 ///
 /// Twenty is right for one service and wrong for thirty-five: the merged list is
 /// read top to bottom, and seven hundred rows is not a list.
 const FAN_OUT_COUNT: u32 = 5;
+
+/// Rows one service contributes to a merged search when `--per-service` is not
+/// given, after its categories are interleaved.
+///
+/// Three, which is what Sonos's own mobile app shows beneath a service heading
+/// before you ask it for more. It is also about as many as a person reads per
+/// service when twenty of them answered.
+const FAN_OUT_PER_SERVICE: usize = 3;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_search(
@@ -799,6 +808,7 @@ pub async fn run_search(
     service: Option<&String>,
     category: Option<&String>,
     only_linked: bool,
+    per_service: Option<usize>,
     count: Option<u32>,
     index: u32,
     play: Option<usize>,
@@ -852,6 +862,7 @@ pub async fn run_search(
             candidates,
             term,
             category,
+            per_service.unwrap_or(FAN_OUT_PER_SERVICE),
             count.unwrap_or(FAN_OUT_COUNT),
             index,
             play,
@@ -1095,24 +1106,107 @@ pub async fn run_search(
     Ok(())
 }
 
-/// Which category of one service a merged search should ask.
+/// What a merged search asks for when the caller names no category.
 ///
-/// Named, and the service must have it by that name - a miss is skipped rather
-/// than substituted, because `-c albums` answered with a radio service's station
-/// list would be a wrong answer wearing the right label. Unnamed, `all` where the
-/// service offers one, else whatever it lists first, which is the same rule the
-/// single-service path follows.
-fn pick_category<'a>(
+/// Sonos standardised these names across services, and they are the three a
+/// search box is usually about. Order is the priority: where only a few rows per
+/// service survive, a track beats an artist beats an album.
+const DEFAULT_CATEGORIES: [&str; 3] = ["tracks", "artists", "albums"];
+
+/// Which categories of one service a merged search should ask, in priority order.
+///
+/// **Named, and the service must have them by those names.** A miss is skipped
+/// rather than substituted, because `-c albums` answered with a radio service's
+/// station list would be a wrong answer wearing the right label; a service with
+/// none of the named categories drops out of the search entirely.
+///
+/// Unnamed, `all` first - that is not a convenience but the service declaring
+/// Universal Search, which Sonos documents as "use `all` as the ID to inform
+/// Sonos that this category should be used for search experiences that support
+/// it", and one request that already means "anything". Only three services in
+/// this household's catalogue of thirty-five declare one, so the fallback does
+/// the real work: [`DEFAULT_CATEGORIES`] where the service has them, and failing
+/// even that, whatever it lists first. That last arm is what keeps the thirteen
+/// stations-only services answering exactly as they did before.
+fn pick_categories<'a>(
     categories: &'a [sonos::smapi::Category],
     want: Option<&str>,
-) -> Option<&'a sonos::smapi::Category> {
-    match want {
-        Some(want) => categories.iter().find(|c| c.id.eq_ignore_ascii_case(want)),
-        None => categories
-            .iter()
-            .find(|c| c.id.eq_ignore_ascii_case("all"))
-            .or_else(|| categories.first()),
+) -> Vec<&'a sonos::smapi::Category> {
+    let by_name = |name: &str| categories.iter().find(|c| c.id.eq_ignore_ascii_case(name));
+    if let Some(want) = want {
+        // The caller's order, not the service's: they said what mattered most.
+        return want
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .filter_map(by_name)
+            .collect();
     }
+    if let Some(all) = by_name("all") {
+        return vec![all];
+    }
+    let preferred: Vec<_> = DEFAULT_CATEGORIES
+        .iter()
+        .filter_map(|n| by_name(n))
+        .collect();
+    if !preferred.is_empty() {
+        return preferred;
+    }
+    categories.iter().take(1).collect()
+}
+
+/// What one service answered, kept per category until it is interleaved.
+///
+/// Named because the shape is three deep and reads badly inline: for each
+/// category the service was asked, its id and the rows it returned.
+type ByCategory<'a> = Vec<(&'a str, Vec<sonos::smapi::Item>)>;
+
+/// One service's categories, round-robined into a single list, best first.
+///
+/// Concatenating instead would make "top three from this service" three tracks,
+/// which is not what a person searching a name wants to see; taking one from
+/// each category in turn makes it a track, an artist and an album. The order of
+/// `per_category` is the priority - `pick_categories` put it there - so when the
+/// cap bites, the earlier categories are what survive.
+///
+/// **Duplicates are dropped by id, first occurrence winning.** The three services
+/// that declare `all` also publish the individual categories, and a service may
+/// answer with the same track under both; the first is the more specific one.
+///
+/// `cap` of 0 keeps everything. Nothing here can fail: a category that returned
+/// nothing, a service that returned nothing at all, and fewer rows than the cap
+/// are all ordinary.
+fn interleave(per_category: ByCategory<'_>, cap: usize) -> Vec<(&str, sonos::smapi::Item)> {
+    let mut queues: Vec<(&str, std::vec::IntoIter<sonos::smapi::Item>)> = per_category
+        .into_iter()
+        .map(|(id, items)| (id, items.into_iter()))
+        .collect();
+    let mut out: Vec<(&str, sonos::smapi::Item)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    while !queues.is_empty() {
+        let mut exhausted = Vec::new();
+        for (slot, (id, items)) in queues.iter_mut().enumerate() {
+            let Some(item) = items.next() else {
+                exhausted.push(slot);
+                continue;
+            };
+            // An item nothing can be done with is not a result. Observed: a
+            // service answering with an element carrying no id at all.
+            if item.id.is_empty() || seen.contains(&item.id) {
+                continue;
+            }
+            seen.push(item.id.clone());
+            out.push((id, item));
+            if cap > 0 && out.len() >= cap {
+                return out;
+            }
+        }
+        // Back to front, so the earlier removals do not shift the later indices.
+        for slot in exhausted.into_iter().rev() {
+            queues.remove(slot);
+        }
+    }
+    out
 }
 
 /// `x2rock search <term>` with no `--service`: ask everything at once.
@@ -1138,6 +1232,7 @@ async fn search_everywhere(
     candidates: Vec<sonos::smapi::Service>,
     term: &str,
     category: Option<&String>,
+    per_service: usize,
     count: u32,
     index: u32,
     play: Option<usize>,
@@ -1175,17 +1270,18 @@ async fn search_everywhere(
         }
     }
 
-    // Pass two: who can answer, and in which category. A service that has no
-    // category by the requested name is skipped rather than searched in the
-    // wrong one - `-c albums` against a radio service would otherwise return
-    // its station list and call it albums.
-    let mut plan: Vec<(&sonos::smapi::Service, String)> = Vec::new();
+    // Pass two: who can answer, and in which categories. A service that has no
+    // category by a requested name is skipped rather than searched in the wrong
+    // one - `-c albums` against a radio service would otherwise return its
+    // station list and call it albums. One entry per (service, category), so a
+    // service with five of them is five searches.
+    let mut plan: Vec<(&sonos::smapi::Service, String, String)> = Vec::new();
     for service in &candidates {
         let Some(categories) = catalogue.cached_categories(&service.id) else {
             continue;
         };
-        if let Some(picked) = pick_category(categories, category.map(String::as_str)) {
-            plan.push((service, picked.mapped_id.clone()));
+        for picked in pick_categories(categories, category.map(String::as_str)) {
+            plan.push((service, picked.id.clone(), picked.mapped_id.clone()));
         }
     }
     if plan.is_empty() {
@@ -1195,10 +1291,11 @@ async fn search_everywhere(
         }
     }
 
-    // Pass three: the searches. Every service gets the same term and the same
+    // Pass three: the searches. Every one gets the same term and the same
     // budget, and one that overruns it is named on stderr rather than passed off
-    // as having found nothing.
-    let answers = futures_util::future::join_all(plan.iter().map(|(service, mapped)| {
+    // as having found nothing. **A failure is per category, not per service**:
+    // a service asked for five whose third times out still keeps the other four.
+    let answers = futures_util::future::join_all(plan.iter().map(|(service, id, mapped)| {
         let token = linked.token_for(&service.id);
         async move {
             let mut refreshed = None;
@@ -1215,37 +1312,82 @@ async fn search_everywhere(
                 ),
             )
             .await;
-            (*service, got, refreshed)
+            (*service, id.as_str(), got, refreshed)
         }
     }))
     .await;
 
     struct Row<'a> {
         service: &'a sonos::smapi::Service,
+        category: &'a str,
         item: sonos::smapi::Item,
     }
-    let mut rows: Vec<Row> = Vec::new();
+    // Grouped by service, in the order the plan visited them, because the
+    // interleave and the cap are per service. A `Vec` rather than a map: there
+    // are tens of services, and the order is the point.
+    let mut grouped: Vec<(&sonos::smapi::Service, ByCategory)> = Vec::new();
     let mut total = 0u32;
     let mut slow: Vec<&str> = Vec::new();
     let mut refused: Vec<(&str, String)> = Vec::new();
-    for (service, got, refreshed) in answers {
+    let mut token_written: Vec<&str> = Vec::new();
+    for (service, id, got, refreshed) in answers {
         // Sequentially, after the fan-out: this writes the credentials file, and
-        // several tasks racing to rewrite it is a good way to lose a token.
-        if refreshed.is_some() {
+        // several tasks racing to rewrite it is a good way to lose a token. Once
+        // per service however many of its categories came back with one - the
+        // second write would say the same thing and risks saying it badly.
+        if refreshed.is_some() && !token_written.contains(&service.id.as_str()) {
+            token_written.push(&service.id);
             let _ = use_refreshed_token(&service.id, linked.token_for(&service.id), refreshed);
         }
+        // Named once however many of its categories failed. Five timeout lines
+        // for one service hide the other thirty.
         match got {
-            Err(_) => slow.push(&service.name),
-            Ok(Err(e)) => refused.push((&service.name, format!("{e:#}"))),
+            Err(_) => {
+                if !slow.contains(&service.name.as_str()) {
+                    slow.push(&service.name);
+                }
+            }
+            Ok(Err(e)) => {
+                if !refused.iter().any(|(n, _)| *n == service.name) {
+                    refused.push((&service.name, format!("{e:#}")));
+                }
+            }
             Ok(Ok((items, found))) => {
+                // Summed only over the categories that actually replied, so the
+                // number never quietly omits one that did not.
                 total += found;
-                rows.extend(items.into_iter().map(|item| Row { service, item }));
+                match grouped.iter_mut().find(|(s, _)| s.id == service.id) {
+                    Some((_, per_category)) => per_category.push((id, items)),
+                    None => grouped.push((service, vec![(id, items)])),
+                }
             }
         }
     }
 
-    // Stable, so each service keeps the order it answered in - services rank
-    // their own hits and reordering within one would discard that.
+    // Distinct services, not searches: every count printed below is about
+    // services, because that is what a person asked about.
+    let mut seen_service: Vec<&str> = Vec::new();
+    for (service, _, _) in &plan {
+        if !seen_service.contains(&service.id.as_str()) {
+            seen_service.push(&service.id);
+        }
+    }
+    let asked_services = seen_service.len();
+    let answered_services = grouped.len();
+
+    let mut rows: Vec<Row> = Vec::new();
+    for (service, per_category) in grouped {
+        for (category, item) in interleave(per_category, per_service) {
+            rows.push(Row {
+                service,
+                category,
+                item,
+            });
+        }
+    }
+
+    // Stable, so each service keeps the order the interleave gave it - services
+    // rank their own hits and reordering within one would discard that.
     rows.sort_by_key(|r| {
         (
             linked.get(&r.service.id).is_none(),
@@ -1295,6 +1437,10 @@ async fn search_everywhere(
                     "container": r.item.container,
                     "queueable": queueable(&r.item, r.service),
                     "linked": linked.get(&r.service.id).is_some(),
+                    // Unconditional, even when only one category was asked: a
+                    // caller grouping by it should not have to work out whether
+                    // the field exists before it can read it.
+                    "category": r.category,
                 })
             })
             .collect();
@@ -1303,7 +1449,11 @@ async fn search_everywhere(
             serde_json::to_string_pretty(&json!({
                 "total": total,
                 "index": index,
-                "asked": plan.len(),
+                // Services, not searches. `plan` is one entry per
+                // (service, category), so reporting its length would claim to
+                // have asked thirty-two services when there are twenty-three.
+                "asked": asked_services,
+                "searches": plan.len(),
                 "items": items,
             }))?
         );
@@ -1317,10 +1467,7 @@ async fn search_everywhere(
         eprintln!("x2rock: {name} refused the search ({why})");
     }
     if rows.is_empty() {
-        println!(
-            "Nothing for {term:?} on any of the {} services asked.",
-            plan.len()
-        );
+        println!("Nothing for {term:?} on any of the {asked_services} services asked.");
         return Ok(());
     }
     // Rendered first, then measured. Measuring the raw title instead leaves a
@@ -1341,6 +1488,18 @@ async fn search_everywhere(
         })
         .collect();
     let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(20);
+    // The category each row came from, shown only when more than one is in play.
+    // With one it is the same word on every line, which is a column of noise.
+    let categories: Vec<&str> = rows.iter().map(|r| r.category).collect();
+    let many = categories.iter().any(|c| *c != categories[0]);
+    let cat_width = match many {
+        true => categories
+            .iter()
+            .map(|c| c.chars().count())
+            .max()
+            .unwrap_or(0),
+        false => 0,
+    };
     // Ids are never truncated - they are what `play-item` is given, and half an
     // id is worse than a ragged column. The width is the widest *ordinary* one,
     // so a service with monstrous ids (NRK Radio's are 58 characters) pushes its
@@ -1378,7 +1537,13 @@ async fn search_everywhere(
         })
         .collect();
     let by_width = artists.iter().map(|a| a.chars().count()).max().unwrap_or(0);
-    for (n, ((row, name), by)) in rows.iter().zip(&names).zip(&artists).enumerate() {
+    for (n, (((row, name), by), category)) in rows
+        .iter()
+        .zip(&names)
+        .zip(&artists)
+        .zip(&categories)
+        .enumerate()
+    {
         // Padded by hand: `{:<width$}` pads to a byte count through Display, so
         // one accented character in a title shifts the column.
         let pad = |s: &str, w: usize| " ".repeat(w.saturating_sub(s.chars().count()));
@@ -1386,8 +1551,12 @@ async fn search_everywhere(
             0 => String::new(),
             _ => format!("{by}{}  ", pad(by, by_width)),
         };
+        let cat = match cat_width {
+            0 => String::new(),
+            _ => format!("{category}{}  ", pad(category, cat_width)),
+        };
         println!(
-            "{:>3}. {}{} {:<9} {name}{}  {by}{}",
+            "{:>3}. {}{} {:<9} {name}{}  {by}{cat}{}",
             n + 1,
             row.item.id,
             pad(&row.item.id, id_width),
@@ -1397,10 +1566,9 @@ async fn search_everywhere(
         );
     }
     println!(
-        "\n{} from {} of {} services asked. Play one with: x2rock search {term:?} --play N",
-        rows.len(),
-        plan.len() - slow.len() - refused.len(),
-        plan.len()
+        "\n{} from {answered_services} of {asked_services} services asked. \
+         Play one with: x2rock search {term:?} --play N",
+        rows.len()
     );
     Ok(())
 }
@@ -1567,36 +1735,152 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn an_unnamed_category_prefers_all_and_falls_back_to_the_first() {
-        let with_all = cats(&["artists", "all", "tracks"]);
-        assert_eq!(pick_category(&with_all, None).unwrap().id, "all");
+    fn ids<'a>(picked: &[&'a sonos::smapi::Category]) -> Vec<&'a str> {
+        picked.iter().map(|c| c.id.as_str()).collect()
+    }
 
-        // iHeartRadio publishes no `all`, so the merged search asks its first -
-        // stations - which is why a music term there answers with radio.
-        let without = cats(&["stations", "artists", "tracks"]);
-        assert_eq!(pick_category(&without, None).unwrap().id, "stations");
+    fn item(id: &str) -> sonos::smapi::Item {
+        sonos::smapi::Item {
+            id: id.to_string(),
+            title: id.to_string(),
+            item_type: "track".into(),
+            summary: None,
+            art_url: None,
+            container: false,
+        }
+    }
 
-        assert!(pick_category(&[], None).is_none(), "nothing to pick");
+    fn picked(out: &[(&str, sonos::smapi::Item)]) -> Vec<String> {
+        out.iter().map(|(c, i)| format!("{c}:{}", i.id)).collect()
     }
 
     #[test]
-    fn a_named_category_is_matched_by_name_or_skipped_entirely() {
+    fn interleaving_takes_one_from_each_category_in_turn() {
+        // Three rows from a service should be three kinds of thing, not the
+        // first three tracks - which is the whole reason for round-robin.
+        let out = interleave(
+            vec![
+                ("tracks", vec![item("t1"), item("t2"), item("t3")]),
+                ("artists", vec![item("a1"), item("a2")]),
+                ("albums", vec![item("b1")]),
+            ],
+            3,
+        );
+        assert_eq!(picked(&out), ["tracks:t1", "artists:a1", "albums:b1"]);
+    }
+
+    #[test]
+    fn an_exhausted_category_drops_out_and_the_rest_keep_going() {
+        // Albums runs dry first; the remaining rows must still come, rather than
+        // the round-robin stalling or leaving a gap.
+        let out = interleave(
+            vec![
+                ("tracks", vec![item("t1"), item("t2")]),
+                ("albums", vec![item("b1")]),
+            ],
+            0,
+        );
+        assert_eq!(picked(&out), ["tracks:t1", "albums:b1", "tracks:t2"]);
+    }
+
+    #[test]
+    fn the_same_id_in_two_categories_is_kept_once() {
+        // The three services that declare `all` also publish the individual
+        // categories, so one track can arrive twice. First wins, which given the
+        // priority order is the more specific category.
+        let out = interleave(
+            vec![
+                ("tracks", vec![item("same"), item("t2")]),
+                ("all", vec![item("same"), item("x9")]),
+            ],
+            0,
+        );
+        assert_eq!(picked(&out), ["tracks:same", "tracks:t2", "all:x9"]);
+    }
+
+    #[test]
+    fn nothing_to_interleave_is_ordinary_rather_than_an_error() {
+        assert!(
+            interleave(vec![], 3).is_empty(),
+            "a service that said nothing"
+        );
+        assert!(
+            interleave(vec![("tracks", vec![])], 3).is_empty(),
+            "a category that said nothing"
+        );
+        // Fewer rows than the cap is the common case and must not pad or panic.
+        let out = interleave(vec![("tracks", vec![item("t1")])], 10);
+        assert_eq!(picked(&out), ["tracks:t1"]);
+    }
+
+    #[test]
+    fn an_item_with_no_id_is_dropped_because_nothing_can_be_done_with_it() {
+        let out = interleave(vec![("tracks", vec![item(""), item("t1")])], 0);
+        assert_eq!(picked(&out), ["tracks:t1"]);
+    }
+
+    #[test]
+    fn a_cap_of_zero_keeps_everything() {
+        let out = interleave(
+            vec![("tracks", vec![item("t1"), item("t2"), item("t3")])],
+            0,
+        );
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn an_unnamed_search_prefers_all_which_is_the_universal_search_declaration() {
+        // One request that already means "anything", so nothing else is asked.
+        let with_all = cats(&["artists", "all", "tracks"]);
+        assert_eq!(ids(&pick_categories(&with_all, None)), ["all"]);
+        assert!(pick_categories(&[], None).is_empty(), "nothing to pick");
+    }
+
+    #[test]
+    fn an_unnamed_search_without_all_takes_the_default_three_in_priority_order() {
+        // Deezer's real list. The service's own order is artists-first; ours is
+        // tracks-first, because that is what survives a small per-service cap.
+        let deezer = cats(&["artists", "albums", "tracks", "playlists", "stations"]);
+        assert_eq!(
+            ids(&pick_categories(&deezer, None)),
+            ["tracks", "artists", "albums"]
+        );
+        // Hype Machine has no albums, and is asked only for what it has.
+        let partial = cats(&["artists", "tracks"]);
+        assert_eq!(ids(&pick_categories(&partial, None)), ["tracks", "artists"]);
+    }
+
+    #[test]
+    fn a_service_with_none_of_the_defaults_still_answers_on_its_first() {
+        // Thirteen services here are stations-only. Without this arm every one
+        // of them would drop out of a merged search that used to include them.
+        let radio = cats(&["stations", "podcasts"]);
+        assert_eq!(ids(&pick_categories(&radio, None)), ["stations"]);
+    }
+
+    #[test]
+    fn a_named_list_keeps_the_callers_order_and_skips_what_is_missing() {
         let deezer = cats(&["artists", "albums", "tracks"]);
         assert_eq!(
-            pick_category(&deezer, Some("albums")).unwrap().mapped_id,
-            "search:albums"
+            ids(&pick_categories(&deezer, Some("albums,tracks"))),
+            ["albums", "tracks"],
+            "the caller said what mattered most, not the service"
         );
         assert_eq!(
-            pick_category(&deezer, Some("ALBUMS")).unwrap().id,
-            "albums",
-            "services disagree about case"
+            ids(&pick_categories(&deezer, Some(" ALBUMS , ,tracks "))),
+            ["albums", "tracks"],
+            "services disagree about case, and people leave spaces"
+        );
+        assert_eq!(
+            ids(&pick_categories(&deezer, Some("albums,podcasts"))),
+            ["albums"],
+            "a name this service lacks is dropped, not substituted"
         );
         // The point of the whole function: a station-only service asked for
         // albums is left out, rather than answered with its stations.
         let radio = cats(&["stations", "podcasts"]);
         assert!(
-            pick_category(&radio, Some("albums")).is_none(),
+            pick_categories(&radio, Some("albums")).is_empty(),
             "no substituting a category the caller did not ask for"
         );
     }

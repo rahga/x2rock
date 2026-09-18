@@ -6602,6 +6602,62 @@ credentials file is a good way to lose one.
 Measured on the office household: 0.6s for `--only-linked`, 2.8s for all 35 including a cold
 category warm-up of 32 of them.
 
+## Several categories at once, because `all` is almost never there (built 2026-09-18)
+
+The merged search asked each service in exactly one category, chosen by preferring its `all`
+and falling back to whatever it listed first. Searching the linked tier for "Garth Brooks"
+then returned no artist: the picker pinned `tracks`, and Deezer keeps artists elsewhere.
+Unpinning only swapped the fault, since Deezer's *first* category is artists and nothing
+would then be directly playable.
+
+**What Sonos documents.** There are two search methods. *Universal Search* "enables users to
+search across multiple content categories simultaneously" and is required for iOS, Android
+and the web app; *Classic Search* is category-by-category and is what desktop and S1 use.
+The marker for the first is a category whose id is `all` — "use `all` as the ID to inform
+Sonos that this category should be used for search experiences that support it". And the
+mobile experience is not assembled by the controller at all: "all mobile app search requests
+are routed through a central Sonos cloud service". x2rock has no access to that, so it does
+client-side over Classic Search what Sonos does in its cloud. That is the documented path,
+not a workaround.
+
+**Why the fallback carries the weight.** Of 35 services with cached categories here, **3**
+declare an `all` (NRK Radio, Radio France, Sveriges Radio), **20** publish categories without
+one, and **12** publish none and are not searchable. Deezer was checked directly: its
+`PresentationMap type="Search"` lists `artists, albums, tracks, playlists, stations` and no
+`all`, and its manifest's `search-catalogs` is `[]`. So the grouped Deezer results the mobile
+app shows are that cloud service doing per-category searches.
+
+`getMetadata` on the `search` id is the documented second route, and the docs say both lists
+"should be identical". Probed against the 12 that publish nothing, in case any implemented
+only the desktop half: NTS Radio faults with "Item for ID Not Found Error", Relisten and CBC
+answer with nothing, and Virgin Radio UK ignores the id and returns its own stations as
+`itemType=stream`. **No fallback was added for them.** A service that publishes neither list
+has not implemented search, and that is its decision.
+
+**The rules `pick_categories` follows**: named categories in the caller's order, skipping any
+a service lacks and dropping the service entirely if it has none; else `all`; else
+`DEFAULT_CATEGORIES` (`tracks`, `artists`, `albums`) where present; else its first category,
+which is the arm that keeps the thirteen stations-only services answering as they did.
+
+**Cost.** One call per service is 23; every category of every service is 57; the priority
+list is **32**, and measured wall-clock is unchanged — 2.3s against a 2.6s baseline, because
+they all run concurrently. The cap is load-bearing rather than tidiness: PowerApp alone
+declares 11 categories.
+
+**Interleaving, not concatenation.** `interleave` round-robins a service's categories so
+three rows are three kinds of thing. It drops a repeated id within the service (the `all`
+services also publish the individual categories, so the same track can arrive twice; first
+wins, which given the priority order is the more specific one) and drops an item with no id,
+which nothing can be done with. `--per-service` caps what survives — 3 by default, matching
+what the mobile app shows under a service heading.
+
+**Partial is the normal case.** A failure is per (service, category): a service asked for
+five whose third times out keeps the other four. It is named once on stderr however many of
+its categories failed. `total` sums only the categories that replied, and both printed counts
+are *distinct services*, never `plan.len()`, which is searches — for "jazz" that is 23 asked
+against 32 searches. A refreshed token is written once per service, because the second write
+would say the same thing and risks saying it badly.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
