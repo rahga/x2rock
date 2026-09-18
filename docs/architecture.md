@@ -6977,6 +6977,16 @@ and x2rock already does the right thing by falling back to the session (`play-it
 `browse --play` on one does not, because it reaches the queue first). Live stations are streams
 anyway; podcasts and the household's own favorites queue normally.
 
+**And a favorite carries its own account, which is the way round all of this.** The owner saved the
+*wife's* personal station - `jamielhoelscher Favorites Radio`, a `custom_radio.favorites-…` program
+belonging to `sn_24` - as a Sonos favorite, and `x2rock favorite 89` played it in a third room with
+position advancing. `getMetadataStatus` reported **`sn_24`**: not the primary (`sn_25` by then), not
+this machine's token (`sn_25`), but the account the favorite was saved from. `loadFavorite` hands
+the player an id and the player resolves everything, account included, from what the favorite
+stores. So on a household where several people's personal content matters, **saving it as a favorite
+is the reliable route** - it is the one path that neither depends on which token searched nor on
+whichever serial the enqueue path prefers.
+
 **And Set Primary does not govern the enqueue path.** The owner set their own account primary in
 the Android app; the app's own playback followed immediately (a station started there resolved
 `sn_25`), while every enqueue from x2rock kept resolving `sn_24` - four minutes later and again
