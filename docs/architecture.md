@@ -2370,8 +2370,9 @@ one, which is not worth manufacturing.
 This matters more than the taxonomy does. Knowing the household holds an account for a service is
 not enough to use it — with several present, choosing wrong plays from the wrong account.
 
-**Answered 2026-09-18 on a household that really has two**: the chooser is the Sonos app's **Set
-Primary**, and the enqueue path follows it. See "Two accounts for one service, one per person".
+**Probed 2026-09-18 on a household that really has two, and still open**: the Sonos app has a **Set
+Primary**, and its own playback follows it at once - but the enqueue path went on resolving the
+*other*, lower-numbered serial regardless. See "Two accounts for one service, one per person".
 
 ### The two playback paths use two different identities (verified 2026-08-31)
 
@@ -6943,30 +6944,46 @@ concluded. Worth keeping as a lesson about this file's favourite mistake: a seri
 is not a serial that did not exist, and the harvest is the reason - it shows an account only once
 that account has saved or queued something.
 
-### The identity split is not cosmetic: it breaks playback across accounts
+### An artist-radio track will not queue, and the account has nothing to do with it
 
-"The two playback paths use two different identities" was recorded on a household with one account
-per service, where the split cost nothing. With two accounts it is a failure, and the shape is
-worth stating exactly:
+This started as the opposite claim, and the experiment that was supposed to confirm it refuted it
+instead. Written up in that order, because the wrong version is the one a reader would otherwise
+reinvent.
 
-- A search made with **this machine's token** returns ids minted for *its* account (`sn_25`).
-- The **enqueue path** hands the id to the player, which resolves it with the household's
-  **primary** - `sn_24` here, the other person's account.
-- An iHeartRadio personal id minted for one account and resolved by another is refused:
-  `browse -s iHeartRadio artist_radio.44512 --play 1` queued "Turn On The Lights" and the room
-  never started, `play` then naming it **`ERROR_CANT_REACH_SERVER`**.
-- The **stream path** resolves the same id through `getMediaURI` with our own token, and it
-  **plays** (verified, position advancing after a ~25s buffer).
+**What was seen first.** `browse -s iHeartRadio artist_radio.44512 --play 1` queued a track, the
+room never started, and `play` named it **`ERROR_CANT_REACH_SERVER`**. The id had come from a
+search made with *this machine's* token (`sn_25`), while `getMetadataStatus` showed the player
+resolving the queued item as **`sn_24`** - the other person's account. Two accounts, an id minted
+under one and resolved under the other, and a refusal: it read as a cross-account failure, and the
+stream path playing the same id through our own token seemed to confirm it.
 
-So on a multi-account household, x2rock reaches a service's *personal* content (artist stations,
-custom playlists) only through the stream path, unless the primary happens to be the account that
-searched. Live stations are streams anyway and are unaffected; the household's own favorites are
-unaffected too, since `favorite` hands the player an id it resolves entirely on its own.
+**Three controls killed that reading.**
 
-**Set Primary is therefore the chooser**, which answers "Choosing between several accounts is an
-open question" above: the household does have a default, the Android app sets it, and the enqueue
-path follows it. x2rock cannot read it - no command reports the primary - but it can be *inferred*
-the way it was here, by enqueuing something and reading back the `accountId` the player filled in.
+- **Naming the account changes nothing.** The same id was enqueued twice by hand over
+  `raw upnp AVTransport AddURIToQueue`, once with `sn=25` and once with `sn=24`. *Both* were
+  accepted, both resolved their real title from the service, and **both refused to play** with the
+  identical error. So `sn=` is not the lever here, exactly as `bookmarks::service_uri` has always
+  said, and the account is not what the failure turns on.
+- **A different content type queues and plays cross-account.** An iHeartRadio **podcast episode**
+  (`podcast_show.96972136.101839702`) enqueued through the ordinary `play-item` path and played -
+  position advancing 6.7s → 12.4s - while resolving as `sn_24`, still not our account. Same
+  household, same two accounts, same path, different kind of id.
+- **The failing kind is per-listener.** `artist_radio_track.…` ids are minted for a listening
+  session rather than being catalogue items, which is why `getMediaURI` will serve one to the token
+  that asked and the queue will not serve it at all.
+
+**So the rule is about content, not identity:** iHeartRadio's artist-radio tracks are stream-only,
+and x2rock already does the right thing by falling back to the session (`play-item` on one plays;
+`browse --play` on one does not, because it reaches the queue first). Live stations are streams
+anyway; podcasts and the household's own favorites queue normally.
+
+**And Set Primary does not govern the enqueue path.** The owner set their own account primary in
+the Android app; the app's own playback followed immediately (a station started there resolved
+`sn_25`), while every enqueue from x2rock kept resolving `sn_24` - four minutes later and again
+after that. `sn_24` is the lower of the two live serials, which fits "oldest registration wins"
+better than "primary wins", but one household cannot separate those. So "Choosing between several
+accounts is an open question" is **still open** for the enqueue path; what is settled is that the
+app's chooser and the player's are not the same chooser.
 
 ### What linking did *not* do
 
