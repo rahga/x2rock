@@ -1495,7 +1495,8 @@ Linked Bandcamp. Search it with: x2rock search -s Bandcamp
   most legible way available to it. The decision to accept a reply with a token and no real key
   rather than refusing it was the right one, and this is why.
 - `userIdHashCode` — **absent**. So `match` was skipped, with the message it was written for, and
-  the household does not know about the account.
+  the household does not know about the account. *Those are two facts, not one: see "A missing
+  hash is not what keeps a service out of the queue" below.*
 
 The `loginToken` header is accepted: `getMetadata` on `root` returns Bandcamp's browse tree, which
 is proof the credential is honoured by an endpoint that has one to check.
@@ -6686,6 +6687,44 @@ and Sonos's heading is "Songs", so keying it as `kindSongs` silently showed the 
 The drill-in deliberately does **not** apply the picker's filter box to its rows, unlike
 every other list there: that box still holds the search term, and filtering "garth brooks"
 over his own results would hide "The Dance" for not repeating his name.
+
+## A missing hash is not what keeps a service out of the queue (TIDAL, 2026-09-18)
+
+TIDAL was added in the Sonos desktop app and then linked with `x2rock link tidal`, and the
+pair of facts it produced separates two things this document had been treating as one.
+
+**TIDAL sends no `userIdHashCode`**, exactly as Bandcamp does not, so `match` was never
+attempted and `link` printed the message written for that case. **And its content queues
+anyway**: `play-item` on `track/84777633` went into the queue at position 13 with a real
+duration, no stream fallback, and the player wrote
+
+```
+x-sonos-http:track%2f84777633.flac?sid=174&flags=24616&sn=11
+```
+
+`sn=11` is the household's own TIDAL serial, which the Sonos app created and which
+`accounts --content` now harvests beside Deezer's `sn_10`.
+
+So the registration and the hash are independent:
+
+- **`match` is not the mechanism, only one route to it** - and a route that has never once
+  succeeded from here. The Sonos app is another route, and it works.
+- **A service that cannot send a hash is not locked out of the queue.** Bandcamp streams
+  because nobody has registered it with the household, not because its reply lacks a field.
+  Registered, it would queue like TIDAL.
+
+An earlier reading here had the missing hash *causing* the stream fallback. It does not. It
+causes `match` to be unattemptable, which is a different sentence, and only matters at all
+because `match` is the one route x2rock could in principle drive itself.
+
+**What TIDAL is, practically.** DeviceLink in the descriptor but OAuth2 in fact: its
+`getDeviceLinkCode` answers with a `login.tidal.com/authorize` page,
+`showLinkCode: false`, and the link code smuggled through OAuth's own `state` parameter as
+`<code>//<householdId>` rather than in a parameter of its own the way Deezer does. The
+`regUrl` is byte-identical to what the Sonos app opens, down to
+`client_id=0g8Ygsaw3ZrKCOI9Xlet`, which is the clearest evidence available that `link` is
+doing what a controller does. Four search categories - artists, albums, tracks, playlists -
+and no `all`, so a merged search asks it for tracks, artists and albums. FLAC.
 
 ## Open questions
 
