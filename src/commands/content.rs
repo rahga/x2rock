@@ -238,8 +238,18 @@ pub async fn play_item(
     // A stream is never queue material, and a service with no type in the
     // player's list has no cdudn to build - `SA_RINCONNone` is not an account.
     let streamish = kind.is_some_and(|k| k.eq_ignore_ascii_case("stream"));
+    // A container of containers is not queue material and is not a stream
+    // either, so neither path fits: falling through would try to stream an
+    // artist, which fails silently minutes later at IDLE.
+    if kind.is_some_and(bookmarks::container_of_containers) {
+        bail!(
+            "{title:?} is a {}, which holds albums and playlists rather than \
+             tracks. Open it with `x2rock browse` and play what is inside.",
+            kind.unwrap_or_default()
+        );
+    }
     if let (false, Some(cdudn)) = (streamish, service.cdudn()) {
-        match enqueue_item(session, room, service, &cdudn, id, title, true).await {
+        match enqueue_item(session, room, service, &cdudn, id, title, kind, true).await {
             Ok(()) => return Ok(()),
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
@@ -267,6 +277,7 @@ async fn enqueue_item(
     cdudn: &str,
     id: &str,
     title: &str,
+    kind: Option<&str>,
     play: bool,
 ) -> Result<()> {
     let target = session::target(&session.groups, room)?;
@@ -275,12 +286,26 @@ async fn enqueue_item(
             .coordinator_ip
             .unwrap_or_else(|| session.connection.ip()),
     );
-    // No `sn=`: nothing here has ever played, so there is no serial to harvest,
-    // and the player does not need one. See `bookmarks::service_uri`.
-    let uri = bookmarks::service_uri(id, &service.id, None);
-    let length = upnp
-        .add_to_queue(&uri, &bookmarks::service_didl(id, title, cdudn), false)
-        .await?;
+    // **A container is enqueued by a different scheme from a track.** A track is
+    // fetched; a container is expanded by the player, which walks it and adds
+    // each track it holds. Handing a container a track's URI is what got UPnP
+    // error 804 - the player calling the URI malformed, rather than the 800 it
+    // gives for something it cannot play.
+    //
+    // No `sn=` either way: nothing here has ever played, so there is no serial
+    // to harvest, and the player does not need one. See `bookmarks::service_uri`.
+    let container = kind.is_some_and(bookmarks::container_holds_tracks);
+    let (uri, didl) = match container {
+        true => (
+            bookmarks::container_uri(id, &service.id, None),
+            bookmarks::container_didl(id, title, kind.unwrap_or_default(), cdudn),
+        ),
+        false => (
+            bookmarks::service_uri(id, &service.id, None),
+            bookmarks::service_didl(id, title, cdudn),
+        ),
+    };
+    let length = upnp.add_to_queue(&uri, &didl, false).await?;
     if !play {
         println!("{} — queued {title} at {length}", target.name);
         return Ok(());
@@ -394,6 +419,17 @@ pub async fn run_queue_item(
              Play it with `x2rock play-item` instead."
         );
     }
+    // A place rather than a thing. The player refuses it with a bare UPnP 804,
+    // which says the URI was malformed and not that an artist has no tracks of
+    // its own to add - so this says the second, where every other refusal here
+    // explains itself.
+    if kind.is_some_and(bookmarks::container_of_containers) {
+        bail!(
+            "{title:?} is a {}, which holds albums and playlists rather than \
+             tracks. Open it with `x2rock browse` and queue what is inside.",
+            kind.unwrap_or_default()
+        );
+    }
     // Without a service type there is no cdudn, and `SA_RINCONNone` is not an
     // account - the enqueue would be refused by the player with less to say.
     let Some(cdudn) = chosen.cdudn() else {
@@ -403,7 +439,7 @@ pub async fn run_queue_item(
             chosen.name
         );
     };
-    enqueue_item(&session, room, &chosen, &cdudn, id, title, false).await
+    enqueue_item(&session, room, &chosen, &cdudn, id, title, kind, false).await
 }
 
 /// Whether a row can be put in a queue, which is not the same as playable.
@@ -418,7 +454,16 @@ pub async fn run_queue_item(
 /// its id with a grammar error - see `browse` - so it is somewhere to go rather
 /// than something to add.
 pub fn queueable(item: &sonos::smapi::Item, service: &sonos::smapi::Service) -> bool {
-    !item.container && !item.item_type.eq_ignore_ascii_case("stream") && service.cdudn().is_some()
+    if item.item_type.eq_ignore_ascii_case("stream") || service.cdudn().is_none() {
+        return false;
+    }
+    // A container qualifies when what it holds is tracks - an album or a
+    // playlist - because the player will expand it into the queue. One holding
+    // other containers, an artist say, has nothing to enqueue and is refused.
+    match item.container {
+        true => bookmarks::container_holds_tracks(&item.item_type),
+        false => true,
+    }
 }
 
 pub fn run_bookmarks(

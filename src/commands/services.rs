@@ -18,7 +18,7 @@ use crate::sonos::local::Connection;
 use crate::sonos::proto::Player;
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
-use crate::{catalogue, credentials, hint, sonos};
+use crate::{bookmarks, catalogue, credentials, hint, sonos};
 
 /// Persist a token a service handed back inside a `tokenRefreshRequired`
 /// fault, so the next command does not pay for the same refresh again.
@@ -1066,15 +1066,18 @@ pub async fn run_search(
         // A search can return places rather than things: every Mixcloud hit is a
         // `tag:` collection, not a track. Refusing here beats letting
         // getMediaURI refuse it with a grammar error about ids.
+        //
+        // An album or a playlist is not one of those places: it holds tracks, so
+        // the player expands it into the queue. Only a container of *containers*
+        // has nothing to play.
         ensure!(
-            !item.container,
-            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}\n\
-             To play the whole thing, save it as a favorite in the Sonos app - \
-             then: x2rock favorite {:?}",
+            !item.container || bookmarks::container_holds_tracks(&item.item_type),
+            "{:?} is a {}, which holds other containers rather than tracks. \
+             Open it with: x2rock browse -s {} {}",
             item.title,
+            item.item_type,
             chosen.name,
-            item.id,
-            item.title
+            item.id
         );
         return play_item(
             live()?,
@@ -1509,9 +1512,11 @@ async fn search_everywhere(
             .get(nth.checked_sub(1).unwrap_or(usize::MAX))
             .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", rows.len()))?;
         ensure!(
-            !row.item.container,
-            "{:?} is a container, not a track. Open it with: x2rock browse -s {} {}",
+            !row.item.container || bookmarks::container_holds_tracks(&row.item.item_type),
+            "{:?} is a {}, which holds other containers rather than tracks. \
+             Open it with: x2rock browse -s {} {}",
             row.item.title,
+            row.item.item_type,
             row.service.name,
             row.item.id
         );

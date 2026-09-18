@@ -195,6 +195,95 @@ fn native_scheme(service_id: &str) -> &'static str {
 /// rooms, in the same session the scheme itself was fixed in. Not proof for
 /// every future service this constant might reach, only that it is not a
 /// coincidence limited to the two it was first checked against.
+/// Whether a container of this kind holds *tracks*, and so can go in a queue.
+///
+/// An `album` and a `playlist` are lists of tracks, which is exactly what a
+/// queue takes. An `artist` is a list of sub-containers - albums, playlists,
+/// programs - so there is nothing to enqueue, and a player says so with UPnP
+/// error 804 rather than a polite refusal. Verified against Deezer 2026-09-18:
+/// an album added 51 rows, a playlist added its own, an artist was refused.
+///
+/// The conservative default is `false`: an unknown kind is not offered, because
+/// the cost of guessing wrong is an error where there was a working row.
+pub fn container_holds_tracks(item_type: &str) -> bool {
+    matches!(
+        item_type.to_ascii_lowercase().as_str(),
+        "album" | "playlist" | "tracklist" | "artisttracklist" | "audiobook"
+    )
+}
+
+/// Whether this kind is a container that holds *other containers*, so a queue
+/// can do nothing with it.
+///
+/// Named separately from [`container_holds_tracks`] rather than inverting it,
+/// because the two are not complements: a kind nobody recognises is neither, and
+/// belongs to the player to refuse rather than to this to guess about.
+pub fn container_of_containers(item_type: &str) -> bool {
+    matches!(
+        item_type.to_ascii_lowercase().as_str(),
+        "artist" | "albumlist" | "genre" | "collection" | "container"
+    )
+}
+
+/// The DIDL `upnp:class` a container of this kind is announced as.
+fn container_class(item_type: &str) -> &'static str {
+    match item_type.to_ascii_lowercase().as_str() {
+        "album" => "object.container.album.musicAlbum",
+        "playlist" => "object.container.playlistContainer",
+        "audiobook" => "object.container.playlistContainer",
+        _ => "object.container",
+    }
+}
+
+/// The enqueue URI for a *container* - a different scheme from a track's.
+///
+/// A track is fetched (`x-sonos-http:<id>.flac`); a container is expanded by the
+/// player, which walks it and adds each track. The prefix on the object id is
+/// Sonos's own convention for a container id. `1004206c` and `0004206c` were
+/// both accepted, and the query string turned out to be optional entirely - the
+/// player resolves the service from the cdudn in the DIDL - but both are sent,
+/// because that is what the player writes for itself.
+pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
+    let sn = account
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("&sn={a}"))
+        .unwrap_or_default();
+    format!(
+        "x-rincon-cpcontainer:1004206c{}?sid={service_id}&flags=8300{sn}",
+        encode_object_id(object_id)
+    )
+}
+
+/// The DIDL for a container being enqueued.
+///
+/// Its `id` carries the same prefix the URI does, and the class says which kind
+/// of container it is; the cdudn is what tells the player whose it is.
+pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    format!(
+        concat!(
+            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+            r#"<item id="1004206c{object}" parentID="0" restricted="true">"#,
+            "<dc:title>{title}</dc:title>",
+            "<upnp:class>{class}</upnp:class>",
+            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            "{cdudn}</desc></item></DIDL-Lite>"
+        ),
+        object = esc(&encode_object_id(object_id)),
+        title = esc(title),
+        class = container_class(item_type),
+        cdudn = esc(cdudn),
+    )
+}
+
 pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
     let sn = account
         .filter(|a| !a.is_empty())
@@ -509,6 +598,66 @@ impl Bookmarks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_container_of_tracks_can_be_queued() {
+        // Verified against Deezer 2026-09-18: an album expanded into 51 rows and
+        // a playlist into its own, while an artist was refused with UPnP 804 -
+        // an artist holds albums and playlists, so there is nothing to enqueue.
+        assert!(container_holds_tracks("album"));
+        assert!(
+            container_holds_tracks("Playlist"),
+            "services disagree on case"
+        );
+        assert!(container_holds_tracks("trackList"));
+        assert!(!container_holds_tracks("artist"));
+        assert!(!container_holds_tracks("genre"));
+        // The default is no: an unknown kind is not offered, because guessing
+        // wrong turns a working row into an error.
+        assert!(!container_holds_tracks("somethingNew"));
+    }
+
+    #[test]
+    fn a_container_is_enqueued_by_a_different_scheme_from_a_track() {
+        let track = service_uri("tr-flac:1", "2", Some("10"));
+        let album = container_uri("album-69804312", "2", Some("10"));
+        assert!(track.starts_with("x-sonosapi-hls-static:"), "{track}");
+        assert!(
+            album.starts_with("x-rincon-cpcontainer:1004206calbum-69804312?"),
+            "{album}"
+        );
+        assert!(album.contains("sid=2") && album.contains("sn=10"));
+        // The serial stays optional, as it is for a track.
+        assert!(!container_uri("album-1", "2", None).contains("sn="));
+    }
+
+    #[test]
+    fn a_container_announces_which_kind_it_is() {
+        let didl = container_didl(
+            "album-1",
+            "ASTROWORLD",
+            "album",
+            "SA_RINCON519_X_#Svc519-0-Token",
+        );
+        assert!(didl.contains("object.container.album.musicAlbum"), "{didl}");
+        assert!(
+            didl.contains(r#"id="1004206calbum-1""#),
+            "id carries the prefix"
+        );
+        assert!(
+            didl.contains("SA_RINCON519_X_#Svc519-0-Token"),
+            "cdudn names the account"
+        );
+        let pl = container_didl("p-1", "Mix", "playlist", "cd");
+        assert!(pl.contains("object.container.playlistContainer"), "{pl}");
+        // An unknown kind still announces itself as *a* container rather than
+        // claiming to be an album.
+        let other = container_didl("x-1", "Thing", "wat", "cd");
+        assert!(
+            other.contains("<upnp:class>object.container</upnp:class>"),
+            "{other}"
+        );
+    }
 
     fn bm(name: &str, object: &str) -> Bookmark {
         Bookmark::from_id(name, &id(object, Some("284"), Some("sn_3"))).unwrap()

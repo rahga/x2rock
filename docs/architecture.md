@@ -6790,6 +6790,37 @@ aggregator-and-station pattern.
 the search term or the default category, and both are adjustable - which is what the merged
 search and `--all-categories` were built for.
 
+## An album is queued by a different scheme from a track (built 2026-09-18)
+
+`queue-item` on an album answered `UPnP error 804`, and the hint it printed told people to
+save the thing as a favorite in the Sonos app instead. Both were wrong: the player queues
+albums perfectly well, and 804 was it calling our URI malformed rather than refusing the
+content.
+
+A track is **fetched** - `x-sonos-http:<id>.flac?sid=..&sn=..`. A container is **expanded**:
+the player walks it and adds each track it holds, through a different scheme entirely.
+
+```
+x-rincon-cpcontainer:1004206c<encoded object id>?sid=2&flags=8300&sn=10
+```
+
+with DIDL `<upnp:class>object.container.album.musicAlbum</upnp:class>` and the cdudn naming
+the account. Verified against Deezer: an album expanded into 51 rows, a playlist into 70.
+
+**Not every container can be queued, and the line is what it holds.** An `album` and a
+`playlist` are lists of tracks. An `artist` is a list of albums and playlists, so there is
+nothing to enqueue, and the player says 804 for that too. `container_holds_tracks` names the
+first set and `container_of_containers` the second - deliberately not each other's inverse,
+because a kind neither recognises belongs to the player to refuse rather than to us to guess
+about. An artist now gets a sentence explaining itself rather than the bare UPnP code.
+
+Two things the probing turned up that the convention does not mention. The query string is
+**optional** - a bare `x-rincon-cpcontainer:1004206c<id>` with no `sid`, `flags` or `sn` was
+accepted, the player resolving the service from the cdudn, which is the same finding
+`service_uri` already records about `sn=`. And the `1004206c` prefix was interchangeable with
+`0004206c`. Both are sent as the player writes them, on the principle that matching what a
+controller does costs nothing.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from

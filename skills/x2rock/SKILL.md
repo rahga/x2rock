@@ -367,6 +367,7 @@ see "Ask before you act".
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search [-s <svc>] <term> --play N -r "<Room>"` — `N` counts the merged list |
 | Play or queue a hit you already have the id for | `x2rock -r "<Room>" play-item -s <svc> <id> --title "<name>" --kind <type>` / `queue-item` (same arguments; adds without playing, refuses a stream) |
+| Queue a whole album or playlist | the same commands with `--kind album` or `--kind playlist` — the player expands it into the queue. An `artist` is refused: it holds albums and playlists rather than tracks, so browse it and queue what is inside |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
