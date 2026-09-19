@@ -10,7 +10,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use mpris_server::Server;
+use mpris_server::{Property, Server};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -40,23 +42,26 @@ fn log(message: &str) {
 static VERBOSE: OnceLock<bool> = OnceLock::new();
 static EVENTS: OnceLock<bool> = OnceLock::new();
 
-/// Initialize logging flags for the daemon run, combining CLI flags and env vars.
+/// Settle the logging knobs for the daemon run, each the CLI flag or its env
+/// var. `main` calls this before [`run`], which is what lets the readers below
+/// treat an unset cell as "off" rather than consult the environment again.
 pub fn init_logging(verbose: bool, log_events: bool) {
     let _ = VERBOSE.set(verbose || std::env::var_os("X2ROCK_LOG_VERBOSE").is_some());
     let _ = EVENTS.set(log_events || std::env::var_os("X2ROCK_LOG_EVENTS").is_some());
 }
 
-/// `X2ROCK_LOG_VERBOSE`, read once for the whole run: the reconnect machinery
-/// out loud - every status pass with coalescing off, and the backoff ramp.
+/// `--verbose` or `X2ROCK_LOG_VERBOSE`, settled once for the whole run: the
+/// reconnect machinery out loud - every status pass with coalescing off, and
+/// the backoff ramp.
 ///
 /// The flag is a knob for the run rather than a per-call cost, so it lives here
 /// instead of being threaded through every call site.
 fn verbose() -> bool {
-    *VERBOSE.get_or_init(|| std::env::var_os("X2ROCK_LOG_VERBOSE").is_some())
+    VERBOSE.get().copied().unwrap_or(false)
 }
 
-/// `X2ROCK_LOG_EVENTS`, read once for the whole run: every event body exactly
-/// as it arrived.
+/// `--log-events` or `X2ROCK_LOG_EVENTS`, settled once for the whole run:
+/// every event body exactly as it arrived.
 ///
 /// Deliberately not folded into [`verbose`], and not implied by it. The two
 /// answer different questions at wildly different rates - verbose is a few
@@ -64,7 +69,7 @@ fn verbose() -> bool {
 /// that is actually playing something buries the retry ramp under bodies. They
 /// are asked for separately because they are read separately.
 fn log_events() -> bool {
-    *EVENTS.get_or_init(|| std::env::var_os("X2ROCK_LOG_EVENTS").is_some())
+    EVENTS.get().copied().unwrap_or(false)
 }
 
 /// What [`StatusLog::decide`] resolved to: log fresh, log a heartbeat carrying
@@ -86,7 +91,7 @@ struct StatusLog {
     key: Option<String>,
     last_logged: Instant,
     suppressed: u32,
-    /// `X2ROCK_LOG_VERBOSE`: log every pass, coalescing off. For diagnosing the
+    /// [`verbose`]: log every pass, coalescing off. For diagnosing the
     /// reconnect/backoff/network machinery, where the repetition and the ramp
     /// are the point rather than the noise.
     verbose: bool,
@@ -414,9 +419,8 @@ async fn follow(
                 if let Some(version) = version
                     && let Some(room) = rooms.iter().find(|s| s.imp().group_id == group_id)
                     && let Some(property) = room.imp().apply_queue_version(version)
-                    && let Err(e) = room.properties_changed(vec![property]).await
                 {
-                    log(&format!("{}: {e:#}", room.imp().room));
+                    announce(room, vec![property]).await;
                 }
                 continue;
             }
@@ -440,7 +444,7 @@ async fn follow(
 
         match (event.namespace.as_str(), event.kind.as_str()) {
             ("groups:1", "groups") => {
-                let groups: Groups = match serde_json::from_value(event.body.clone()) {
+                let groups = match Groups::deserialize(&event.body) {
                     Ok(groups) => groups,
                     Err(e) => {
                         log(&format!("ignoring unparseable groups event: {e}"));
@@ -485,50 +489,25 @@ async fn follow(
             }
             // Player-scoped, so it is matched by player rather than by group.
             ("playerVolume:1", _) => {
-                let Some(player_id) = event.player_id.as_deref() else {
-                    continue;
-                };
-                let volume: proto::Volume = match serde_json::from_value(event.body.clone()) {
-                    Ok(volume) => volume,
-                    Err(e) => {
-                        log(&format!("ignoring unparseable playerVolume event: {e}"));
-                        continue;
-                    }
-                };
-                for server in &rooms {
-                    let properties = server.imp().apply_member_volume(player_id, &volume);
-                    if properties.is_empty() {
-                        continue;
-                    }
-                    if let Err(e) = server.properties_changed(properties).await {
-                        log(&format!("{}: {e:#}", server.imp().room));
-                    }
-                }
+                fan_out(
+                    &rooms,
+                    &event,
+                    "playerVolume",
+                    RoomPlayer::apply_member_volume,
+                )
+                .await;
             }
             // Player-scoped for the same reason as playerVolume:1: the TV
             // socket belongs to a player, not to the group around it, so a
             // soundbar that joined someone else's group still answers here.
             ("homeTheater:1", _) => {
-                let Some(player_id) = event.player_id.as_deref() else {
-                    continue;
-                };
-                let update: proto::HomeTheaterUpdate =
-                    match serde_json::from_value(event.body.clone()) {
-                        Ok(update) => update,
-                        Err(e) => {
-                            log(&format!("ignoring unparseable homeTheater event: {e}"));
-                            continue;
-                        }
-                    };
-                for server in &rooms {
-                    let properties = server.imp().apply_home_theater(player_id, &update);
-                    if properties.is_empty() {
-                        continue;
-                    }
-                    if let Err(e) = server.properties_changed(properties).await {
-                        log(&format!("{}: {e:#}", server.imp().room));
-                    }
-                }
+                fan_out(
+                    &rooms,
+                    &event,
+                    "homeTheater",
+                    RoomPlayer::apply_home_theater,
+                )
+                .await;
             }
             ("playback:1" | "playbackMetadata:1" | "groupVolume:1", _) => {
                 let Some(server) = rooms
@@ -543,6 +522,44 @@ async fn follow(
             }
             _ => {}
         }
+    }
+}
+
+/// Announce `properties` on the bus for one room, logging a failure by room
+/// name. Nothing more can be done about one: the player's state is already
+/// updated, and the next change announces again.
+async fn announce(server: &Server<RoomPlayer>, properties: Vec<Property>) {
+    if let Err(e) = server.properties_changed(properties).await {
+        log(&format!("{}: {e:#}", server.imp().room));
+    }
+}
+
+/// Offer a player-scoped event to every room. Only the room holding that
+/// player as a member has anything to say about it - `apply` returns nothing
+/// for the rest - so this is how an event without a group finds its player.
+/// `label` names the namespace in the log line for a body that fails to parse.
+async fn fan_out<T: DeserializeOwned>(
+    rooms: &[Server<RoomPlayer>],
+    event: &Event,
+    label: &str,
+    apply: impl Fn(&RoomPlayer, &str, &T) -> Vec<Property>,
+) {
+    let Some(player_id) = event.player_id.as_deref() else {
+        return;
+    };
+    let body = match T::deserialize(&event.body) {
+        Ok(body) => body,
+        Err(e) => {
+            log(&format!("ignoring unparseable {label} event: {e}"));
+            return;
+        }
+    };
+    for server in rooms {
+        let properties = apply(server.imp(), player_id, &body);
+        if properties.is_empty() {
+            continue;
+        }
+        announce(server, properties).await;
     }
 }
 
@@ -614,15 +631,15 @@ async fn publish_group(
     let coordinator_ip = groups.player(&group.coordinator_id).and_then(Player::ip);
     let conn = connection_to(wiring, coordinator_ip, Loss::Fatal).await?;
 
-    let members: Vec<(String, String)> = groups
-        .members(group)
-        .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
+    let players = groups.members(group);
     // The TV socket belongs to a player, which need not be the one
     // coordinating: a soundbar that joined a Play:5's group still has its
     // HDMI, and `x2rock tv` finds it among the members the same way.
-    let has_tv_input = groups.members(group).iter().any(|p| p.has_tv());
+    let has_tv_input = players.iter().any(|p| p.has_tv());
+    let members: Vec<(String, String)> = players
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
     let player = RoomPlayer::new(
         conn.clone(),
         group.id.clone(),
@@ -630,16 +647,25 @@ async fn publish_group(
         members.clone(),
         has_tv_input,
     );
-    player.apply_playback(&conn.playback_status(&group.id).await?);
-    player.apply_metadata(&conn.metadata(&group.id).await?);
-    player.apply_volume(&conn.group_volume(&group.id).await?);
+    // Independent reads of one coordinator, so they go out together; the
+    // socket multiplexes replies by command id.
+    let (playback, metadata, volume) = tokio::try_join!(
+        conn.playback_status(&group.id),
+        conn.metadata(&group.id),
+        conn.group_volume(&group.id),
+    )?;
+    player.apply_playback(&playback);
+    player.apply_metadata(&metadata);
+    player.apply_volume(&volume);
 
     let server = Server::new(suffix, player)
         .await
         .with_context(|| format!("publishing org.mpris.MediaPlayer2.{suffix}"))?;
-    for namespace in ["playback:1", "playbackMetadata:1", "groupVolume:1"] {
-        conn.subscribe_group(namespace, &group.id).await?;
-    }
+    tokio::try_join!(
+        conn.subscribe_group("playback:1", &group.id),
+        conn.subscribe_group("playbackMetadata:1", &group.id),
+        conn.subscribe_group("groupVolume:1", &group.id),
+    )?;
     // Per-member volume is player-scoped, not group-scoped: a group shares
     // one volume, and this is the balance underneath it. Player-scoped
     // commands are refused by anyone but that player - ERROR_INVALID_OBJECT_ID,
@@ -745,7 +771,7 @@ async fn apply(
     fetching: &mut HashSet<String>,
 ) -> Result<()> {
     let player = server.imp();
-    let body = event.body.clone();
+    let body = &event.body;
     // Under X2ROCK_LOG_EVENTS, the body exactly as it arrived. A partial
     // `playbackStatus` - one with no `playbackState` - is now folded in
     // silently and leaves no other trace, so this is the only way to catch one
@@ -770,7 +796,7 @@ async fn apply(
                 log(&format!("{}: playback failed: {error}", player.room));
                 return Ok(());
             }
-            let properties = player.apply_playback(&serde_json::from_value(body)?);
+            let properties = player.apply_playback(&proto::PlaybackStatus::deserialize(body)?);
             // The queue's version has to be fetched rather than read off the
             // event, because the players do not send one - see
             // `RoomPlayer::queue_version_fetch`. Fetched off the event loop and
@@ -789,14 +815,14 @@ async fn apply(
             properties
         }
         "playbackMetadata:1" => {
-            let status: proto::MetadataStatus = serde_json::from_value(body)?;
+            let status = proto::MetadataStatus::deserialize(body)?;
             remember(&status, player);
             player.apply_metadata(&status)
         }
-        "groupVolume:1" => player.apply_volume(&serde_json::from_value(body)?),
+        "groupVolume:1" => player.apply_volume(&proto::Volume::deserialize(body)?),
         _ => return Ok(()),
     };
-    server.properties_changed(properties).await?;
+    announce(server, properties).await;
     Ok(())
 }
 

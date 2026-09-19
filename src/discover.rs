@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use futures_util::{StreamExt, stream};
 use tokio::net::TcpStream;
 
 use crate::sonos::local::PORT;
@@ -125,16 +126,16 @@ pub async fn scan_local_subnet() -> Result<Scan> {
 
     let hosts = network.hosts();
     let scanned = hosts.len() as u32;
-    let mut found = Vec::new();
 
-    for chunk in hosts.chunks(CONCURRENCY) {
-        let probes: Vec<_> = chunk.iter().map(|&ip| tokio::spawn(responds(ip))).collect();
-        for probe in probes {
-            if let Ok(Some(ip)) = probe.await {
-                found.push(ip);
-            }
-        }
-    }
+    // A rolling window of `CONCURRENCY` probes in flight: as one answers or
+    // times out the next address takes its slot, so a quick refusal is not
+    // held to the pace of the slowest probe beside it.
+    let mut found: Vec<Ipv4Addr> = stream::iter(hosts)
+        .map(responds)
+        .buffer_unordered(CONCURRENCY)
+        .filter_map(std::future::ready)
+        .collect()
+        .await;
     found.sort();
     Ok(Scan {
         found,

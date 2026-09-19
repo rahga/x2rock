@@ -65,7 +65,11 @@ mod tests {
         );
     }
 
+    /// Reads the real routing table, so it needs a machine with a default
+    /// route; a network-less container or CI runner has none. Run with
+    /// `cargo test -- --ignored` on a connected machine.
     #[test]
+    #[ignore = "needs a real default route; fails in a network-less container"]
     fn finds_this_machines_gateway() {
         // Not asserting a value - just that parsing the real table does not error.
         assert!(default_gateway().is_ok(), "should find a default route");

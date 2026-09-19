@@ -515,7 +515,9 @@ impl RoomPlayer {
         {
             return Vec::new();
         }
-        state.member_volumes[at] = level;
+        if let Some(slot) = state.member_volumes.get_mut(at) {
+            *slot = level;
+        }
         if let Some(slot) = state.member_muted.get_mut(at) {
             *slot = volume.muted;
         }
@@ -707,6 +709,17 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     metadata
 }
 
+/// The same test `run_rate` makes before anything else: a track, with an id,
+/// that names real content rather than the `-1` a player uses for "nothing
+/// to say".
+fn has_track_id(meta: &MetadataStatus) -> bool {
+    meta.current_item
+        .as_ref()
+        .and_then(|i| i.track.as_ref())
+        .and_then(|t| t.id.as_ref())
+        .is_some_and(|id| id.is_real())
+}
+
 /// Whether a `metadataStatus` describes a live stream - internet radio, and
 /// anything else the player resolves continuously rather than as an item.
 ///
@@ -731,17 +744,6 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
 /// no duration and no end. Only the container type and the absent duration
 /// survive all three, and the duration is not the question anyway (see
 /// [`LIVE_STREAM`]).
-/// The same test `run_rate` makes before anything else: a track, with an id,
-/// that names real content rather than the `-1` a player uses for "nothing
-/// to say".
-fn has_track_id(meta: &MetadataStatus) -> bool {
-    meta.current_item
-        .as_ref()
-        .and_then(|i| i.track.as_ref())
-        .and_then(|t| t.id.as_ref())
-        .is_some_and(|id| id.is_real())
-}
-
 fn is_live_stream(meta: &MetadataStatus) -> bool {
     meta.container
         .as_ref()
@@ -773,7 +775,11 @@ fn track_id(group_id: &str, title: Option<&str>, artist: Option<&str>) -> TrackI
     // An empty group id - nothing real sends one, but it comes off the wire -
     // would make `//track/`, which is not a valid path, and the `expect` below
     // would abort the daemon. One character keeps the path well-formed.
-    let group = if group.is_empty() { "_".to_string() } else { group };
+    let group = if group.is_empty() {
+        "_".to_string()
+    } else {
+        group
+    };
     let path = format!("/com/rahga/x2rock/{group}/track/{:x}", hasher.finish());
     TrackId::try_from(path).expect("path built only from [A-Za-z0-9_/], never empty")
 }
