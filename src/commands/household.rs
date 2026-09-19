@@ -255,6 +255,14 @@ pub async fn discover_and_remember() -> Result<()> {
 /// answer could be the reason someone is confused in the first place.
 pub async fn run_households(json: bool, redact: bool) -> Result<()> {
     let scan = discover::scan_local_subnet().await?;
+    // The same honesty `discover` has: on a /16 only the local /24 was swept,
+    // and a household outside it is missing from this list, not absent.
+    if let Some(prefix) = scan.narrowed_from {
+        eprintln!(
+            "Network is a /{prefix}, too large to sweep; scanned {} addresses in the local /24 only.",
+            scan.scanned
+        );
+    }
     if scan.found.is_empty() {
         println!(
             "{}",
@@ -309,14 +317,18 @@ pub async fn run_households(json: bool, redact: bool) -> Result<()> {
 /// `x2rock update`: each speaker's installed and offered firmware. Read-only;
 /// applying an update is the Sonos app's job.
 pub async fn update(session: &Session, json: bool) -> Result<()> {
-    let mut rows = Vec::new();
-    for player in &session.groups.players {
-        let found = match player.ip() {
-            Some(ip) => Upnp::new(ip).software_update().await,
-            None => Err(anyhow!("no address to reach it on")),
-        };
-        rows.push((player.name.clone(), found));
-    }
+    // All at once: sequentially each unreachable player stacked its 8s
+    // timeout onto a read-only command - the same shape `system` fixed.
+    let rows: Vec<_> = futures_util::future::join_all(session.groups.players.iter().map(
+        |player| async move {
+            let found = match player.ip() {
+                Some(ip) => Upnp::new(ip).software_update().await,
+                None => Err(anyhow!("no address to reach it on")),
+            };
+            (player.name.clone(), found)
+        },
+    ))
+    .await;
     if json {
         let items: Vec<_> = rows
             .iter()

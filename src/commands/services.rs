@@ -652,7 +652,12 @@ pub async fn run_browse(
                 catalogue.save()?;
             }
         }
-        Err(e) if catalogue.services().is_empty() => return Err(anyhow!("{e:#}")),
+        // Re-wrapped so the message is this command's, but with the code kept:
+        // a `--json` caller branches on `no_player`, and a plain string would
+        // degrade it to `unknown`.
+        Err(e) if catalogue.services().is_empty() => {
+            return Err(hint::no_player(e, format!("{e:#}")));
+        }
         Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
     }
 
@@ -853,8 +858,9 @@ pub async fn run_search(
         Err(e) if catalogue.services().is_empty() => {
             // Nothing cached and nothing to ask: this is the one case with no
             // useful answer, so give the connection's own error rather than a
-            // second-hand one about an empty catalogue.
-            return Err(anyhow!("{e:#}"));
+            // second-hand one about an empty catalogue - with its code kept, so
+            // `--json` still says `no_player`.
+            return Err(hint::no_player(e, format!("{e:#}")));
         }
         Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
     }
@@ -1536,6 +1542,16 @@ async fn search_everywhere(
         .await;
     }
 
+    // Which services did not answer, and which refused, whichever way the
+    // answer is printed: stderr cannot pollute the JSON on stdout, and a caller
+    // grouping thirty-five services deserves to know which three are missing.
+    for name in &slow {
+        eprintln!("x2rock: {name} did not answer within {FAN_OUT_TIMEOUT:?}");
+    }
+    for (name, why) in &refused {
+        eprintln!("x2rock: {name} refused the search ({why})");
+    }
+
     if json {
         // The same field names one service's `--json` emits, so the widget can
         // concatenate the two rather than translate between them. `service` was
@@ -1569,18 +1585,15 @@ async fn search_everywhere(
                 // and thirty-two of the second for an ordinary merged term.
                 "asked": asked_services,
                 "searches": searches,
+                "answered": answered_services,
+                "slow": slow,
+                "refused": refused.iter().map(|(name, _)| name).collect::<Vec<_>>(),
                 "items": items,
             }))?
         );
         return Ok(());
     }
 
-    for name in &slow {
-        eprintln!("x2rock: {name} did not answer within {FAN_OUT_TIMEOUT:?}");
-    }
-    for (name, why) in &refused {
-        eprintln!("x2rock: {name} refused the search ({why})");
-    }
     if rows.is_empty() {
         println!("Nothing for {term:?} on any of the {asked_services} services asked.");
         return Ok(());

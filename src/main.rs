@@ -170,7 +170,7 @@ async fn run(cli: Cli) -> Result<()> {
         );
         ensure!(
             fans_out(&cli.command),
-            "--all applies only to the per-room commands (volume, transport, repeat, shuffle)"
+            "--all applies only to the per-room commands (volume, transport, repeat, shuffle, crossfade)"
         );
     }
     match cli.command {

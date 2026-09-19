@@ -62,9 +62,13 @@ pub fn install(shell: Shell) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
-    let mut file =
-        std::fs::File::create(&path).with_context(|| format!("writing {}", path.display()))?;
-    generate(shell, &mut file)?;
+    // Rendered first and written atomically, so a failure part-way cannot leave
+    // a truncated script where a working one was.
+    let mut text = Vec::new();
+    generate(shell, &mut text)?;
+    let text = String::from_utf8(text).context("completion script is not UTF-8")?;
+    crate::store::write_atomically(&path, &text, crate::store::PLAIN)
+        .with_context(|| format!("writing {}", path.display()))?;
     println!("Installed {shell} completions to {}.", path.display());
     Ok(())
 }

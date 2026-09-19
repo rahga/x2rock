@@ -7,8 +7,10 @@
 //! executable is resolved against the *user manager's* `PATH`, not the shell's,
 //! and even on a desktop that imports one `~/.cargo/bin` is not in it - on a
 //! headless box nothing is. So the unit is rendered from the shipped file with
-//! `ExecStart` set to `std::env::current_exe()`, which resolves through
-//! symlinks to whatever was installed by whichever route.
+//! `ExecStart` set to the path the binary was *invoked by* - `argv[0]`,
+//! resolved the way the shell resolved it and with symlinks kept, see
+//! [`invoked_path`] for why - falling back to `std::env::current_exe()` only
+//! when that yields nothing.
 //!
 //! A re-run judges the unit already on disk by its *directives* - the lines
 //! systemd reads - and not by its comments: the shipped explanation changes
@@ -16,8 +18,11 @@
 //! block existed must not be refused over prose. Only a directive this command
 //! does not own, changed by a person, is worth stopping for.
 //!
-//! Everything here that decides *what* to write is pure and tested; the file
-//! write and the `systemctl` calls live in `main.rs` with the other commands.
+//! What decides *what* to write is pure and tested. The unit's write and the
+//! `systemctl` calls live in `commands/admin.rs` with the other commands; the
+//! desktop-file placement ([`place_desktop_files_at`], [`uninstall_desktop_files`])
+//! writes from here, against a directory the caller names, so a test can point
+//! it at a scratch one.
 
 use std::path::{Path, PathBuf};
 
@@ -75,7 +80,8 @@ fn quoted(value: &str) -> String {
 
 /// The unit to install, from the shipped template.
 ///
-/// `exe` is the binary to run - the caller passes `current_exe()`. `household`
+/// `exe` is the binary to run - [`invoked_path`]'s answer, or `current_exe()`
+/// when it has none. `household`
 /// fills in and uncomments the `X2ROCK_HOUSEHOLD` line; `None` leaves it as the
 /// commented explanation it is in the shipped file.
 pub fn render_unit(exe: &Path, household: Option<&str>) -> Result<String> {
@@ -301,31 +307,43 @@ fn directives(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The inverse of [`quoted`]: one whole double-quoted word, unescaped. `None`
-/// for anything `quoted` could not have written.
-fn unquoted(word: &str) -> Option<String> {
-    let inner = word.strip_prefix('"')?.strip_suffix('"')?;
+/// One double-quoted word off the front of `text`, unescaped, and what follows
+/// it. `None` if `text` does not start a quoted word or the quote never closes.
+///
+/// Lenient on purpose, and the one reader for every directive: `\x` is `x` for
+/// any `x`, `%%` is `%`, and a lone `%` passes through. Whether a line is the
+/// exact shape this command *writes* is a different question, answered
+/// strictly by [`is_generated_exec`] and [`is_generated_household`]; reading a
+/// person's hand-written value must not fail on an escape systemd accepts.
+/// Three readers with three rule sets had the same value parsing differently
+/// depending on which directive carried it.
+fn unquote_word(text: &str) -> Option<(String, &str)> {
+    let inner = text.strip_prefix('"')?;
     let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
+    let mut chars = inner.char_indices();
+    while let Some((idx, c)) = chars.next() {
         match c {
-            '\\' => out.push(chars.next().filter(|n| matches!(n, '\\' | '"'))?),
-            '%' => {
-                chars.next().filter(|n| *n == '%')?;
+            '\\' => out.push(chars.next()?.1),
+            '%' if inner[idx + 1..].starts_with('%') => {
+                chars.next();
                 out.push('%');
             }
-            '"' => return None,
+            '"' => return Some((out, &inner[idx + 1..])),
             c => out.push(c),
         }
     }
-    Some(out)
+    None
 }
 
 /// Whether a household line is exactly the shape [`render_unit`] writes,
 /// the same rule [`is_generated_exec`] applies to `ExecStart`.
 fn is_generated_household(line: &str) -> bool {
     line.strip_prefix("Environment=")
-        .and_then(unquoted)
+        // The whole value, as `existing_household` reads it.
+        .and_then(|word| {
+            let (value, tail) = unquote_word(word)?;
+            tail.trim().is_empty().then_some(value)
+        })
         .and_then(|a| a.strip_prefix("X2ROCK_HOUSEHOLD=").map(str::to_owned))
         .is_some_and(|value| !value.is_empty())
 }
@@ -338,7 +356,12 @@ pub fn existing_household(unit: &str) -> Option<String> {
     unit.lines().find_map(|line| {
         let rest = line.strip_prefix("Environment=")?;
         let assignment = if rest.starts_with('"') {
-            unquoted(rest)?
+            // The whole value, not a word off the front of one.
+            let (value, tail) = unquote_word(rest)?;
+            if !tail.trim().is_empty() {
+                return None;
+            }
+            value
         } else {
             rest.to_owned()
         };
@@ -377,21 +400,7 @@ pub fn existing_exec(unit: &str) -> Option<String> {
                 return None;
             }
             let raw_path = if rest.starts_with('"') {
-                let mut escaped = false;
-                let mut end = None;
-                for (idx, c) in rest.char_indices().skip(1) {
-                    if escaped {
-                        escaped = false;
-                    } else if c == '\\' {
-                        escaped = true;
-                    } else if c == '"' {
-                        end = Some(idx);
-                        break;
-                    }
-                }
-                let end_idx = end?;
-                let quoted_token = &rest[..=end_idx];
-                unquote_exec_token(quoted_token)?
+                unquote_word(rest)?.0
             } else {
                 rest.split_whitespace().next()?.to_owned()
             };
@@ -410,27 +419,6 @@ pub fn existing_exec(unit: &str) -> Option<String> {
             Some(expanded)
         })
         .next_back()
-}
-
-/// Unescape a double-quoted executable token from a systemd command line.
-fn unquote_exec_token(token: &str) -> Option<String> {
-    let inner = token.strip_prefix('"')?.strip_suffix('"')?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                let next = chars.next()?;
-                out.push(next);
-            }
-            '%' if chars.as_str().starts_with('%') => {
-                chars.next();
-                out.push('%');
-            }
-            c => out.push(c),
-        }
-    }
-    Some(out)
 }
 
 /// Whether an `ExecStart` line is exactly the shape [`render_unit`] writes: one

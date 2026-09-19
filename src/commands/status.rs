@@ -189,40 +189,55 @@ pub async fn print_status(session: &session::Session, json: bool, full: bool) ->
     // (YouTube Music now-playing carries the sid, not the name). Best-effort and
     // read-only - a cold or absent cache just leaves `service` null as before.
     let services = json.then(catalogue::Catalogue::load);
-    for group in &session.groups.groups {
-        let target = session::Target {
-            group_id: group.id.clone(),
-            name: group.name.clone(),
-            coordinator_id: group.coordinator_id.clone(),
-            coordinator_ip: session
+    // Everything that can be known without asking a speaker, per group - then
+    // every coordinator asked at once. Sequentially each unreachable one
+    // stacked its whole connect timeout onto a read-only command, N dark
+    // coordinators making N×5s; together they cost one timeout at worst. The
+    // same shape `system` uses for its device reads.
+    let planned: Vec<_> = session
+        .groups
+        .groups
+        .iter()
+        .map(|group| {
+            let target = session::Target {
+                group_id: group.id.clone(),
+                name: group.name.clone(),
+                coordinator_id: group.coordinator_id.clone(),
+                coordinator_ip: session
+                    .groups
+                    .player(&group.coordinator_id)
+                    .and_then(Player::ip),
+            };
+            let members: Vec<String> = session
+                .groups
+                .members(group)
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            // A soundbar's HDMI belongs to the player, so the group has a TV
+            // input if any member does - the same rule `x2rock tv` uses.
+            let has_tv = session.groups.members(group).iter().any(|p| p.has_tv());
+            let coordinator = session
                 .groups
                 .player(&group.coordinator_id)
-                .and_then(Player::ip),
-        };
-        let members: Vec<String> = session
-            .groups
-            .members(group)
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
-        // A soundbar's HDMI belongs to the player, so the group has a TV input
-        // if any member does - the same rule `x2rock tv` uses to find it.
-        let has_tv = session.groups.members(group).iter().any(|p| p.has_tv());
-        let coordinator = session
-            .groups
-            .player(&group.coordinator_id)
-            .map(|p| p.name.as_str());
-
+                .map(|p| p.name.as_str());
+            (group, target, members, has_tv, coordinator)
+        })
+        .collect();
+    let fetched_all = futures_util::future::join_all(
+        planned.iter().map(|(_, target, ..)| fetch_room(session, target)),
+    )
+    .await;
+    for ((group, _, members, has_tv, coordinator), fetched) in planned.iter().zip(fetched_all) {
         let facts = RoomFacts {
             name: &group.name,
-            members: &members,
-            coordinator,
-            has_tv,
+            members,
+            coordinator: *coordinator,
+            has_tv: *has_tv,
         };
-        // Fetched once; a failure is this room's alone. Both branches push, so
-        // one unreachable coordinator is tagged, never propagated - the snapshot
+        // A failure is this room's alone. Both branches push, so one
+        // unreachable coordinator is tagged, never propagated - the snapshot
         // always describes the whole household.
-        let fetched = fetch_room(session, &target).await;
         if fetched.is_err() {
             unreachable.push(group.name.clone());
         }

@@ -844,8 +844,8 @@ pub async fn alarm(session: &Session, id: u32, action: &AlarmAction) -> Result<(
         AlarmAction::Remove { yes } => {
             ensure!(
                 *yes,
-                "removing alarm {id} cannot be undone, and only the Sonos app can make a \
-                 new one - pass --yes"
+                "removing alarm {id} cannot be undone (`x2rock alarms add` makes a new \
+                 one) - pass --yes"
             );
             upnp.destroy_alarm(id).await?;
             println!("alarm {id} removed");

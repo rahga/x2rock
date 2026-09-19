@@ -16,14 +16,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub struct Cli {
     /// Room to control. Not needed when the household has a single group.
     /// Repeatable for the per-room commands (volume, transport, repeat,
-    /// shuffle): `-r Kitchen -r Bedroom vol 10` applies to each, topology
+    /// shuffle, crossfade): `-r Kitchen -r Bedroom vol 10` applies to each, topology
     /// resolved once. Other commands take a single `--room`.
     #[arg(long, short = 'r', global = true, env = "X2ROCK_ROOM")]
     pub room: Vec<String>,
 
     /// Apply a per-room command to every room, topology resolved once - "turn
     /// it down everywhere" as `--all vol -10`. Only the per-room commands
-    /// (volume, transport, repeat, shuffle); exclusive with a typed `--room`,
+    /// (volume, transport, repeat, shuffle, crossfade); exclusive with a typed `--room`,
     /// while an exported X2ROCK_ROOM is simply set aside.
     // Not `conflicts_with = "room"`: clap fires that on the env var exactly as
     // on a typed `-r`, which made `--all vol -10` a usage error in every shell
@@ -208,8 +208,9 @@ pub enum Command {
     /// List the household's alarms.
     ///
     /// Alarms are household-wide - one list, each entry naming its room - so
-    /// this takes no --room. Created in the Sonos app; x2rock can turn them on
-    /// and off and remove them.
+    /// listing them and `on`/`off`/`remove` take no --room; `add` names the
+    /// speaker that will ring with --room. x2rock can create, arm, disarm and
+    /// remove them.
     Alarms {
         #[command(subcommand)]
         action: Option<AlarmsAction>,
@@ -1123,9 +1124,9 @@ pub enum AlarmAction {
     On,
     /// Disarm it, leaving it in the list to be armed again.
     Off,
-    /// Delete it. Sonos keeps no undo, and the app is the only way to make a
-    /// new one.
+    /// Delete it. Sonos keeps no undo; `x2rock alarms add` makes a new one.
     Remove {
+        /// Confirm: removal cannot be undone.
         #[arg(long)]
         yes: bool,
     },
