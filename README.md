@@ -524,8 +524,10 @@ already broadcast instead.
 **Playing an on-demand track is different.** The track is added to the queue and the *speaker*
 fetches it using the **household's own account** for that service, added in the Sonos app — so a
 track plays only if the household has one. Without it, x2rock falls back to streaming the item
-with its own token, which works where the service hands back a playable URL (Amazon Music, TuneIn
-stations) and not where it does not (Spotify, until the household adds it in the Sonos app).
+with its own token. That is a bonus some services give, never a substitute: Amazon Music and TuneIn
+stations play that way; Spotify refuses; and Deezer hands back a URL the room then never gets past a
+second on — each plays normally once the household holds the account. A fallback that *started* is
+not one that played, so check that `now --json` shows `position_ms` moving.
 `link` also asks the household to match the account (`--no-match` skips it); it has only ever
 matched an account the household already held, and never creates one.
 
