@@ -62,17 +62,26 @@ enum Service {
 
 impl Service {
     /// The row in [`SERVICES`] this variant names.
-    const fn entry(self) -> &'static ServiceEntry {
-        match self {
-            Self::AlarmClock => &SERVICES[0],
-            Self::AvTransport => &SERVICES[2],
-            Self::ContentDirectory => &SERVICES[4],
-            Self::DeviceProperties => &SERVICES[5],
-            Self::HtControl => &SERVICES[8],
-            Self::MusicServices => &SERVICES[9],
-            Self::RenderingControl => &SERVICES[12],
-            Self::ZoneGroupTopology => &SERVICES[15],
-        }
+    ///
+    /// The typed variants and the raw table are the same strings, so they are
+    /// written once, and a lookup *by name* survives the table being reordered
+    /// or extended. Positions into it would not, and would fail by quietly
+    /// addressing the wrong service - a worse failure than the panic below. A
+    /// variant whose name is missing from the table is a programming error
+    /// rather than a runtime condition, hence the `expect`: the unit test below
+    /// walks every variant, so it cannot reach a build.
+    fn entry(self) -> &'static ServiceEntry {
+        let name = match self {
+            Self::AvTransport => "AVTransport",
+            Self::ContentDirectory => "ContentDirectory",
+            Self::MusicServices => "MusicServices",
+            Self::AlarmClock => "AlarmClock",
+            Self::ZoneGroupTopology => "ZoneGroupTopology",
+            Self::RenderingControl => "RenderingControl",
+            Self::DeviceProperties => "DeviceProperties",
+            Self::HtControl => "HTControl",
+        };
+        service_entry(name).expect("every Service variant is in SERVICES")
     }
 }
 

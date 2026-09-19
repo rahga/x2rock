@@ -96,9 +96,12 @@ impl Restarts {
     /// Watching nothing yet. Every source is optional, so this alone is a
     /// working - if slow - configuration.
     pub fn new() -> Self {
-        // Buffer up to 8 restart notifications so rapid bursts (e.g. system resume
-        // and concurrent NetworkManager changes) do not cause lagged receiver errors.
-        let (restarts, _) = broadcast::channel(8);
+        // Capacity one, on purpose. This is a "reconnect now" signal, and its one
+        // receiver (`daemon::restarted`) treats lagging behind a burst as
+        // uninteresting: it loops to the newest message, and one reconnect
+        // answers the whole burst. A deeper buffer would only hand it the stale
+        // ones first, each to be filtered against `established` in turn.
+        let (restarts, _) = broadcast::channel(1);
         let (network, mut raw) = mpsc::unbounded_channel();
 
         let sender = restarts.clone();
