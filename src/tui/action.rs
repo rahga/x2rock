@@ -1,8 +1,9 @@
 //! Changing something, by whichever of the two routes can express it.
 //!
-//! MPRIS carries transport and the play modes, so those go straight down the
-//! bus and land instantly. It carries nothing for grouping, party, TV input, a
-//! single speaker's volume beneath its group - or a *relative* volume step,
+//! MPRIS carries transport, repeat and shuffle, so those go straight down the
+//! bus and land instantly. It carries nothing for grouping, party, TV input,
+//! mute, crossfade, a single speaker's volume beneath its group - or a
+//! *relative* volume step,
 //! which is what a key is (see [`Cli::nudge_volume`]). Those run the CLI as a
 //! subprocess, which is what the bar widget does and for the same reason.
 //!
@@ -77,7 +78,7 @@ impl Cli {
     async fn run(&self, args: &[&str]) -> Result<()> {
         let binary = self.binary.as_ref().context(
             "cannot find the x2rock binary this screen was started from, so grouping, \
-             party, TV input and the volume keys have nothing to run",
+             party, TV input, mute, crossfade and the volume keys have nothing to run",
         )?;
         let mut command = tokio::process::Command::new(binary);
         command.kill_on_drop(true);

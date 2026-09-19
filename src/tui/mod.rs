@@ -10,7 +10,8 @@
 //! **It needs the daemon**, unlike the CLI, which promises to need nothing
 //! running. That is deliberate and it says so plainly rather than drawing an
 //! empty screen - see [`source`]. Reads come from MPRIS, and so do the writes
-//! MPRIS can express; grouping, party, TV input and every volume step shell out
+//! MPRIS can express; grouping, party, TV input, mute, crossfade and every
+//! volume step shell out
 //! to this binary's CLI, for the reasons in [`action`].
 //!
 //! The seam worth keeping is inside: a keypress becomes an [`Intent`] without
@@ -251,6 +252,10 @@ async fn drive(
                 });
                 continue;
             }
+            // A key that changed only the screen has nothing to run: dispatched,
+            // it would spawn a task that returns Ok at once and come back through
+            // `finished` for a second redraw of the same frame.
+            Intent::Nothing => continue,
             _ => {}
         }
         // The CLI intents take about a second, and a second of nothing reads as
@@ -259,8 +264,7 @@ async fn drive(
         if let Some(waiting) = intent.waiting() {
             app.status = Some(Status::busy(waiting));
         }
-        in_flight += 1;
-        dispatch(source, cli, intent, finished.clone());
+        launch(source, cli, intent, &mut in_flight, &finished);
     }
 }
 
@@ -286,6 +290,19 @@ fn dispatch(
     });
 }
 
+/// Start one intent's work off the event loop and count it, so the "working"
+/// line comes down when the last of them is in and not the first.
+fn launch(
+    source: &Source,
+    cli: &action::Cli,
+    intent: Intent,
+    in_flight: &mut usize,
+    finished: &mpsc::UnboundedSender<Result<()>>,
+) {
+    *in_flight += 1;
+    dispatch(source, cli, intent, finished.clone());
+}
+
 /// Send one folded run of volume keys, unless it folded to nothing: `+5` then
 /// `-5` is no change, and a command that changes nothing still costs a round
 /// trip to the speaker.
@@ -299,8 +316,7 @@ fn flush(
     if nudge.by == 0 {
         return;
     }
-    *in_flight += 1;
-    dispatch(source, cli, Intent::Nudge(nudge), finished.clone());
+    launch(source, cli, Intent::Nudge(nudge), in_flight, finished);
 }
 
 /// So many points on one volume: a group's (by its coordinator's room name), or
@@ -592,6 +608,11 @@ impl App {
                 }
                 return;
             }
+            // Too long to be a republish: the empty bus is believed, and the
+            // footer must stop saying otherwise in the same breath - not at the
+            // next heartbeat, up to thirty seconds on.
+            self.emptied = None;
+            self.status.take_if(|status| status.kind == Kind::Busy);
         } else if self.emptied.take().is_some() {
             self.status.take_if(|status| status.kind == Kind::Busy);
         }
@@ -761,8 +782,9 @@ impl App {
     ///
     /// A room on its TV input has none - the television is the source and its
     /// own remote owns the buttons - and a queue that cannot be skipped says so
-    /// per direction. Both are silent rather than explained: the row draws those
-    /// controls dimmed, which has already said it.
+    /// per direction. Both are silent rather than explained: the row already
+    /// shows what rules them out - the `TV` badge, the context line - and a
+    /// footer line would only repeat it.
     fn transport(&mut self, what: Transport) -> Intent {
         let Some(room) = self.selected() else {
             return Intent::Nothing;
@@ -1246,7 +1268,7 @@ mod tests {
     }
 
     /// A room on its TV input has no transport to drive, and the keys say so by
-    /// doing nothing - the row has already drawn them as unavailable.
+    /// doing nothing - the row already shows the `TV` badge that rules them out.
     #[test]
     fn the_transport_keys_do_nothing_on_tv_input() {
         let mut app = App::new(vec![RoomSnapshot {
