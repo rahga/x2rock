@@ -1152,7 +1152,9 @@ fn refresh_in(doc: &Document) -> Option<RefreshedToken> {
 /// would be lost for a reason that had nothing to do with the person or the
 /// service.
 fn parse_fault(text: &str, status: u16) -> Fault {
-    fault_in(text).unwrap_or_else(|| Fault {
+    // Reached only after `fault_in` found no fault in this same body (see the
+    // caller), so this is the plain non-XML fallback and does not parse again.
+    Fault {
         code: if text.contains("NOT_LINKED_RETRY") {
             "NOT_LINKED_RETRY".to_string()
         } else {
@@ -1161,7 +1163,7 @@ fn parse_fault(text: &str, status: u16) -> Fault {
         message: format!("HTTP {status}"),
         sonos_error: None,
         refresh: None,
-    })
+    }
 }
 
 /// One SMAPI call for everything that is not the link flow.
@@ -1667,7 +1669,7 @@ mod tests {
             <faultstring>Link code not yet claimed</faultstring>
             <detail><ExceptionInfo>NOT_LINKED_RETRY</ExceptionInfo>
             <SonosError>5</SonosError></detail></s:Fault></s:Body></s:Envelope>"#;
-        let fault = parse_fault(pending, 500);
+        let fault = fault_in(pending).expect("a SOAP fault");
         assert!(fault.is_pending());
         assert_eq!(fault.sonos_error, Some(5));
         assert_eq!(fault.message, "Link code not yet claimed");
@@ -1676,16 +1678,16 @@ mod tests {
             <s:Fault><faultcode>s:Client.LOGIN_INVALID</faultcode>
             <faultstring>Invalid credentials</faultstring>
             <detail><SonosError>9</SonosError></detail></s:Fault></s:Body></s:Envelope>"#;
-        assert!(!parse_fault(refused, 500).is_pending());
+        assert!(!fault_in(refused).expect("a SOAP fault").is_pending());
 
         // Either signal alone is enough: services are inconsistent about which
         // half they populate, and both are documented.
         let code_only = r#"<Fault><faultcode>Client.NOT_LINKED_RETRY</faultcode>
             <faultstring>wait</faultstring></Fault>"#;
-        assert!(parse_fault(code_only, 500).is_pending());
+        assert!(fault_in(code_only).expect("a fault").is_pending());
         let error_only = r#"<Fault><faultcode>Client</faultcode>
             <faultstring>wait</faultstring><detail><SonosError>5</SonosError></detail></Fault>"#;
-        assert!(parse_fault(error_only, 500).is_pending());
+        assert!(fault_in(error_only).expect("a fault").is_pending());
     }
 
     #[test]

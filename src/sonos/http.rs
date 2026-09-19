@@ -281,7 +281,10 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
         .ok_or_else(|| anyhow!("no HTTP status in response from {authority}"))?;
     let chunked = head
         .lines()
-        .any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.contains("chunked"));
+        .any(|l| {
+            let l = l.to_ascii_lowercase();
+            l.starts_with("transfer-encoding:") && l.contains("chunked")
+        });
     let body = if chunked {
         dechunk(body)?
     } else {
@@ -372,11 +375,18 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
         if size == 0 {
             return Ok(out);
         }
-        if data.len() < size + 2 {
+        // `checked_add`, because `size` came off the wire: a hex size near
+        // `usize::MAX` would wrap `size + 2` to something tiny, pass the length
+        // check, and the slice below would panic - and this is the daemon,
+        // which aborts on panic. A bad chunk header is a bad reply, not a crash.
+        let Some(need) = size.checked_add(2) else {
+            bail!("bad chunk size {size_text:?}");
+        };
+        if data.len() < need {
             bail!("truncated chunk");
         }
         out.extend_from_slice(&data[..size]);
-        data = &data[size + 2..];
+        data = &data[need..];
     }
 }
 

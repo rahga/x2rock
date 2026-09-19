@@ -231,15 +231,27 @@ impl Catalogue {
     /// searching - linking one, or explaining why a name cannot be searched.
     pub fn find_any(&self, query: &str) -> Result<&Service> {
         let all: Vec<&Service> = self.services.iter().collect();
-        Self::find(&all, query)
+        Self::find_in(&all, query, "service", "link")
     }
 
-    /// A service by name: exact match first, then unique prefix.
+    /// A *searchable* service by name: exact match first, then unique prefix.
     ///
     /// Prefix matching is restricted to a *unique* prefix on purpose. "radio"
     /// matches a dozen services here, and silently searching whichever sorted
     /// first would be worse than saying so.
     pub fn find<'a>(candidates: &[&'a Service], query: &str) -> Result<&'a Service> {
+        Self::find_in(candidates, query, "searchable service", "search")
+    }
+
+    /// [`find`] over any candidate set, naming what was searched and the
+    /// command that lists it: `link` lists what can be linked and `search` what
+    /// can be searched, and a miss has to point at the right one.
+    fn find_in<'a>(
+        candidates: &[&'a Service],
+        query: &str,
+        what: &str,
+        lists: &str,
+    ) -> Result<&'a Service> {
         let needle = query.to_lowercase();
         if let Some(exact) = candidates.iter().find(|s| s.name.to_lowercase() == needle) {
             return Ok(exact);
@@ -251,7 +263,7 @@ impl Catalogue {
         match matches.as_slice() {
             [only] => Ok(only),
             [] => Err(anyhow!(
-                "no searchable service matching {query:?}. Run `x2rock search` to list them."
+                "no {what} matching {query:?}. Run `x2rock {lists}` to list them."
             )),
             several => {
                 let names: Vec<_> = several.iter().map(|s| s.name.as_str()).collect();
@@ -268,18 +280,15 @@ impl Catalogue {
     ///
     /// This is the pair of internet round trips the cache exists to avoid, so it
     /// is the one place worth being careful: a hit costs nothing, and a miss
-    /// during an outage falls back to whatever was cached rather than failing.
+    /// fetches once and remembers the answer. A miss during an outage fails -
+    /// by definition there is nothing cached to fall back to.
     pub async fn categories_for(&mut self, service: &Service) -> Result<Vec<Category>> {
         if let Some(hit) = self.categories.get(&service.id) {
             return Ok(hit.clone());
         }
-        match smapi::categories(service).await {
-            Ok(fetched) => {
-                self.categories.insert(service.id.clone(), fetched.clone());
-                Ok(fetched)
-            }
-            Err(e) => Err(e),
-        }
+        let fetched = smapi::categories(service).await?;
+        self.categories.insert(service.id.clone(), fetched.clone());
+        Ok(fetched)
     }
 
     /// The cached categories for a service, without fetching.

@@ -22,13 +22,17 @@ pub const PORT: u16 = 1400;
 const TIMEOUT: Duration = Duration::from_secs(8);
 /// How long to let a soundbar's group handoff swallow the reply to the request
 /// that caused it before going to look instead, how long to allow each look, how
-/// long to wait between looks, and how many to make. The switch completes at
-/// about 13.5s, so the budget reaches past 25s: long enough that the answer is
-/// always waited for, short enough that a room which never switches says so.
+/// long to wait between looks, and how long to keep looking. The switch completes
+/// at about 13.5s, so the budget is 25s: long enough that the answer is always
+/// waited for, short enough that a room which never switches says so. A budget
+/// in time rather than in looks, because a look that answers at once - a
+/// soundbar not yet stalled, or a firmware with a shorter stall - would use up a
+/// fixed number of looks in a few seconds and report "still following" for a
+/// switch that completes at 13.5s.
 const TV_HANDOFF: Duration = Duration::from_millis(1500);
 const TV_ASK: Duration = Duration::from_secs(3);
 const TV_POLL: Duration = Duration::from_millis(500);
-const TV_CONFIRMATIONS: u32 = 8;
+const TV_BUDGET: Duration = Duration::from_secs(25);
 /// Queues can hold tens of thousands of tracks; listing stops here and says so.
 pub const MAX_QUEUE_ITEMS: u32 = 1000;
 const PAGE: u32 = 100;
@@ -1936,7 +1940,8 @@ impl Upnp {
 
         let soundbar = Upnp::new(bar);
         let mut last = String::new();
-        for _ in 0..TV_CONFIRMATIONS {
+        let deadline = tokio::time::Instant::now() + TV_BUDGET;
+        while tokio::time::Instant::now() < deadline {
             // Bounded per ask, because the stall opens partway through and an
             // unbounded one would sit inside it rather than asking again.
             if let Ok(Ok(uri)) = tokio::time::timeout(TV_ASK, soundbar.current_uri()).await {
