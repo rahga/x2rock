@@ -60,8 +60,11 @@ fn main() {
 
     // Without these the stamp is cached with the first build, and every later
     // one reports the commit it was first built at. `HEAD` and the ref it
-    // points to catch commits and branch switches; `index` is what makes
-    // `--dirty` honest: it moves when the working tree does.
+    // points to catch commits and branch switches. `index` catches `git add`
+    // and `git stash`, so the `-dirty` marker tracks *staged* changes; a bare
+    // edit to a tracked file touches none of these and does not re-run this
+    // script, so for unstaged work the marker is best-effort. Cargo has no way
+    // to watch "any tracked file changed" short of listing every one of them.
     for name in ["HEAD", "index", "packed-refs"] {
         if let Some(path) = git_path(name) {
             println!("cargo:rerun-if-changed={}", path.display());
