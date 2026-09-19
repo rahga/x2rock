@@ -74,22 +74,20 @@ pub fn find_content<'a>(
 
 /// One position, or an inclusive `4-8` range, as a start and a count.
 fn parse_range(text: &str) -> Result<(u32, u32)> {
-    let (start, count) = match text.split_once('-') {
-        None => (text.trim().parse::<u32>()?, 1),
+    match text.split_once('-') {
+        None => {
+            let track: u32 = text.trim().parse()?;
+            ensure!(track >= 1, "queue tracks are numbered from 1");
+            Ok((track, 1))
+        }
         Some((first, last)) => {
             let first: u32 = first.trim().parse()?;
             let last: u32 = last.trim().parse()?;
             ensure!(first >= 1, "queue tracks are numbered from 1");
             ensure!(last >= first, "{text}: the range ends before it starts");
-            let count = last
-                .checked_sub(first)
-                .and_then(|diff| diff.checked_add(1))
-                .ok_or_else(|| anyhow!("{text}: range too large"))?;
-            (first, count)
+            Ok((first, last - first + 1))
         }
-    };
-    ensure!(start >= 1, "queue tracks are numbered from 1");
-    Ok((start, count))
+    }
 }
 
 fn print_favorites(favorites: &[Favorite], json: bool) {
@@ -970,7 +968,7 @@ mod tests {
         assert!(parse_range("8-4").is_err(), "ends before it starts");
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
         assert!(parse_range("0-8").is_err(), "tracks are numbered from 1");
-        assert!(parse_range("0-4294967295").is_err(), "overflow / invalid start");
+        assert!(parse_range("0-4294967295").is_err());
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
     }

@@ -136,7 +136,7 @@ pub async fn apply_vol(
         (false, _) => None,
         (true, Some(VolumeChange::Set(level))) => Some(*level),
         (true, Some(VolumeChange::Adjust(delta))) => {
-            Some(u8::try_from((i16::from(before.volume) + i16::from(*delta)).clamp(0, 100)).unwrap_or(0))
+            Some((i16::from(before.volume) + i16::from(*delta)).clamp(0, 100) as u8)
         }
         (true, Some(VolumeChange::Mute(_))) => {
             bail!("--ramp does not apply to mute; there is no level to slide to")

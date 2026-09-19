@@ -70,18 +70,6 @@ pub fn install(shell: Shell) -> Result<()> {
     crate::store::write_atomically(&path, &text, crate::store::PLAIN)
         .with_context(|| format!("writing {}", path.display()))?;
     println!("Installed {shell} completions to {}.", path.display());
-    if shell == Shell::Zsh
-        && let Some(parent) = path.parent()
-    {
-        let fpath = std::env::var("FPATH").unwrap_or_default();
-        if !fpath.contains(&parent.to_string_lossy().to_string()) {
-            println!(
-                "Note: ensure {} is in your zsh $fpath (`fpath=({} $fpath)`).",
-                parent.display(),
-                parent.display()
-            );
-        }
-    }
     Ok(())
 }
 

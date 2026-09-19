@@ -263,44 +263,10 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // A truncated body is still caught downstream, by the parse.
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
-    let mut header_end: Option<usize> = None;
-    let mut expected_len: Option<usize> = None;
-    let mut is_chunked = false;
-
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) => break,
-            Ok(n) => {
-                raw.extend_from_slice(&chunk[..n]);
-                if header_end.is_none()
-                    && let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n")
-                {
-                    header_end = Some(split + 4);
-                    let head = String::from_utf8_lossy(&raw[..split]);
-                    for line in head.lines() {
-                        let lower = line.to_ascii_lowercase();
-                        if let Some(val) = lower.strip_prefix("content-length:") {
-                            if let Ok(cl) = val.trim().parse::<usize>() {
-                                expected_len = Some(split + 4 + cl);
-                            }
-                        } else if lower.starts_with("transfer-encoding:")
-                            && lower.contains("chunked")
-                        {
-                            is_chunked = true;
-                        }
-                    }
-                }
-                if let Some(target) = expected_len {
-                    if raw.len() >= target {
-                        break;
-                    }
-                } else if is_chunked
-                    && let Some(hend) = header_end
-                    && raw[hend..].ends_with(b"0\r\n\r\n")
-                {
-                    break;
-                }
-            }
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => break,
             Err(e) => return Err(e).with_context(|| format!("reading from {authority}")),
         }

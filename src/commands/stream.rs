@@ -524,7 +524,10 @@ pub fn require_http_url(url: &str) -> Result<()> {
             let host = host_part
                 .strip_prefix('[')
                 .and_then(|h| h.split_once(']'))
-                .map_or_else(|| host_part.split(':').next().unwrap_or(""), |(ipv6, _)| ipv6);
+                .map_or_else(
+                    || host_part.split(':').next().unwrap_or(""),
+                    |(ipv6, _)| ipv6,
+                );
             if !host.is_empty() {
                 return Ok(());
             }

@@ -112,7 +112,7 @@ async fn main() {
     cli.room.retain(|room| !room.is_empty());
     // Decided before the command runs, so a failure knows how to report itself.
     let json = cli.command.json();
-    if let Err(e) = Box::pin(run(cli)).await {
+    if let Err(e) = run(cli).await {
         // The same answer the panic hook gives, for the paths that return a
         // broken pipe rather than panicking on it - `completions`, which writes
         // through `io::Write` and `?`. The reader left; there is no failure to
@@ -421,7 +421,7 @@ async fn run(cli: Cli) -> Result<()> {
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
     if let Command::Alarms { action, json } = &cli.command {
-        return Box::pin(speaker::alarms(&session, room, action.as_ref(), *json)).await;
+        return speaker::alarms(&session, room, action.as_ref(), *json).await;
     }
 
     if let Command::Alarm { id, action } = &cli.command {
@@ -582,11 +582,9 @@ async fn run(cli: Cli) -> Result<()> {
                 night,
                 dialog,
             };
-            Box::pin(apply_eq(&session, &target, room, want, json)).await?;
+            apply_eq(&session, &target, room, want, json).await?;
         }
-        Command::Queue { action, json } => {
-            Box::pin(content::queue(&player, &target, action, json)).await?;
-        }
+        Command::Queue { action, json } => content::queue(&player, &target, action, json).await?,
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
@@ -594,7 +592,7 @@ async fn run(cli: Cli) -> Result<()> {
             feedback,
             repeater,
             json,
-        } => Box::pin(apply_remote(&session, &target, room, feedback, repeater, json)).await?,
+        } => apply_remote(&session, &target, room, feedback, repeater, json).await?,
         Command::Rename { name } => {
             apply_rename(&session, &mut state, &target, room, &name).await?;
         }
