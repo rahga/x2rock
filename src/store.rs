@@ -112,6 +112,7 @@ impl Lock {
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(SECRET)
             .open(&lock)
             .with_context(|| format!("opening {}", lock.display()))?;
         // `File::lock` is what moved the MSRV to 1.89: it is `flock(2)` from
@@ -168,6 +169,11 @@ mod tests {
         // The write replaces the file's inode; the lock file is untouched by it,
         // so a second writer waiting on the lock still waits on the same inode.
         let before = fs::metadata(dir.path().join("bookmarks.json.lock")).unwrap();
+        assert_eq!(
+            before.permissions().mode() & 0o777,
+            SECRET,
+            "lock file should have mode 0600"
+        );
         write_atomically(&path, "[]", PLAIN).unwrap();
         let after = fs::metadata(dir.path().join("bookmarks.json.lock")).unwrap();
         assert_eq!(

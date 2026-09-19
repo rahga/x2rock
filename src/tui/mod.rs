@@ -866,7 +866,7 @@ impl App {
             "Playlist" if room.can_repeat_one => "Track",
             _ => "None",
         };
-        room.loop_status = next.to_owned();
+        next.clone_into(&mut room.loop_status);
         Intent::SetLoop(room.bus_name.clone(), next)
     }
 
@@ -988,7 +988,7 @@ impl App {
             && let Some(at) = selected.members.iter().position(|member| *member == room)
             && let Some(slot) = selected.member_volumes.get_mut(at)
         {
-            *slot = (i16::from(*slot) + by).clamp(0, 100) as u8;
+            *slot = u8::try_from((i16::from(*slot) + by).clamp(0, 100)).unwrap_or(0);
             // As for the group: a step unmutes the speaker it steps.
             if let Some(flag) = selected.member_muted.get_mut(at) {
                 *flag = false;

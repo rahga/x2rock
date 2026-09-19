@@ -180,13 +180,18 @@ pub async fn get_with(
 /// pin code, and a search term going to the radio directory needs exactly the
 /// same treatment. A second copy would be a second chance to get it wrong.
 pub fn urlencode(value: &str) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02x}")),
+            _ => {
+                out.push('%');
+                out.push(HEX_DIGITS[(b >> 4) as usize] as char);
+                out.push(HEX_DIGITS[(b & 0xf) as usize] as char);
+            }
         }
     }
     out
@@ -258,10 +263,44 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // A truncated body is still caught downstream, by the parse.
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
+    let mut header_end: Option<usize> = None;
+    let mut expected_len: Option<usize> = None;
+    let mut is_chunked = false;
+
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if header_end.is_none()
+                    && let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    header_end = Some(split + 4);
+                    let head = String::from_utf8_lossy(&raw[..split]);
+                    for line in head.lines() {
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(val) = lower.strip_prefix("content-length:") {
+                            if let Ok(cl) = val.trim().parse::<usize>() {
+                                expected_len = Some(split + 4 + cl);
+                            }
+                        } else if lower.starts_with("transfer-encoding:")
+                            && lower.contains("chunked")
+                        {
+                            is_chunked = true;
+                        }
+                    }
+                }
+                if let Some(target) = expected_len {
+                    if raw.len() >= target {
+                        break;
+                    }
+                } else if is_chunked
+                    && let Some(hend) = header_end
+                    && raw[hend..].ends_with(b"0\r\n\r\n")
+                {
+                    break;
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => break,
             Err(e) => return Err(e).with_context(|| format!("reading from {authority}")),
         }
@@ -440,5 +479,12 @@ mod tests {
         // the host and the scheme's default port applies.
         let (e, _, _) = parse_url("https://host.test:notaport/x").unwrap();
         assert_eq!(e.authority(), "host.test:notaport:443");
+    }
+
+    #[test]
+    fn urlencode_escapes_special_characters() {
+        assert_eq!(urlencode("foo bar"), "foo%20bar");
+        assert_eq!(urlencode("a/b?c=d&e+f"), "a%2fb%3fc%3dd%26e%2bf");
+        assert_eq!(urlencode("plain_text-1.0~"), "plain_text-1.0~");
     }
 }

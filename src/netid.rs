@@ -10,24 +10,37 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Result, anyhow};
 
-/// Default IPv4 gateway, from the kernel routing table.
+/// Default IPv4 gateway, parsed from a routing table in `/proc/net/route` format.
 ///
 /// `/proc/net/route` is little-endian hex, one route per line.
-fn default_gateway() -> Result<Ipv4Addr> {
-    let table = fs::read_to_string("/proc/net/route")?;
+fn default_gateway_from(table: &str) -> Result<Ipv4Addr> {
     for line in table.lines().skip(1) {
         let mut fields = line.split_whitespace();
-        let (_iface, destination, gateway) = (fields.next(), fields.next(), fields.next());
+        let (_iface, destination, gateway, flags) =
+            (fields.next(), fields.next(), fields.next(), fields.next());
         let (Some(destination), Some(gateway)) = (destination, gateway) else {
             continue;
         };
-        // Destination 0.0.0.0 marks the default route.
-        if destination == "00000000" {
+        // Destination 0.0.0.0 marks a default route.
+        // A gateway of 0.0.0.0 is an unrouted/on-link entry, not a reachable gateway.
+        if destination == "00000000" && gateway != "00000000" {
+            // RTF_GATEWAY flag is 0x0002. If flags are present, ensure it's marked as a gateway.
+            if let Some(flags) = flags {
+                let flags = u16::from_str_radix(flags, 16).unwrap_or(0);
+                if flags & 0x0002 == 0 {
+                    continue;
+                }
+            }
             let raw = u32::from_str_radix(gateway, 16)?;
             return Ok(Ipv4Addr::from(raw.swap_bytes()));
         }
     }
     Err(anyhow!("no default route"))
+}
+
+fn default_gateway() -> Result<Ipv4Addr> {
+    let table = fs::read_to_string("/proc/net/route")?;
+    default_gateway_from(&table)
 }
 
 /// MAC address of the default gateway, as a stable fingerprint for this network.
@@ -63,6 +76,18 @@ mod tests {
             Ipv4Addr::from(raw.swap_bytes()),
             Ipv4Addr::new(192, 168, 0, 1)
         );
+    }
+
+    #[test]
+    fn skips_dummy_default_routes_and_finds_gateway() {
+        let table = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+dummy0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\t0\t0\t0
+tun0\t00000000\t0100A8C0\t0001\t0\t0\t50\t00000000\t0\t0\t0
+wlan0\t00000000\t0156A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+";
+        let gw = default_gateway_from(table).unwrap();
+        assert_eq!(gw, Ipv4Addr::new(192, 168, 86, 1));
     }
 
     /// Reads the real routing table, so it needs a machine with a default

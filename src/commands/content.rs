@@ -79,8 +79,13 @@ fn parse_range(text: &str) -> Result<(u32, u32)> {
         Some((first, last)) => {
             let first: u32 = first.trim().parse()?;
             let last: u32 = last.trim().parse()?;
+            ensure!(first >= 1, "queue tracks are numbered from 1");
             ensure!(last >= first, "{text}: the range ends before it starts");
-            (first, last - first + 1)
+            let count = last
+                .checked_sub(first)
+                .and_then(|diff| diff.checked_add(1))
+                .ok_or_else(|| anyhow!("{text}: range too large"))?;
+            (first, count)
         }
     };
     ensure!(start >= 1, "queue tracks are numbered from 1");
@@ -964,6 +969,8 @@ mod tests {
     fn ranges_reject_what_cannot_be_a_position() {
         assert!(parse_range("8-4").is_err(), "ends before it starts");
         assert!(parse_range("0").is_err(), "tracks are numbered from 1");
+        assert!(parse_range("0-8").is_err(), "tracks are numbered from 1");
+        assert!(parse_range("0-4294967295").is_err(), "overflow / invalid start");
         assert!(parse_range("").is_err());
         assert!(parse_range("nine").is_err());
     }

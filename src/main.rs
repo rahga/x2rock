@@ -112,7 +112,7 @@ async fn main() {
     cli.room.retain(|room| !room.is_empty());
     // Decided before the command runs, so a failure knows how to report itself.
     let json = cli.command.json();
-    if let Err(e) = run(cli).await {
+    if let Err(e) = Box::pin(run(cli)).await {
         // The same answer the panic hook gives, for the paths that return a
         // broken pipe rather than panicking on it - `completions`, which writes
         // through `io::Write` and `?`. The reader left; there is no failure to
@@ -421,7 +421,7 @@ async fn run(cli: Cli) -> Result<()> {
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
     if let Command::Alarms { action, json } = &cli.command {
-        return speaker::alarms(&session, room, action.as_ref(), *json).await;
+        return Box::pin(speaker::alarms(&session, room, action.as_ref(), *json)).await;
     }
 
     if let Command::Alarm { id, action } = &cli.command {
@@ -546,16 +546,16 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Play { track: None } => play_or_resume(&session, &player, &target).await?,
         Command::Play { track: Some(n) } => playback::play_track(&player, &target, n).await?,
         Command::Keep { name, container } => {
-            content::keep(&session, &player, group, name, container).await?
+            content::keep(&session, &player, group, name, container).await?;
         }
         Command::Bookmark { query, next } => {
-            content::bookmark(&session, &player, &target, room, &query, next).await?
+            content::bookmark(&session, &player, &target, room, &query, next).await?;
         }
         Command::Favorite { query } => {
-            content::favorite(&session, &player, &target, &query).await?
+            content::favorite(&session, &player, &target, &query).await?;
         }
         Command::Playlist { query } => {
-            content::playlist(&session, &player, &target, &query).await?
+            content::playlist(&session, &player, &target, &query).await?;
         }
         Command::Tv => speaker::tv(&session, &player, &target, room).await?,
         Command::Chime { volume } => {
@@ -582,9 +582,11 @@ async fn run(cli: Cli) -> Result<()> {
                 night,
                 dialog,
             };
-            apply_eq(&session, &target, room, want, json).await?
+            Box::pin(apply_eq(&session, &target, room, want, json)).await?;
         }
-        Command::Queue { action, json } => content::queue(&player, &target, action, json).await?,
+        Command::Queue { action, json } => {
+            Box::pin(content::queue(&player, &target, action, json)).await?;
+        }
         Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
         Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
         Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
@@ -592,19 +594,19 @@ async fn run(cli: Cli) -> Result<()> {
             feedback,
             repeater,
             json,
-        } => apply_remote(&session, &target, room, feedback, repeater, json).await?,
+        } => Box::pin(apply_remote(&session, &target, room, feedback, repeater, json)).await?,
         Command::Rename { name } => {
-            apply_rename(&session, &mut state, &target, room, &name).await?
+            apply_rename(&session, &mut state, &target, room, &name).await?;
         }
         Command::Led { mode, json } => apply_led(&session, &target, room, mode, json).await?,
         Command::Buttons { mode, json } => {
-            apply_buttons(&session, &target, room, mode, json).await?
+            apply_buttons(&session, &target, room, mode, json).await?;
         }
         Command::Sleep { duration, json } => {
-            apply_sleep(&target, player.ip(), duration, json).await?
+            apply_sleep(&target, player.ip(), duration, json).await?;
         }
         Command::Snooze { duration, json } => {
-            apply_snooze(&target, player.ip(), duration, json).await?
+            apply_snooze(&target, player.ip(), duration, json).await?;
         }
         Command::Pause => playback::transport(&player, group, "pause").await?,
         Command::Toggle => playback::transport(&player, group, "togglePlayPause").await?,

@@ -353,15 +353,10 @@ impl Inner {
     /// Route one incoming frame: a reply to whoever is waiting for it, anything
     /// else out as an event.
     fn dispatch(&self, text: &str) {
-        let Ok(mut parts) = serde_json::from_str::<Vec<Value>>(text) else {
+        let Ok((header_raw, body)) = serde_json::from_str::<(Value, Value)>(text) else {
             return;
         };
-        if parts.len() != 2 {
-            return;
-        }
-        let body = parts.pop().expect("length checked");
-        let Ok(header) = serde_json::from_value::<Header>(parts.pop().expect("length checked"))
-        else {
+        let Ok(header) = serde_json::from_value::<Header>(header_raw) else {
             return;
         };
 

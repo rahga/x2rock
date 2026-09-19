@@ -487,11 +487,14 @@ impl RoomPlayer {
         }
     }
 
+    /// Lock the room's state, recovering from poisoning rather than panicking.
+    fn state(&self) -> std::sync::MutexGuard<'_, RoomState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The players in this group, for deciding whether a republish is due.
     pub fn member_ids(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .unwrap()
+        self.state()
             .members
             .iter()
             .map(|(id, _)| id.clone())
@@ -501,7 +504,7 @@ impl RoomPlayer {
     /// Fold one member's `playerVolume` in; returns the properties to announce,
     /// or nothing when the level has not actually moved.
     pub fn apply_member_volume(&self, player_id: &str, volume: &proto::Volume) -> Vec<Property> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         let Some(at) = state.members.iter().position(|(id, _)| id == player_id) else {
             return Vec::new();
         };
@@ -539,7 +542,7 @@ impl RoomPlayer {
         player_id: &str,
         update: &proto::HomeTheaterUpdate,
     ) -> Vec<Property> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if !state.members.iter().any(|(id, _)| id == player_id) {
             return Vec::new();
         }
@@ -558,7 +561,7 @@ impl RoomPlayer {
 
     /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
     pub fn apply_playback(&self, status: &proto::PlaybackStatus) -> Vec<Property> {
-        self.state.lock().unwrap().apply_playback(status)
+        self.state().apply_playback(status)
     }
 
     /// Read the queue's real version over UPnP, and say so if it moved.
@@ -595,7 +598,7 @@ impl RoomPlayer {
     /// The other half of [`queue_version_fetch`]: fold a fetched version in,
     /// announcing only when it moved. Cheap, and run on the event loop.
     pub fn apply_queue_version(&self, version: String) -> Option<Property> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if state.queue_version == version {
             return None;
         }
@@ -606,7 +609,7 @@ impl RoomPlayer {
     /// Whether `object_id` is a different track from the one last remembered
     /// for this room - and note it, so the next event for it says no.
     pub fn track_changed(&self, object_id: &str) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if state.last_remembered.as_deref() == Some(object_id) {
             return false;
         }
@@ -616,7 +619,7 @@ impl RoomPlayer {
 
     /// Fold a `metadataStatus` event in.
     pub fn apply_metadata(&self, meta: &MetadataStatus) -> Vec<Property> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         state.metadata = to_metadata(&self.group_id, meta);
         // The format is present only on the TV input, but its summary can be
         // empty there too (no codec named, no channels yet), so being on TV is
@@ -641,7 +644,7 @@ impl RoomPlayer {
 
     /// Fold a `groupVolume` event in.
     pub fn apply_volume(&self, volume: &proto::Volume) -> Vec<Property> {
-        self.state.lock().unwrap().apply_volume(volume)
+        self.state().apply_volume(volume)
     }
 
     async fn playback(&self, command: &str) -> fdo::Result<()> {
@@ -781,7 +784,10 @@ fn track_id(group_id: &str, title: Option<&str>, artist: Option<&str>) -> TrackI
         group
     };
     let path = format!("/com/rahga/x2rock/{group}/track/{:x}", hasher.finish());
-    TrackId::try_from(path).expect("path built only from [A-Za-z0-9_/], never empty")
+    TrackId::try_from(path).unwrap_or_else(|_| {
+        TrackId::try_from("/com/rahga/x2rock/track/unknown")
+            .expect("fallback path is guaranteed valid")
+    })
 }
 
 impl RootInterface for RoomPlayer {
@@ -865,14 +871,12 @@ impl PlayerInterface for RoomPlayer {
     }
     async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {
         Ok(self
-            .state
-            .lock()
-            .unwrap()
+            .state()
             .status
             .unwrap_or(PlaybackStatus::Stopped))
     }
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
-        Ok(self.state.lock().unwrap().loop_status())
+        Ok(self.state().loop_status())
     }
     async fn set_loop_status(&self, loop_status: LoopStatus) -> zbus::Result<()> {
         let repeat = match loop_status {
@@ -880,7 +884,7 @@ impl PlayerInterface for RoomPlayer {
             LoopStatus::Playlist => Repeat::All,
             LoopStatus::Track => Repeat::One,
         };
-        let actions = self.state.lock().unwrap().actions;
+        let actions = self.state().actions;
         if !actions.allows(repeat) {
             return Err(self.cannot(repeat.denied_as()));
         }
@@ -896,11 +900,11 @@ impl PlayerInterface for RoomPlayer {
         Ok(())
     }
     async fn shuffle(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().play_modes.shuffle)
+        Ok(self.state().play_modes.shuffle)
     }
     async fn set_shuffle(&self, shuffle: bool) -> zbus::Result<()> {
         // Turning it off is always allowed, as with repeat.
-        if shuffle && !self.state.lock().unwrap().actions.can_shuffle {
+        if shuffle && !self.state().actions.can_shuffle {
             return Err(self.cannot("shuffled"));
         }
         self.connection
@@ -909,10 +913,10 @@ impl PlayerInterface for RoomPlayer {
             .map_err(set_failed)
     }
     async fn metadata(&self) -> fdo::Result<Metadata> {
-        Ok(self.state.lock().unwrap().with_hints())
+        Ok(self.state().with_hints())
     }
     async fn volume(&self) -> fdo::Result<f64> {
-        Ok(self.state.lock().unwrap().heard())
+        Ok(self.state().heard())
     }
     async fn set_volume(&self, volume: f64) -> zbus::Result<()> {
         let level = (volume.clamp(0.0, 1.0) * 100.0).round() as u8;
@@ -922,7 +926,7 @@ impl PlayerInterface for RoomPlayer {
             .map_err(set_failed)
     }
     async fn position(&self) -> fdo::Result<Time> {
-        let state = self.state.lock().unwrap();
+        let state = self.state();
         let mut millis = state.position_millis;
         if state.status == Some(PlaybackStatus::Playing)
             && let Some(at) = state.position_at
@@ -938,19 +942,19 @@ impl PlayerInterface for RoomPlayer {
         Ok(1.0)
     }
     async fn can_go_next(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().actions.can_skip)
+        Ok(self.state().actions.can_skip)
     }
     async fn can_go_previous(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().actions.can_skip_back)
+        Ok(self.state().actions.can_skip_back)
     }
     async fn can_play(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().actions.can_play)
+        Ok(self.state().actions.can_play)
     }
     async fn can_pause(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().actions.can_pause)
+        Ok(self.state().actions.can_pause)
     }
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(self.state.lock().unwrap().actions.can_seek)
+        Ok(self.state().actions.can_seek)
     }
     async fn can_control(&self) -> fdo::Result<bool> {
         Ok(true)
