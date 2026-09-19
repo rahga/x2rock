@@ -108,7 +108,7 @@ impl Catalogue {
 
     /// Every service the player knows about, from cache where the version agrees.
     ///
-    /// `refresh` forces the descriptors to be re-parsed and every cached category
+    /// `force` has the descriptors re-parsed and every cached category
     /// dropped, for when a service has changed under a version that did not move.
     /// Returns whether anything changed, so the caller can skip writing.
     pub async fn refresh(&mut self, upnp: &Upnp, force: bool) -> Result<bool> {

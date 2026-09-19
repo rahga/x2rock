@@ -20,6 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::proto::MusicObjectId;
+use crate::sonos::xml_escape;
 use crate::store;
 
 /// How many unpinned entries the history keeps. Pinned ones never count.
@@ -126,12 +127,7 @@ impl Bookmark {
     /// accepts the item and then has nothing to show, for the whole queue rather
     /// than just the new row.
     pub fn didl(&self, cdudn: &str) -> String {
-        let esc = |s: &str| {
-            s.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('"', "&quot;")
-        };
+        let esc = xml_escape;
         let artist = self
             .artist
             .as_deref()
@@ -179,22 +175,6 @@ fn native_scheme(service_id: &str) -> &'static str {
     }
 }
 
-/// The playback URI for a service item, for callers that have no [`Bookmark`].
-///
-/// `account` is the `sn=` serial, and it is **optional because the player does
-/// not need it**: the cdudn names the account and the player resolves it from
-/// there. Verified against Mixcloud, where the real serial, a wrong one and no
-/// `sn=` at all were each accepted and each played. It is still sent when known,
-/// since that is what the player writes for itself.
-///
-/// `flags=65544` is carried into every scheme, [`native_scheme`] included,
-/// rather than varied per service - not just assumed to travel, but
-/// independently verified for Spotify specifically, whose own officially-built
-/// URIs carry `flags=8232` instead (see the scheme's own doc comment): several
-/// different `spotify:track:…` ids played correctly this way, across three
-/// rooms, in the same session the scheme itself was fixed in. Not proof for
-/// every future service this constant might reach, only that it is not a
-/// coincidence limited to the two it was first checked against.
 /// Whether a container of this kind holds *tracks*, and so can go in a queue.
 ///
 /// An `album` and a `playlist` are lists of tracks, which is exactly what a
@@ -259,12 +239,7 @@ pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -
 /// Its `id` carries the same prefix the URI does, and the class says which kind
 /// of container it is; the cdudn is what tells the player whose it is.
 pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str) -> String {
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
+    let esc = xml_escape;
     format!(
         concat!(
             r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
@@ -284,6 +259,22 @@ pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str
     )
 }
 
+/// The playback URI for a service item, for callers that have no [`Bookmark`].
+///
+/// `account` is the `sn=` serial, and it is **optional because the player does
+/// not need it**: the cdudn names the account and the player resolves it from
+/// there. Verified against Mixcloud, where the real serial, a wrong one and no
+/// `sn=` at all were each accepted and each played. It is still sent when known,
+/// since that is what the player writes for itself.
+///
+/// `flags=65544` is carried into every scheme, [`native_scheme`] included,
+/// rather than varied per service - not just assumed to travel, but
+/// independently verified for Spotify specifically, whose own officially-built
+/// URIs carry `flags=8232` instead (see the scheme's own doc comment): several
+/// different `spotify:track:…` ids played correctly this way, across three
+/// rooms, in the same session the scheme itself was fixed in. Not proof for
+/// every future service this constant might reach, only that it is not a
+/// coincidence limited to the two it was first checked against.
 pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
     let sn = account
         .filter(|a| !a.is_empty())

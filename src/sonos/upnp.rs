@@ -5,9 +5,8 @@
 //! behind a default-deny firewall. UPnP *eventing* (GENA) is never used: it needs
 //! the player to connect back to us, which that same firewall silently blocks.
 //!
-//! The HTTP client is deliberately minimal. It talks to exactly one server
-//! implementation, which answers with `Transfer-Encoding: chunked` and
-//! `Connection: close` (verified), so it dechunks and reads to end of stream.
+//! The HTTP client is [`super::http`], shared with the SMAPI, Plex and artwork
+//! fetches; what is particular to the players' server is recorded there.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -17,6 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
 
 use super::http;
+use super::xml_escape;
 
 pub const PORT: u16 = 1400;
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -63,7 +63,7 @@ enum Service {
 impl Service {
     /// The row in [`SERVICES`] this variant names.
     ///
-    /// The typed variants and the raw table are the same six strings, so they
+    /// The typed variants and the raw table are the same strings, so they
     /// are written once. A variant whose name is missing from the table is a
     /// programming error rather than a runtime condition, hence the panic: the
     /// unit test below walks every variant so it cannot reach a build.
@@ -228,7 +228,7 @@ pub struct ServiceEntry {
 /// (DeviceProperties), soundbar IR, and the local music library.
 ///
 /// Paths and URNs are transcribed from svrooij/sonos-api-docs, which generates
-/// them from the players' own service descriptions. The six that overlap with
+/// them from the players' own service descriptions. Those that overlap with
 /// the typed variants were checked against what this file already sent and
 /// agree exactly. Note the two that are not `schemas-upnp-org`: `Queue` is
 /// Sonos's own, and `QPlay` is Tencent's.
@@ -685,8 +685,10 @@ impl Upnp {
     /// answer with the same offered version. So nothing has to be known before
     /// asking. `CachedOnly=1` keeps it local rather than reaching Sonos.
     pub async fn software_update(&self) -> Result<SoftwareUpdate> {
-        let text = self
-            .soap(
+        // The offer and the installed version come from different documents
+        // and neither needs the other, so they are fetched together.
+        let (text, installed) = tokio::try_join!(
+            self.soap(
                 Service::ZoneGroupTopology,
                 "CheckForUpdate",
                 &[
@@ -694,14 +696,15 @@ impl Upnp {
                     ("CachedOnly", "1"),
                     ("Version", ""),
                 ],
-            )
-            .await?;
+            ),
+            self.firmware_version(),
+        )?;
         let outer = Document::parse(&text)?;
         // The UpdateItem arrives as escaped XML inside the reply, like the
         // alarm list does.
         let inner = text_of(&outer, "UpdateItem").unwrap_or("");
         let mut update = update_item_in(inner)?;
-        update.installed = self.firmware_version().await?;
+        update.installed = installed;
         Ok(update)
     }
 
@@ -768,14 +771,12 @@ impl Upnp {
     /// *to the household*: with no timezone configured the clock runs UTC, so
     /// "07:00" is 07:00 UTC and not 07:00 wherever the person typing it is.
     pub async fn household_time(&self) -> Result<(String, i32)> {
-        let now = self.soap(Service::AlarmClock, "GetTimeNow", &[]).await?;
-        let doc = Document::parse(&now)?;
-        let local = text_of(&doc, "CurrentLocalTime").unwrap_or("").to_string();
-        let zone = self.soap(Service::AlarmClock, "GetTimeZone", &[]).await?;
-        let doc = Document::parse(&zone)?;
-        let index = text_of(&doc, "Index")
-            .and_then(|i| i.trim().parse().ok())
-            .unwrap_or(-1);
+        // Two independent reads, so they go out together.
+        let (local, index) = tokio::try_join!(
+            self.one_value(Service::AlarmClock, "GetTimeNow", "CurrentLocalTime"),
+            self.one_value(Service::AlarmClock, "GetTimeZone", "Index"),
+        )?;
+        let index = index.trim().parse().unwrap_or(-1);
         Ok((local, index))
     }
 
@@ -1193,9 +1194,9 @@ impl Upnp {
         Ok(())
     }
 
-    /// Read all three tone controls.
+    /// Read the tone controls and the TruePlay state together.
     ///
-    /// Three round trips because the service offers no combined read; they go
+    /// Four round trips because the service offers no combined read; they go
     /// out together rather than in sequence, since none depends on the others.
     pub async fn tone(&self) -> Result<Tone> {
         let (bass, treble, loudness, calibration) = tokio::try_join!(
@@ -1379,7 +1380,7 @@ impl Upnp {
     ) -> Result<String> {
         let mut params = String::new();
         for (name, value) in args {
-            params.push_str(&format!("<{name}>{}</{name}>", escape(value)));
+            params.push_str(&format!("<{name}>{}</{name}>", xml_escape(value)));
         }
         let envelope = format!(
             r#"<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:{action} xmlns:u="{urn}">{params}</u:{action}></s:Body></s:Envelope>"#,
@@ -1492,14 +1493,24 @@ impl Upnp {
             .collect())
     }
 
-    /// One page of the queue.
-    async fn browse_queue(&self, start: u32, count: u32) -> Result<Queue> {
+    /// One page of a `Browse`: the total the container claims, its `UpdateID`,
+    /// and the DIDL-Lite document, still to be parsed.
+    ///
+    /// The envelope is the same whatever is browsed; only the DIDL differs, so
+    /// [`Self::browse_queue`] and [`Self::browse_content`] share this and keep
+    /// their own item parsers.
+    async fn browse_page(
+        &self,
+        object_id: &str,
+        start: u32,
+        count: u32,
+    ) -> Result<(u32, String, String)> {
         let text = self
             .soap(
                 Service::ContentDirectory,
                 "Browse",
                 &[
-                    ("ObjectID", "Q:0"),
+                    ("ObjectID", object_id),
                     ("BrowseFlag", "BrowseDirectChildren"),
                     ("Filter", "*"),
                     ("StartingIndex", &start.to_string()),
@@ -1508,14 +1519,23 @@ impl Upnp {
                 ],
             )
             .await?;
-        let envelope = Document::parse(&text).context("parsing Browse response")?;
+        let envelope =
+            Document::parse(&text).with_context(|| format!("parsing Browse of {object_id}"))?;
         let total = text_of(&envelope, "TotalMatches")
             .and_then(|t| t.parse().ok())
             .unwrap_or(0);
         let update_id = text_of(&envelope, "UpdateID").unwrap_or("0").to_owned();
         // The DIDL-Lite document is carried as escaped text; the parser has
-        // already unescaped one layer, leaving XML to parse again.
-        let didl_text = text_of(&envelope, "Result").unwrap_or("");
+        // already unescaped one layer, leaving XML to parse again. Nothing
+        // there comes back as an empty <Result/>, which roxmltree reads as no
+        // text at all - a list of none, not a parse error.
+        let didl = text_of(&envelope, "Result").unwrap_or("").to_owned();
+        Ok((total, update_id, didl))
+    }
+
+    /// One page of the queue.
+    async fn browse_queue(&self, start: u32, count: u32) -> Result<Queue> {
+        let (total, update_id, didl_text) = self.browse_page("Q:0", start, count).await?;
         if didl_text.trim().is_empty() {
             return Ok(Queue {
                 total,
@@ -1523,7 +1543,7 @@ impl Upnp {
                 items: Vec::new(),
             });
         }
-        let didl = Document::parse(didl_text).context("parsing queue DIDL-Lite")?;
+        let didl = Document::parse(&didl_text).context("parsing queue DIDL-Lite")?;
 
         let items = didl
             .descendants()
@@ -1585,11 +1605,6 @@ impl Upnp {
         })
     }
 
-    /// Browse a container - `SQ:` for saved playlists, `FV:2` for favorites.
-    ///
-    /// Kept apart from [`Self::browse_queue`] because the two want different
-    /// things from the same DIDL: the queue needs positions and durations,
-    /// this needs what it would take to enqueue the thing.
     /// Every music service Sonos knows about, as the raw descriptor list.
     ///
     /// This is the whole catalogue, not the household's - there is no command
@@ -1656,37 +1671,21 @@ impl Upnp {
             .collect())
     }
 
+    /// Browse a container - `SQ:` for saved playlists, `FV:2` for favorites.
+    ///
+    /// Kept apart from [`Self::browse_queue`] because the two want different
+    /// things from the same DIDL: the queue needs positions and durations,
+    /// this needs what it would take to enqueue the thing.
     pub async fn browse_content(&self, object_id: &str) -> Result<Vec<BrowseItem>> {
         let mut items = Vec::new();
         let mut start = 0;
         loop {
-            let text = self
-                .soap(
-                    Service::ContentDirectory,
-                    "Browse",
-                    &[
-                        ("ObjectID", object_id),
-                        ("BrowseFlag", "BrowseDirectChildren"),
-                        ("Filter", "*"),
-                        ("StartingIndex", &start.to_string()),
-                        ("RequestedCount", &PAGE.to_string()),
-                        ("SortCriteria", ""),
-                    ],
-                )
-                .await?;
-            let envelope =
-                Document::parse(&text).with_context(|| format!("parsing Browse of {object_id}"))?;
-            let total: u32 = text_of(&envelope, "TotalMatches")
-                .and_then(|t| t.parse().ok())
-                .unwrap_or(0);
-            // Nothing there comes back as an empty <Result/>, which roxmltree
-            // reads as no text at all - a list of none, not a parse error.
-            let didl_text = text_of(&envelope, "Result").unwrap_or("");
+            let (total, _, didl_text) = self.browse_page(object_id, start, PAGE).await?;
             if total == 0 || didl_text.trim().is_empty() {
                 break;
             }
             let page = self
-                .items_from_didl(didl_text)
+                .items_from_didl(&didl_text)
                 .with_context(|| format!("parsing DIDL-Lite of {object_id}"))?;
             let got = page.len() as u32;
             items.extend(page);
@@ -1851,11 +1850,7 @@ impl Upnp {
     /// Whether the group is currently playing from its queue rather than, say, a
     /// radio stream or line-in.
     pub async fn playing_from_queue(&self) -> Result<bool> {
-        let text = self
-            .soap(Service::AvTransport, "GetMediaInfo", &[("InstanceID", "0")])
-            .await?;
-        let doc = Document::parse(&text).context("parsing GetMediaInfo response")?;
-        Ok(text_of(&doc, "CurrentURI").is_some_and(|uri| uri.starts_with("x-rincon-queue:")))
+        Ok(self.current_uri().await?.starts_with("x-rincon-queue:"))
     }
 
     /// Make the coordinator's queue the current source.
@@ -2192,15 +2187,6 @@ fn insert_before(from: u32, to: u32) -> u32 {
     if to > from { to + 1 } else { to }
 }
 
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// `H:MM:SS` or `H:MM:SS.mmm`, as UPnP reports durations.
 /// Every `(service id, account serial)` a list of items names in its URIs.
 ///
 /// The household will not enumerate its accounts - `musicServiceAccounts:1` has
@@ -2261,6 +2247,7 @@ pub fn format_hms(d: Duration) -> String {
     )
 }
 
+/// `H:MM:SS` or `H:MM:SS.mmm`, as UPnP reports durations.
 pub fn parse_hms(text: &str) -> Option<Duration> {
     let mut parts = text.split(':');
     let h: u64 = parts.next()?.parse().ok()?;
@@ -2708,11 +2695,6 @@ mod tests {
         // shortcut from a favorite the service resolves, which is exactly why
         // the r:type marker is what decides.
         assert!(items[0].uri.is_none());
-    }
-
-    #[test]
-    fn soap_arguments_are_escaped() {
-        assert_eq!(escape(r#"a&b<c>"d""#), "a&amp;b&lt;c&gt;&quot;d&quot;");
     }
 
     fn item(uri: Option<&str>, art: Option<&str>) -> BrowseItem {

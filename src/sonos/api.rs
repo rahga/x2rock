@@ -29,6 +29,14 @@ fn on_group(namespace: &str, command: &str, group_id: &str) -> Value {
     })
 }
 
+fn on_household(namespace: &str, command: &str, household_id: &str) -> Value {
+    json!({
+        "namespace": namespace,
+        "command": command,
+        "householdId": household_id,
+    })
+}
+
 /// The whole `setPlayModes` body for a repeat setting.
 ///
 /// Both flags go every time, so the result never depends on what the other one
@@ -123,11 +131,7 @@ impl Connection {
     /// As [`Self::subscribe_group`], for household-wide namespaces such as `groups:1`.
     pub async fn subscribe_household(&self, namespace: &str, household_id: &str) -> Result<()> {
         self.call(
-            json!({
-                "namespace": namespace,
-                "command": "subscribe",
-                "householdId": household_id,
-            }),
+            on_household(namespace, "subscribe", household_id),
             json!({}),
         )
         .await?;
@@ -230,11 +234,7 @@ impl Connection {
     pub async fn favorites(&self, household_id: &str) -> Result<FavoritesList> {
         let body = self
             .call(
-                json!({
-                    "namespace": "favorites:1",
-                    "command": "getFavorites",
-                    "householdId": household_id,
-                }),
+                on_household("favorites:1", "getFavorites", household_id),
                 json!({}),
             )
             .await?;
@@ -263,11 +263,7 @@ impl Connection {
     ) -> Result<Option<String>> {
         let body = self
             .call(
-                json!({
-                    "namespace": "musicServiceAccounts:1",
-                    "command": "match",
-                    "householdId": household_id,
-                }),
+                on_household("musicServiceAccounts:1", "match", household_id),
                 match_options(service_id, user_id_hash_code, nickname, link_code),
             )
             .await?;
@@ -278,11 +274,7 @@ impl Connection {
     pub async fn playlists(&self, household_id: &str) -> Result<PlaylistsList> {
         let body = self
             .call(
-                json!({
-                    "namespace": "playlists:1",
-                    "command": "getPlaylists",
-                    "householdId": household_id,
-                }),
+                on_household("playlists:1", "getPlaylists", household_id),
                 json!({}),
             )
             .await?;

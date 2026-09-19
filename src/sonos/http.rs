@@ -279,12 +279,10 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow!("no HTTP status in response from {authority}"))?;
-    let chunked = head
-        .lines()
-        .any(|l| {
-            let l = l.to_ascii_lowercase();
-            l.starts_with("transfer-encoding:") && l.contains("chunked")
-        });
+    let chunked = head.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    });
     let body = if chunked {
         dechunk(body)?
     } else {

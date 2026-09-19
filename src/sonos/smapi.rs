@@ -58,6 +58,7 @@ use roxmltree::Document;
 use serde::{Deserialize, Serialize};
 
 use super::http;
+use super::xml_escape;
 
 /// Short, and deliberately shorter than the LAN's. Search is invoked from a bar
 /// widget as a subprocess; a call that never returns is worse than one that fails.
@@ -480,8 +481,8 @@ pub async fn search(
         "search",
         &format!(
             "<id>{}</id><term>{}</term><index>{index}</index><count>{count}</count>",
-            escape(category),
-            escape(term)
+            xml_escape(category),
+            xml_escape(term)
         ),
         refreshed,
     )
@@ -508,7 +509,7 @@ pub async fn metadata(
         "getMetadata",
         &format!(
             "<id>{}</id><index>{index}</index><count>{count}</count>",
-            escape(id)
+            xml_escape(id)
         ),
         refreshed,
     )
@@ -523,10 +524,7 @@ pub async fn metadata(
 /// services mix them freely in either call.
 fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
     let doc = Document::parse(body).with_context(|| format!("parsing {what} response"))?;
-    let total = doc
-        .descendants()
-        .find(|n| n.has_tag_name("total"))
-        .and_then(|n| n.text())
+    let total = element_text(&doc, "total")
         .and_then(|t| t.parse().ok())
         .unwrap_or(0);
     let items = doc
@@ -595,14 +593,12 @@ pub async fn media_uri(
         service,
         token,
         "getMediaURI",
-        &format!("<id>{}</id>", escape(id)),
+        &format!("<id>{}</id>", xml_escape(id)),
         refreshed,
     )
     .await?;
     let doc = Document::parse(&body).context("parsing getMediaURI response")?;
-    doc.descendants()
-        .find(|n| n.has_tag_name("getMediaURIResult"))
-        .and_then(|n| n.text())
+    element_text(&doc, "getMediaURIResult")
         .map(str::to_string)
         .ok_or_else(|| anyhow!("{} returned no media URI for {id}", service.name))
 }
@@ -733,7 +729,7 @@ pub async fn extended_metadata(
         service,
         token,
         "getExtendedMetadata",
-        &format!("<id>{}</id>", escape(id)),
+        &format!("<id>{}</id>", xml_escape(id)),
         refreshed,
     )
     .await?;
@@ -783,14 +779,17 @@ pub async fn rate_item(
         service,
         token,
         "rateItem",
-        &format!("<id>{}</id><rating>{}</rating>", escape(id), escape(rating)),
+        &format!(
+            "<id>{}</id><rating>{}</rating>",
+            xml_escape(id),
+            xml_escape(rating)
+        ),
         refreshed,
     )
     .await?;
     parse_rate_result(&body).with_context(|| format!("{} rateItem response", service.name))
 }
 
-/// A `rateItem` response, pure for testing against a captured payload.
 /// One element's text, by tag - the lookup every reply parser in this file
 /// does. Written out longhand six times before it had a name.
 fn element_text<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
@@ -799,6 +798,7 @@ fn element_text<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
         .and_then(|n| n.text())
 }
 
+/// A `rateItem` response, pure for testing against a captured payload.
 fn parse_rate_result(body: &str) -> Result<RateResult> {
     let doc = Document::parse(body)?;
     let should_skip = element_text(&doc, "shouldSkip").and_then(|t| t.parse::<bool>().ok());
@@ -824,7 +824,7 @@ pub async fn device_link_code(service: &Service, household: &str) -> Result<Link
         service,
         None,
         "getDeviceLinkCode",
-        &format!("<householdId>{}</householdId>", escape(household)),
+        &format!("<householdId>{}</householdId>", xml_escape(household)),
     )
     .await?
     {
@@ -870,7 +870,7 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
         service,
         Some(&empty),
         "getAppLink",
-        &format!("<householdId>{}</householdId>", escape(household)),
+        &format!("<householdId>{}</householdId>", xml_escape(household)),
     )
     .await?
     {
@@ -916,7 +916,7 @@ pub async fn device_auth_token(
     // nothing device-linked so far has, and sending an empty element to a
     // service that never asked is a way to find new failure modes.
     let device = link_device_id
-        .map(|d| format!("<linkDeviceId>{}</linkDeviceId>", escape(d)))
+        .map(|d| format!("<linkDeviceId>{}</linkDeviceId>", xml_escape(d)))
         .unwrap_or_default();
     let body = match call_soap(
         service,
@@ -924,8 +924,8 @@ pub async fn device_auth_token(
         "getDeviceAuthToken",
         &format!(
             "<householdId>{}</householdId><linkCode>{}</linkCode>{device}",
-            escape(household),
-            escape(link_code)
+            xml_escape(household),
+            xml_escape(link_code)
         ),
     )
     .await?
@@ -967,12 +967,12 @@ fn envelope(action: &str, params: &str, token: Option<&Token>) -> String {
             let household = t
                 .household
                 .as_deref()
-                .map(|h| format!("<householdId>{}</householdId>", escape(h)))
+                .map(|h| format!("<householdId>{}</householdId>", xml_escape(h)))
                 .unwrap_or_default();
             format!(
                 "<loginToken><token>{}</token><key>{}</key>{household}</loginToken>",
-                escape(&t.token),
-                escape(&t.key)
+                xml_escape(&t.token),
+                xml_escape(&t.key)
             )
         }
     };
@@ -1018,13 +1018,6 @@ async fn call_soap(
     )
     .await?;
 
-    // **The body decides whether this is a fault, not the status.** SOAP 1.1
-    // says a fault travels with HTTP 500, and most of them do - but Bandcamp
-    // answers `getDeviceAuthToken` with HTTP 200 and a `<s:Fault>` for every
-    // poll before the last one, which is the *normal* path through a device
-    // link. Trusting the status there read the pending fault as a successful
-    // reply and reported "linked but returned no authToken" seconds into a flow
-    // that had not started yet. Verified against Bandcamp 2026-08-31.
     if std::env::var_os("X2ROCK_DUMP_SMAPI").is_some() {
         eprintln!(
             "--- {action} request ---\n{}\n--- reply HTTP {status} ---\n{text}\n---",
@@ -1048,6 +1041,13 @@ async fn call_soap(
             refresh: None,
         }));
     }
+    // **The body decides whether this is a fault, not the status.** SOAP 1.1
+    // says a fault travels with HTTP 500, and most of them do - but Bandcamp
+    // answers `getDeviceAuthToken` with HTTP 200 and a `<s:Fault>` for every
+    // poll before the last one, which is the *normal* path through a device
+    // link. Trusting the status there read the pending fault as a successful
+    // reply and reported "linked but returned no authToken" seconds into a flow
+    // that had not started yet. Verified against Bandcamp 2026-08-31.
     if let Some(fault) = fault_in(&text) {
         return Ok(Err(fault));
     }
@@ -1216,14 +1216,6 @@ async fn call(
     }
 }
 
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,7 +1357,11 @@ mod tests {
         assert_eq!(tunein.manifest_uri.as_deref(), Some("https://cdn/m/tunein"));
 
         let ytm = &services[1];
-        assert_eq!(ytm.auth, Auth::AppLink, "not linkable from a desktop");
+        assert_eq!(
+            ytm.auth,
+            Auth::AppLink,
+            "the tier x2rock cannot drive unaided"
+        );
         assert_eq!(
             ytm.uri, "https://ytm/x",
             "Uri is used when there is no SecureUri"
@@ -1858,11 +1854,6 @@ mod tests {
         assert_eq!(auth.auth_token, "t");
         assert!(auth.private_key.is_empty());
         assert!(auth.user_id_hash_code.is_none());
-    }
-
-    #[test]
-    fn search_terms_are_escaped_into_the_envelope() {
-        assert_eq!(escape(r#"rock & <roll>"#), "rock &amp; &lt;roll&gt;");
     }
 
     /// iHeartRadio's real `NowPlayingRatings` block, trimmed of icon

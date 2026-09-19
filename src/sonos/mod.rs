@@ -27,6 +27,19 @@ pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
     host.parse().ok()
 }
 
+/// Text made safe to sit inside an XML element or attribute value.
+///
+/// The four characters XML reserves in both positions, so one function serves
+/// SOAP arguments and DIDL-Lite alike; `'` is left alone because every caller
+/// quotes attributes with `"`. Four copies of this chain had grown up - two in
+/// `bookmarks`, one each in `upnp` and `smapi` - before it was written once.
+pub fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// The one rustls crypto backend in this binary, named in one place.
 ///
 /// Both TLS paths build their config from this: the player websockets in
@@ -46,4 +59,14 @@ pub(crate) fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     PROVIDER
         .get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xml_escape;
+
+    #[test]
+    fn xml_escape_covers_the_four_reserved_characters() {
+        assert_eq!(xml_escape(r#"a&b<c>"d""#), "a&amp;b&lt;c&gt;&quot;d&quot;");
+    }
 }
