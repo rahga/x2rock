@@ -1136,11 +1136,11 @@ YouTube Premium subscription was re-registered.
 ### In the widget (2026-08-31)
 
 Kept items join the picker beneath the household's favorites — a flat list, since both answer "what
-should this room play" and the CLI emits them with the same field names. A **keep** glyph sits in
-each room's switch row, next to the TV input rather than with the grouping pair, because
-remembering what is playing is about this room's own source. It dims when there is no title to hang
-a name on, since the CLI refuses a live stream and a button that looks available and silently does
-nothing is worse than one that looks unavailable.
+should this room play" and the CLI emits them with the same field names. A **keep** glyph for each
+room's switch row was designed - beside the TV input, since remembering what is playing is about
+this room's own source; dimmed when there is no title, since the CLI refuses a live stream - but
+never wired in: `canKeep`/`keepPlaying`/`keepProc` sat unreferenced until a 2026-09-18 review found
+them and they were removed. Keeping is `x2rock keep` from a terminal; the widget *shows* kept items.
 
 `bookmarksProc` is quieter on failure than `favoritesProc`: an empty bookmark list is the normal
 state until someone keeps something, so a non-zero exit leaves the section absent rather than
