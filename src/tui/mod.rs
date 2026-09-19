@@ -450,7 +450,10 @@ pub enum Overlay {
     },
     Help,
     /// A question that has to be answered before something whole-house happens.
+    /// The title names what is being asked about, so a second question could
+    /// never come up under the first one's heading.
     Confirm {
+        title: &'static str,
         prompt: String,
         intent: Intent,
     },
@@ -549,23 +552,6 @@ impl App {
         (since >= STALE).then_some(since)
     }
 
-    /// A screen to draw in a test, and a way to age it. Only for the view's
-    /// own tests, which need an `App` without a bus behind it.
-    #[cfg(test)]
-    pub fn new_for_test(rooms: Vec<RoomSnapshot>) -> Self {
-        Self::new(rooms)
-    }
-
-    #[cfg(test)]
-    pub fn set_contacted_for_test(&mut self, at: Instant) {
-        self.contacted = at;
-    }
-
-    #[cfg(test)]
-    fn set_emptied_for_test(&mut self, at: Instant) {
-        self.emptied = Some(at);
-    }
-
     pub fn rooms(&self) -> &[RoomSnapshot] {
         &self.rooms
     }
@@ -625,7 +611,7 @@ impl App {
         // The overlay lists the rooms of a group that has just changed shape,
         // so its cursor is measured against a list that no longer exists.
         if let Overlay::Group { cursor } = self.overlay {
-            let rows = self.group_rows().len();
+            let rows = self.group_row_count();
             self.overlay = match rows {
                 0 => Overlay::None,
                 rows => Overlay::Group {
@@ -701,6 +687,20 @@ impl App {
             );
         }
         rows
+    }
+
+    /// How many rows [`Self::group_rows`] would have, without building them:
+    /// every member of the selected group, then every room outside it.
+    fn group_row_count(&self) -> usize {
+        let Some(selected) = self.selected() else {
+            return 0;
+        };
+        self.rooms
+            .iter()
+            .filter(|other| other.bus_name != selected.bus_name)
+            .map(|other| other.members.len())
+            .sum::<usize>()
+            + selected.members.len()
     }
 
     /// Where the overlay's cursor is, for drawing it.
@@ -924,6 +924,7 @@ impl App {
     fn party(&mut self) -> Intent {
         if self.rooms.len() == 1 && self.rooms[0].is_group() {
             self.overlay = Overlay::Confirm {
+                title: " Party ",
                 prompt: "End the party and put every room on its own?".into(),
                 intent: Intent::PartyOff,
             };
@@ -936,6 +937,7 @@ impl App {
             return Intent::Nothing;
         };
         self.overlay = Overlay::Confirm {
+            title: " Party ",
             prompt: format!("Group every room to {host}, playing what it plays?"),
             intent: Intent::Party(host),
         };
@@ -943,7 +945,6 @@ impl App {
     }
 
     fn on_group_key(&mut self, key: KeyEvent, cursor: usize) -> Intent {
-        let rows = self.group_rows();
         match key.code {
             KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
                 self.overlay = Overlay::None;
@@ -951,7 +952,7 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.overlay = Overlay::Group {
-                    cursor: (cursor + 1).min(rows.len().saturating_sub(1)),
+                    cursor: (cursor + 1).min(self.group_row_count().saturating_sub(1)),
                 };
                 Intent::Nothing
             }
@@ -1596,7 +1597,7 @@ mod tests {
 
         // Empty for longer than a republish takes: believed.
         app.apply(Vec::new());
-        app.set_emptied_for_test(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
+        app.emptied = Some(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
         app.apply(Vec::new());
         assert!(app.rooms().is_empty());
     }
@@ -1607,7 +1608,7 @@ mod tests {
     fn an_empty_household_leaves_nothing_selected() {
         let mut app = grouped();
         app.cursor = 1;
-        app.set_emptied_for_test(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
+        app.emptied = Some(Instant::now() - REPUBLISH_GRACE - Duration::from_secs(1));
         app.apply(Vec::new());
         assert_eq!(app.cursor, 0);
         assert!(app.selected().is_none());

@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
+use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedValue;
 use zbus::{Connection, MatchRule, MessageStream, fdo};
 
@@ -51,7 +52,6 @@ pub trait Player {
     fn next(&self) -> zbus::Result<()>;
     fn previous(&self) -> zbus::Result<()>;
     fn play_pause(&self) -> zbus::Result<()>;
-    fn stop(&self) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn metadata(&self) -> zbus::Result<HashMap<String, OwnedValue>>;
@@ -59,8 +59,6 @@ pub trait Player {
     fn playback_status(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn volume(&self) -> zbus::Result<f64>;
-    #[zbus(property)]
-    fn set_volume(&self, level: f64) -> zbus::Result<()>;
     #[zbus(property)]
     fn loop_status(&self) -> zbus::Result<String>;
     #[zbus(property)]
@@ -151,13 +149,20 @@ impl Source {
         Ok(rooms)
     }
 
+    /// The proxies here are read once and dropped, so they are built without a
+    /// property cache: with one, the first read would add a match rule and
+    /// fetch every property, and the drop would remove the rule again - per
+    /// player, per snapshot, every heartbeat - which is exactly the per-player
+    /// bookkeeping the single rule in [`Self::watch`] exists to avoid.
     async fn read_one(&self, bus_name: &str) -> Result<RoomSnapshot> {
         let app = MediaPlayer2Proxy::builder(&self.connection)
             .destination(bus_name.to_owned())?
+            .cache_properties(CacheProperties::No)
             .build()
             .await?;
         let player = PlayerProxy::builder(&self.connection)
             .destination(bus_name.to_owned())?
+            .cache_properties(CacheProperties::No)
             .build()
             .await?;
 

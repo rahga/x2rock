@@ -41,7 +41,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::None => {}
         Overlay::Group { .. } => grouping(frame, app, body),
         Overlay::Help => help(frame, body),
-        Overlay::Confirm { prompt, .. } => confirm(frame, prompt, body),
+        Overlay::Confirm { title, prompt, .. } => confirm(frame, title, prompt, body),
     }
 }
 
@@ -323,7 +323,7 @@ fn grouping(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn confirm(frame: &mut Frame, prompt: &str, area: Rect) {
+fn confirm(frame: &mut Frame, title: &'static str, prompt: &str, area: Rect) {
     let area = centered(area, Span::raw(prompt).width() as u16 + 4, 5);
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -332,7 +332,7 @@ fn confirm(frame: &mut Frame, prompt: &str, area: Rect) {
             Line::raw(""),
             Line::styled("y to confirm · esc to cancel", Style::new().dim()),
         ])
-        .block(Block::bordered().title(" Party ")),
+        .block(Block::bordered().title(title)),
         area,
     );
 }
@@ -551,7 +551,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use std::time::Instant;
 
-        let mut app = App::new_for_test(vec![RoomSnapshot {
+        let mut app = App::new(vec![RoomSnapshot {
             room: "Kitchen".to_owned(),
             members: vec!["Kitchen".to_owned()],
             ..RoomSnapshot::default()
@@ -563,7 +563,7 @@ mod tests {
         assert!(fresh.contains("1 room"), "{fresh}");
         assert!(!fresh.contains("no answer"), "{fresh}");
 
-        app.set_contacted_for_test(Instant::now() - Duration::from_secs(600));
+        app.contacted = Instant::now() - Duration::from_secs(600);
         terminal.draw(|frame| draw(frame, &app)).expect("a frame");
         let stale = terminal.backend().to_string();
         assert!(stale.contains("no answer for 10m"), "{stale}");

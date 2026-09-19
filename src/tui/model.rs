@@ -140,6 +140,20 @@ fn strings(value: Option<&OwnedValue>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A per-member list the daemon sends as decimal strings - [`MEMBER_VOLUMES`]
+/// says why - read back as the numbers they are.
+fn numbers(value: Option<&OwnedValue>) -> Vec<u8> {
+    strings(value)
+        .iter()
+        .map(|v| v.parse().unwrap_or(0))
+        .collect()
+}
+
+/// The same, for a list of flags.
+fn flags(value: Option<&OwnedValue>) -> Vec<bool> {
+    strings(value).iter().map(|v| v == "true").collect()
+}
+
 impl RoomSnapshot {
     /// Fold an MPRIS `Metadata` map in. Absent keys leave their fields empty,
     /// which is the right reading here: the daemon omits a key it has nothing
@@ -150,18 +164,12 @@ impl RoomSnapshot {
         self.title = first_string(get("xesam:title"));
         self.artist = first_string(get("xesam:artist"));
         self.members = strings(get(MEMBERS));
-        self.member_volumes = strings(get(MEMBER_VOLUMES))
-            .iter()
-            .map(|v| v.parse().unwrap_or(0))
-            .collect();
+        self.member_volumes = numbers(get(MEMBER_VOLUMES));
         // The slider positions, where the daemon sends them: the same list with
         // mute not zeroing anything. Trusted only when it lines up with the
         // members, since a half-published list would pair levels with the
         // wrong rooms.
-        let levels: Vec<u8> = strings(get(MEMBER_VOLUME_LEVELS))
-            .iter()
-            .map(|v| v.parse().unwrap_or(0))
-            .collect();
+        let levels = numbers(get(MEMBER_VOLUME_LEVELS));
         if !levels.is_empty() && levels.len() == self.member_volumes.len() {
             self.member_volumes = levels;
         }
@@ -170,15 +178,9 @@ impl RoomSnapshot {
             .ok()
             .map(|level| f64::from(level) / 100.0);
         self.muted = flag(get(MUTED));
-        self.member_muted = strings(get(MEMBER_MUTED))
-            .iter()
-            .map(|v| v == "true")
-            .collect();
+        self.member_muted = flags(get(MEMBER_MUTED));
         self.fixed_volume = flag(get(FIXED_VOLUME));
-        self.member_fixed = strings(get(MEMBER_FIXED_VOLUME))
-            .iter()
-            .map(|v| v == "true")
-            .collect();
+        self.member_fixed = flags(get(MEMBER_FIXED_VOLUME));
         self.crossfade = flag(get(CROSSFADE));
         self.no_source = flag(get(NO_SOURCE));
         self.on_tv = flag(get(ON_TV_INPUT));
