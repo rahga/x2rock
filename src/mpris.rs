@@ -61,6 +61,9 @@ pub fn bus_suffix_among(room: &str, taken: &HashSet<String>) -> String {
 struct RoomState {
     status: Option<PlaybackStatus>,
     metadata: Metadata,
+    /// The object id `daemon::remember` last stored for this room, so a
+    /// metadata event for the same track writes nothing.
+    last_remembered: Option<String>,
 
     /// Position at the last event, and when that was, so `Position` can advance
     /// between events without polling the player.
@@ -580,14 +583,33 @@ impl RoomPlayer {
     ///
     /// Never fails a caller: a browse that does not answer means the version is
     /// simply not updated this time round.
-    pub async fn refresh_queue_version(&self) -> Option<Property> {
-        let version = Upnp::new(self.connection.ip()).update_id().await.ok()?;
+    pub fn queue_version_fetch(
+        &self,
+    ) -> impl std::future::Future<Output = Option<String>> + Send + 'static {
+        let ip = self.connection.ip();
+        async move { Upnp::new(ip).update_id().await.ok() }
+    }
+
+    /// The other half of [`queue_version_fetch`]: fold a fetched version in,
+    /// announcing only when it moved. Cheap, and run on the event loop.
+    pub fn apply_queue_version(&self, version: String) -> Option<Property> {
         let mut state = self.state.lock().unwrap();
         if state.queue_version == version {
             return None;
         }
         state.queue_version = version;
         state.announce()
+    }
+
+    /// Whether `object_id` is a different track from the one last remembered
+    /// for this room - and note it, so the next event for it says no.
+    pub fn track_changed(&self, object_id: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.last_remembered.as_deref() == Some(object_id) {
+            return false;
+        }
+        state.last_remembered = Some(object_id.to_string());
+        true
     }
 
     /// Fold a `metadataStatus` event in.
@@ -748,8 +770,12 @@ fn track_id(group_id: &str, title: Option<&str>, artist: Option<&str>) -> TrackI
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
+    // An empty group id - nothing real sends one, but it comes off the wire -
+    // would make `//track/`, which is not a valid path, and the `expect` below
+    // would abort the daemon. One character keeps the path well-formed.
+    let group = if group.is_empty() { "_".to_string() } else { group };
     let path = format!("/com/rahga/x2rock/{group}/track/{:x}", hasher.finish());
-    TrackId::try_from(path).expect("path built only from [A-Za-z0-9_/]")
+    TrackId::try_from(path).expect("path built only from [A-Za-z0-9_/], never empty")
 }
 
 impl RootInterface for RoomPlayer {

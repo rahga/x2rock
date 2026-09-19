@@ -23,7 +23,6 @@ use crate::session::{self, Session};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{self, Event, Groups, Player};
 use crate::state::State;
-use mpris_server::Property;
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -219,6 +218,11 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
     // off is still waiting to be seen rather than lost between subscriptions.
     let mut restarts = restarts.subscribe();
 
+    // The session layer's progress lines ("rescanning", a player that did not
+    // answer) are for a person at a terminal. Here `StatusLog` decides what
+    // reaches the journal and coalesces it; those would otherwise land
+    // uncoalesced on every retry while a household is switched off.
+    session::silence_progress();
     let mut backoff = MIN_BACKOFF;
     let mut status = StatusLog::new(verbose());
     loop {
@@ -390,12 +394,32 @@ async fn follow(
     )
     .await?;
 
+    // Queue-version fetches run off this loop and answer here. A UPnP browse
+    // has an 8s timeout; awaited inline, one wedged coordinator stalled every
+    // room's events for that long. One fetch per group in flight at a time - a
+    // burst of playback events collapses onto it - see `apply`.
+    let (versions, mut fetched) = mpsc::unbounded_channel::<(String, Option<String>)>();
+    let mut fetching: HashSet<String> = HashSet::new();
+
     loop {
         let event = tokio::select! {
             event = events.recv() => match event {
                 Some(event) => event,
                 None => bail!("event channel closed"),
             },
+            done = fetched.recv() => {
+                // Cannot close: `versions` lives on this stack.
+                let Some((group_id, version)) = done else { continue };
+                fetching.remove(&group_id);
+                if let Some(version) = version
+                    && let Some(room) = rooms.iter().find(|s| s.imp().group_id == group_id)
+                    && let Some(property) = room.imp().apply_queue_version(version)
+                    && let Err(e) = room.properties_changed(vec![property]).await
+                {
+                    log(&format!("{}: {e:#}", room.imp().room));
+                }
+                continue;
+            }
             // The sockets did not survive whatever this was, even though they
             // still look open, so do not wait for them to say so. Unless they
             // postdate it: a change is reported a moment after it happened, and
@@ -513,7 +537,7 @@ async fn follow(
                 else {
                     continue;
                 };
-                if let Err(e) = apply(server, &event).await {
+                if let Err(e) = apply(server, &event, &versions, &mut fetching).await {
                     log(&format!("{}: {e:#}", server.imp().room));
                 }
             }
@@ -714,7 +738,12 @@ fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
         })
 }
 
-async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
+async fn apply(
+    server: &Server<RoomPlayer>,
+    event: &Arc<Event>,
+    versions: &mpsc::UnboundedSender<(String, Option<String>)>,
+    fetching: &mut HashSet<String>,
+) -> Result<()> {
     let player = server.imp();
     let body = event.body.clone();
     // Under X2ROCK_LOG_EVENTS, the body exactly as it arrived. A partial
@@ -741,20 +770,27 @@ async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
                 log(&format!("{}: playback failed: {error}", player.room));
                 return Ok(());
             }
-            let mut properties = player.apply_playback(&serde_json::from_value(body)?);
+            let properties = player.apply_playback(&serde_json::from_value(body)?);
             // The queue's version has to be fetched rather than read off the
             // event, because the players do not send one - see
-            // `RoomPlayer::refresh_queue_version`. A fresher Metadata supersedes
-            // whatever apply_playback built, rather than being sent beside it.
-            if let Some(metadata) = player.refresh_queue_version().await {
-                properties.retain(|p| !matches!(p, Property::Metadata(_)));
-                properties.push(metadata);
+            // `RoomPlayer::queue_version_fetch`. Fetched off the event loop and
+            // folded in by `follow` when it answers, as a Metadata of its own
+            // that supersedes the one built here. One fetch per group at a
+            // time: the events of a burst all want the same answer.
+            if !fetching.contains(&player.group_id) {
+                fetching.insert(player.group_id.clone());
+                let fetch = player.queue_version_fetch();
+                let versions = versions.clone();
+                let group_id = player.group_id.clone();
+                tokio::spawn(async move {
+                    let _ = versions.send((group_id, fetch.await));
+                });
             }
             properties
         }
         "playbackMetadata:1" => {
             let status: proto::MetadataStatus = serde_json::from_value(body)?;
-            remember(&status);
+            remember(&status, player);
             player.apply_metadata(&status)
         }
         "groupVolume:1" => player.apply_volume(&serde_json::from_value(body)?),
@@ -772,8 +808,10 @@ async fn apply(server: &Server<RoomPlayer>, event: &Arc<Event>) -> Result<()> {
 /// in the journal, not a room that will no longer pause.
 ///
 /// Cheap by construction too: the store is only rewritten when the object id
-/// actually changes, so a track playing for four minutes writes once.
-fn remember(status: &proto::MetadataStatus) {
+/// actually changes - [`RoomPlayer::track_changed`] remembers the last one per
+/// room - so a track playing for four minutes writes once, however many
+/// metadata events it sends.
+fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
     let Some(track) = status.current_item.as_ref().and_then(|i| i.track.as_ref()) else {
         return;
     };
@@ -784,6 +822,13 @@ fn remember(status: &proto::MetadataStatus) {
         // A live stream has no id worth storing; that is normal, not an error.
         return;
     };
+    // Only when the track changes. Every `playbackMetadata` event names the
+    // current track - a queue edit, a new `nextItem`, a re-sent status - and
+    // without this each one cost a lock, a read and an atomic rewrite of the
+    // store for a track that was already the last thing remembered.
+    if !player.track_changed(&bookmark.object_id) {
+        return;
+    }
     bookmark.artist = track.artist.as_ref().and_then(|a| a.name.clone());
     bookmark.art_url = track.image_url.clone();
     bookmark.kind = Some("track".into());

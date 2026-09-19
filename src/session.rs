@@ -38,6 +38,23 @@ pub async fn attach(ip: IpAddr, state: &mut State, fingerprint: Option<&str>) ->
     Ok(Session { connection, groups })
 }
 
+/// Progress lines - "rescanning", a player that did not answer - are for a
+/// person at a terminal watching a scan take its seconds. The daemon has its
+/// own idea of what reaches the journal and coalesces it (`StatusLog`), and
+/// must not print an uncoalesced line on every retry while a household is
+/// switched off; it calls [`silence_progress`] once and these go nowhere.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn silence_progress() {
+    QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn progress(line: &str) {
+    if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
+}
+
 /// Find a player to talk to: an explicit address, then whatever is remembered for
 /// this network, then - only on a network we already know has players - a rescan.
 ///
@@ -101,7 +118,7 @@ pub async fn connect(
     // household answering first must never silently stand in for the one that
     // was actually asked for, which ruled out the old `attach_any`-over-the-
     // raw-scan fallback (first responder wins, whoever that is).
-    eprintln!("Remembered players did not answer; rescanning...");
+    progress("Remembered players did not answer; rescanning...");
     let nobody_answered = || {
         let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
         crate::hint::no_players_answered(&names)
@@ -196,7 +213,7 @@ pub async fn discover_households(
             Err(e) => Err(e),
         };
         if let Err(e) = &probed {
-            eprintln!("{ip}: {e:#}");
+            progress(&format!("{ip}: {e:#}"));
         }
         probed
     });
@@ -228,7 +245,7 @@ pub async fn discover_households(
                     break;
                 }
                 Err(e) => {
-                    eprintln!("{}: {e:#}", connection.ip());
+                    progress(&format!("{}: {e:#}", connection.ip()));
                     last_error = Some(e);
                     connection.close();
                 }
@@ -272,7 +289,7 @@ pub async fn discover_households(
                 state.save()?;
             }
         }
-        None => eprintln!("Could not identify this network; results will not be remembered."),
+        None => progress("Could not identify this network; results will not be remembered."),
     }
     Ok(discovered)
 }
