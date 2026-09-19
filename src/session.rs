@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use crate::discover;
 use crate::netid;
 use crate::sonos::local::Connection;
-use crate::sonos::proto::{Groups, Player};
+use crate::sonos::proto::{Group, Groups, Player};
 use crate::state::{KnownPlayer, State};
 
 /// A live connection together with the household topology it reported.
@@ -379,13 +379,21 @@ pub struct Target {
 }
 
 pub fn target(groups: &Groups, room: Option<&str>) -> Result<Target> {
-    let group = groups.resolve(room)?;
-    Ok(Target {
+    Ok(target_for(groups, groups.resolve(room)?))
+}
+
+/// The [`Target`] for a group already in hand - the whole-household commands
+/// (`status`, `party off`, `link --from-player`) walk the group list and want
+/// one per group without resolving a room name they never had. The one place
+/// the coordinator's address is looked up, so `coordinator_ip` cannot mean
+/// something different here than it does through [`target`].
+pub fn target_for(groups: &Groups, group: &Group) -> Target {
+    Target {
         group_id: group.id.clone(),
         name: group.name.clone(),
         coordinator_id: group.coordinator_id.clone(),
         coordinator_ip: groups.player(&group.coordinator_id).and_then(Player::ip),
-    })
+    }
 }
 
 /// Group commands go to the coordinator, which may not be the player we reached.

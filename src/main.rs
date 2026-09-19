@@ -552,10 +552,10 @@ async fn run(cli: Cli) -> Result<()> {
             content::bookmark(&session, &player, &target, room, &query, next).await?
         }
         Command::Favorite { query } => {
-            content::favorite(&session, &player, &target, group, &query).await?
+            content::favorite(&session, &player, &target, &query).await?
         }
         Command::Playlist { query } => {
-            content::playlist(&session, &player, &target, group, &query).await?
+            content::playlist(&session, &player, &target, &query).await?
         }
         Command::Tv => speaker::tv(&session, &player, &target, room).await?,
         Command::Chime { volume } => {

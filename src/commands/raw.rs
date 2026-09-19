@@ -177,21 +177,13 @@ pub async fn api(
             // A player answers player-scoped commands only for itself, so
             // naming one over a socket to another gets ERROR_INVALID_OBJECT_ID
             // - "Incorrect playerId" - for an id that is perfectly correct.
-            let player = match room {
-                Some(room) => session.groups.player_named(room)?,
-                None => {
-                    let id = session.groups.resolve(None)?.coordinator_id.clone();
-                    session
-                        .groups
-                        .player(&id)
-                        .ok_or_else(|| anyhow!("group coordinator {id} is not a known player"))?
-                }
-            };
+            // The same resolution every per-player command uses, so `--scope
+            // player` and `led` cannot drift on which speaker `--room` means.
+            let target = session::target(&session.groups, room)?;
+            let (player, upnp) = named_speaker(session, &target, room)?;
             envelope["playerId"] = json!(player.id);
-            if let Some(ip) = player.ip()
-                && ip != connection.ip()
-            {
-                connection = Connection::open(ip).await?;
+            if upnp.ip() != connection.ip() {
+                connection = Connection::open(upnp.ip()).await?;
             }
         }
         RawScope::None => {}

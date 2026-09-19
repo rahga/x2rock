@@ -8,12 +8,12 @@ use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::json;
 
 use super::stream::{STREAM_START, StreamStart, stream_item};
-use super::{on_word, transition};
+use super::{on_off, on_word, refreshed_catalogue, transition, upnp_ip};
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{MetadataStatus, Repeat};
 use crate::sonos::upnp::Upnp;
-use crate::{catalogue, credentials, hint, sonos, streams};
+use crate::{credentials, hint, sonos, streams};
 
 /// Set or read repeat, printing the outcome. Shared by the single arm and fan-out.
 pub async fn apply_repeat(
@@ -65,10 +65,9 @@ pub async fn apply_shuffle(
     let player = session::coordinator(session, target).await?;
     let status = player.playback_status(group).await?;
     let before = status.modes().shuffle;
-    let after = match mode.as_deref() {
+    let after = match on_off("shuffle", mode.as_deref())? {
         None => before,
-        Some(text @ ("on" | "off")) => {
-            let shuffle = text == "on";
+        Some(shuffle) => {
             ensure!(
                 !shuffle || status.actions().can_shuffle,
                 "what {} is playing cannot be shuffled",
@@ -77,7 +76,6 @@ pub async fn apply_shuffle(
             player.set_shuffle(group, shuffle).await?;
             shuffle
         }
-        Some(_) => bail!("shuffle takes on or off"),
     };
     if json {
         println!("{}", json!({ "room": target.name, "shuffle": after }));
@@ -98,14 +96,12 @@ pub async fn apply_crossfade(
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let before = player.playback_status(group).await?.modes().crossfade;
-    let after = match mode.as_deref() {
+    let after = match on_off("crossfade", mode.as_deref())? {
         None => before,
-        Some(text @ ("on" | "off")) => {
-            let crossfade = text == "on";
+        Some(crossfade) => {
             player.set_crossfade(group, crossfade).await?;
             crossfade
         }
-        Some(_) => bail!("crossfade takes on or off"),
     };
     if json {
         println!("{}", json!({ "room": target.name, "crossfade": after }));
@@ -116,6 +112,7 @@ pub async fn apply_crossfade(
     Ok(())
 }
 
+/// Apply one transport verb to a group, through its coordinator.
 pub async fn apply_transport(
     session: &session::Session,
     target: &session::Target,
@@ -286,7 +283,7 @@ pub async fn play_or_resume(
     player: &Connection,
     target: &session::Target,
 ) -> Result<()> {
-    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
     let failed = match play_confirmed(player, &upnp, &target.group_id, &target.name).await {
         Ok(()) => return Ok(()),
         Err(e) if hint::of(&e).0 == "playback_failed" => e,
@@ -328,13 +325,9 @@ async fn try_resume_stream(
     else {
         return Ok(false);
     };
-    // Refreshed, as every other by-id lookup does: a cleared or schema-bumped
-    // cache would otherwise make this give up until some `search` happened to
-    // rebuild it, and the failure would look like the URL's.
-    let mut catalogue = catalogue::Catalogue::load();
-    catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await?;
+    // Refreshed, as every other by-id lookup does: a stale cache would make
+    // this give up, and the failure would look like the URL's.
+    let catalogue = refreshed_catalogue(session).await?;
     let Some(service) = catalogue.by_id(&stream.service_id).cloned() else {
         return Ok(false);
     };
@@ -407,7 +400,7 @@ pub async fn play_track(player: &Connection, target: &Target, n: u32) -> Result<
     // The queue lives on the coordinator and only UPnP can address it by
     // position. Make sure the queue is the source first: after a radio
     // station or line-in it is not, and Seek would fail with error 701.
-    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
     if !upnp.playing_from_queue().await? {
         upnp.use_queue(&target.coordinator_id).await?;
     }

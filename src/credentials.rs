@@ -246,27 +246,24 @@ impl Credentials {
     }
 }
 
-/// Build an [`Account`] from a fresh `getDeviceAuthToken` reply.
+/// Build an [`Account`] from a fresh `getDeviceAuthToken` reply. The service
+/// id is not part of it - that is the key the caller files it under.
 pub fn from_device_auth(
-    service_id: &str,
     service_name: &str,
     household: Option<&str>,
     nickname: Option<&str>,
     auth: DeviceAuth,
-) -> (String, Account) {
-    (
-        service_id.to_string(),
-        Account {
-            service_name: service_name.to_string(),
-            auth_token: auth.auth_token,
-            private_key: auth.private_key,
-            user_id_hash_code: auth.user_id_hash_code,
-            nickname: nickname.map(str::to_string),
-            household: household.map(str::to_string),
-            account_id: None,
-            linked: now(),
-        },
-    )
+) -> Account {
+    Account {
+        service_name: service_name.to_string(),
+        auth_token: auth.auth_token,
+        private_key: auth.private_key,
+        user_id_hash_code: auth.user_id_hash_code,
+        nickname: nickname.map(str::to_string),
+        household: household.map(str::to_string),
+        account_id: None,
+        linked: now(),
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use serde_json::json;
 use super::mmss;
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
-use crate::sonos::proto::{Groups, MetadataStatus, PlaybackStatus, Player, Repeat, Volume};
+use crate::sonos::proto::{Groups, MetadataStatus, PlaybackStatus, Repeat, Volume};
 use crate::{catalogue, hint, netid};
 
 fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
@@ -199,15 +199,7 @@ pub async fn print_status(session: &session::Session, json: bool, full: bool) ->
         .groups
         .iter()
         .map(|group| {
-            let target = session::Target {
-                group_id: group.id.clone(),
-                name: group.name.clone(),
-                coordinator_id: group.coordinator_id.clone(),
-                coordinator_ip: session
-                    .groups
-                    .player(&group.coordinator_id)
-                    .and_then(Player::ip),
-            };
+            let target = session::target_for(&session.groups, group);
             let members: Vec<String> = session
                 .groups
                 .members(group)
@@ -225,7 +217,9 @@ pub async fn print_status(session: &session::Session, json: bool, full: bool) ->
         })
         .collect();
     let fetched_all = futures_util::future::join_all(
-        planned.iter().map(|(_, target, ..)| fetch_room(session, target)),
+        planned
+            .iter()
+            .map(|(_, target, ..)| fetch_room(session, target)),
     )
     .await;
     for ((group, _, members, has_tv, coordinator), fetched) in planned.iter().zip(fetched_all) {
@@ -515,7 +509,7 @@ pub async fn now(player: &Connection, target: &Target, json: bool) -> Result<()>
 mod tests {
     use super::*;
     use crate::commands::admin::SKILL;
-    use crate::sonos::proto::Group;
+    use crate::sonos::proto::{Group, Player};
     use anyhow::anyhow;
 
     #[test]

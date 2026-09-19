@@ -14,18 +14,19 @@ pub mod status;
 pub mod stream;
 pub mod volume;
 
+use std::net::IpAddr;
+
 use anyhow::{Context, Result, bail};
 
 use crate::cli::Command;
 use crate::hint;
-use crate::session;
-use crate::sonos::upnp;
+use crate::session::{self, Session, Target};
+use crate::sonos::upnp::{self, Upnp};
+use crate::state::State;
+use crate::{catalogue, credentials, sonos};
 use playback::{apply_crossfade, apply_repeat, apply_shuffle, apply_transport, play_or_resume};
 use volume::apply_vol;
 
-/// An exact id wins, then a case-insensitive substring of the name; among
-/// several of those, a whole-name match settles it, and anything else is
-/// ambiguous and says so - naming `hint` as the command that lists them.
 /// "a" or "an" for a word about to follow it.
 ///
 /// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
@@ -39,6 +40,9 @@ pub fn article(word: &str) -> &'static str {
     }
 }
 
+/// An exact id wins, then a case-insensitive substring of the name; among
+/// several of those, a whole-name match settles it, and anything else is
+/// ambiguous and says so - naming `hint` as the command that lists them.
 pub fn find_named<'a, T>(
     items: &'a [T],
     query: &str,
@@ -141,6 +145,54 @@ pub fn on_off(what: &str, text: Option<&str>) -> Result<Option<bool>> {
 /// The word for a boolean, for the read-back lines.
 pub fn on_word(on: bool) -> &'static str {
     if on { "on" } else { "off" }
+}
+
+/// The `n`th of `items`, counted from 1 the way every listing here numbers
+/// its rows - `search --play 3` plays the row printed as `3.` - so `0` is
+/// nobody rather than the first.
+pub fn nth<T>(items: &[T], n: usize) -> Option<&T> {
+    items.get(n.checked_sub(1)?)
+}
+
+/// Where a group's UPnP calls go: its coordinator, which owns the queue and
+/// the transport, or `fallback` - the connection already open - when the
+/// topology gave no address for it. One rule, because a call that went to a
+/// member instead would edit the wrong queue while looking like it worked.
+pub fn upnp_ip(target: &Target, fallback: IpAddr) -> IpAddr {
+    target.coordinator_ip.unwrap_or(fallback)
+}
+
+/// The service catalogue, brought up to date against the player the session
+/// reached. Every by-id lookup wants this before it trusts an id: a cleared or
+/// schema-bumped cache would otherwise make a bookmark or a remembered stream
+/// look unknown until some `search` happened to rebuild it. Not saved here -
+/// the callers that care whether anything changed refresh for themselves.
+pub async fn refreshed_catalogue(session: &Session) -> Result<catalogue::Catalogue> {
+    let mut catalogue = catalogue::Catalogue::load();
+    catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await?;
+    Ok(catalogue)
+}
+
+/// The opening `play-item` and `queue-item` share: connect, refresh the
+/// catalogue, and resolve `service` among what this machine can use, with the
+/// token held for it. The two commands take the same arguments and differ
+/// only in what they do with the item once it is named.
+pub async fn connect_for_service(
+    ip: Option<IpAddr>,
+    household: Option<&str>,
+    room: Option<&str>,
+    service: &str,
+) -> Result<(Session, sonos::smapi::Service, Option<sonos::smapi::Token>)> {
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state, household, room).await?;
+    let catalogue = refreshed_catalogue(&session).await?;
+    let linked = credentials::Credentials::load()?;
+    let usable = catalogue.usable(&linked);
+    let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
+    let token = linked.token_for(&chosen.id);
+    Ok((session, chosen, token))
 }
 
 /// Fan a per-room command across several `--room`, topology resolved once. Only

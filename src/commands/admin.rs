@@ -101,12 +101,6 @@ pub fn handle_skill(
     Ok(())
 }
 
-/// Where the user unit goes: `$XDG_CONFIG_HOME/systemd/user`, which is where
-/// `systemctl --user` looks and where the README told people to copy it.
-fn user_unit_dir() -> Result<PathBuf> {
-    service::user_unit_dir()
-}
-
 /// Auto-detect the current shell from $SHELL environment variable.
 fn detect_shell() -> Option<clap_complete::Shell> {
     let shell_path = std::env::var("SHELL").ok()?;
@@ -121,11 +115,11 @@ fn detect_shell() -> Option<clap_complete::Shell> {
     }
 }
 
-/// Whether the running daemon is on a binary other than `exe`: replaced in
-/// place, or started from somewhere else. `false` whenever it cannot tell, so
-/// an unreadable `/proc` never forces a restart.
-fn daemon_runs_stale_binary(exe: &std::path::Path) -> bool {
-    let Ok(out) = std::process::Command::new("systemctl")
+/// The pid of the daemon systemd is running, or `None` when it is not running
+/// or `systemctl` could not be asked. `MainPID` reads `0` for an inactive unit,
+/// which is no process, so it is folded into `None` rather than handed on.
+fn main_pid() -> Option<u32> {
+    let out = std::process::Command::new("systemctl")
         .args([
             "--user",
             "show",
@@ -135,18 +129,49 @@ fn daemon_runs_stale_binary(exe: &std::path::Path) -> bool {
             "--value",
         ])
         .output()
-    else {
-        return false;
-    };
-    let pid: u32 = match String::from_utf8_lossy(&out.stdout).trim().parse() {
-        Ok(pid) if pid > 0 => pid,
-        _ => return false,
-    };
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|&pid| pid > 0)
+}
+
+/// Whether the daemon running as `pid` is on a binary other than `exe`:
+/// replaced in place, or started from somewhere else. `false` whenever it
+/// cannot tell, so an unreadable `/proc` never forces a restart.
+fn daemon_runs_stale_binary(exe: &std::path::Path, pid: u32) -> bool {
     let Ok(running) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
         return false;
     };
     let installed = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
     service::runs_stale_binary(&running, &installed)
+}
+
+/// Say what `place_desktop_files` did, the same way from `service install` and
+/// `desktop install`: a file written is announced, a file left alone because
+/// someone edited it is noted with the flag that would overwrite it, and one
+/// that was already current says nothing here.
+fn report_placed(placed: &service::DesktopPlacement, force: bool) {
+    if placed.desktop_written {
+        println!(
+            "Installed desktop entry to {}.",
+            placed.desktop_path.display()
+        );
+    } else if placed.desktop_edited && !force {
+        println!(
+            "Note: {} has been edited and was left in place; use --force to overwrite.",
+            placed.desktop_path.display()
+        );
+    }
+    if placed.icon_written {
+        println!("Installed icon to {}.", placed.icon_path.display());
+    } else if placed.icon_edited && !force {
+        println!(
+            "Note: {} has been edited and was left in place; use --force to overwrite.",
+            placed.icon_path.display()
+        );
+    }
 }
 
 /// Write one generated file. Three cases, judged by [`service::classify`]:
@@ -222,7 +247,7 @@ fn install_service(
     // network with several Sonos systems dropping the one set earlier leaves
     // the daemon asking which household forever. So an existing one is kept
     // unless `--household` replaces it or `--no-household` drops it.
-    let dir = user_unit_dir()?;
+    let dir = service::user_unit_dir()?;
     let household = match (household, no_household) {
         (Some(_), true) => bail!("--household and --no-household contradict each other"),
         (Some(given), false) => Some(given.to_owned()),
@@ -263,7 +288,7 @@ fn install_service(
         .unwrap_or(false);
     // An upgrade in place leaves the unit identical, so "changed" alone misses
     // the commonest reinstall; ask the running process what it is running.
-    let stale = was_active && daemon_runs_stale_binary(&exe);
+    let stale = was_active && main_pid().is_some_and(|pid| daemon_runs_stale_binary(&exe, pid));
 
     let mut changed = place_generated(&dir.join("x2rock.service"), &unit, force)?;
     let dropin = dir.join("x2rock.service.d").join("headless.conf");
@@ -277,27 +302,7 @@ fn install_service(
     }
     if !headless {
         match service::place_desktop_files(force) {
-            Ok(placed) => {
-                if placed.desktop_written {
-                    println!(
-                        "Installed desktop entry to {}.",
-                        placed.desktop_path.display()
-                    );
-                } else if placed.desktop_edited && !force {
-                    println!(
-                        "Note: {} has been edited and was left in place; use --force to overwrite.",
-                        placed.desktop_path.display()
-                    );
-                }
-                if placed.icon_written {
-                    println!("Installed icon to {}.", placed.icon_path.display());
-                } else if placed.icon_edited && !force {
-                    println!(
-                        "Note: {} has been edited and was left in place; use --force to overwrite.",
-                        placed.icon_path.display()
-                    );
-                }
-            }
+            Ok(placed) => report_placed(&placed, force),
             Err(e) => eprintln!("Note: could not install desktop files: {e}"),
         }
     }
@@ -437,28 +442,7 @@ fn status_service(json: bool) -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    let pid = if active {
-        std::process::Command::new("systemctl")
-            .args([
-                "--user",
-                "show",
-                "x2rock.service",
-                "-p",
-                "MainPID",
-                "--value",
-            ])
-            .output()
-            .ok()
-            .and_then(|out| {
-                String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .filter(|&p| p > 0)
-    } else {
-        None
-    };
+    let pid = if active { main_pid() } else { None };
 
     let (desktop_file_exists, icon_exists) = service::desktop_installed();
     let desktop_installed = desktop_file_exists && icon_exists;
@@ -467,12 +451,10 @@ fn status_service(json: bool) -> Result<()> {
     // answering this command. `service status` run from a build tree asks about
     // the installed daemon, and "stale" because those two are different
     // binaries is true of nothing anyone wanted to know.
-    let stale = active
-        && exec
-            .as_deref()
-            .map(std::path::Path::new)
-            .map(daemon_runs_stale_binary)
-            .unwrap_or(false);
+    let stale = match (pid, exec.as_deref()) {
+        (Some(pid), Some(exec)) => daemon_runs_stale_binary(std::path::Path::new(exec), pid),
+        _ => false,
+    };
 
     if json {
         let status = ServiceStatusJson {
@@ -670,25 +652,7 @@ pub fn desktop(action: Option<DesktopAction>, force: bool) -> Result<()> {
     match action {
         None | Some(DesktopAction::Install) => {
             let placed = service::place_desktop_files(force)?;
-            if placed.desktop_written {
-                println!(
-                    "Installed desktop entry to {}.",
-                    placed.desktop_path.display()
-                );
-            } else if placed.desktop_edited && !force {
-                println!(
-                    "Note: {} has been edited and was left in place; use --force to overwrite.",
-                    placed.desktop_path.display()
-                );
-            }
-            if placed.icon_written {
-                println!("Installed icon to {}.", placed.icon_path.display());
-            } else if placed.icon_edited && !force {
-                println!(
-                    "Note: {} has been edited and was left in place; use --force to overwrite.",
-                    placed.icon_path.display()
-                );
-            }
+            report_placed(&placed, force);
             if !placed.desktop_written
                 && !placed.icon_written
                 && !placed.desktop_edited

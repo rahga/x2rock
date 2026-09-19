@@ -10,13 +10,12 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
 use super::stream::{StreamStart, stream_item};
-use super::{find_named, is_refusal, mmss};
+use super::{connect_for_service, find_named, is_refusal, mmss, refreshed_catalogue, upnp_ip};
 use crate::cli::{BookmarksAction, QueueAction};
 use crate::session::{self, Session, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::Favorite;
 use crate::sonos::upnp::{self, Upnp};
-use crate::state::State;
 use crate::{bookmarks, catalogue, credentials, sonos};
 
 fn print_sources(sources: &[upnp::BrowseItem], json: bool) {
@@ -282,11 +281,7 @@ async fn enqueue_item(
     play: bool,
 ) -> Result<()> {
     let target = session::target(&session.groups, room)?;
-    let upnp = Upnp::new(
-        target
-            .coordinator_ip
-            .unwrap_or_else(|| session.connection.ip()),
-    );
+    let upnp = Upnp::new(upnp_ip(&target, session.connection.ip()));
     // **A container is enqueued by a different scheme from a track.** A track is
     // fetched; a container is expanded by the player, which walks it and adds
     // each track it holds. Handing a container a track's URI is what got UPnP
@@ -306,19 +301,35 @@ async fn enqueue_item(
             bookmarks::service_didl(id, title, cdudn),
         ),
     };
-    let length = upnp.add_to_queue(&uri, &didl, false).await?;
     if !play {
+        let length = upnp.add_to_queue(&uri, &didl, false).await?;
         println!("{} — queued {title} at {length}", target.name);
         return Ok(());
     }
+    enqueue_and_play(session, &target, &upnp, &uri, &didl).await?;
+    println!("{} — {title} on {}", target.name, service.name);
+    Ok(())
+}
+
+/// Add one item to the group's queue and play it from there: the shared body
+/// of [`enqueue_item`] and [`play_bookmark`], which differ only in where the
+/// URI and DIDL come from. The queue is made the current source first - after
+/// a station or line-in it is not, and `Seek` would fail with 701 - and the
+/// play goes to the coordinator, the one player that answers for the group.
+async fn enqueue_and_play(
+    session: &session::Session,
+    target: &Target,
+    upnp: &Upnp,
+    uri: &str,
+    didl: &str,
+) -> Result<()> {
+    let length = upnp.add_to_queue(uri, didl, false).await?;
     if !upnp.playing_from_queue().await? {
         upnp.use_queue(&target.coordinator_id).await?;
     }
     upnp.seek_track(length).await?;
-    let coordinator = session::coordinator(session, &target).await?;
-    coordinator.playback(&target.group_id, "play").await?;
-    println!("{} — {title} on {}", target.name, service.name);
-    Ok(())
+    let coordinator = session::coordinator(session, target).await?;
+    coordinator.playback(&target.group_id, "play").await
 }
 
 /// Put a bookmark in the room's queue and jump to it, using its own remembered
@@ -331,26 +342,20 @@ async fn enqueue_item(
 /// until this existed `bookmark` had no way to notice and just gave up.
 async fn play_bookmark(
     session: &session::Session,
-    room: Option<&str>,
+    player: &Connection,
+    target: &Target,
     bookmark: &bookmarks::Bookmark,
     cdudn: &str,
 ) -> Result<()> {
-    let target = session::target(&session.groups, room)?;
-    let upnp = Upnp::new(
-        target
-            .coordinator_ip
-            .unwrap_or_else(|| session.connection.ip()),
-    );
-    let length = upnp
-        .add_to_queue(&bookmark.uri(), &bookmark.didl(cdudn), false)
-        .await?;
-    if !upnp.playing_from_queue().await? {
-        upnp.use_queue(&target.coordinator_id).await?;
-    }
-    upnp.seek_track(length).await?;
-    let coordinator = session::coordinator(session, &target).await?;
-    coordinator.playback(&target.group_id, "play").await?;
-    Ok(())
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
+    enqueue_and_play(
+        session,
+        target,
+        &upnp,
+        &bookmark.uri(),
+        &bookmark.didl(cdudn),
+    )
+    .await
 }
 
 /// `x2rock play-item`: play a hit whose id is already known.
@@ -367,16 +372,7 @@ pub async fn run_play_item(
     id: &str,
     title: Option<&String>,
 ) -> Result<()> {
-    let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household, room).await?;
-    let mut catalogue = catalogue::Catalogue::load();
-    catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await?;
-    let linked = credentials::Credentials::load()?;
-    let usable = catalogue.usable(&linked);
-    let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
-    let token = linked.token_for(&chosen.id);
+    let (session, chosen, token) = connect_for_service(ip, household, room, service).await?;
     play_item(
         &session,
         room,
@@ -400,15 +396,9 @@ pub async fn run_queue_item(
     id: &str,
     title: Option<&String>,
 ) -> Result<()> {
-    let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household, room).await?;
-    let mut catalogue = catalogue::Catalogue::load();
-    catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await?;
-    let linked = credentials::Credentials::load()?;
-    let usable = catalogue.usable(&linked);
-    let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
+    // The token is not wanted: an enqueue hands the player a cdudn and lets
+    // it resolve the account, so nothing here talks to the service.
+    let (session, chosen, _) = connect_for_service(ip, household, room, service).await?;
     let title = title.map(String::as_str).unwrap_or(id);
 
     // Refused rather than half-worked. `play-item` answers a stream by streaming
@@ -724,10 +714,7 @@ pub async fn bookmark(
     // The cdudn names the account the player resolves the content with,
     // and it is derived from the service type list rather than copied
     // from anything - see `Service::cdudn`.
-    let mut catalogue = catalogue::Catalogue::load();
-    catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await?;
+    let catalogue = refreshed_catalogue(session).await?;
     // Two different failures, worth telling apart: a service the player
     // has never heard of, and one it lists but gives no type for.
     let service = catalogue
@@ -754,12 +741,12 @@ pub async fn bookmark(
         // Queuing for later, not playing now - streaming would start it
         // immediately and break what `--next` promised, so there is no
         // fallback here: a refusal is just a refusal.
-        let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+        let upnp = Upnp::new(upnp_ip(target, player.ip()));
         upnp.add_to_queue(&bookmark.uri(), &bookmark.didl(&cdudn), true)
             .await?;
         println!("{:<24} {}", target.name, bookmark.name);
     } else {
-        match play_bookmark(session, room, &bookmark, &cdudn).await {
+        match play_bookmark(session, player, target, &bookmark, &cdudn).await {
             Ok(()) => println!("{:<24} {}", target.name, bookmark.name),
             // The same rule `play_item` follows for a fresh search/browse
             // hit: a refusal means this is not queue material, most often
@@ -789,19 +776,18 @@ pub async fn bookmark(
     Ok(())
 }
 
-/// `x2rock favorite`: play a household favorite on `group`, by name or id.
+/// `x2rock favorite`: play a household favorite on `target`, by name or id.
 pub async fn favorite(
     session: &Session,
     player: &Connection,
     target: &Target,
-    group: &str,
     query: &str,
 ) -> Result<()> {
     let household = session.connection.household_id().await?;
     let favorites = session.connection.favorites(&household).await?;
     let favorite = find_favorite(&favorites.items, query)?;
     // Household-scoped to find, group-scoped to play.
-    player.load_favorite(group, &favorite.id).await?;
+    player.load_favorite(&target.group_id, &favorite.id).await?;
     println!("{:<24} {}", target.name, favorite.name);
     Ok(())
 }
@@ -811,7 +797,6 @@ pub async fn playlist(
     session: &Session,
     player: &Connection,
     target: &Target,
-    group: &str,
     query: &str,
 ) -> Result<()> {
     let household = session.connection.household_id().await?;
@@ -827,9 +812,22 @@ pub async fn playlist(
     // Household-scoped to find, group-scoped to play, as with a
     // favorite. The id passed is the bare one this list reports: the
     // `SQ:0` form `queue sources` shows is refused here.
-    player.load_playlist(group, &playlist.id).await?;
+    player.load_playlist(&target.group_id, &playlist.id).await?;
     println!("{:<24} {}", target.name, playlist.name);
     Ok(())
+}
+
+/// Everything that can go in a queue by name: the saved playlists (`SQ:`) and
+/// the favorites (`FV:2`), searched as one list because both enqueue the same
+/// way. Shortcuts are dropped - they have no resource, so they can neither be
+/// enqueued nor played, and offering one only produces "has nothing to play"
+/// a step later. The two browses are independent, so they run together.
+pub async fn queue_sources(upnp: &Upnp) -> Result<Vec<upnp::BrowseItem>> {
+    let (mut sources, favorites) =
+        tokio::try_join!(upnp.browse_content("SQ:"), upnp.browse_content("FV:2"))?;
+    sources.extend(favorites);
+    sources.retain(|item| !item.shortcut);
+    Ok(sources)
 }
 
 /// `x2rock queue`: list, edit, save or append to `target`'s queue. Every
@@ -840,7 +838,7 @@ pub async fn queue(
     action: Option<QueueAction>,
     json: bool,
 ) -> Result<()> {
-    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player.ip()));
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
     let room = target.name.as_str();
     match action {
         None => {
@@ -896,12 +894,7 @@ pub async fn queue(
             }
         }
         Some(QueueAction::Sources { query }) => {
-            let mut sources = upnp.browse_content("SQ:").await?;
-            sources.extend(upnp.browse_content("FV:2").await?);
-            // Shortcuts are not sources: they have no resource, so they
-            // can neither be enqueued nor played, and offering one only
-            // produces "has nothing to play" a step later.
-            sources.retain(|item| !item.shortcut);
+            let mut sources = queue_sources(&upnp).await?;
             if let Some(query) = &query {
                 let needle = query.to_lowercase();
                 sources.retain(|i| i.title.to_lowercase().contains(&needle));
@@ -909,14 +902,7 @@ pub async fn queue(
             print_sources(&sources, json);
         }
         Some(QueueAction::Add { query, next }) => {
-            // Saved playlists and favorites both enqueue the same way,
-            // so they are searched as one list.
-            let mut sources = upnp.browse_content("SQ:").await?;
-            sources.extend(upnp.browse_content("FV:2").await?);
-            // Shortcuts are not sources: they have no resource, so they
-            // can neither be enqueued nor played, and offering one only
-            // produces "has nothing to play" a step later.
-            sources.retain(|item| !item.shortcut);
+            let sources = queue_sources(&upnp).await?;
             let item = find_content(&sources, &query)?;
             let uri = item
                 .uri

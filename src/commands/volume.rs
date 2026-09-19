@@ -395,8 +395,10 @@ pub async fn each(
 mod tests {
     use super::*;
 
-    /// A queue that is not the source still lists its items, and marks none of
-    /// them current.
+    /// `normalize` parses as a volume word alongside the levels and `mute`, and
+    /// `all_at` - the read that decides whether a group reports "members
+    /// differ" - leaves a fixed-volume member out of the question, since a Port
+    /// feeding an amplifier has no level of its own to even out.
     #[test]
     fn normalize_is_a_volume_word_and_fixed_members_do_not_unbalance() {
         assert!(matches!(

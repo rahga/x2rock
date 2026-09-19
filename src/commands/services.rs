@@ -12,6 +12,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
 use super::content::{play_item, queueable};
+use super::nth;
 use crate::cli::RateDirection;
 use crate::session;
 use crate::sonos::local::Connection;
@@ -70,10 +71,12 @@ pub fn save_refreshed_token(
 /// mid-call handed the very next call (`play_item`) the token that call had
 /// just proven stale.
 ///
-/// Loads its own store: callers of this one are past the point of having a
-/// `Credentials` already open for another reason, so there is nothing to
-/// avoid reloading. `save_refreshed_token` is the one that matters for reuse.
+/// Writes into the store the caller already holds - every caller loaded one
+/// to look the token up in the first place - so the refresh is saved through
+/// the same `Credentials` the command is working from, rather than a second
+/// copy loaded here that could disagree with it.
 fn use_refreshed_token(
+    creds: &mut credentials::Credentials,
     service_id: &str,
     token: Option<sonos::smapi::Token>,
     refreshed: Option<sonos::smapi::RefreshedToken>,
@@ -87,9 +90,7 @@ fn use_refreshed_token(
         new_token.private_key.clone()
     };
     let household = token.and_then(|t| t.household);
-    if let Ok(mut creds) = credentials::Credentials::load() {
-        save_refreshed_token(&mut creds, service_id, new_token.clone());
-    }
+    save_refreshed_token(creds, service_id, new_token.clone());
     Some(sonos::smapi::Token {
         token: new_token.auth_token,
         key,
@@ -227,7 +228,7 @@ pub async fn run_rate(
         }
     );
 
-    let linked = credentials::Credentials::load()?;
+    let mut linked = credentials::Credentials::load()?;
     let token = linked.token_for(&service.id);
 
     let mut refreshed = None;
@@ -238,7 +239,7 @@ pub async fn run_rate(
         &mut refreshed,
     )
     .await?;
-    let token = use_refreshed_token(&service.id, token, refreshed);
+    let token = use_refreshed_token(&mut linked, &service.id, token, refreshed);
 
     let up = direction == RateDirection::Up;
     let chosen = properties
@@ -264,7 +265,7 @@ pub async fn run_rate(
     )
     .await?;
     // Nothing follows that needs the token; the call is for its save.
-    let _ = use_refreshed_token(&service.id, token, refreshed);
+    let _ = use_refreshed_token(&mut linked, &service.id, token, refreshed);
 
     // The rating already landed - a failure here must not read as the rating
     // itself having failed, which `?` would do (and which could send a caller
@@ -399,15 +400,7 @@ pub async fn run_link(
         // the session's socket only answers for the group it coordinates.
         let mut token = None;
         for group in &session.groups.groups {
-            let target = session::Target {
-                group_id: group.id.clone(),
-                name: group.name.clone(),
-                coordinator_id: group.coordinator_id.clone(),
-                coordinator_ip: session
-                    .groups
-                    .player(&group.coordinator_id)
-                    .and_then(|p| p.ip()),
-            };
+            let target = session::target_for(&session.groups, group);
             let Ok(connection) = session::coordinator(&session, &target).await else {
                 continue;
             };
@@ -446,34 +439,7 @@ pub async fn run_link(
     } else if chosen.id == sonos::plex::SERVICE_ID {
         let (pin, url) = sonos::plex::pin().await?;
         announce_link_page(&chosen.name, &url, no_open);
-        let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
-        eprint!("Waiting for you to finish");
-        let token = loop {
-            match sonos::plex::poll(&pin).await {
-                Ok(Some(token)) => {
-                    eprintln!();
-                    break token;
-                }
-                Ok(None) => {
-                    use std::io::Write;
-                    eprint!(".");
-                    let _ = std::io::stderr().flush();
-                }
-                Err(e) => {
-                    eprintln!();
-                    return Err(e);
-                }
-            }
-            if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
-                eprintln!();
-                bail!(
-                    "{} never confirmed the link. Run `x2rock link {}` again to start over.",
-                    chosen.name,
-                    chosen.name
-                );
-            }
-            tokio::time::sleep(sonos::smapi::LINK_POLL).await;
-        };
+        let token = wait_for_link(&chosen.name, || sonos::plex::poll(&pin)).await?;
         let auth = sonos::smapi::DeviceAuth {
             auth_token: token,
             private_key: String::new(),
@@ -500,57 +466,27 @@ pub async fn run_link(
             println!("Enter this code when asked:\n\n  {}\n", code.link_code);
         }
 
-        let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
-        eprint!("Waiting for you to finish");
-        let auth = loop {
-            match sonos::smapi::device_auth_token(
+        let auth = wait_for_link(&chosen.name, || {
+            sonos::smapi::device_auth_token(
                 &chosen,
                 &household,
                 &code.link_code,
                 code.link_device_id.as_deref(),
             )
-            .await
-            {
-                Ok(Some(auth)) => {
-                    eprintln!();
-                    break auth;
-                }
-                Ok(None) => {
-                    use std::io::Write;
-                    eprint!(".");
-                    let _ = std::io::stderr().flush();
-                }
-                Err(e) => {
-                    eprintln!();
-                    return Err(e);
-                }
-            }
-            if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
-                eprintln!();
-                bail!(
-                    "{} never confirmed the link. Run `x2rock link {}` again to start over.",
-                    chosen.name,
-                    chosen.name
-                );
-            }
-            tokio::time::sleep(sonos::smapi::LINK_POLL).await;
-        };
+        })
+        .await?;
         (auth, Some(code.link_code))
     };
 
     let nickname = nickname.cloned().unwrap_or_else(default_nickname);
     let hash = auth.user_id_hash_code.clone();
-    let (id, account) = credentials::from_device_auth(
-        &chosen.id,
-        &chosen.name,
-        Some(&household),
-        Some(&nickname),
-        auth,
-    );
+    let id = chosen.id.as_str();
+    let account =
+        credentials::from_device_auth(&chosen.name, Some(&household), Some(&nickname), auth);
     // Stored before anything else is attempted. A link code is single-use, so
     // losing the token to a later failure would mean walking back through the
     // browser to fix something that already worked.
-    linked.remember(&id, account);
+    linked.remember(id, account);
     linked.save()?;
     println!(
         "Linked {}. Search it with: x2rock search -s {}",
@@ -587,7 +523,7 @@ pub async fn run_link(
         .await
     {
         Ok(account_id) => {
-            if let Some(entry) = linked.services.get_mut(&id) {
+            if let Some(entry) = linked.services.get_mut(id) {
                 entry.account_id = account_id.clone();
             }
             linked.save()?;
@@ -613,6 +549,46 @@ pub async fn run_link(
         ),
     }
     Ok(())
+}
+
+/// Ask `poll` every `LINK_POLL` until the person has finished in the browser -
+/// the shared wait of the Plex PIN flow and the SMAPI device-link flow, which
+/// differ only in what they poll. `Ok(None)` is "not yet" and earns a dot on
+/// stderr; the first `Some` is the answer; an error ends the wait, as does the
+/// deadline, with a fresh `link` named as the way to start over - a link code
+/// is single-use, so nothing here can retry.
+async fn wait_for_link<T, F, Fut>(service_name: &str, mut poll: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<T>>>,
+{
+    let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
+    eprint!("Waiting for you to finish");
+    loop {
+        match poll().await {
+            Ok(Some(got)) => {
+                eprintln!();
+                return Ok(got);
+            }
+            Ok(None) => {
+                use std::io::Write;
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+            }
+            Err(e) => {
+                eprintln!();
+                return Err(e);
+            }
+        }
+        if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
+            eprintln!();
+            bail!(
+                "{service_name} never confirmed the link. Run `x2rock link {service_name}` \
+                 again to start over."
+            );
+        }
+        tokio::time::sleep(sonos::smapi::LINK_POLL).await;
+    }
 }
 
 /// `x2rock browse`: a music service's own containers, walked one level at a time.
@@ -661,7 +637,7 @@ pub async fn run_browse(
         Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
     }
 
-    let linked = credentials::Credentials::load()?;
+    let mut linked = credentials::Credentials::load()?;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
     // published search category on top of that. This comment used to say the
@@ -694,12 +670,10 @@ pub async fn run_browse(
         sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await?;
     // Feeds whatever comes next, below - not just persisted for later. A
     // token that just proved stale must not be handed straight to `play_item`.
-    let token = use_refreshed_token(&chosen.id, token, refreshed);
+    let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
 
-    if let Some(nth) = play {
-        let item = items
-            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
-            .ok_or_else(|| anyhow!("no row {nth}; {at} has {}", items.len()))?;
+    if let Some(n) = play {
+        let item = nth(&items, n).ok_or_else(|| anyhow!("no row {n}; {at} has {}", items.len()))?;
         // A container is a place, and refusing here is kinder than letting
         // getMediaURI refuse it with a grammar error about ids.
         //
@@ -792,17 +766,6 @@ pub async fn run_browse(
     Ok(())
 }
 
-/// `x2rock search`: the CLI talking to a music service. One of three commands
-/// that leave the LAN - `browse` and `link` are the others - and like them it is
-/// CLI-only and unreachable from the daemon. See "Rule: talking to a service
-/// never enters the daemon".
-///
-/// A player is wanted but not required. Listing what can be searched, and a
-/// service's categories, both come from the on-disk catalogue and must keep
-/// working when the household is unreachable - a cache that fails whenever the
-/// thing it caches is unavailable is not doing its job. Only `--play`, and a
-/// first run with nothing cached, genuinely need a player.
-#[allow(clippy::too_many_arguments)]
 /// How long one service gets to answer in a merged search.
 ///
 /// Shorter than the single-service budget on purpose: thirty-five services are
@@ -825,6 +788,16 @@ const FAN_OUT_COUNT: u32 = 5;
 /// service when twenty of them answered.
 const FAN_OUT_PER_SERVICE: usize = 3;
 
+/// `x2rock search`: the CLI talking to a music service. One of three commands
+/// that leave the LAN - `browse` and `link` are the others - and like them it is
+/// CLI-only and unreachable from the daemon. See "Rule: talking to a service
+/// never enters the daemon".
+///
+/// A player is wanted but not required. Listing what can be searched, and a
+/// service's categories, both come from the on-disk catalogue and must keep
+/// working when the household is unreachable - a cache that fails whenever the
+/// thing it caches is unavailable is not doing its job. Only `--play`, and a
+/// first run with nothing cached, genuinely need a player.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_search(
     ip: Option<IpAddr>,
@@ -865,7 +838,7 @@ pub async fn run_search(
         Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
     }
 
-    let linked = credentials::Credentials::load()?;
+    let mut linked = credentials::Credentials::load()?;
 
     // A term with no service is the merged search. Checked before the listing
     // below, which is what a bare term used to fall into: it printed the
@@ -884,7 +857,7 @@ pub async fn run_search(
         }
         return search_everywhere(
             &mut catalogue,
-            &linked,
+            &mut linked,
             &reached,
             room,
             candidates,
@@ -903,9 +876,10 @@ pub async fn run_search(
     let usable = catalogue.searchable(&linked);
 
     let Some(query) = service else {
-        let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
-        names.sort_unstable_by_key(|n| n.to_lowercase());
+        let mut sorted = usable.clone();
+        sorted.sort_unstable_by_key(|s| s.name.to_lowercase());
         if json {
+            let names: Vec<_> = sorted.iter().map(|s| s.name.as_str()).collect();
             println!("{}", serde_json::to_string_pretty(&names)?);
         } else {
             // "More" means it: what could be linked and is not yet, so the
@@ -920,13 +894,16 @@ pub async fn run_search(
                 usable.len(),
                 catalogue.services().len()
             );
-            for name in names {
-                let mark = if linked.services.values().any(|a| a.service_name == name) {
+            for s in &sorted {
+                // By id, as every other site asks: a name in Sonos's
+                // catalogue can change under a stable id, and the store is
+                // keyed by the id for exactly that reason.
+                let mark = if linked.get(&s.id).is_some() {
                     "  (linked)"
                 } else {
                     ""
                 };
-                println!("  {name}{mark}");
+                println!("  {}{mark}", s.name);
             }
             println!("\nSearch one with: x2rock search -s <service> <term>");
             if linkable > 0 {
@@ -1003,7 +980,7 @@ pub async fn run_search(
     {
         return search_everywhere(
             &mut catalogue,
-            &linked,
+            &mut linked,
             &reached,
             room,
             vec![chosen.clone()],
@@ -1063,12 +1040,11 @@ pub async fn run_search(
     .await?;
     // Feeds whatever comes next, below - not just persisted for later. A
     // token that just proved stale must not be handed straight to `play_item`.
-    let token = use_refreshed_token(&chosen.id, token, refreshed);
+    let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
 
-    if let Some(nth) = play {
-        let item = items
-            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
-            .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", items.len()))?;
+    if let Some(n) = play {
+        let item = nth(&items, n)
+            .ok_or_else(|| anyhow!("no result {n}; the search returned {}", items.len()))?;
         // A search can return places rather than things: every Mixcloud hit is a
         // `tag:` collection, not a track. Refusing here beats letting
         // getMediaURI refuse it with a grammar error about ids.
@@ -1328,7 +1304,7 @@ fn interleave(per_category: ByCategory<'_>, cap: usize) -> Vec<(&str, sonos::sma
 #[allow(clippy::too_many_arguments)]
 async fn search_everywhere(
     catalogue: &mut catalogue::Catalogue,
-    linked: &credentials::Credentials,
+    linked: &mut credentials::Credentials,
     reached: &Result<session::Session>,
     room: Option<&str>,
     candidates: Vec<sonos::smapi::Service>,
@@ -1478,7 +1454,8 @@ async fn search_everywhere(
         // Sequentially, after the fan-out: this writes the credentials file, and
         // several tasks racing to rewrite it is a good way to lose a token.
         if refresh.is_some() {
-            let _ = use_refreshed_token(&service.id, linked.token_for(&service.id), refresh);
+            let token = linked.token_for(&service.id);
+            let _ = use_refreshed_token(linked, &service.id, token, refresh);
         }
         // Named once however many of its categories failed. Five timeout lines
         // for one service hide the other thirty.
@@ -1514,10 +1491,9 @@ async fn search_everywhere(
         )
     });
 
-    if let Some(nth) = play {
-        let row = rows
-            .get(nth.checked_sub(1).unwrap_or(usize::MAX))
-            .ok_or_else(|| anyhow!("no result {nth}; the search returned {}", rows.len()))?;
+    if let Some(n) = play {
+        let row = nth(&rows, n)
+            .ok_or_else(|| anyhow!("no result {n}; the search returned {}", rows.len()))?;
         ensure!(
             !row.item.container || bookmarks::container_holds_tracks(&row.item.item_type),
             "{:?} is {} {}, which holds other containers rather than tracks. \

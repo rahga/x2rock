@@ -9,8 +9,8 @@ use std::net::IpAddr;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
-use super::content::find_content;
-use super::{on_off, on_word, transition};
+use super::content::{find_content, queue_sources};
+use super::{on_off, on_word, transition, upnp_ip};
 use crate::cli::{AlarmAction, AlarmsAction};
 use crate::session::{self, Session, Target};
 use crate::sonos;
@@ -62,13 +62,12 @@ fn print_alarms(alarms: &[upnp::Alarm], groups: &Groups, json: bool) {
             a.recurrence,
             a.duration,
             a.volume,
-            if a.enabled { "on" } else { "off" },
+            on_word(a.enabled),
             a.program(),
         );
     }
 }
 
-/// Apply one transport verb to a group, through its coordinator.
 /// What one `eq` invocation asked to change; `None` means leave it alone.
 ///
 /// A struct rather than four more parameters: they arrive together, are
@@ -367,11 +366,6 @@ pub async fn apply_eq(
             );
         }
     }
-    let on_off = |what: &str, text: Option<&str>| match text {
-        None => Ok(None),
-        Some(word @ ("on" | "off")) => Ok(Some(word == "on")),
-        Some(_) => bail!("{what} takes on or off"),
-    };
     let wanted_loudness = on_off("loudness", loudness.as_deref())?;
     let wanted_trueplay = on_off("trueplay", trueplay.as_deref())?;
     let wanted_night = on_off("night", night.as_deref())?;
@@ -596,7 +590,7 @@ pub async fn apply_sleep(
 ) -> Result<()> {
     // AVTransport answers for the group on its coordinator, the way the queue
     // and the TV input do.
-    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player_ip));
+    let upnp = Upnp::new(upnp_ip(target, player_ip));
     let wanted = duration.as_deref().map(parse_sleep).transpose()?;
     if let Some(after) = wanted {
         upnp.set_sleep_timer(after).await?;
@@ -640,7 +634,7 @@ pub async fn apply_snooze(
 ) -> Result<()> {
     // AVTransport answers for the group on its coordinator, like the sleep
     // timer above.
-    let upnp = Upnp::new(target.coordinator_ip.unwrap_or(player_ip));
+    let upnp = Upnp::new(upnp_ip(target, player_ip));
     let how_long = match duration.as_deref() {
         None => SNOOZE_DEFAULT,
         // `parse_sleep` is reused for the grammar, but its `off` arm has no
@@ -694,7 +688,14 @@ pub async fn tv(
     // named is asked first; otherwise (or when the widget names the
     // group by its coordinator) it is whichever member has one.
     let is_soundbar = |p: &&Player| p.has_tv();
-    let members = session.groups.members(session.groups.resolve(room)?);
+    // The target's own group, not the room resolved a second time: the caller
+    // resolved `room` into `target` already, and the coordinator is always a
+    // member of the group it coordinates.
+    let group = session
+        .groups
+        .group_of(&target.coordinator_id)
+        .ok_or_else(|| anyhow!("no group for {}", target.name))?;
+    let members = session.groups.members(group);
     let named = match room {
         Some(name) => Some(session.groups.player_named(name)?),
         None => session.groups.player(&target.coordinator_id),
@@ -707,7 +708,7 @@ pub async fn tv(
             .find(is_soundbar)
             .ok_or_else(|| anyhow!("no room in {} has a TV input", target.name))?,
     };
-    let coordinator_ip = target.coordinator_ip.unwrap_or(player.ip());
+    let coordinator_ip = upnp_ip(target, player.ip());
     let upnp = Upnp::new(coordinator_ip);
     // The soundbar's own address, so the switch can be confirmed there
     // when handing the group over costs the coordinator its reply.
@@ -773,9 +774,7 @@ pub async fn alarms(
             let (uri, metadata) = match program {
                 None => ("x-rincon-buzzer:0".to_string(), String::new()),
                 Some(query) => {
-                    let mut sources = upnp.browse_content("SQ:").await?;
-                    sources.extend(upnp.browse_content("FV:2").await?);
-                    sources.retain(|item| !item.shortcut);
+                    let sources = queue_sources(&upnp).await?;
                     let item = find_content(&sources, query)?;
                     let uri = item
                         .uri
@@ -824,7 +823,7 @@ pub async fn alarms(
                     alarm.recurrence,
                     alarm.duration,
                     alarm.volume,
-                    if alarm.enabled { "on" } else { "off" },
+                    on_word(alarm.enabled),
                 );
             }
         }

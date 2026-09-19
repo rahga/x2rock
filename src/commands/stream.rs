@@ -10,8 +10,10 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
+use super::nth;
 use super::services::save_refreshed_token;
-use crate::session;
+use super::speaker::named_speaker;
+use crate::session::{self, Target};
 use crate::sonos::local::Connection;
 use crate::state::State;
 use crate::{credentials, hint, sonos, stations, streams};
@@ -68,7 +70,7 @@ pub async fn stream_item(
         StreamStart::Resume => STREAM_START,
     };
     let target = session::target(&session.groups, room)?;
-    let (_, started) = stream_url(session, room, &uri, title, Some(service), wait).await?;
+    let started = stream_url(session, &target, &uri, title, Some(service), wait).await?;
     // Remembered against the group's coordinator, so `play` can re-resolve a
     // fresh URL once this one expires - the player will hold only the dead URL
     // by then, not the item that made it. Non-fatal: a stream that plays but is
@@ -240,8 +242,8 @@ fn report_started_json(room: &str, title: &str, url: &str, started: &Started) ->
 /// The half of [`stream_item`] that has nothing to do with services, shared so
 /// that `play-url` and a service's live stream cannot drift apart: they are the
 /// same two calls to the same namespace, and the only difference is whether a
-/// service gets named in the metadata. Returns the room's name, so the caller
-/// can word its own confirmation.
+/// service gets named in the metadata. The caller resolves the target, since it
+/// needs the room's name to word its own confirmation anyway.
 ///
 /// **A session rather than the transport, on purpose.** `SetAVTransportURI`
 /// with `x-rincon-mp3radio://<url>` also plays an arbitrary stream (verified
@@ -251,14 +253,13 @@ fn report_started_json(room: &str, title: &str, url: &str, started: &Started) ->
 /// exactly as it was, which is what a radio station should do.
 async fn stream_url(
     session: &session::Session,
-    room: Option<&str>,
+    target: &Target,
     url: &str,
     title: &str,
     service: Option<&sonos::smapi::Service>,
     wait: Duration,
-) -> Result<(String, Started)> {
-    let target = session::target(&session.groups, room)?;
-    let coordinator = session::coordinator(session, &target).await?;
+) -> Result<Started> {
+    let coordinator = session::coordinator(session, target).await?;
 
     let opened = coordinator
         .call(
@@ -304,7 +305,7 @@ async fn stream_url(
     // lost - or in this case meaningless - answer is checked rather than
     // believed.
     if wait.is_zero() {
-        return Ok((target.name.clone(), Started::Starting));
+        return Ok(Started::Starting);
     }
 
     let deadline = tokio::time::Instant::now() + wait;
@@ -324,7 +325,7 @@ async fn stream_url(
             Ok(status) => {
                 answered = true;
                 match status.state() {
-                    Some("PLAYING") => return Ok((target.name.clone(), Started::Playing)),
+                    Some("PLAYING") => return Ok(Started::Playing),
                     Some(state) => last = Some(state.to_string()),
                     None => {}
                 }
@@ -364,7 +365,7 @@ async fn stream_url(
             why: last_err,
         },
     };
-    Ok((target.name.clone(), started))
+    Ok(started)
 }
 
 /// `x2rock stations`: search the radio directory, and optionally play a hit.
@@ -393,16 +394,15 @@ pub async fn run_stations(
     }
 
     if let Some(n) = play {
-        let station = found
-            .get(n.checked_sub(1).unwrap_or(usize::MAX))
-            .ok_or_else(|| {
-                anyhow!(
-                    "there is no result {n}: the directory returned {}",
-                    found.len()
-                )
-            })?;
+        let station = nth(&found, n).ok_or_else(|| {
+            anyhow!(
+                "there is no result {n}: the directory returned {}",
+                found.len()
+            )
+        })?;
         let mut state = State::load()?;
         let session = session::connect(ip, &mut state, household, room).await?;
+        let target = session::target(&session.groups, room)?;
         let wait = if no_wait {
             Duration::ZERO
         } else {
@@ -411,9 +411,9 @@ pub async fn run_stations(
         // A directory row is a stranger's URL and the directory's own liveness
         // check is stale, so this is the one place the silent failure is
         // routine rather than exotic. That is why waiting is the default here.
-        let (room_name, started) = stream_url(
+        let started = stream_url(
             &session,
-            room,
+            &target,
             &station.url_resolved,
             &station.name,
             None,
@@ -421,9 +421,14 @@ pub async fn run_stations(
         )
         .await?;
         if json {
-            return report_started_json(&room_name, &station.name, &station.url_resolved, &started);
+            return report_started_json(
+                &target.name,
+                &station.name,
+                &station.url_resolved,
+                &started,
+            );
         }
-        return report_started(&room_name, &station.name, None, &started);
+        return report_started(&target.name, &station.name, None, &started);
     }
 
     if json {
@@ -477,20 +482,16 @@ pub async fn run_stations(
 /// Split out from [`run_play_url`] because it is the whole of what can be
 /// judged without a speaker, and therefore the whole of what a test can pin.
 fn stream_display_name(url: &str, title: Option<&str>) -> Result<String> {
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| bad_stream_url(url))
-        .map(|(s, r)| (s.to_lowercase(), r))?;
-    if !matches!(scheme.as_str(), "http" | "https") || rest.is_empty() {
-        return Err(bad_stream_url(url));
-    }
+    require_http_url(url)?;
     if let Some(title) = title {
         return Ok(title.to_owned());
     }
     // The host, not the last path segment: a stream URL's path is usually a
     // bitrate-and-format slug ("groovesalad-128-mp3") while the host names the
     // station. The player picks that slug when given nothing at all, which is
-    // what makes this default worth having.
+    // what makes this default worth having. The scheme is present - the check
+    // above passed - so the split cannot miss.
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     Ok(rest
         .split('/')
         .next()
@@ -533,9 +534,10 @@ const APP_ID: &str = "com.github.rahga.x2rock";
 
 /// Play a clip on the room's *own* player - the shared body of `chime` (the
 /// built-in sound, `stream_url` None) and `notify` (a URL). Player-scoped, so it
-/// resolves the named room to its own speaker the way `vol --player` does rather
-/// than to the group's coordinator: a chime should land on the room asked for,
-/// not the whole group it happens to be playing with.
+/// resolves the named room to its own speaker the way `vol --player` and every
+/// other per-speaker command do (`named_speaker`) rather than to the group's
+/// coordinator: a chime should land on the room asked for, not the whole group
+/// it happens to be playing with.
 pub async fn play_audio_clip(
     session: &session::Session,
     target: &session::Target,
@@ -543,16 +545,10 @@ pub async fn play_audio_clip(
     stream_url: Option<&str>,
     volume: Option<u8>,
 ) -> Result<()> {
-    let this = match room {
-        Some(name) => session.groups.player_named(name)?,
-        None => session
-            .groups
-            .player(&target.coordinator_id)
-            .ok_or_else(|| anyhow!("no player for {}", target.name))?,
-    };
-    let ip = this
-        .ip()
-        .ok_or_else(|| anyhow!("no address for {}", this.name))?;
+    // Only the address is wanted off the UPnP handle: the clip goes over the
+    // Control API, which is the one wire that carries `loadAudioClip`.
+    let (this, upnp) = named_speaker(session, target, room)?;
+    let ip = upnp.ip();
     // Player-scoped, so it must ride the player's own socket, not a
     // coordinator's - the same rule the per-player volume path follows.
     let speaker = if ip == session.connection.ip() {
@@ -601,16 +597,17 @@ pub async fn run_play_url(
     let name = stream_display_name(url, title)?;
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state, household, room).await?;
+    let target = session::target(&session.groups, room)?;
     let wait = if no_wait {
         Duration::ZERO
     } else {
         STREAM_START
     };
-    let (room_name, started) = stream_url(&session, room, url, &name, None, wait).await?;
+    let started = stream_url(&session, &target, url, &name, None, wait).await?;
     if json {
-        return report_started_json(&room_name, &name, url, &started);
+        return report_started_json(&target.name, &name, url, &started);
     }
-    report_started(&room_name, &name, None, &started)
+    report_started(&target.name, &name, None, &started)
 }
 
 #[cfg(test)]

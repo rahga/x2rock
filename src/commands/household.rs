@@ -319,16 +319,15 @@ pub async fn run_households(json: bool, redact: bool) -> Result<()> {
 pub async fn update(session: &Session, json: bool) -> Result<()> {
     // All at once: sequentially each unreachable player stacked its 8s
     // timeout onto a read-only command - the same shape `system` fixed.
-    let rows: Vec<_> = futures_util::future::join_all(session.groups.players.iter().map(
-        |player| async move {
+    let rows: Vec<_> =
+        futures_util::future::join_all(session.groups.players.iter().map(|player| async move {
             let found = match player.ip() {
                 Some(ip) => Upnp::new(ip).software_update().await,
                 None => Err(anyhow!("no address to reach it on")),
             };
             (player.name.clone(), found)
-        },
-    ))
-    .await;
+        }))
+        .await;
     if json {
         let items: Vec<_> = rows
             .iter()
@@ -427,7 +426,7 @@ pub async fn group(session: &Session, room: Option<&str>, rooms: &[String]) -> R
     }
     let host_id = host.id.clone();
     let ids: Vec<String> = joining.iter().map(|(id, _)| id.clone()).collect();
-    let target = session::target(&session.groups, room)?;
+    let target = session::target_for(&session.groups, host);
     let coordinator = session::coordinator(session, &target).await?;
     let info = coordinator
         .modify_group_members(&host_id, &ids, &[])
@@ -454,7 +453,7 @@ pub async fn party(session: &Session, room: Option<&str>, mode: Option<&str>) ->
                 println!("{}", group_line(host, &session.groups));
                 return Ok(());
             }
-            let target = session::target(&session.groups, room)?;
+            let target = session::target_for(&session.groups, host);
             let coordinator = session::coordinator(session, &target).await?;
             let info = coordinator
                 .modify_group_members(&host_id, &joining, &[])
@@ -477,13 +476,15 @@ pub async fn party(session: &Session, room: Option<&str>, mode: Option<&str>) ->
                 if leaving.is_empty() {
                     continue;
                 }
-                // Resolving with no name would pick the default group -
-                // some other group's coordinator, which refuses this one.
-                let Some(host) = session.groups.player(&group.coordinator_id) else {
+                // This group's own coordinator, not the default group's -
+                // some other group's coordinator refuses this one. A group
+                // whose coordinator the topology does not list has nobody to
+                // ask, so it is named and left as it is.
+                if session.groups.player(&group.coordinator_id).is_none() {
                     eprintln!("{}: coordinator unknown, left as it is", group.name);
                     continue;
-                };
-                let target = session::target(&session.groups, Some(&host.name))?;
+                }
+                let target = session::target_for(&session.groups, group);
                 let coordinator = session::coordinator(session, &target).await?;
                 coordinator
                     .modify_group_members(&group.id, &[], &leaving)
@@ -524,7 +525,7 @@ pub async fn ungroup(session: &Session, room: &str) -> Result<()> {
     let leaving_name = leaving.name.clone();
     // The group being changed is the one the room is leaving, whatever
     // --room might otherwise have selected.
-    let target = session::target(&session.groups, Some(room))?;
+    let target = session::target_for(&session.groups, group);
     let coordinator = session::coordinator(session, &target).await?;
     let info = coordinator
         .modify_group_members(&group_id, &[], &[leaving_id])
