@@ -96,7 +96,9 @@ impl Restarts {
     /// Watching nothing yet. Every source is optional, so this alone is a
     /// working - if slow - configuration.
     pub fn new() -> Self {
-        let (restarts, _) = broadcast::channel(1);
+        // Buffer up to 8 restart notifications so rapid bursts (e.g. system resume
+        // and concurrent NetworkManager changes) do not cause lagged receiver errors.
+        let (restarts, _) = broadcast::channel(8);
         let (network, mut raw) = mpsc::unbounded_channel();
 
         let sender = restarts.clone();

@@ -138,12 +138,11 @@ impl Source {
     pub async fn snapshot(&self) -> Result<Vec<RoomSnapshot>> {
         let mut rooms = Vec::new();
         for name in self.players().await? {
-            match self.read_one(&name).await {
-                Ok(room) => rooms.push(room),
-                // A player that vanished between listing and reading is not an
-                // error, it is a regroup landing mid-read. The next event brings
-                // the corrected list along.
-                Err(_) => continue,
+            // A player that vanished between listing and reading is not an
+            // error, it is a regroup landing mid-read. The next event brings
+            // the corrected list along.
+            if let Ok(room) = self.read_one(&name).await {
+                rooms.push(room);
             }
         }
         Ok(rooms)
@@ -234,8 +233,7 @@ impl Source {
                     };
                     let matched = owner
                         .args()
-                        .map(|a| a.name().starts_with(PREFIX))
-                        .unwrap_or(false);
+                        .is_ok_and(|a| a.name().starts_with(PREFIX));
                     if !matched {
                         continue;
                     }

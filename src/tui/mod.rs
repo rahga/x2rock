@@ -556,11 +556,11 @@ impl App {
         &self.rooms
     }
 
-    pub fn cursor(&self) -> usize {
+    pub const fn cursor(&self) -> usize {
         self.cursor
     }
 
-    pub fn overlay(&self) -> &Overlay {
+    pub const fn overlay(&self) -> &Overlay {
         &self.overlay
     }
 
@@ -704,7 +704,7 @@ impl App {
     }
 
     /// Where the overlay's cursor is, for drawing it.
-    pub fn group_cursor(&self) -> usize {
+    pub const fn group_cursor(&self) -> usize {
         match self.overlay {
             Overlay::Group { cursor } => cursor,
             _ => 0,
@@ -785,7 +785,7 @@ impl App {
     /// per direction. Both are silent rather than explained: the row already
     /// shows what rules them out - the `TV` badge, the context line - and a
     /// footer line would only repeat it.
-    fn transport(&mut self, what: Transport) -> Intent {
+    fn transport(&self, what: Transport) -> Intent {
         let Some(room) = self.selected() else {
             return Intent::Nothing;
         };

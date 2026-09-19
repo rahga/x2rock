@@ -62,23 +62,17 @@ enum Service {
 
 impl Service {
     /// The row in [`SERVICES`] this variant names.
-    ///
-    /// The typed variants and the raw table are the same strings, so they
-    /// are written once. A variant whose name is missing from the table is a
-    /// programming error rather than a runtime condition, hence the panic: the
-    /// unit test below walks every variant so it cannot reach a build.
-    fn entry(self) -> &'static ServiceEntry {
-        let name = match self {
-            Self::AvTransport => "AVTransport",
-            Self::ContentDirectory => "ContentDirectory",
-            Self::MusicServices => "MusicServices",
-            Self::AlarmClock => "AlarmClock",
-            Self::ZoneGroupTopology => "ZoneGroupTopology",
-            Self::RenderingControl => "RenderingControl",
-            Self::DeviceProperties => "DeviceProperties",
-            Self::HtControl => "HTControl",
-        };
-        service_entry(name).expect("every Service variant is in SERVICES")
+    const fn entry(self) -> &'static ServiceEntry {
+        match self {
+            Self::AlarmClock => &SERVICES[0],
+            Self::AvTransport => &SERVICES[2],
+            Self::ContentDirectory => &SERVICES[4],
+            Self::DeviceProperties => &SERVICES[5],
+            Self::HtControl => &SERVICES[8],
+            Self::MusicServices => &SERVICES[9],
+            Self::RenderingControl => &SERVICES[12],
+            Self::ZoneGroupTopology => &SERVICES[15],
+        }
     }
 }
 
@@ -2272,17 +2266,18 @@ mod tests {
     /// the test that makes the "written once" arrangement safe.
     #[test]
     fn every_typed_service_is_in_the_raw_table() {
-        for service in [
-            Service::AvTransport,
-            Service::ContentDirectory,
-            Service::MusicServices,
-            Service::AlarmClock,
-            Service::ZoneGroupTopology,
-            Service::RenderingControl,
-            Service::DeviceProperties,
-            Service::HtControl,
+        for (service, expected_name) in [
+            (Service::AvTransport, "AVTransport"),
+            (Service::ContentDirectory, "ContentDirectory"),
+            (Service::MusicServices, "MusicServices"),
+            (Service::AlarmClock, "AlarmClock"),
+            (Service::ZoneGroupTopology, "ZoneGroupTopology"),
+            (Service::RenderingControl, "RenderingControl"),
+            (Service::DeviceProperties, "DeviceProperties"),
+            (Service::HtControl, "HTControl"),
         ] {
             let entry = service.entry();
+            assert_eq!(entry.name, expected_name);
             assert!(entry.path.starts_with('/'), "{}", entry.name);
             assert!(entry.urn.contains(":service:"), "{}", entry.name);
         }
