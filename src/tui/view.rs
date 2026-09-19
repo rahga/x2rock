@@ -251,8 +251,12 @@ fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     if fixed {
         return vec![Span::styled("fixed volume", Style::new().dim())];
     }
-    let percent = (volume.clamp(0.0, 1.0) * 100.0).round() as usize;
-    let filled = (percent * BAR + 50) / 100;
+    let percent = if volume.is_nan() {
+        0
+    } else {
+        (volume.clamp(0.0, 1.0) * 100.0).round() as usize
+    };
+    let filled = ((percent * BAR + 50) / 100).min(BAR);
     let lit = if muted {
         Style::new().dim()
     } else {
@@ -264,7 +268,7 @@ fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
     }
     spans.extend([
         Span::styled("█".repeat(filled), lit),
-        Span::styled("░".repeat(BAR - filled), Style::new().dim()),
+        Span::styled("░".repeat(BAR.saturating_sub(filled)), Style::new().dim()),
         Span::styled(format!(" {percent:>3}%"), lit),
     ]);
     spans
@@ -631,5 +635,8 @@ mod tests {
         assert_eq!(filled(0.0), 0);
         assert_eq!(filled(0.62), 6);
         assert_eq!(filled(1.0), BAR);
+        assert_eq!(filled(2.5), BAR);
+        assert_eq!(filled(-0.5), 0);
+        assert_eq!(filled(f64::NAN), 0);
     }
 }

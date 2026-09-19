@@ -518,10 +518,17 @@ fn bad_stream_url(url: &str) -> anyhow::Error {
 /// way, by the player rather than by this machine.
 pub fn require_http_url(url: &str) -> Result<()> {
     match url.split_once("://") {
-        Some((scheme, rest))
-            if matches!(scheme.to_lowercase().as_str(), "http" | "https") && !rest.is_empty() =>
-        {
-            Ok(())
+        Some((scheme, rest)) if matches!(scheme.to_lowercase().as_str(), "http" | "https") => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let host_part = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            let host = host_part
+                .strip_prefix('[')
+                .and_then(|h| h.split_once(']'))
+                .map_or_else(|| host_part.split(':').next().unwrap_or(""), |(ipv6, _)| ipv6);
+            if !host.is_empty() {
+                return Ok(());
+            }
+            Err(bad_stream_url(url))
         }
         _ => Err(bad_stream_url(url)),
     }
@@ -768,6 +775,8 @@ mod tests {
             "x-rincon-mp3radio://ice1.somafm.com/s",
             "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
             "http://",
+            "http:///path",
+            "http://?query",
         ] {
             let err = stream_display_name(bad, None).unwrap_err();
             assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
@@ -782,7 +791,14 @@ mod tests {
         // rule: http/https with a host, and the same `bad_stream_url` code.
         assert!(require_http_url("http://x/s.mp3").is_ok());
         assert!(require_http_url("https://EXAMPLE.test/clip.wav").is_ok());
-        for bad in ["file:///tmp/x.mp3", "x.mp3", "http://", "spotify:track:1"] {
+        for bad in [
+            "file:///tmp/x.mp3",
+            "x.mp3",
+            "http://",
+            "http:///path",
+            "http://:8080/clip.mp3",
+            "spotify:track:1",
+        ] {
             let err = require_http_url(bad).unwrap_err();
             assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
         }

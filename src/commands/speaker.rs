@@ -428,15 +428,18 @@ pub async fn apply_eq(
     // because this secondary read did.
     let home_theater = if is_soundbar {
         let control = if upnp.ip() == session.connection.ip() {
-            session.connection.clone()
+            Some(session.connection.clone())
         } else {
-            Connection::open(upnp.ip()).await?
+            Connection::open(upnp.ip()).await.ok()
         };
-        control
-            .player_settings(&speaker.id)
-            .await
-            .ok()
-            .and_then(|s| s.home_theater)
+        match control {
+            Some(c) => c
+                .player_settings(&speaker.id)
+                .await
+                .ok()
+                .and_then(|s| s.home_theater),
+            None => None,
+        }
     } else {
         None
     };
@@ -532,12 +535,22 @@ fn parse_sleep(text: &str) -> Result<Option<std::time::Duration>> {
         // straight back without conversion.
         let parts: Option<Vec<u64>> = raw.split(':').map(|p| p.parse().ok()).collect();
         match parts.as_deref() {
-            Some([h, m, s]) => h * 3600 + m * 60 + s,
-            Some([m, s]) => m * 60 + s,
+            Some([h, m, s]) => h
+                .checked_mul(3600)
+                .and_then(|v| v.checked_add(m.checked_mul(60)?))
+                .and_then(|v| v.checked_add(*s))
+                .ok_or_else(bad)?,
+            Some([m, s]) => m
+                .checked_mul(60)
+                .and_then(|v| v.checked_add(*s))
+                .ok_or_else(bad)?,
             _ => return Err(bad()),
         }
     } else if raw.chars().all(|c| c.is_ascii_digit()) {
-        raw.parse::<u64>().map_err(|_| bad())? * 60
+        raw.parse::<u64>()
+            .map_err(|_| bad())?
+            .checked_mul(60)
+            .ok_or_else(bad)?
     } else {
         let mut total = 0u64;
         let mut digits = String::new();
@@ -547,12 +560,14 @@ fn parse_sleep(text: &str) -> Result<Option<std::time::Duration>> {
                 continue;
             }
             let n: u64 = digits.parse().map_err(|_| bad())?;
-            total += n * match c {
+            let mult = match c {
                 'h' => 3600,
                 'm' => 60,
                 's' => 1,
                 _ => return Err(bad()),
             };
+            let product = n.checked_mul(mult).ok_or_else(bad)?;
+            total = total.checked_add(product).ok_or_else(bad)?;
             digits.clear();
         }
         // A trailing number with no unit sits ambiguously next to the units
@@ -923,6 +938,10 @@ mod tests {
         assert!(parse_sleep("1439").is_ok(), "23h59m fits");
         assert!(parse_sleep("1440").is_err(), "24h exactly does not");
         assert!(parse_sleep("25h").is_err());
+        // Huge inputs that would overflow unchecked integer arithmetic are refused.
+        assert!(parse_sleep("18446744073709551615h").is_err());
+        assert!(parse_sleep("18446744073709551615").is_err());
+        assert!(parse_sleep("9999999999999999999:00:00").is_err());
     }
 
     #[test]

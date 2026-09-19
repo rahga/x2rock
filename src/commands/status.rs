@@ -84,8 +84,9 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     if status.modes().shuffle {
         flags.push("shuffle");
     }
-    let repeating = format!("repeat {}", repeat.as_str());
+    let repeating;
     if repeat != Repeat::Off {
+        repeating = format!("repeat {}", repeat.as_str());
         flags.push(&repeating);
     }
     if !flags.is_empty() {
