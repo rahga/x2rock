@@ -286,16 +286,15 @@ pub enum Existing<'a> {
 
 /// The directives this command owns and may rewrite without asking: the two
 /// substitutions, in the shape it writes them or the shape the shipped file
-/// carries them. Every other directive is the person's.
+/// carries them. Every other directive is the person's. The shipped household
+/// line is a comment, so it never reaches here: the caller feeds this only
+/// [`directives`].
 ///
 /// The shipped `ExecStart=%h/.local/bin/x2rock daemon` is owned as that exact
 /// line only: a `%h` pointing anywhere else, or quoted, is a person's edit (see
 /// [`is_generated_exec`]).
 fn is_owned_line(line: &str) -> bool {
-    line == EXEC_MARKER
-        || is_generated_exec(line)
-        || is_generated_household(line)
-        || line.starts_with("#Environment=X2ROCK_HOUSEHOLD=")
+    line == EXEC_MARKER || is_generated_exec(line) || is_generated_household(line)
 }
 
 /// The lines systemd acts on: everything but blanks and comments. Unit files
@@ -517,7 +516,6 @@ mod tests {
             installed
         ));
     }
-    use std::path::PathBuf;
 
     /// The substitution is a string replacement on the shipped file, so the
     /// file has to keep carrying the exact lines it replaces - and only once

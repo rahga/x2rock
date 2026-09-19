@@ -393,7 +393,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Play a favorite, by name or id. The one way to start a room that has
+    /// Play a favorite, by name or id. One way to start a room that has
     /// nothing queued, which `play` cannot do.
     Favorite { query: String },
     /// Search music services. A term with no `--service` asks every service
@@ -836,8 +836,9 @@ pub enum Command {
     },
     /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
     ///
-    /// Outputs the script to stdout. Room names, bookmarks, and services are
-    /// dynamically completed from local state.
+    /// Outputs the script to stdout. Room names, households, services,
+    /// bookmarks, and linked accounts are dynamically completed from local
+    /// state.
     Completions {
         /// Shell to generate completions for. Auto-detects from $SHELL when omitted.
         shell: Option<clap_complete::Shell>,
@@ -1483,9 +1484,6 @@ mod tests {
         assert_eq!(cli.room, ["Kitchen"]);
     }
 
-    /// Each transport declares its own grammar, so clap rejects the other's
-    /// rather than anything being checked - or silently ignored - at runtime.
-    /// `--watch`/`--session` are the event socket and have no counterpart over
     /// A service that starts offering ratings does not move the player's
     /// service-list version, which is the only thing that otherwise clears the
     /// learned-ratings cache - so without this flag one ratings-less reply is
@@ -1613,6 +1611,9 @@ mod tests {
         ));
     }
 
+    /// Each transport declares its own grammar, so clap rejects the other's
+    /// rather than anything being checked - or silently ignored - at runtime.
+    /// `--watch`/`--session` are the event socket and have no counterpart over
     /// UPnP; the arity and the scope set differ in both directions.
     #[test]
     fn each_raw_transport_accepts_only_its_own_grammar() {
