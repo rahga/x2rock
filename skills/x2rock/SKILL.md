@@ -880,9 +880,12 @@ those two apart when telling a user what linking will do.
   "would not go in the queue; streaming it"), which works only when the service hands back a
   playable URL: **Amazon Music does** (it then plays as a direct stream that cannot be paused and
   resumed), **Spotify does not** (it fails with an unsupported-scheme error until the household adds
-  Spotify in the Sonos app, and then plays normally), and Radio Paradise's programs do not. A
-  service container (album, playlist) cannot be played whole either way; see "A container cannot
-  be played whole".
+  Spotify in the Sonos app, and then plays normally), **Deezer does not** (the room takes the URL
+  and never gets past a second, cycling PLAYING/BUFFERING with the position resetting - and plays
+  perfectly once the household has the account), and Radio Paradise's programs do not. **So a
+  fallback that "started" is not a fallback that played**: confirm with `now --json` twice and
+  require `position_ms` to have moved. A service container (album, playlist) cannot be played whole
+  either way; see "A container cannot be played whole".
 - **Read `link`'s last line for which case you are in.** `The household knows this account as
   sn_22` means the household already holds this very account, so on-demand playback works. `did not
   match` or `sent no userIdHashCode` means only that this account was not matched; the household may

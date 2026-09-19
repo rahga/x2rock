@@ -6893,7 +6893,9 @@ what README.md has said all along. The mistake was in the sections here that rea
 never-yet-succeeded call as a call that *cannot* succeed.
 
 **The order matters, then**: Sonos app first, then `x2rock link`. Linked first and registered
-after, `match` runs against nothing and the account id stays empty until the next relink.
+after, `match` runs against nothing and the account id stays empty until the next relink. That was
+then run deliberately backwards on a second household, which is where it stops being an inference -
+see "Deezer in reverse: what a household registration is actually for".
 
 TIDAL is the counter-example that keeps the two apart: its household registration exists and
 its content queues, but it sends no `userIdHashCode`, so `match` cannot be attempted at all
@@ -7022,6 +7024,44 @@ played under `sn_25` afterwards, where its saved content named `sn_15`. That rea
 machine's token with it. A second link changed nothing either, so **linking is idempotent from the
 household's side** and `unlink`'s "local only" wording is accurate. What a link does reach is this
 machine's `credentials.json`: relinking replaced the stored token and moved its `linked` stamp.
+
+## Deezer in reverse: what a household registration is actually for (home household, 2026-09-18)
+
+Everything above about registrations was learned in the order a person would naturally do it - the
+Sonos app first, then `x2rock link` - which conflates two variables, because by the time anything
+is measured both have moved. So this was run **backwards on purpose**, on a household that had no
+Deezer account in any form, with each step measured before the next was allowed to happen.
+
+| # | what changed | `match` | search / browse | `play-item` on `tr-flac:74456737` |
+|---|---|---|---|---|
+| 1 | `x2rock link Deezer`, no household account | refused, bare `ERROR_COMMAND_FAILED` | **work** | - |
+| 2 | nothing | - | - | `AddURIToQueue` **UPnP 800**, stream fallback **stalls** |
+| 3 | Deezer added in the **iPhone app**, nothing else | not re-run | unchanged | **queues and plays**, resolved `sn_26` |
+| 4 | `x2rock link Deezer` again | **`sn_26`** | unchanged | unchanged |
+
+**Step 3 is the whole point.** The stored token was byte-identical across steps 2 and 3 - same
+`authToken`, same `linked` stamp, `account_id` still `null` - and the room went from a hard refusal
+to a clean queued play with position advancing 8.6s → 18.4s. Nothing this machine holds had moved;
+only the household's registration had appeared. **The registration is what playback needs, and the
+local token is not part of it.**
+
+Three things fall out of that, each worth more than the claim it replaces:
+
+- **`account_id` is provenance, not a capability.** Playback worked in step 3 while it was still
+  `null`, and step 4 filled it in without changing a thing about playback.
+- **A stream fallback cannot stand in for a registration** - for this service. Deezer's
+  `getMediaURI` answered, the room took the URL, and it never got past about a second: PLAYING and
+  BUFFERING alternating with the position resetting to zero. So Deezer sits with Spotify and Radio
+  Paradise rather than with Amazon Music, whose presigned CloudFront URL plays unregistered. The
+  fallback is a bonus that some services give and others do not, never a substitute.
+- **`match` is a lookup, reproduced on a second household.** It refused when there was nothing to
+  find and returned `sn_26` the moment there was, without the request changing. The office Deezer
+  result was one household; this is the control.
+
+One practical note for anyone reading this to decide what to do: the reverse order costs nothing
+permanent. Linking first simply leaves `account_id` empty until a later relink picks it up, and
+search and browse work throughout - which is exactly what a household wanting search but not
+playback should do.
 
 ## Open questions
 
