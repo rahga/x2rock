@@ -255,8 +255,11 @@ one object per **group**, and it is the snapshot to read first: now-playing is f
 
 Two shapes differ from the rest and are worth knowing: `search --json` and `browse --json` answer
 an **envelope**, `{total, index, items}`, because one page cannot say how much there is — page with
-`--index`. `queue --json` is `{current, in_use, items}`. `favorites`, `bookmarks`, `accounts`,
-`alarms` and `rooms` are bare arrays.
+`--index`. A search with no `-s` asks every reachable service at once and adds `asked`, `searches`,
+`answered`, `slow` and `refused` to that envelope, so a caller can tell "nothing on any service"
+from "three services never answered"; the slow and refused services are also named on stderr, which
+never mixes with the JSON on stdout. `queue --json` is `{current, in_use, items}`. `favorites`,
+`bookmarks`, `accounts`, `alarms` and `rooms` are bare arrays.
 
 ### Errors are data
 
@@ -414,9 +417,13 @@ room in a popup with now-playing, transport, repeat and shuffle, and the piece n
 bar has — **per-room volume**. Scroll the pill to change the focused room's volume; middle-click
 toggles play; the popup has grouping (each member's own slider, and *Normalize* when they differ),
 the queue (click to jump, move or drop), party mode, thumbs up/down where the daemon says the
-track is rateable, and a favorites picker that also searches and browses services. Cover art
-comes from the speaker itself and falls back to a glyph. It is entirely event-driven off the
-daemon and hides itself when there is no daemon.
+track is rateable, and a music picker: a **Services** door first, then favorites and kept items,
+with a search that runs itself once typing pauses — across every service, or only the linked
+accounts, when `searchService` is `"all"` or `"linked"` in `shell.json`. Favorites the household
+can no longer play (the ones the Sonos app greys out) are left out. Cover art comes from the
+speaker itself and falls back to a glyph. It is entirely event-driven off the daemon and hides
+itself when there is no daemon; the widget's own [README](quickshell/x2rock.sonos/README.md) has
+every setting.
 
 ```sh
 cp -r quickshell/x2rock.sonos ~/.config/omarchy/plugins/
@@ -434,8 +441,10 @@ This is the one part of x2rock with a desktop dependency. `grep -ri omarchy src/
 
 ```sh
 x2rock search                                   # what can be searched here
+x2rock search jazz                              # every reachable service at once
+x2rock search jazz --only-linked -c tracks      # only linked accounts, one category
 x2rock search -s tunein                         # that service's categories
-x2rock search -s tunein jazz                    # search it
+x2rock search -s tunein jazz                    # search one service
 x2rock search -s somafm --play 3 ambient        # play the third hit
 x2rock browse -s iheartradio                    # a service's own root
 x2rock browse -s iheartradio for_you --play 1   # open a container, play a row
@@ -462,6 +471,14 @@ an id and lets it resolve the thing itself.
 Both page. `--count` is the page size and `--index` the 0-based start; `--json` answers
 `{total, index, items}`, and there is more whenever `index + items.len() < total`. `--play N`
 counts within the page returned.
+
+`search` with no `-s` is a **merged search**: every service that can answer is asked at once, each
+in a few categories, and the answers are interleaved so one service's rows are a song, an artist and
+an album rather than three songs. `--only-linked` restricts it to the accounts this machine has
+linked, which is the tier with real albums and tracks the player will queue; `-c artists,tracks`
+picks the categories; `--per-service N` caps how many rows each contributes. The envelope adds
+`asked`, `searches`, `answered`, `slow` and `refused`, and a service that timed out or refused is
+also named on stderr.
 
 `--play` plays a hit: a live stream opens a playback session and leaves the queue alone; anything
 on-demand is added to the queue, because that is the only way a player resolves a service's own

@@ -362,7 +362,7 @@ see "Ask before you act".
 | Search every service at once | `x2rock search "<term>" --json` — no `--service`; `--only-linked` for the good tier, `-c artists,tracks` to choose categories, `--per-service N` to cap each |
 | Search one service | `x2rock search -s <svc> <term> --json` / `x2rock search --json` (lists services) |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
-| Page through either | add `--count N --index N` — `--json` answers `{total, index, items}` |
+| Page through either | add `--count N --index N` — `--json` answers `{total, index, items}`. A merged search (no `-s`) adds `asked`, `searches`, `answered`, `slow`, `refused`: read `slow`/`refused` before concluding a service has nothing, and expect those services named on stderr beside the JSON |
 | Play a stream by URL | `x2rock play-url "<http url>" [--title "<name>"] -r "<Room>"` |
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search [-s <svc>] <term> --play N -r "<Room>"` — `N` counts the merged list |

@@ -106,6 +106,18 @@ lines below record the reversals rather than warn about text that still says oth
   no IP - so it is CA-signed, and connecting by the `.local` name would validate. x2rock relaxes
   verification anyway, but the old reason was wrong. Corrected 2026-09-07 from x2rocktv's hardware
   capture; see "Certificates are validated here".
+- **The picker's search is no longer a `Search TuneIn` row at the end of the list.** Typing puts the
+  search first, it runs itself once typing pauses (`searchDelay`), and with `searchService` set to
+  `"all"` or `"linked"` it is a merged search across services, grouped by service the way the mobile
+  app does. The single-service default (`"TuneIn"`) is still what a fresh install gets; merged
+  search is opt-in per `shell.json`. Changed 2026-09-18; see the widget README.
+- **The Services door is always the first row of the picker's base list**, whatever the
+  configuration, unless `browseServices: []` turns browsing off by hand. It used to be hidden until
+  the async account read landed, and hidden for good under `"all"`/`"linked"` with nothing linked.
+  The linkable list loads on every picker open in every mode, so offering to link a service with no
+  token is no longer an `"all"`-only feature. Changed 2026-09-18/19.
+- **`remember()` writes once per track because the daemon dedupes per room**, not because `note()`
+  does. See "Cheap by construction" under the bookmarks section; corrected 2026-09-19.
 
 ## Scope
 
@@ -670,7 +682,9 @@ players, and their last-known addresses. On any network change, work out where y
 
 - **Primary fingerprint: the default gateway's MAC address** (`ip neigh show <gateway>`). It is
   stable per site and does not collide the way SSIDs and RFC1918 subnets do — `192.168.1.0/24` and
-  an SSID of `guest` are shared by half the planet.
+  an SSID of `guest` are shared by half the planet. The gateway is read from `/proc/net/route`, and
+  since 2026-09-19 a default route whose gateway is `0.0.0.0` or that lacks `RTF_GATEWAY` (a `dummy`
+  or VPN interface listed first) is skipped rather than fingerprinting nothing.
 - **Secondary: SSID / NetworkManager connection UUID.** NetworkManager is present on Omarchy
   (`nmcli` available, service active) and its D-Bus signals are the right change trigger.
 - On an unrecognised network: try nothing, advertise nothing, wait.
@@ -909,7 +923,8 @@ A cold search cost ~950ms and three round trips before any query ran; warm it is
 ### Search in the widget (2026-08-31)
 
 The favorites picker now searches too. Typing filters the favorites as before; with a term typed
-and nothing sent yet, a **`Search TuneIn`** row appears at the end of the list, and choosing it
+and nothing sent yet, a **`Search TuneIn`** row appeared at the end of the list (since 2026-09-18 the search sits first
+and runs itself on a pause; see "Superseded claims"), and choosing it
 runs the query. Hits land in the same list under the same delegate.
 
 Four decisions in it:
@@ -930,7 +945,8 @@ Four decisions in it:
   failure; `[]` is a real answer meaning the service has nothing. Copied from the favorites picker,
   which already had all of this right.
 
-`searchService` in `shell.json` picks the service (default `TuneIn`) and `""` turns the feature
+`searchService` in `shell.json` picks the service (default `TuneIn`; `"all"` or `"linked"` makes it a
+merged search across services, since 2026-09-18) and `""` turns the feature
 off, leaving the picker exactly as it was with no network call behind it. `searchCount` sets how
 many hits to ask for.
 
@@ -1162,8 +1178,11 @@ written, and it is a convenience sitting inside the process whose job is transpo
 has no `?` in it: every failure is logged and swallowed. Verified by making the store unreadable
 (`chmod 000`) and confirming `pause`, `play` and `vol` all still worked and the unit stayed active.
 
-Cheap by construction, too: `note()` returns whether anything changed, so a track playing for four
-minutes writes once, not once per event. A pinned entry keeps its name and its pin — only the
+Cheap by construction, too: `RoomPlayer::track_changed` remembers the last object id stored per
+room, so `remember()` returns before touching the store for every further `playbackMetadata` event
+naming the same track — a queue edit, a new `nextItem` — and a track playing for four minutes writes
+once, not once per event. (`note()` alone did not give that: it re-stamps whenever the second
+differs, which every event did; corrected 2026-09-19.) A pinned entry keeps its name and its pin — only the
 timestamp moves — because someone named it deliberately and the daemon must not rename it back.
 That one is pinned by a test.
 
@@ -7112,6 +7131,72 @@ machine's `credentials.json`: relinking replaced the stored token and moved its 
    **Not** an explanation for `musicServiceAccounts:1 match` refusing. An earlier guess that the
    household was declining an extra registration is withdrawn — if accounts coexist, there is no
    count to decline on.
+
+## Review pass (2026-09-18/19): decisions challenged and upheld
+
+A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
+is in the commits (`0c0c4e5..c606a67`). What belongs here is the set of decisions that were
+questioned and stand, so the next pass does not re-derive them, and the facts that did change.
+
+**Upheld — do not "fix" these:**
+
+- **`panic = "abort"` means a lock can never be poisoned**, so `lock().unwrap()` is right and
+  `unwrap_or_else(|e| e.into_inner())` is dead code that also contradicts the intent: a panic
+  holding the MPRIS state lock should abort and let systemd restart clean, not continue on state a
+  panic left half-mutated. The rationale sits beside the setting in `Cargo.toml`.
+- **The restart channel has capacity one on purpose.** It is a "reconnect now" signal;
+  `daemon::restarted` treats `Lagged` as uninteresting and loops to the newest message, and one
+  reconnect answers a burst. A deeper buffer only hands it stale ones first.
+- **`Service::entry` looks the table up by name**, so it survives `SERVICES` being reordered or
+  extended. Positions into it would fail by quietly addressing the wrong service — a worse failure
+  than the deliberate, test-guarded panic. The test asserts each variant's name.
+- **A clamp-then-cast is not an `unwrap_or(0)`.** A value clamped to `0..=100` cannot fail
+  `u8::try_from`, and a fallback that sets a speaker to silence is the wrong shape for a failure
+  that cannot happen. Reverted twice (`volume.rs`, `tui/mod.rs`).
+- **`http.rs` reads to EOF.** An early break on `Content-Length` or on `0\r\n\r\n` can truncate a
+  chunked body whose bytes happen to end that way at a read boundary; the parse downstream is what
+  catches a short body. Kept simple.
+- **The picker's merged search is opt-in.** `searchService` defaults to `"TuneIn"`, the one broad
+  anonymous service, so a fresh install's Search row works with nothing linked; `"linked"` or
+  `"all"` turns on the merged search. "It only shows radio stations" is that default, not a
+  regression.
+
+**Changed, and why:**
+
+- **The queue version is fetched off the event loop.** A UPnP browse has an 8s timeout; awaited in
+  `follow`'s loop, one wedged coordinator stalled every room's events. `RoomPlayer::queue_version_fetch`
+  is a spawned future holding only the coordinator's address, answering through a channel;
+  `apply_queue_version` folds it in on the loop. One fetch per group in flight.
+- **`dechunk` cannot panic on a wire-supplied size** (`checked_add`), and the chunked check is
+  case-insensitive on the value. Two paths that could abort the daemon on a bad reply are closed.
+- **`itemsFrom` returns `null` for an empty body**, so every picker handler's failure branch covers
+  "exit 0, nothing on stdout" and no surface sits on "Searching…"/"Opening…" for ever. The premise
+  that the exit code had already reported an empty body was false.
+- **`search --json`/`browse --json` keep the `no_player` code** on the no-cache path (it degraded to
+  `unknown`), and a merged search's envelope carries `asked`, `searches`, `answered`, `slow` and
+  `refused`, with the slow/refused services also on stderr.
+- **`status` and `update` ask every coordinator/player at once** (`join_all`), the shape `system`
+  already had; sequentially, N unreachable ones cost N timeouts.
+- **The subnet sweep is a rolling window** (`buffer_unordered`), not chunks each waiting for their
+  slowest probe.
+- **The TUI's per-snapshot proxies set `CacheProperties::No`**, so a snapshot no longer runs
+  AddMatch, GetAll and RemoveMatch per player every heartbeat.
+- **`session::connect`'s progress lines can be silenced**; the daemon does so once, and `StatusLog`
+  owns the journal. They were printing uncoalesced on every retry while a household was off.
+- **`parse_sleep` and `parse_range` refuse huge inputs** (checked arithmetic; start checked before
+  the subtraction) rather than wrapping under the bound check in release.
+- **`require_http_url` requires a non-empty host**, so `http:///path` and `http://:8080/...` are
+  refused before the player sees them.
+- **The gateway lookup skips on-link and dummy default routes** — see the fingerprint bullet in
+  "Network identity".
+
+**Process, recorded because it bit twice:** CI runs `cargo fmt --check`, `cargo clippy --all-targets
+--locked -- -D warnings` and `cargo test --locked` on every push, and two agents each pushed a red
+commit by skipping the first. Run all three before the push; hand-patched or agent-patched Rust does
+not pass through rustfmt on its own.
+
+See also [openphonos-ratings-findings.md](openphonos-ratings-findings.md), the 2026-09-12 research
+record the `rate` work was built from.
 
 ## Resolved since the original draft
 
