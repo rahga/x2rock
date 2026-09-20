@@ -4294,7 +4294,14 @@ the *key's* own API restrictions first (`API_KEY_SERVICE_BLOCKED`), while the he
 the *project* check (`SERVICE_DISABLED`). Probing only one way would have produced half the
 picture. (And a key with restrictions set will answer `API_KEY_SERVICE_BLOCKED` on *both*
 transports, hiding the project verdict entirely - unrestrict the key before reading anything into
-a re-probe.)
+a re-probe. This is not hypothetical: the console required at least one API to be selected when
+restricting the key, "Google Cloud APIs" was chosen, and the next probe changed answer for that
+reason alone rather than because anything about the service had moved.)
+
+**A third witness, from the console's own enumeration.** That restriction picker lists the APIs
+enabled on the project, and **"YouTube Music API (Partner)" was not among them to select.** So the
+verdict arrives from three independent directions: the endpoint says `SERVICE_DISABLED`, the
+activation page will not load, and the console cannot enumerate the API for the project at all.
 
 #### What the outside world knows, and the two bridges that are out (2026-09-20)
 
