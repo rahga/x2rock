@@ -2931,10 +2931,19 @@ it required; the rejected call was simply invalid).
 
 Sonos's own materials explain the seven names, and it is not arbitrary: **27mcp "supports the same
 set of content services as Classic Sonos Voice Control"**, and the enum is that list, inherited
-verbatim - Radio France included, which is otherwise an odd member. YouTube Music, TIDAL and
-iHeartRadio were never Sonos Voice Control services, so they are absent here for a reason that
-predates MCP entirely. The exclusion is a *hand-me-down*, not a judgement about those services -
-which also means it will not be fixed by anything MCP-specific.
+verbatim. Sonos's support page for voice content services names exactly: Sonos Radio, Apple Music,
+Amazon Music, Deezer, Pandora, Spotify, Radio France - **the same seven, item for item**, which is
+why Radio France is in there looking out of place. YouTube Music, TIDAL and iHeartRadio were never
+Sonos Voice Control services, so they are absent here for a reason that predates MCP entirely. The
+exclusion is a *hand-me-down*, not a judgement about those services - which also means it will not
+be fixed by anything MCP-specific.
+
+**And the list has barely moved in four years.** Sonos Voice Control launched June 2022 (US) with
+Apple Music, Amazon Music, Deezer, Pandora and Sonos Radio - *without Spotify*, which took roughly
+two years to arrive. Radio France is the only other addition. So the constraint x2rock ran into in
+2026 is a 2022 list with two entries appended, now inherited by the AI product: the household's
+own YouTube Music account has been unaddressable by every Sonos-built voice or agent surface for
+its entire existence.
 
 Sonos's engineering blog adds three things worth recording:
 
