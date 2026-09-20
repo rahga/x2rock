@@ -137,7 +137,7 @@ pub async fn post(
     body: &str,
     timeout: Duration,
 ) -> Result<(u16, String)> {
-    tokio::time::timeout(
+    let (status, _, body) = tokio::time::timeout(
         timeout,
         exchange(endpoint, tls, "POST", path, headers, Some(body)),
     )
@@ -147,7 +147,8 @@ pub async fn post(
             "timed out after {timeout:?} talking to {}",
             endpoint.authority()
         )
-    })?
+    })??;
+    Ok((status, body))
 }
 
 /// One HTTP/1.1 GET. Service manifests and presentation maps are plain
@@ -165,12 +166,36 @@ pub async fn get_with(
     headers: &[(&str, &str)],
 ) -> Result<(u16, String)> {
     let (endpoint, path, tls) = parse_url(url)?;
-    tokio::time::timeout(
+    let (status, _, body) = tokio::time::timeout(
         timeout,
         exchange(&endpoint, tls, "GET", &path, headers, None),
     )
     .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
+    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))??;
+    Ok((status, body))
+}
+
+/// Ask a URL what it is, by fetching a single byte of it.
+///
+/// Returns the status and the raw response head, for a caller that needs the
+/// headers rather than the body - which so far is one caller, deciding whether
+/// a URL a music service handed back is a finite file or a live broadcast. A
+/// one-byte `Range` keeps it honest: no service seen returns a single-use URL,
+/// but asking for the whole of a 52 MB FLAC to read its `Content-Type` would be
+/// rude even if it worked.
+///
+/// `HEAD` would be the obvious method and is not used: CDNs answer it
+/// inconsistently, and some of the signed URLs here reject it outright while
+/// serving the same URL to a `GET` perfectly well.
+pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
+    let (endpoint, path, tls) = parse_url(url)?;
+    let (status, head, _) = tokio::time::timeout(
+        timeout,
+        exchange(&endpoint, tls, "GET", &path, &[("Range", "bytes=0-0")], None),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {timeout:?} probing {url}"))??;
+    Ok((status, head))
 }
 
 /// Percent-encode one value for a URL: everything unreserved passes through,
@@ -204,7 +229,7 @@ async fn exchange(
     path: &str,
     headers: &[(&str, &str)],
     body: Option<&str>,
-) -> Result<(u16, String)> {
+) -> Result<(u16, String, String)> {
     let authority = endpoint.authority();
     let stream = TcpStream::connect(&authority)
         .await
@@ -251,7 +276,7 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     request: &str,
     authority: &str,
-) -> Result<(u16, String)> {
+) -> Result<(u16, String, String)> {
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
 
@@ -313,7 +338,11 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // Services answer UTF-8 and some of them lead with a BOM, which every XML
     // parser then refuses as content before the declaration.
     let text = String::from_utf8_lossy(&body).into_owned();
-    Ok((status, text.trim_start_matches('\u{feff}').to_string()))
+    Ok((
+        status,
+        head.into_owned(),
+        text.trim_start_matches('\u{feff}').to_string(),
+    ))
 }
 
 /// Unwrap one gzip member (RFC 1952) into the deflate stream inside it.

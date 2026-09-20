@@ -7107,10 +7107,12 @@ worth knowing about: `queue clear` left the room `PAUSED` with `in_use` still `t
 `IDLE`, because it was paused before the clear - emptying the queue does not take the room off
 `x-rincon-queue:`, so an empty queue can still be the group's source.
 
-**The stream fallback is 1-for-4** *as x2rock plays it*. Amazon Music plays unregistered on a
-presigned CloudFront URL; Spotify, Radio Paradise, Deezer and TIDAL all fail, TIDAL exactly as
-Deezer does - the room takes the URL, reports `PLAYING`, and never passes 0ms. **The reason turned
-out to be this client's, not the services'** - see the section below, written the next day.
+**The stream fallback was 1-for-4** *as x2rock played it then*. Amazon Music plays unregistered on
+a presigned CloudFront URL; Spotify, Radio Paradise, Deezer and TIDAL all failed, TIDAL exactly as
+Deezer did - the room takes the URL, reports `PLAYING`, and never passes 0ms. **The reason turned
+out to be this client's, not the services'**, and it is now fixed: Deezer and TIDAL play. See the
+two sections below. Radio Paradise remains a real failure, for its own reason - it implements no
+`getMediaURI` at all - and Spotify has not been re-tested since.
 
 ### The fallback stalls because we call every URL a station (2026-09-19)
 
@@ -7164,14 +7166,56 @@ household heard none of it.
   stand-in than it needs to be, not because services withhold anything but because we ask the
   player for the wrong kind of playback.
 
-**The open work this creates**, deliberately not done in the same sitting as the measurement: the
-fallback should hand a finite file to the player as a track rather than as a station. `SetAVTransportURI`
-with a DIDL-Lite `CurrentURIMetaData` is the obvious route and is known to work on both services
-above; what it costs is the `playbackSession` the current path opens, and the room shows the
-hostname as its title when the metadata is empty (Dining Room read `f-cdnt-stream.dzcdn.net` after
-the bare test). Deciding between "always AVTransport for a fallback" and "station-shape only when the
-URL looks like one (`.m3u8`)" wants one more measurement: whether `loadStreamUrl` has a non-station
-`type` that does the same job.
+### Fixed, and what the fix had to learn first (2026-09-19)
+
+**`loadStreamUrl` has no non-station `type`.** That was the cheap hope and it is dead: probed
+through x2rock's own client with the metadata type set to `"track"`, and again with the field
+omitted entirely, the same Deezer file stalled exactly as `"station"` does - `PLAYING`, `RelTime`
+0:00, `TrackDuration 0:00:00`. The command means *stream* in the strict sense and no field softens
+it. So the fallback now sends a finite file to `SetAVTransportURI` with a DIDL-Lite
+`object.item.audioItem.musicTrack` (`Upnp::play_url_as_track`), and a live stream keeps the
+playback session it has always had.
+
+**Which a URL is gets asked, not guessed** - and the first rule written for that was wrong, which
+hardware caught inside a minute. The rule was "a one-byte range request; a `206` with a
+`Content-Range` is a file". **Icecast honours range requests on live streams**, answering
+`206 Content-Range: bytes 0-0/1073741823` - 2³⁰-1 as a stand-in for "endless". NPR's stream
+therefore took the file path. It *played*, which is the part that makes this worth writing down:
+the bug was invisible in the only place anyone would look. What gave it away was
+`CurrentURI` - `http://npr-ice.streamguys1.com/live.mp3` where the session path writes
+`x-rincon-mp3radio://…` - and the cost was the room's queue, replaced by a radio station that had
+never needed to touch it.
+
+So the test is now three things agreeing, because Icecast fails each of them independently:
+
+| signal | Deezer / TIDAL | Icecast live |
+|---|---|---|
+| `icy-*` headers | absent | `icy-br`, `icy-name` |
+| `ETag` / `Last-Modified` | both (TIDAL's reads 2017) | neither |
+| length | 55933354 / 52299553 | `1073741823`, the sentinel |
+
+A playlist `Content-Type` (`mpegurl`, `dash+xml`, `x-scpls`) stays on the stream path whatever else
+it says, which is what keeps **Amazon Music's presigned HLS fallback working** - it is cacheable and
+finite and belongs in a session. Anything unclear - a non-2xx, a redirect (iHeartRadio answers
+`302`), an unreachable host, a timeout - stays on the stream path too: the wrong guess there costs
+the stall that was already the status quo, while the wrong guess the other way costs a queue.
+`shaped_like_file` is a pure function over the response head, unit-tested against the real header
+blocks from all four.
+
+Verified on hardware afterwards, Dining Room at volume 0:
+
+| played | transport taken | result |
+|---|---|---|
+| Deezer FLAC via `play-url` | `SetAVTransportURI` (URL is `CurrentURI`) | `TrackDuration 0:09:22`, position advancing |
+| NPR 24 Hour Program Stream | session (`x-rincon-mp3radio://`) | plays, queue untouched |
+| iHeartRadio favourite | unchanged | plays |
+
+What it costs, stated plainly because `play-url --help` now says it too: **a file replaces what the
+room was playing.** A session plays alongside the queue; the transport does not. That is the worse
+of two behaviours and better than the only alternative, which was silence. One loose end left
+unfixed: `now --json` reports `duration_ms: null` on a file played this way, though the player
+knows the duration perfectly well and `GetPositionInfo` reports it - the LAN API's metadata for a
+transport-set URI simply carries none.
 
 **Why Amazon might be the odd one out.** The household's reading, on the evidence of what that
 account is: it is a Prime membership, not Amazon Music Unlimited, and a free tier has a reason to

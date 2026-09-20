@@ -552,8 +552,12 @@ pub enum Command {
     /// enclosure, a stream a service does not carry. No account, no
     /// registration, no sid.
     ///
-    /// It opens a playback session, as a live stream from a service does, so
-    /// the room's queue is left exactly as it was.
+    /// A live stream opens a playback session, as one from a service does, so
+    /// the room's queue is left exactly as it was. A URL that turns out to be a
+    /// *file* - a podcast enclosure, a signed track from a service's CDN -
+    /// cannot be played that way at all, so it goes to the transport instead
+    /// and does replace what the room was playing. Which one a URL is gets
+    /// asked of the server, not guessed from the URL.
     PlayUrl {
         /// The stream's URL. `http` or `https`; the *player* fetches it, so it
         /// must be reachable from the speaker rather than from this machine.

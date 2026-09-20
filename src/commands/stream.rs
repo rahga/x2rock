@@ -13,8 +13,10 @@ use serde_json::json;
 use super::nth;
 use super::services::save_refreshed_token;
 use super::speaker::named_speaker;
+use super::upnp_ip;
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
+use crate::sonos::upnp::Upnp;
 use crate::state::State;
 use crate::{credentials, hint, sonos, stations, streams};
 
@@ -251,6 +253,96 @@ fn report_started_json(room: &str, title: &str, url: &str, started: &Started) ->
 /// docs/architecture.md), but it *replaces* what the room was doing and loses
 /// the queue's position. A session plays alongside the queue and leaves it
 /// exactly as it was, which is what a radio station should do.
+///
+/// **Except when the URL is not a stream at all**, which is what a music
+/// service's `getMediaURI` usually hands back: Deezer and TIDAL both answer
+/// with a plain, signed, seekable FLAC file. A session cannot play one - see
+/// [`Upnp::play_url_as_track`] for the measurement - so a file goes to the
+/// transport instead, and the queue's position is lost. That is the worse of
+/// two behaviours and better than the only alternative, which was silence.
+/// Whether a URL is a finite file rather than a broadcast, asked of the server
+/// rather than guessed from the URL.
+///
+/// A signed CDN URL says nothing useful in its path - Deezer's ends `.flac` and
+/// TIDAL's ends `/0.flac?token=…`, but neither shape is promised by anything -
+/// so the question goes to the server as a one-byte range request.
+///
+/// **"It answered 206" is not the test**, which is what the first version of
+/// this got wrong and hardware caught within the minute: Icecast honours a
+/// range request on a *live* stream, answering `206` with `Content-Range: bytes
+/// 0-0/1073741823` - a 1 GiB sentinel standing in for "endless". NPR's stream
+/// took the file path on that basis and played, but as a transport swap that
+/// wiped the room's queue rather than the session it should have been.
+///
+/// What actually separates them is whether the thing behaves like a stored
+/// object. Deezer and TIDAL both answer with an `ETag` *and* a `Last-Modified`
+/// (TIDAL's reads 2017) over a real total; Icecast sends neither, and labels
+/// itself besides with `icy-` headers. So all three must agree - no `icy-`, a
+/// validator, and a length that is not the sentinel - before a URL is treated
+/// as a file.
+///
+/// **False on anything unclear, including every error.** The stream path is
+/// what has always run here and what every internet radio station needs, so a
+/// probe that cannot reach the URL, times out, or comes back ambiguous leaves
+/// the behaviour exactly as it was. Guessing "file" wrongly replaces a room's
+/// queue for nothing; guessing "stream" wrongly costs the silent stall that is
+/// already documented and already the status quo.
+async fn finite_file(url: &str) -> bool {
+    match sonos::http::probe(url, PROBE).await {
+        Ok((status, head)) => shaped_like_file(status, &head),
+        Err(_) => false,
+    }
+}
+
+/// The verdict itself, given what the server said. Pure, because the rule is
+/// the part that was wrong the first time and the part worth testing: the
+/// header blocks in its tests are real ones, copied from Deezer, TIDAL, an
+/// Icecast relay and iHeartRadio.
+fn shaped_like_file(status: u16, head: &str) -> bool {
+    let head = head.to_ascii_lowercase();
+    let header = |name: &str| {
+        head.lines().find_map(|l| {
+            let value = l.strip_prefix(name)?.strip_prefix(':')?.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+    };
+    // A server that announces itself as a broadcast is believed on the spot.
+    if head.lines().any(|l| l.starts_with("icy-")) {
+        return false;
+    }
+    // An HLS playlist is finite by every other measure - it has a length, a
+    // validator and a type - and is exactly the continuous thing the stream
+    // path wants. Amazon Music's fallback is one of these and works today; it
+    // must keep working.
+    if let Some(kind) = header("content-type")
+        && (kind.contains("mpegurl") || kind.contains("dash+xml") || kind.contains("x-scpls"))
+    {
+        return false;
+    }
+    // A stored object is cacheable, so it carries something to revalidate
+    // against. A broadcast has nothing to validate and sends neither.
+    if header("etag").is_none() && header("last-modified").is_none() {
+        return false;
+    }
+    let total = match status {
+        // `bytes 0-0/52299553`, or `/*` where the server will not say.
+        206 => header("content-range")
+            .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok()),
+        // A server that ignored the range answers the whole thing instead.
+        200 => header("content-length").and_then(|v| v.parse::<u64>().ok()),
+        _ => None,
+    };
+    // 2^30 - 1 exactly: Icecast's stand-in for a length it does not have. No
+    // real track is that large, and treating the sentinel as a size is what
+    // sent a live stream down the wrong path.
+    total.is_some_and(|n| n > 0 && n != 1_073_741_823)
+}
+
+/// How long a URL gets to say what it is before the stream path is used anyway.
+/// Short on purpose: this runs before every fallback play, and the answer is
+/// only ever an optimisation over failing.
+const PROBE: Duration = Duration::from_secs(4);
+
 async fn stream_url(
     session: &session::Session,
     target: &Target,
@@ -261,42 +353,49 @@ async fn stream_url(
 ) -> Result<Started> {
     let coordinator = session::coordinator(session, target).await?;
 
-    let opened = coordinator
-        .call(
-            json!({
-                "namespace": "playbackSession:1",
-                "command": "createSession",
-                "groupId": target.group_id,
-            }),
-            json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
-        )
-        .await?;
-    let session_id = opened["sessionId"]
-        .as_str()
-        .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
+    if finite_file(url).await {
+        let upnp = Upnp::new(upnp_ip(target, session.connection.ip()));
+        upnp.play_url_as_track(url, title).await?;
+        coordinator.playback(&target.group_id, "play").await?;
+    } else {
+        let opened = coordinator
+            .call(
+                json!({
+                    "namespace": "playbackSession:1",
+                    "command": "createSession",
+                    "groupId": target.group_id,
+                }),
+                json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
+            )
+            .await?;
+        let session_id = opened["sessionId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("player opened a session but did not name it"))?;
 
-    // stationMetadata is optional, but it is where the name the room displays
-    // comes from; without it the stream plays with nothing to show. `service`
-    // is omitted entirely for a bare URL - there is no service to name, and
-    // naming a false one would put a wrong sid in the room's now-playing.
-    let mut metadata = json!({ "name": title, "type": "station" });
-    if let Some(service) = service {
-        metadata["service"] = json!({ "name": service.name, "id": service.id });
+        // stationMetadata is optional, but it is where the name the room
+        // displays comes from; without it the stream plays with nothing to
+        // show. `service` is omitted entirely for a bare URL - there is no
+        // service to name, and naming a false one would put a wrong sid in the
+        // room's now-playing.
+        let mut metadata = json!({ "name": title, "type": "station" });
+        if let Some(service) = service {
+            metadata["service"] = json!({ "name": service.name, "id": service.id });
+        }
+        coordinator
+            .call(
+                json!({
+                    "namespace": "playbackSession:1",
+                    "command": "loadStreamUrl",
+                    "sessionId": session_id,
+                }),
+                json!({
+                    "streamUrl": url,
+                    "playOnCompletion": true,
+                    "stationMetadata": metadata,
+                }),
+            )
+            .await?;
     }
-    coordinator
-        .call(
-            json!({
-                "namespace": "playbackSession:1",
-                "command": "loadStreamUrl",
-                "sessionId": session_id,
-            }),
-            json!({
-                "streamUrl": url,
-                "playOnCompletion": true,
-                "stationMetadata": metadata,
-            }),
-        )
-        .await?;
 
     // **The load succeeding is not the stream playing.** `loadStreamUrl`
     // accepts a URL it cannot play and then leaves the room idle without ever
@@ -623,6 +722,82 @@ pub async fn run_play_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real header blocks, as the servers sent them on 2026-09-19.
+    const DEEZER_FILE: &str = "HTTP/1.1 206 Partial Content\r\n\
+         Last-Modified: Mon, 23 Mar 2026 15:18:41 GMT\r\n\
+         ETag: \"e21e038d9cef36827bfb335642880041\"\r\n\
+         Content-Type: audio/flac\r\n\
+         Accept-Ranges: bytes\r\n\
+         Content-Range: bytes 0-0/55933354\r\n\
+         Content-Length: 1";
+    const TIDAL_FILE: &str = "HTTP/1.1 206 Partial Content\r\n\
+         Content-Type: audio/flac\r\n\
+         ETag: \"3bb27f3e6d8f7fd987bcc0d3cdc7c452\"\r\n\
+         Last-Modified: Wed, 08 Feb 2017 14:08:54 GMT\r\n\
+         Accept-Ranges: bytes\r\n\
+         Content-Range: bytes 0-1048575/52299553";
+    /// The one that fooled the first version of this: a *live* stream that
+    /// honours a range request, over a 1 GiB sentinel length.
+    const ICECAST_LIVE: &str = "HTTP/1.1 206 Partial Content\r\n\
+         Server: Icecast\r\n\
+         Content-Type: audio/mpeg\r\n\
+         Accept-Ranges: bytes\r\n\
+         Content-Range: bytes 0-0/1073741823\r\n\
+         icy-br: 96\r\n\
+         icy-name: NPR 24 Hour Program Stream";
+
+    #[test]
+    fn a_stored_file_is_told_from_a_live_stream_by_what_the_server_says() {
+        assert!(shaped_like_file(206, DEEZER_FILE));
+        assert!(shaped_like_file(206, TIDAL_FILE));
+
+        // Icecast fails on every one of the three tests independently, so no
+        // single header carries the verdict on its own.
+        assert!(!shaped_like_file(206, ICECAST_LIVE));
+        assert!(!shaped_like_file(
+            206,
+            "HTTP/1.1 206\r\nContent-Range: bytes 0-0/1073741823\r\nETag: \"x\""
+        ));
+        assert!(!shaped_like_file(
+            206,
+            "HTTP/1.1 206\r\nContent-Range: bytes 0-0/9999\r\nServer: Icecast\r\nicy-br: 96"
+        ));
+        assert!(!shaped_like_file(
+            206,
+            "HTTP/1.1 206\r\nContent-Range: bytes 0-0/9999"
+        ));
+    }
+
+    #[test]
+    fn a_playlist_stays_on_the_stream_path_however_file_shaped_it_looks() {
+        // Amazon Music's fallback is a presigned HLS playlist: cacheable,
+        // finite, and exactly what a playback session wants. It plays today
+        // and must not be moved.
+        assert!(!shaped_like_file(
+            200,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/vnd.apple.mpegurl\r\n\
+             ETag: \"abc\"\r\n\
+             Content-Length: 8213"
+        ));
+    }
+
+    #[test]
+    fn anything_unclear_stays_on_the_stream_path() {
+        // A redirect, which is what iHeartRadio answers with, says nothing
+        // about what is at the other end.
+        assert!(!shaped_like_file(
+            302,
+            "HTTP/1.0 302 Found\r\nContent-Length: 0"
+        ));
+        assert!(!shaped_like_file(200, "HTTP/1.1 200 OK\r\nETag: \"x\""));
+        assert!(!shaped_like_file(
+            200,
+            "HTTP/1.1 200 OK\r\nETag: \"x\"\r\nContent-Length: 0"
+        ));
+        assert!(!shaped_like_file(500, DEEZER_FILE));
+    }
 
     #[test]
     fn every_stream_outcome_is_told_apart_from_the_others() {

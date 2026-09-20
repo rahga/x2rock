@@ -1871,6 +1871,48 @@ impl Upnp {
         Ok(())
     }
 
+    /// Play one URL as a track: a finite file, with a duration and a seek
+    /// table, rather than a broadcast that happens to be audio.
+    ///
+    /// **This exists because `loadStreamUrl` cannot do it.** The Control API's
+    /// `playbackSession:1 loadStreamUrl` means *stream* in the strict sense,
+    /// and a file handed to it is accepted, reported `PLAYING`, and sits at
+    /// 0:00 forever with `TrackDuration` reading `0:00:00`. Measured against
+    /// Deezer and TIDAL on 2026-09-19: the same signed FLAC URL, in the same
+    /// room seconds apart, stalls through `loadStreamUrl` and plays through
+    /// here - 0:00 → 0:05 → 0:11 against a known 9:22. Its `stationMetadata`
+    /// `type` is not the lever either; `"track"` and the field omitted
+    /// altogether both stall exactly as `"station"` does.
+    ///
+    /// The metadata is what the room displays. Without it a Sonos shows the
+    /// URL's hostname, which is how `f-cdnt-stream.dzcdn.net` ended up as a
+    /// now-playing title during the test that found this.
+    pub async fn play_url_as_track(&self, url: &str, title: &str) -> Result<()> {
+        let didl = format!(
+            concat!(
+                r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+                r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+                r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+                r#"<item id="-1" parentID="-1" restricted="true">"#,
+                "<dc:title>{title}</dc:title>",
+                "<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
+                "</item></DIDL-Lite>"
+            ),
+            title = xml_escape(title)
+        );
+        self.soap(
+            Service::AvTransport,
+            "SetAVTransportURI",
+            &[
+                ("InstanceID", "0"),
+                ("CurrentURI", url),
+                ("CurrentURIMetaData", &didl),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Point a soundbar at its TV input.
     ///
     /// The Control API cannot do this: its `loadLineIn` is for analog line-in
