@@ -4223,6 +4223,46 @@ favourite played in Dining Room from the queue (`queue_position: 1`, position ad
 by the player with the household's own `sn=2`. What the sealed key costs is search and browse from
 this machine, not playback.
 
+### The cheaper experiment: *a* key rather than *the* key (2026-09-19)
+
+The sealed-key section closed "can we obtain Sonos's key" and said nothing about a different
+question, asked by the household this evening: **does the endpoint want a particular key, or any
+valid project identity?** Google's API-key check is a *consumer* check - it names which Cloud
+project is calling - and nothing about it is inherently partner-specific. If any enabled project
+counted, a self-service key would do.
+
+**The endpoint evaluates keys, which was not obvious and is free to establish.** A syntactically
+well-formed but fake key, sent both ways Google accepts:
+
+| sent | answer |
+|---|---|
+| nothing | **403** `PERMISSION_DENIED` — "unregistered callers … use API Key **or other form of API consumer identity**" |
+| `?key=AIzaSy…0000` | **400** `INVALID_ARGUMENT`, `reason: API_KEY_INVALID`, `metadata.service: music.googleapis.com` |
+| `X-Goog-Api-Key: AIzaSy…0000` | identical 400 |
+
+The complaint moves from *no identity* to *this key is not valid*, by the same logic that made the
+Bearer probe informative. So the key gate is live, both transports are accepted, and **a real key
+from a self-owned project gets evaluated rather than ignored.** That is a two-minute experiment -
+an API key needs no OAuth client type, no consent screen, no device-grant harness - and it should
+be run *before* the OAuth task below, because it tests the same wall from the cheap side.
+
+What the answers would mean, reading `details[].reason` rather than the status (the same
+discipline the OAuth task already insists on):
+
+- **403 `SERVICE_DISABLED`** with `metadata.consumer: projects/<n>` → the API must be enabled on
+  the calling project, and `music.googleapis.com` is absent from Google's public API discovery
+  directory, so there is no console page to enable it. The hardest no available, and the likeliest
+  outcome for a partner API.
+- **403 `PERMISSION_DENIED`** with no `ErrorInfo`, or `CONSUMER_INVALID` → an allowlist: *the* key,
+  not *a* key. Closed, but for a nameable reason.
+- **401 `UNAUTHENTICATED`** — "Expected OAuth 2 access token, login cookie…" → **the key satisfied
+  the consumer gate.** Only user identity would then be missing, which is exactly what the device
+  grant below provides, and the two halves would compose into a working link.
+- **200** → the wall was never partner-specific at all.
+
+The probe lives outside the repo, in the session's scratch directory, for the same reason the
+device-grant harness would: it takes a live credential and is not a feature.
+
 **Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
 
 - **Read `details[].reason`, not the HTTP status.** `ACCESS_TOKEN_SCOPE_INSUFFICIENT` returns
