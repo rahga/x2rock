@@ -4199,6 +4199,23 @@ circumvention, nothing built into the repo:
      rather than the sealed key, and revisitable only if Google ever opens the client set.
    - **401 / scope error** → wrong scope; retry with another before concluding anything.
 
+**A shortcut that does not exist, tested 2026-09-19 (home household).** The obvious idea, once you
+watch the Sonos desktop app link YouTube Music: it shows a code (three groups of letters, before
+the Authorize button) and that code is the device-grant `user_code`. Could x2rock simply be handed
+one and redeem it? **No.** `getDeviceAuthToken` at `music.googleapis.com/v1:sendRequest`, carrying
+a link code, answers the identical 403 `PERMISSION_DENIED` that `getAppLink` does — the caller
+check runs *before* the code is looked at, so there is nothing a code can buy. Probed with a
+made-up code precisely so the question could be answered without spending a real one. The same 403
+also came back from `x2rock link "YouTube Music"` against a household that **already has YouTube
+Music registered** through the official app, which is the other half of the point: the wall is
+about the caller's identity to Google, never the account or the household.
+
+Worth stating plainly next to it, since the 403 reads like a failure and is not the whole picture:
+that registration already buys the half that matters. Verified the same evening — a YouTube Music
+favourite played in Dining Room from the queue (`queue_position: 1`, position advancing), resolved
+by the player with the household's own `sn=2`. What the sealed key costs is search and browse from
+this machine, not playback.
+
 **Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
 
 - **Read `details[].reason`, not the HTTP status.** `ACCESS_TOKEN_SCOPE_INSUFFICIENT` returns

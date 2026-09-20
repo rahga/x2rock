@@ -875,9 +875,38 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
     .await?
     {
         Ok(body) => body,
-        Err(fault) => bail!("{} refused getAppLink: {}", service.name, fault.message),
+        Err(fault) => bail!(
+            "{} refused getAppLink: {}{}",
+            service.name,
+            fault.message,
+            sealed_key_note(&fault.message)
+        ),
     };
     parse_link_code(&service.name, "getAppLink", &body)
+}
+
+/// The sentence to add when a service refuses the *caller* rather than the
+/// account, which is a refusal a person can otherwise spend a long time trying
+/// to fix from the wrong end.
+///
+/// YouTube Music's endpoint answers "Method doesn't allow unregistered callers"
+/// to anything without the API key Sonos seals in firmware, and it says so
+/// whatever the household holds. Somebody who has just added the service in the
+/// Sonos app will reasonably read a bare 403 as "the app-link did not take" and
+/// go round the loop again; worth one sentence to stop that, including the part
+/// that matters - the registration they already made is doing its job, on the
+/// path that actually plays music.
+fn sealed_key_note(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unregistered callers") || lower.contains("api consumer identity") {
+        return ". This is the service refusing x2rock as a caller, not refusing your account, \
+                and adding the service in the Sonos app does not change it: the key it wants is \
+                sealed in Sonos's own firmware. A household registration still does the half that \
+                matters - the player resolves and plays this service's content from the queue \
+                (favorites, bookmarks and `play-item` all work); only search and browse from here \
+                are out of reach";
+    }
+    ""
 }
 
 /// The two link-code replies differ only in nesting - `getAppLink` wraps the
