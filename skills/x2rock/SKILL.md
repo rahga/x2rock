@@ -878,15 +878,17 @@ those two apart when telling a user what linking will do.
   service**, added in the Sonos app. So an on-demand track plays only if the household has that
   account. Without one, the queue refuses and x2rock falls back to streaming the item (stderr says
   "would not go in the queue; streaming it"), which works only when the service hands back a
-  playable URL: **Amazon Music does** (it then plays as a direct stream that cannot be paused and
-  resumed), **Spotify does not** (it fails with an unsupported-scheme error until the household adds
-  Spotify in the Sonos app, and then plays normally), **Deezer does not** (the room takes the URL
-  and never gets past a second, cycling PLAYING/BUFFERING with the position resetting - and plays
-  perfectly once the household has the account), **TIDAL does not** (identically to Deezer), and
-  Radio Paradise's programs do not — so of the five measured, only Amazon Music's fallback plays.
-  **A fallback that "started" is not a fallback that played**: confirm with `now --json` twice and
-  require `position_ms` to have moved. A service container (album, playlist) cannot be played whole
-  either way; see "A container cannot be played whole".
+  playable URL: **Amazon Music does** (a presigned HLS playlist), and **Deezer and TIDAL do**
+  (a signed, seekable FLAC file) — the last two only since 2026-09-19, when the reason they used to
+  stall turned out to be x2rock's own: every fallback URL was handed to the player as a *station*,
+  and a file cannot be played that way. **Spotify does not** (an unsupported-scheme error until the
+  household adds Spotify in the Sonos app, after which it plays normally), and Radio Paradise's
+  programs do not (it implements no `getMediaURI` at all). Two things to know about a fallback that
+  is a file: it **replaces what the room was playing**, queue included, where a station-shaped
+  stream plays alongside the queue; and `now --json` reports `duration_ms: null` for it even though
+  the player knows the duration. **A fallback that "started" is still not a fallback that played**:
+  confirm with `now --json` twice and require `position_ms` to have moved. A service container
+  (album, playlist) cannot be played whole either way; see "A container cannot be played whole".
 - **Read `link`'s last line for which case you are in.** `The household knows this account as
   sn_22` means the household already holds this very account, so on-demand playback works. `did not
   match` or `sent no userIdHashCode` means only that this account was not matched; the household may
