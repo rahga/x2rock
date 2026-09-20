@@ -7094,11 +7094,30 @@ renumbered the playing track 3 → 2 with playback continuing uninterrupted (12.
 `queue clear` emptied it and left the room `IDLE`. Nothing about the queue is service-specific once
 the household holds the account.
 
+**Run again on Deezer to check that** (home household, Dining Room, 2026-09-19): `tr-flac:2711778`
+queued into an empty queue, `play 1` started it (`position_ms` 31089 of 562000, URI carrying
+`sn=26`), a second track queued behind it, `next` moved to it cleanly, and removing track 1
+underneath renumbered the playing track 2 → 1 with playback never breaking. Identical to TIDAL on a
+different service's catalogue, which is what "not service-specific" has to mean. One difference
+worth knowing about: `queue clear` left the room `PAUSED` with `in_use` still `true` rather than
+`IDLE`, because it was paused before the clear - emptying the queue does not take the room off
+`x-rincon-queue:`, so an empty queue can still be the group's source.
+
 **The stream fallback is now 1-for-4.** Amazon Music plays unregistered on a presigned CloudFront
 URL; Spotify, Radio Paradise, Deezer and TIDAL all fail, TIDAL exactly as Deezer does - the room
 takes the URL, reports `PLAYING`, and never passes 0ms. The long-standing guess that TIDAL would be
 the service to return `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry is neither
 confirmed nor needed: whatever the reason, the fallback does not play.
+
+**Why Amazon might be the odd one out.** The household's reading, on the evidence of what that
+account is: it is a Prime membership, not Amazon Music Unlimited, and a free tier has a reason to
+hand out tracks that play but cannot be steered - a taste of the catalogue that makes the paid tier
+look like the thing that gives you control. That is a motive, not a measurement, and it is not
+needed to use any of the above. But it fits what was already recorded independently - the
+station-shaped browsing, the `match` that failed, and now a self-authorizing stream URL that plays
+for a caller the household never registered - and it predicts something testable: on an Unlimited
+account, the station shape and the freely-playing stream URL should both change. Worth re-running
+if that subscription ever changes.
 
 ## Open questions
 
