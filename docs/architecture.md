@@ -2783,6 +2783,151 @@ closed: a decision, not a gap waiting on someone's afternoon.
 were the half worth building and cloud queue is the half declined.
 
 
+## Sonos 27mcp: the third Sonos API, and what it will not say (2026-09-20)
+
+Sonos ships an MCP server at `https://mcp.ws.sonos.com/mcp` - the backend behind the built-in Sonos
+connector in Claude and other agent clients. It is a *fourth* surface after SMAPI, UPnP and the
+Control API, and it is the one place Sonos has shipped content resolution to third parties. This
+section is what it actually does, probed directly with a scratch client rather than through an
+agent, so the findings are about the API rather than about some model's turn.
+
+### Getting in is open, which was the surprise
+
+Everything needed is advertised:
+
+```
+/.well-known/oauth-protected-resource  → scopes: playback-control-all, partner-content:read
+/.well-known/oauth-authorization-server → registration_endpoint, PKCE S256,
+                                          token_endpoint_auth_methods_supported: ["none"]
+```
+
+**Dynamic client registration is open to anyone** - `POST /mcp-oauth/register` answered `201` with a
+`client_id` for a client calling itself "x2rock probe", no account, no partner gate, nothing like
+the allowlist on `music.googleapis.com`. Then ordinary PKCE: browser consent, code, token. So a
+non-agent program can hold a Sonos cloud token today, and the `partner-content:read` scope is
+exactly the content capability the Control API's 53 paths do not contain.
+
+**One token reached both households** - home and office - with nothing scoping it to either. Worth
+knowing before treating such a token as a per-house credential.
+
+### There is no search. The model is meant to be the index.
+
+About thirty tools: discovery of ids, transport, volume, grouping, favorites, playlists, line-in,
+night sound / speech enhancement, and six `play_*` verbs. **Not one queries a catalogue.** Nothing
+returns a track list, an album list, or an id you can hold and choose from. The design bet is that
+the calling LLM already knows the world's discography and only needs a resolver, so `play_album`
+takes the album's *name*.
+
+What the verbs actually do, which is not what they say:
+
+| called | replied | what the player actually had |
+|---|---|---|
+| `play_album` "Oops!... I Did It Again" | ✓ Playing album | **12-row queue**, position 1 |
+| `play_artist` "Daft Punk" | ✓ Playing *station* "Top Tracks" | **100-row queue**, position 1 |
+| `play_station` artist "Miles Davis" | ✓ Playing *playlist* "100% Miles Davis" | **40-row queue** |
+| `play_track` "Bohemian Rhapsody" | ✓ Playing *station* | **no queue at all**, `queue_position: null` |
+| `play_radio` "NPR" | ✓ "P.R.E. News & Ideas" on Sonos Radio | a stream, and not NPR |
+
+So two of the three "station" verbs build ordinary queues, the verb you would expect to queue one
+track refuses to, and the radio resolver renames what you asked for. A program consuming this must
+verify against the player afterwards rather than trust the reply - which is what everything else in
+this document already does, for the same reason.
+
+### The `music_service` enum is the whole YouTube Music story, again
+
+`play_track`/`play_album`/`play_artist`/`play_playlist`/`play_station` all take an optional
+`music_service`, and its schema is a **closed enum of seven**:
+
+> Amazon Music, Apple Music, Deezer, Pandora, Radio France, Sonos Radio, Spotify
+
+The home household is registered for Deezer, iHeartRadio ×2, Sonos Radio, TIDAL and **YouTube
+Music**. Three of those - YouTube Music, TIDAL, iHeartRadio - are **not in the enum and cannot be
+named**. `get_registered_music_services` lists YouTube Music happily; every play verb refuses the
+words.
+
+The checks run in a fixed order, each with its own message, which is how the layers were separated:
+
+| asked | answer |
+|---|---|
+| `music_service: "YouTube Music"` | `"YouTube Music" is not a recognized music service.` ← vocabulary |
+| `music_service: "Spotify"` (in enum, not connected here) | `That music service isn't set up on this household.` ← registration |
+| `music_service: "Sonos Radio"` (connected, has no albums) | `No matching content found.` ← catalogue |
+| no `music_service` at all | resolved to **Deezer**, the household's first full-catalogue service |
+
+**Consequence, and it is the sharp one.** On a household whose only connected service were YouTube
+Music, "play There's No 'I' In Team by Taking Back Sunday" fails twice - the enum rejects the name,
+and omitting it leaves the resolver nothing eligible but Sonos Radio, which answers `No matching
+content found`. The user owns the song; the API says it cannot find it. That error is
+indistinguishable from "the song does not exist", "you invented the title" and "the service does
+not carry it", and an agent relaying it says "sorry, I couldn't find that song" - confidently
+wrong, about a library the same API listed by name moments earlier.
+
+### But playback is not gated, only resolution
+
+`play_sonos_favorite` on a favorite backed by YouTube Music **plays it** - verified on hardware,
+`Hot House` by Ryo Fukui, position advancing, `sn=2`. Nobody has to name the service for a
+household object, so the player resolves it with the household's own account exactly as the local
+enqueue path does.
+
+So the split is identical to the one the rest of this document found from the LAN side: **discovery
+is gated, playback is not.** Anything already saved - a favorite, a Sonos playlist - plays through
+any route. Only *finding* it is closed.
+
+One caveat for anyone reading the playlist route as a workaround: `get_sonos_playlists` returns
+`{id, name, trackCount}` and nothing else. **The tracks inside a playlist are invisible**, so there
+is no way to tell whether a playlist contains the wanted song short of playing it and reading
+`get_now_playing`.
+
+### The error taxonomy is prose in a success envelope
+
+Tested for whether the strings are model-generated: **they are not.** Byte-identical wording across
+three repeats and across different inputs, 0.27-0.94s round trip. Static templates - including the
+instruction to the *calling model* baked into the constant:
+
+```
+Error: No matching content found. Tell the user what happened.
+```
+
+Where the standardized channel is used, and where it is not:
+
+| condition | answer |
+|---|---|
+| unknown JSON-RPC **method** | `{"error":{"code":-32601,"message":"Method not found"}}` - proper |
+| unknown **tool** | HTTP 200, `result.content[0].text = "Error: Unknown tool: …"` |
+| wrong argument type | HTTP 200, `"Error: Invalid input: expected string, received number"` (Zod's own wording, verbatim - a Node/TypeScript server leaking its validator) |
+| every domain failure | HTTP 200, `"Error: …"` prose |
+
+And **`isError` is absent on every failure**, though MCP defines it for exactly this case. So a
+program cannot distinguish success from failure except by matching the prefix `"Error: "`. That is
+the one thing here worth calling a defect rather than a design choice.
+
+### A diagnostic trap worth remembering: `NO_CONTENT` can mean "out of streams"
+
+Mid-probe, a YouTube Music favorite that had played an hour earlier began failing on **both**
+transports at once - locally `favorites:1 loadFavorite failed: ERROR_PLAYBACK_NO_CONTENT`, and
+through 27mcp `That favorite appears to be unavailable — likely the associated music service
+account is missing`. Both readings pointed at a dead registration, and both were wrong: another
+person in the house was streaming, and YouTube Music's **concurrent-device limit** was refusing the
+household a slot. It cleared by itself.
+
+Two lessons. **An intermittent `NO_CONTENT` is not evidence of a broken account** - do not go
+re-linking a service that was never broken, which is exactly what was about to be recommended here.
+And 27mcp's message names a cause it cannot observe; the underlying error carries no such detail.
+
+### What it would be worth to x2rock
+
+A narrow supplement, and only that. It cannot back a picker - no results, no ids - so nothing about
+the bar widget or `search` changes. What it would add is "play this named thing", cloud-mediated,
+for the two catalogues x2rock cannot reach locally at all: **Apple Music and Spotify**. Cost: an
+OAuth token, a cloud round trip, a per-household rate limit, US-English only, and a reply that must
+be verified against the player. Not built; recorded so the trade is on paper.
+
+Two corrections made while probing, kept visible because both were mine and both came from
+over-generalising a single call: "the play verbs never build a queue" (false - `play_album` does),
+and "`shuffle` is required by the implementation but not the schema" (false - the schema declares
+it required; the rejected call was simply invalid).
+
+
 ## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
 
 The first open question said to build a raw Control-API command before guessing at anything else.
