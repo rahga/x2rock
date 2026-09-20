@@ -2783,11 +2783,11 @@ closed: a decision, not a gap waiting on someone's afternoon.
 were the half worth building and cloud queue is the half declined.
 
 
-## Sonos 27mcp: the third Sonos API, and what it will not say (2026-09-20)
+## Sonos 27mcp: an agent-shaped API, and what it will not say (2026-09-20)
 
 Sonos ships an MCP server at `https://mcp.ws.sonos.com/mcp` - the backend behind the built-in Sonos
-connector in Claude and other agent clients. It is a *fourth* surface after SMAPI, UPnP and the
-Control API, and it is the one place Sonos has shipped content resolution to third parties. This
+connector in Claude and other agent clients. It is another surface alongside SMAPI, UPnP, the Control API and the
+first-party `play.sonos.com` content API, and it is the one place Sonos has shipped content resolution to third parties. This
 section is what it actually does, probed directly with a scratch client rather than through an
 agent, so the findings are about the API rather than about some model's turn.
 
