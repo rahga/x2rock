@@ -2927,6 +2927,35 @@ over-generalising a single call: "the play verbs never build a queue" (false - `
 and "`shuffle` is required by the implementation but not the schema" (false - the schema declares
 it required; the rejected call was simply invalid).
 
+### Where the enum comes from, and what others report
+
+Sonos's own materials explain the seven names, and it is not arbitrary: **27mcp "supports the same
+set of content services as Classic Sonos Voice Control"**, and the enum is that list, inherited
+verbatim - Radio France included, which is otherwise an odd member. YouTube Music, TIDAL and
+iHeartRadio were never Sonos Voice Control services, so they are absent here for a reason that
+predates MCP entirely. The exclusion is a *hand-me-down*, not a judgement about those services -
+which also means it will not be fixed by anything MCP-specific.
+
+Sonos's engineering blog adds three things worth recording:
+
+- **34 tools**, described as "the source of truth", with no stated rationale for the absence of
+  search or discovery.
+- **"Tool inventory, names, descriptions, and schema will evolve without notice."** Anything built
+  on this is building on a contract its author says is unstable - a real argument against depending
+  on it for anything a person would notice breaking.
+- Early access, English only, S2 required, cloud connectivity required.
+
+Independent reports from the Sonos community match what was measured here and add two findings this
+probe did not reach:
+
+- "The mcp is fairly limited right now to playback related operations. It can't do diagnostic
+  functions, can't return search results, etc." - the no-search finding, reached independently.
+- **Multi-profile services cannot be targeted.** A household with a Spotify family plan or an
+  Amazon Music account has no way to say *which profile* a command applies to. The same shape as
+  the two-iHeartRadio-accounts problem recorded elsewhere in this document, and 27mcp has no
+  parameter for it at all (x2rock's `accountLabel` equivalent is visible in
+  `get_registered_music_services`, but no play verb accepts one).
+
 
 ## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
 
