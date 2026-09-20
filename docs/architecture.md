@@ -1632,6 +1632,10 @@ Read for what each would *teach* rather than what would merely work:
 - **TIDAL** is the only route to the one architectural unknown left: whether `getMediaURI` ever
   returns `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry. Every service reached
   so far hands back a plain URL. Costs a subscription, which is why it is not first.
+  *Settled 2026-09-19: TIDAL was subscribed to and asked, and it hands back a plain URL too - a
+  bare `getMediaURIResult` with no sibling elements, pointing at a publicly fetchable FLAC. No
+  service reached so far returns either field. See "The fallback stalls because we call every URL
+  a station".*
 - **AccuRadio** looks like the obvious free-radio pick and is the wrong one for a Google account.
 - **Murfie and NhacCuaTui answer `getDeviceLinkCode` and are not worth a login.** A service
   answering the protocol says nothing about the service being alive, which is worth knowing before
@@ -7103,11 +7107,71 @@ worth knowing about: `queue clear` left the room `PAUSED` with `in_use` still `t
 `IDLE`, because it was paused before the clear - emptying the queue does not take the room off
 `x-rincon-queue:`, so an empty queue can still be the group's source.
 
-**The stream fallback is now 1-for-4.** Amazon Music plays unregistered on a presigned CloudFront
-URL; Spotify, Radio Paradise, Deezer and TIDAL all fail, TIDAL exactly as Deezer does - the room
-takes the URL, reports `PLAYING`, and never passes 0ms. The long-standing guess that TIDAL would be
-the service to return `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry is neither
-confirmed nor needed: whatever the reason, the fallback does not play.
+**The stream fallback is 1-for-4** *as x2rock plays it*. Amazon Music plays unregistered on a
+presigned CloudFront URL; Spotify, Radio Paradise, Deezer and TIDAL all fail, TIDAL exactly as
+Deezer does - the room takes the URL, reports `PLAYING`, and never passes 0ms. **The reason turned
+out to be this client's, not the services'** - see the section below, written the next day.
+
+### The fallback stalls because we call every URL a station (2026-09-19)
+
+The line above says "whatever the reason, the fallback does not play". The reason is now known, and
+it is ours. Two things were measured that had never been looked at directly:
+
+**1. What `getMediaURI` actually returns.** The long-standing open question - "TIDAL is the only
+route to the one architectural unknown left: whether `getMediaURI` ever returns `httpHeaders` or a
+`contentKey` that `loadStreamUrl` cannot carry" - is **answered: no.** TIDAL's reply, read raw off
+the wire rather than through `media_uri()`, which keeps only `getMediaURIResult` and discards any
+sibling:
+
+```
+<getMediaURIResult>http://lgf.audio.tidal.com/mediatracks/CAEaKwgDEic3NWM4…/0.flac?token=1789868645~…</getMediaURIResult>
+```
+
+One element. No `httpHeaders`, no `contentKey`, no `positionInformation`. Deezer's is the same
+shape - a `cdnt-stream.dzcdn.net` `.flac` with an `hdnea=` signature. And the URLs are not merely
+well-formed: fetched from this laptop with no credentials of any kind, TIDAL's answers `206 Partial
+Content`, `audio/flac`, `Accept-Ranges: bytes`, `Content-Range: bytes 0-1048575/52299553`. **A
+52 MB seekable FLAC file, served to anyone holding the signed URL.** So the protected-stream
+barrier this document has carried since the service survey is not there for these two services, and
+the guess it rested on can be retired.
+
+**2. Why a perfectly good URL produced silence.** `stream_url()` hands every URL to
+`playbackSession:1 loadStreamUrl` with `stationMetadata` of `{"type": "station"}` - which tells the
+player this is a live broadcast. It is not; it is a finite file with a duration and a seek table.
+Handed to the *same room, seconds apart*, the same Deezer URL behaves in two different ways:
+
+| how it was handed over | result |
+|---|---|
+| `SetAVTransportURI` + `Play` (plain UPnP, no metadata) | `TrackDuration 0:09:22`, `RelTime` 0:00 → 0:05 → 0:11 - **it plays** |
+| `x2rock play-url` (`loadStreamUrl`, station-shaped) | `PLAYING`, `RelTime` **0:00, 0:00, 0:00** - the documented stall |
+
+TIDAL reproduced it exactly: `track/4915514` over `SetAVTransportURI` reported `TrackDuration
+0:09:04` with `RelTime` advancing 0:44 → 0:49 → 0:54. Volume 0 in Dining Room throughout; the
+household heard none of it.
+
+**What this changes:**
+
+- **The scoreboard was measuring the wrong thing.** "Deezer and TIDAL cannot play unregistered" is
+  wrong as stated. Their content plays unregistered, from a URL our own token bought, through a
+  transport x2rock was not using.
+- **Amazon Music was never the exception it looked like.** Its fallback works because a presigned
+  `.m3u8` *is* station-shaped - an HLS playlist is exactly the continuous thing `loadStreamUrl`
+  expects. It agreed with the transport we chose; Deezer and TIDAL disagreed with it. Radio
+  Paradise stays a genuine failure for its own reason: it implements no `getMediaURI` at all.
+- **Everything the registration sections conclude still stands, unchanged.** Those rest on the
+  *enqueue* path (`AddURIToQueue` → UPnP 800 without a registration, a clean queued play with one),
+  which this does not touch. What moves is only the consolation prize: the fallback is a poorer
+  stand-in than it needs to be, not because services withhold anything but because we ask the
+  player for the wrong kind of playback.
+
+**The open work this creates**, deliberately not done in the same sitting as the measurement: the
+fallback should hand a finite file to the player as a track rather than as a station. `SetAVTransportURI`
+with a DIDL-Lite `CurrentURIMetaData` is the obvious route and is known to work on both services
+above; what it costs is the `playbackSession` the current path opens, and the room shows the
+hostname as its title when the metadata is empty (Dining Room read `f-cdnt-stream.dzcdn.net` after
+the bare test). Deciding between "always AVTransport for a fallback" and "station-shape only when the
+URL looks like one (`.m3u8`)" wants one more measurement: whether `loadStreamUrl` has a non-station
+`type` that does the same job.
 
 **Why Amazon might be the odd one out.** The household's reading, on the evidence of what that
 account is: it is a Prime membership, not Amazon Music Unlimited, and a free tier has a reason to
@@ -7137,7 +7201,8 @@ if that subscription ever changes.
    app-link service to fall"), and `x2rock link` now asks any app-link service for a browser page
    via `getAppLink` rather than refusing on the tier alone. And **the barrier is now one wall
    shorter than this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
-   `loadStreamUrl` cannot carry" was true and is no longer the whole story: the enqueue path does not
+   `loadStreamUrl` cannot carry" was never even *observed* - no service has yet returned either field,
+   TIDAL included (2026-09-19) - and it is no longer the whole story either: the enqueue path does not
    resolve the stream at all, so the player supplies its own credential and protected content plays.
    A kept YouTube Music track demonstrates it — and the same day showed the condition it rests on,
    in both directions: the household's account was disconnected and the same id refused at enqueue
