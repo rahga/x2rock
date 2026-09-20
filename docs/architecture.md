@@ -4292,7 +4292,41 @@ Three things worth having out of that, none of which the fake key could show:
 The two transports disagreeing is itself a detail to keep: a query-string key is evaluated against
 the *key's* own API restrictions first (`API_KEY_SERVICE_BLOCKED`), while the header key reaches
 the *project* check (`SERVICE_DISABLED`). Probing only one way would have produced half the
-picture.
+picture. (And a key with restrictions set will answer `API_KEY_SERVICE_BLOCKED` on *both*
+transports, hiding the project verdict entirely - unrestrict the key before reading anything into
+a re-probe.)
+
+#### What the outside world knows, and the two bridges that are out (2026-09-20)
+
+The console's activation page for this API **fails to load** rather than refusing, which is what an
+API invisible to the calling project looks like from a UI that cannot render a page for it.
+Searched for corroboration and for any route round it; the useful findings are all negative, which
+is worth recording so nobody re-runs them:
+
+- **`music.googleapis.com` is absent from Google's public API discovery directory.** Queried by
+  name and across the whole directory: zero entries matching `music`. No public documentation of
+  the API exists anywhere.
+- **The integration is YouTube's, not Sonos's.** Sonos's own support material and community
+  answers say YouTube submitted and maintains the YouTube Music service on Sonos - which is exactly
+  the shape of a Google-side partner API named `google.music.sonos.v1.Sonos.SendRequest`, built for
+  one caller.
+- **Nobody bypasses it; the third-party projects replace it.** The known way to get YouTube audio
+  onto Sonos from outside is to *write an SMAPI service of your own* backed by the public YouTube
+  Data API v3 and register it with the household. That is a different service, not this one.
+- **And registering one is shut on this firmware.** `http://<player>:1400/customsd.htm`, the page
+  that historically added a custom SMAPI service to a household, answers **403** on 97.1.
+- **The cheapest bridge does not exist either, and this household's own data says so.** If
+  YouTube Music's object ids were YouTube video ids, x2rock could search with the *public* Data API
+  - which any project may enable - and hand the results to the enqueue path, never touching the
+  partner endpoint. They are not. Every YTM id in this household is an opaque 48-character
+  `ALkSOi…` token (`x-sonosapi-hls-static:ALkSOiE6oNaY79ETCNUV59yIVZix_Mdq8J1J8_Y2d01HLnFR`,
+  `x-rincon-cpcontainer:1004004cALkSOiF60SmN3aW6x6j0p5ECA5_qJlToFZPtLSwFkyBNbzYO`), nothing like an
+  11-character video id. The ids are partner-minted and cannot be synthesised.
+
+So the position is: the partner API is the only door to YouTube Music *as YouTube Music*, and it is
+allowlisted to Sonos. That is a closed question with a named mechanism, which is the best available
+outcome short of access. **Nothing about playback changes** - the household's registration resolves
+and plays YTM content from the queue, which is the half that was ever at stake.
 
 **Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
 
