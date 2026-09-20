@@ -4155,7 +4155,14 @@ OAuth, which is what the next section probes.
 Prompted by the observation that a Sonos app linking YouTube Music shows a ~9-character code and
 hands it to **Google**, which authenticates the account and approves the connection. That is the
 **OAuth 2.0 Device Authorization Grant** (RFC 8628), and it is Google's flow, not Sonos's — Sonos
-is a registered partner operating inside Google's terms. Which reframes both the 403 and the sealed
+is a registered partner operating inside Google's terms.
+
+*No longer an inference (2026-09-19).* Watched directly in the Sonos desktop app: the code appears
+before the Authorize button, and Authorize opens
+`https://accounts.google.com/o/oauth2/device/usercode`, which redirects to the same path with
+`?flowName=DeviceOAuth`. Google's own device-grant entry point, named as such in the URL. The
+reading above was right, and the flow the app runs is not a Sonos flow at any point after the code
+is minted. Which reframes both the 403 and the sealed
 key: the key is Google's *project*-identity requirement (a partner key Google requires be
 protected, hence sealed in firmware), and the ~9-char code is Google's *user*-identity flow.
 

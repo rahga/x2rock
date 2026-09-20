@@ -879,7 +879,7 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
             "{} refused getAppLink: {}{}",
             service.name,
             fault.message,
-            sealed_key_note(&fault.message)
+            sealed_key_note(&fault)
         ),
     };
     parse_link_code(&service.name, "getAppLink", &body)
@@ -896,9 +896,12 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
 /// go round the loop again; worth one sentence to stop that, including the part
 /// that matters - the registration they already made is doing its job, on the
 /// path that actually plays music.
-fn sealed_key_note(message: &str) -> &'static str {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("unregistered callers") || lower.contains("api consumer identity") {
+fn sealed_key_note(fault: &Fault) -> &'static str {
+    let lower = fault.message.to_ascii_lowercase();
+    if fault.code == "UNREGISTERED_CALLER"
+        || lower.contains("unregistered callers")
+        || lower.contains("api consumer identity")
+    {
         return ". This is the service refusing x2rock as a caller, not refusing your account, \
                 and adding the service in the Sonos app does not change it: the key it wants is \
                 sealed in Sonos's own firmware. A household registration still does the half that \
@@ -1186,6 +1189,12 @@ fn parse_fault(text: &str, status: u16) -> Fault {
     Fault {
         code: if text.contains("NOT_LINKED_RETRY") {
             "NOT_LINKED_RETRY".to_string()
+        } else if text.contains("unregistered callers") || text.contains("API consumer identity") {
+            // Not a SOAP fault at all - a Google API error object, in JSON,
+            // about *who is calling* rather than about the request. Named here
+            // because `message` is only ever "HTTP {status}" on this path, and
+            // a bare "HTTP 403" tells a reader nothing they can act on.
+            "UNREGISTERED_CALLER".to_string()
         } else {
             String::new()
         },
