@@ -12,6 +12,7 @@ use serde_json::json;
 use super::stream::{StreamStart, stream_item};
 use super::{connect_for_service, find_named, is_refusal, mmss, refreshed_catalogue, upnp_ip};
 use crate::cli::{BookmarksAction, QueueAction};
+use crate::hint;
 use crate::session::{self, Session, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::Favorite;
@@ -257,7 +258,7 @@ pub async fn play_item(
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
             Err(e) if is_refusal(&e) => {
-                eprintln!("x2rock: {title:?} would not go in the queue ({e:#}); streaming it")
+                eprintln!("x2rock: {title:?} {} ({e:#}); streaming it", refusal_was(&e))
             }
             Err(e) => return Err(e),
         }
@@ -327,6 +328,59 @@ async fn enqueue_and_play(
     didl: &str,
 ) -> Result<()> {
     let length = upnp.add_to_queue(uri, didl, false).await?;
+    match start_queued(session, target, upnp, length).await {
+        Ok(()) => Ok(()),
+        // **The queue took it and then would not play it.** `AddURIToQueue` is
+        // not the only way the player says "this is not queue material" - a
+        // live radio station is *accepted* by it (iHeartRadio's
+        // `live_stations.*`, verified 2026-09-19: three of them sat in a real
+        // queue, each showing the station's name) and only refused later, at
+        // the play. The refusal that earns a stream fallback is therefore the
+        // whole sequence's, not `AddURIToQueue`'s alone.
+        //
+        // The row is taken back out before returning. Leaving it would be the
+        // failure mode already on record from the TIDAL account removal - dead
+        // rows accumulating in a room's queue for a person to clear by hand -
+        // and here they would accumulate one per attempt.
+        Err(e) => {
+            if let Err(cleanup) = upnp.remove_track(length).await {
+                eprintln!(
+                    "x2rock: could not take the unplayable row back out of {}'s queue \
+                     ({cleanup:#}); it is at position {length}",
+                    target.name
+                );
+            }
+            Err(hint::Hint::new(
+                format!("{e:#}"),
+                "not_queue_material",
+                None,
+            )
+            .into())
+        }
+    }
+}
+
+/// How to word a refusal, which is two different events wearing one word. The
+/// distinction matters to whoever reads the line: "would not go in the queue"
+/// describes a row that was never created, and printing it for a station the
+/// queue happily accepted and then choked on would send a reader looking for a
+/// queue bug that is not there.
+fn refusal_was(e: &anyhow::Error) -> &'static str {
+    match hint::of(e).0 {
+        "not_queue_material" => "went in the queue and then would not play",
+        _ => "would not go in the queue",
+    }
+}
+
+/// Point the group at the queue and start the row that was just added. Split
+/// out of [`enqueue_and_play`] so the failure of *any* of its three steps is
+/// one thing the caller can act on.
+async fn start_queued(
+    session: &session::Session,
+    target: &Target,
+    upnp: &Upnp,
+    length: u32,
+) -> Result<()> {
     if !upnp.playing_from_queue().await? {
         upnp.use_queue(&target.coordinator_id).await?;
     }
@@ -759,8 +813,9 @@ pub async fn bookmark(
             Err(e) if !is_refusal(&e) => return Err(e),
             Err(e) => {
                 eprintln!(
-                    "x2rock: {:?} would not go in the queue ({e:#}); streaming it",
-                    bookmark.name
+                    "x2rock: {:?} {} ({e:#}); streaming it",
+                    bookmark.name,
+                    refusal_was(&e)
                 );
                 let token = credentials::Credentials::load()?.token_for(&service.id);
                 stream_item(

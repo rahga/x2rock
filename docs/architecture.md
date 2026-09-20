@@ -7166,6 +7166,39 @@ household heard none of it.
   stand-in than it needs to be, not because services withhold anything but because we ask the
   player for the wrong kind of playback.
 
+### A queue that accepts a station and then will not play it (2026-09-19)
+
+Found while regression-testing the section above, and older than it: `play-item` on an iHeartRadio
+`live_stations.*` id failed with `playback:1 play failed: ERROR_PLAYBACK_FAILED`, leaving the room
+idle. The same call failed identically on the pre-change binary, so it was nothing to do with the
+fallback work.
+
+**The fallback to a stream session never fired, because nothing refused.** `play_item` enqueues
+first and treats a refusal as "this is not queue material" - which is exactly right for the
+services that refuse. `AddURIToQueue` *accepts* an iHeartRadio live station: asked directly,
+`queue-item` put three of them in Dining Room's queue, each showing "KOST 103.5" as a proper row.
+The player only objects at the play, by which time the code had stopped looking for an objection.
+Hence a hard error on an item the stream path plays perfectly.
+
+So the refusal that earns the fallback is now the whole sequence's - add, point the group at the
+queue, seek, play - rather than `AddURIToQueue`'s alone. A failure after the add carries the code
+`not_queue_material`, which `is_refusal` accepts alongside a UPnP fault, **and the row is taken
+back out of the queue on the way past.** Leaving it would reproduce the mess already on record from
+the TIDAL account removal - dead rows to be cleared by hand - except one per attempt.
+
+The two events are worth telling apart in the message, since they now share a word:
+
+```
+x2rock: "KOST 103.5" went in the queue and then would not play (...); streaming it
+x2rock: "Radio Paradise" would not go in the queue (UPnP 800 ...); streaming it
+```
+
+Verified on hardware, Dining Room at volume 0: the station falls back and plays with position
+advancing, the queue is back to 0 rows afterwards, `--kind stream` still skips the queue entirely,
+and an ordinary Deezer track still enqueues and plays at queue position 1. `play-item --help` had
+promised this behaviour all along - "Omitted, the queue is tried first and a refusal falls back to
+streaming" - so this is the code catching up with its own documentation.
+
 ### Fixed, and what the fix had to learn first (2026-09-19)
 
 **`loadStreamUrl` has no non-station `type`.** That was the cheap hope and it is dead: probed

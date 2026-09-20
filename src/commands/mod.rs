@@ -126,8 +126,12 @@ pub fn mmss(duration: Option<std::time::Duration>) -> String {
 /// timeout or a dead socket means nothing of the kind, and falling back on one
 /// spends a second round trip to fail the same way while printing a sentence
 /// that blames the content.
+///
+/// A UPnP fault is one way the player says it; `not_queue_material` is the
+/// other, raised by `enqueue_and_play` when the row was accepted and then would
+/// not play. Both mean the same thing to a caller holding a stream fallback.
 pub fn is_refusal(e: &anyhow::Error) -> bool {
-    upnp::Fault::of(e).is_some()
+    upnp::Fault::of(e).is_some() || hint::of(e).0 == "not_queue_material"
 }
 
 /// `on`/`off`, for every flag and argument that takes those two words.
