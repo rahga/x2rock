@@ -4263,6 +4263,37 @@ discipline the OAuth task already insists on):
 The probe lives outside the repo, in the session's scratch directory, for the same reason the
 device-grant harness would: it takes a live credential and is not a feature.
 
+#### Run with a real key: the fourth branch, and it names itself (2026-09-20)
+
+A key from a self-owned Cloud project, sent both ways:
+
+| sent | answer |
+|---|---|
+| `?key=<real>` | **403** `API_KEY_SERVICE_BLOCKED` — "Requests to this API music.googleapis.com **method `google.music.sonos.v1.Sonos.SendRequest`** are blocked" |
+| `X-Goog-Api-Key: <real>` | **403** `SERVICE_DISABLED` — "**YouTube Music API (Partner)** has not been used in project `<n>` before or it is disabled", with an `activationUrl` |
+
+Three things worth having out of that, none of which the fake key could show:
+
+- **The API has a name and a method.** `google.music.sonos.v1.Sonos.SendRequest`, published by
+  Google as **"YouTube Music API (Partner)"**. The `v1:sendRequest` URI in the service descriptor
+  is a gRPC-transcoded method of a partner API dedicated to Sonos - so the SMAPI envelope x2rock
+  sends is being tunnelled through a Google API surface built for exactly one caller.
+- **It is the predicted fourth branch** - `SERVICE_DISABLED`, the API not enabled on the calling
+  project - **but the prediction attached to it was wrong in a useful way.** That branch was
+  written as "there is no console page to enable it, because `music.googleapis.com` is absent from
+  the public discovery directory". Google returns an `activationUrl` for it anyway. Absence from
+  the discovery directory does not mean absence from the console.
+- **So the question is now narrower than "a key or the key", and it is answerable by clicking.**
+  Whether a non-partner project may *enable* "YouTube Music API (Partner)" is a policy Google
+  enforces at activation. If it enables, the same probe re-run decides the rest; if the console
+  refuses, that is the allowlist answer arriving from the console instead of the endpoint, and it
+  closes the question properly.
+
+The two transports disagreeing is itself a detail to keep: a query-string key is evaluated against
+the *key's* own API restrictions first (`API_KEY_SERVICE_BLOCKED`), while the header key reaches
+the *project* check (`SERVICE_DISABLED`). Probing only one way would have produced half the
+picture.
+
 **Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
 
 - **Read `details[].reason`, not the HTTP status.** `ACCESS_TOKEN_SCOPE_INSUFFICIENT` returns
