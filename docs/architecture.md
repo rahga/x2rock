@@ -7086,8 +7086,9 @@ It also answers the older note that kept TIDAL as the counter-example "whose reg
 whose content queues, but whose account id is still `None`" - that is not a curiosity of the office
 household, it is what every no-hash service does everywhere.
 
-**And the queue behaves normally on it**, which matters because TIDAL is the first service tested
-here with a catalogue of ordinary tracks rather than stations or podcasts. With one track playing,
+**And the queue behaves normally on it**, which is the first time the whole cycle has been run on
+ordinary tracks - Deezer's step 3 above played one, but only one, and before that the cycle had only
+been exercised on iHeartRadio podcast episodes. With one track playing,
 two more were queued without disturbing it, `play 3` jumped to the third, and removing track 1
 renumbered the playing track 3 → 2 with playback continuing uninterrupted (12.5s and climbing).
 `queue clear` emptied it and left the room `IDLE`. Nothing about the queue is service-specific once
