@@ -2938,6 +2938,15 @@ Sonos Voice Control services, so they are absent here for a reason that predates
 exclusion is a *hand-me-down*, not a judgement about those services - which also means it will not
 be fixed by anything MCP-specific.
 
+**Three locks, three lock-holders - do not collapse them into one.** YouTube Music is closed to
+this project on every discovery route, but for unrelated reasons: SMAPI search is locked by
+*Google* (its endpoint gates unknown callers on the sealed key), 27mcp is locked by *Sonos* (this
+inherited enum), and the Control API has no discovery for anyone. Deezer, TIDAL and iHeartRadio
+prove SMAPI itself is fine - they answer x2rock's ordinary device-link token and search normally.
+Nothing here is evidence that Sonos's general content mechanism failed; it is evidence that one
+provider fenced its own endpoint, and that Sonos's narrow first-party pipeline - the one holding
+the key - will not say the service's name.
+
 **And the list has barely moved in four years.** Sonos Voice Control launched June 2022 (US) with
 Apple Music, Amazon Music, Deezer, Pandora and Sonos Radio - *without Spotify*, which took roughly
 two years to arrive. Radio France is the only other addition. So the constraint x2rock ran into in
