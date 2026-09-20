@@ -479,6 +479,64 @@ impl SystemPlayer {
     }
 }
 
+/// What a portable reports about its battery.
+///
+/// Every field is optional and kept as the player's own word rather than an
+/// enum: this is a diagnostic readout, and the case that matters most - a
+/// battery misbehaving - is exactly the case where a value nobody has seen
+/// before may turn up. An unknown `Health` must reach the person, not be
+/// flattened into "other".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Battery {
+    /// Percentage, 0-100.
+    pub level: Option<u8>,
+    /// `GREEN` on a healthy pack; anything else is the interesting case.
+    pub health: Option<String>,
+    /// `NORMAL`, or a word about being too hot or too cold to charge - which is
+    /// one of the ordinary reasons a Roam stops charging.
+    pub temperature: Option<String>,
+    /// `BATTERY` when running off the pack, or what it is charging from:
+    /// `USB_POWER`, `SONOS_CHARGING_RING`, `QI_WIRELESS`.
+    pub power_source: Option<String>,
+}
+
+impl Battery {
+    /// Whether the player says it is drawing power from something other than
+    /// its own pack. `None` when it did not say.
+    pub fn charging(&self) -> Option<bool> {
+        let source = self.power_source.as_deref()?;
+        Some(!source.eq_ignore_ascii_case("BATTERY"))
+    }
+}
+
+/// `<Data name="Level">95</Data>` rows out of a `LocalBatteryStatus` block.
+///
+/// Free of the network so the shapes can be pinned in tests, including the
+/// empty document a mains speaker returns.
+fn parse_battery(body: &str) -> Option<Battery> {
+    let doc = Document::parse(body).ok()?;
+    let block = doc
+        .descendants()
+        .find(|n| n.has_tag_name("LocalBatteryStatus"))?;
+    let mut battery = Battery::default();
+    for data in block.children().filter(|n| n.has_tag_name("Data")) {
+        let Some(name) = data.attribute("name") else {
+            continue;
+        };
+        let Some(value) = data.text().map(str::trim).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        match name {
+            "Level" => battery.level = value.parse().ok(),
+            "Health" => battery.health = Some(value.to_string()),
+            "Temperature" => battery.temperature = Some(value.to_string()),
+            "PowerSource" => battery.power_source = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(battery)
+}
+
 /// A player's own description of itself, read from `device_description.xml`.
 ///
 /// This one document carries every field the Sonos apps' "About My System"
@@ -747,6 +805,27 @@ impl Upnp {
             hardware_version: field("hardwareVersion"),
             series_id: field("seriesid"),
         })
+    }
+
+    /// What a portable says about its battery, or `None` from a speaker that
+    /// runs on mains.
+    ///
+    /// **Not SOAP.** `/status/batterystatus` is one of the player's own support
+    /// pages, fetched like `device_description.xml`, and the Control API has no
+    /// equivalent at all - battery is one of the handful of things the cloud API
+    /// never got (see "What the cloud Control API cannot reach").
+    ///
+    /// A mains-powered speaker does not refuse the request: it answers 200 with
+    /// an empty `<ZPSupportInfo></ZPSupportInfo>`, verified against a Beam. So
+    /// "has no battery" is the absent element rather than an error, and a real
+    /// error stays a real error.
+    pub async fn battery(&self) -> Result<Option<Battery>> {
+        let url = format!("http://{}:{PORT}/status/batterystatus", self.ip);
+        let (status, body) = http::get(&url, TIMEOUT).await?;
+        if status != 200 {
+            bail!("the player answered {status} for its battery status");
+        }
+        Ok(parse_battery(&body))
     }
 
     /// Every player in the household, satellites and hidden pair halves too.
@@ -2311,6 +2390,54 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mains_speaker_reports_no_battery_rather_than_an_error() {
+        // Verbatim from a Beam on 97.1: HTTP 200, and an empty document. The
+        // absent element is the whole signal, so this is the shape that must
+        // not be read as a failure.
+        let body = r#"<?xml version="1.0" ?>
+            <?xml-stylesheet type="text/xsl" href="/xml/review.xsl"?><ZPSupportInfo></ZPSupportInfo>"#;
+        assert_eq!(parse_battery(body), None);
+    }
+
+    #[test]
+    fn a_portable_reports_its_pack() {
+        let body = r#"<?xml version="1.0" ?><ZPSupportInfo><LocalBatteryStatus>
+            <Data name="Health">GREEN</Data>
+            <Data name="Level">83</Data>
+            <Data name="Temperature">NORMAL</Data>
+            <Data name="PowerSource">SONOS_CHARGING_RING</Data>
+            </LocalBatteryStatus></ZPSupportInfo>"#;
+        let battery = parse_battery(body).expect("a LocalBatteryStatus block is a battery");
+        assert_eq!(battery.level, Some(83));
+        assert_eq!(battery.health.as_deref(), Some("GREEN"));
+        assert_eq!(battery.temperature.as_deref(), Some("NORMAL"));
+        assert_eq!(battery.charging(), Some(true));
+
+        // Running off the pack is the one power source that is not charging.
+        let on_battery = r#"<ZPSupportInfo><LocalBatteryStatus>
+            <Data name="Level">12</Data><Data name="PowerSource">BATTERY</Data>
+            </LocalBatteryStatus></ZPSupportInfo>"#;
+        assert_eq!(parse_battery(on_battery).unwrap().charging(), Some(false));
+    }
+
+    #[test]
+    fn an_unhealthy_pack_is_passed_through_whatever_it_says() {
+        // The case this command exists for. A word nobody has seen before must
+        // reach the person rather than being flattened, and a missing Level
+        // must not take the rest of the readout down with it.
+        let body = r#"<ZPSupportInfo><LocalBatteryStatus>
+            <Data name="Health">RED_NEEDS_SERVICE</Data>
+            <Data name="Level"></Data>
+            <Data name="Temperature">TOO_HOT_TO_CHARGE</Data>
+            </LocalBatteryStatus></ZPSupportInfo>"#;
+        let battery = parse_battery(body).expect("still a battery");
+        assert_eq!(battery.level, None);
+        assert_eq!(battery.health.as_deref(), Some("RED_NEEDS_SERVICE"));
+        assert_eq!(battery.temperature.as_deref(), Some("TOO_HOT_TO_CHARGE"));
+        assert_eq!(battery.charging(), None);
+    }
 
     /// `Service::entry` panics for a variant the table does not name, so the
     /// panic is kept out of a release by walking every variant here. This is

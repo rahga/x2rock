@@ -417,6 +417,12 @@ async fn run(cli: Cli) -> Result<()> {
         return household::system(&session, *json, *redact).await;
     }
 
+    // Per-player too, and for the same reason: a battery belongs to a speaker,
+    // not to whichever group it happens to be in.
+    if let Command::Battery { room: one, json } = &cli.command {
+        return household::battery(&session, one.as_deref().or(room), *json).await;
+    }
+
     // Household-wide, and addressed by id rather than by room, so these run
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
@@ -624,6 +630,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Alarm { .. }
         | Command::Update { .. }
         | Command::System { .. }
+        | Command::Battery { .. }
         | Command::Group { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }

@@ -404,6 +404,88 @@ pub async fn system(session: &Session, json: bool, redact: bool) -> Result<()> {
     Ok(())
 }
 
+/// `x2rock battery`: what the household's portables say about their packs.
+///
+/// Swept across every player rather than asked of one, because which speakers
+/// have a battery is not something worth making a person remember - and a
+/// portable that has gone flat is *absent from the topology entirely*, which is
+/// itself the answer to "why is it not charging" often enough to be worth
+/// saying out loud rather than printing an empty table.
+pub async fn battery(session: &Session, room: Option<&str>, json: bool) -> Result<()> {
+    // Borrowed rather than collected by value: `Player` is deliberately not
+    // `Clone`, and nothing here needs to own one.
+    let players: Vec<_> = match room {
+        Some(name) => vec![session.groups.player_named(name)?],
+        None => session.groups.players.iter().collect(),
+    };
+    // Together, for the same reason `system` does it: one unreachable player
+    // must not stack its timeout onto all the others.
+    let rows: Vec<_> = futures_util::future::join_all(players.iter().map(|player| async move {
+        let found = match player.ip() {
+            Some(ip) => Upnp::new(ip).battery().await,
+            None => Err(anyhow!("no address to reach it on")),
+        };
+        (player, found)
+    }))
+    .await;
+
+    if json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|(player, found)| match found {
+                Ok(Some(b)) => json!({
+                    "room": player.name,
+                    "battery": true,
+                    "level": b.level,
+                    "health": b.health,
+                    "temperature": b.temperature,
+                    "power_source": b.power_source,
+                    "charging": b.charging(),
+                }),
+                Ok(None) => json!({"room": player.name, "battery": false}),
+                Err(e) => json!({"room": player.name, "error": format!("{e:#}")}),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let mut said = false;
+    for (player, found) in &rows {
+        match found {
+            Ok(Some(b)) => {
+                said = true;
+                let level = b.level.map_or("--".to_string(), |l| format!("{l}%"));
+                let source = match (b.charging(), b.power_source.as_deref()) {
+                    (Some(true), Some(source)) => format!("charging ({source})"),
+                    (Some(false), _) => "on battery".to_string(),
+                    _ => "power source unknown".to_string(),
+                };
+                let health = b.health.as_deref().unwrap_or("health unknown");
+                let temp = b.temperature.as_deref().unwrap_or("temperature unknown");
+                println!(
+                    "{:<24} {level:>4}  {source}, health {health}, temperature {temp}",
+                    player.name
+                );
+            }
+            // Not printed: a mains speaker having no battery is the expected
+            // answer from most of a household and would bury the portables.
+            Ok(None) => {}
+            Err(e) => {
+                said = true;
+                println!("{:<24} could not be asked ({e:#})", player.name);
+            }
+        }
+    }
+    if !said {
+        println!(
+            "No speaker here reports a battery. A portable that has run flat \
+             drops off the network altogether, so it would not be listed at all."
+        );
+    }
+    Ok(())
+}
+
 /// `x2rock group`: pull `rooms` into the group `room` coordinates.
 pub async fn group(session: &Session, room: Option<&str>, rooms: &[String]) -> Result<()> {
     let host = session.groups.resolve(room)?;

@@ -181,6 +181,26 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// What the household's portables say about their batteries: charge,
+    /// health, temperature and what they are drawing power from.
+    ///
+    /// One of the few things the cloud Control API has never exposed, so it is
+    /// read where it lives - each player's own `/status/batterystatus` page.
+    /// Mains-powered speakers are skipped rather than listed as having no
+    /// battery, which would be most of a household.
+    ///
+    /// **A portable that has gone completely flat is not on the network**, and
+    /// so cannot be listed here at all. That absence is a diagnosis in itself.
+    Battery {
+        /// Ask one room rather than sweeping the household.
+        #[arg(long, short = 'r')]
+        room: Option<String>,
+        /// One object per player: `room`, `battery`, and where there is one,
+        /// `level`, `health`, `temperature`, `power_source` and `charging`.
+        /// Mains speakers are included here, as `battery: false`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Every speaker in the household: model, firmware, hardware and bonding.
     ///
     /// The Sonos apps' "About My System", and the one command that speaks in
@@ -1178,6 +1198,7 @@ impl Command {
             | Command::Shuffle { json, .. }
             | Command::Update { json, .. }
             | Command::System { json, .. }
+            | Command::Battery { json, .. }
             | Command::Alarms { json, .. }
             | Command::Sleep { json, .. }
             | Command::Snooze { json, .. }
