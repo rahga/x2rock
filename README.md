@@ -505,9 +505,17 @@ x2rock accounts                 # what is linked here
 x2rock unlink bandcamp
 ```
 
-**A link buys search and browse. It does not, by itself, buy playback of on-demand tracks.**
+**A link buys search and browse. It does not, by itself, buy playback of on-demand tracks.** An
+on-demand track is added to the queue and the *player* resolves it, using a registration the
+household made in the Sonos app — so it plays if the household has that service, and refuses if it
+does not, whatever this machine holds. A stream (a station) needs none of that.
 
-Fourteen services offer *device linking*: `x2rock link <svc>` opens the service's own login page in
+> **Which services actually work?** Ask this household rather than a table: `x2rock search` with no
+> arguments lists what can be searched here, and `x2rock link` with none lists what can be linked.
+> What has been *tested*, service by service, with dates and the household each result came from,
+> is the table at the top of [docs/architecture.md](docs/architecture.md).
+
+Fifteen services offer *device linking*: `x2rock link <svc>` opens the service's own login page in
 your browser, waits for you to finish, and stores the token the service mints — no Sonos account,
 no partner registration, nothing embedded. Over ssh, `--no-open` prints the URL. The remaining
 services are *app-link*, and that tier is not uniformly closed: `link` asks any of them for a

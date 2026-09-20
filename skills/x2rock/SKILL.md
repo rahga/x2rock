@@ -872,6 +872,10 @@ those two apart when telling a user what linking will do.
 - **Plex** links through Plex's own PIN flow. `link plex --from-player` needs no browser: it reads
   the token of the household's own Plex integration while Plex is playing or paused in some room,
   and can browse a server's root where a fresh token sometimes cannot.
+- **The per-service scoreboard below is a summary.** What has been tested, with dates and the
+  household each result came from, is the table at the top of `docs/architecture.md`; when the two
+  disagree, that one is right. The *live* answer for a household is `x2rock search` (bare) and
+  `x2rock link` (bare).
 - **How playback works once linked.** A **stream** (`type: "stream"`, a station) is streamed with
   this machine's token and usually plays with nothing else. **Anything else** — a track, an episode
   — is added to the queue, and the *player* resolves it with **the household's own account for that

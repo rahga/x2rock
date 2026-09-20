@@ -8,6 +8,46 @@
 > The original kickoff assumed the Sonos **cloud** Control API was the only integration path. That
 > was wrong; the local LAN WebSocket is better on every axis. See "Integration path" below.
 
+## Music services: what has actually been tested
+
+One table, kept here rather than in the README, because every row is a measurement with a date and
+a household attached rather than a product capability. `README.md` summarises the tiers; the agent
+skill carries a short scoreboard derived from this; **this is the source both defer to.**
+
+**Read the "playback" column carefully: it is not a property of the service.** On-demand content is
+enqueued and the *player* resolves it with a registration the household made in the Sonos app.
+"Enqueue ✓" therefore means "works in a household that has added this service", not "works". The
+local token buys search and browse, and nothing of playback.
+
+| service | tier | link | search / browse | playback | last verified |
+|---|---|---|---|---|---|
+| **Deezer** | device-link | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the file-transport fix | 2026-09-20, home + office |
+| **TIDAL** | device-link (OAuth in fact) | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the fix | 2026-09-19, home |
+| **iHeartRadio** | device-link | ✓ | ✓ | live stations stream ✓; podcasts enqueue ✓; `artist_radio_track` ids are per-listener and stream-only | 2026-09-19, home |
+| **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
+| **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
+| **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
+| **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
+| **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
+| **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
+| **TuneIn (New)** | anonymous | n/a | ✓ | streams ✓ with no registration anywhere | 2026-09-04 |
+| **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
+| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
+| **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
+| **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
+| **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
+
+Roughly 108 services appear in a household's catalogue; 23 are searchable here today and 15 accept
+`x2rock link`. The live per-household answer is always `x2rock search` (bare) and `x2rock link`
+(bare), which read the catalogue and the credential store rather than this table.
+
+**Untested and worth something, in the order they would teach the most:** Saavn (device-link, free,
+very large catalogue - the only cheap test of non-Latin metadata through SMAPI, DIDL and the
+widget), Classical Archives (device-link - work/movement/composer metadata, the shape most likely
+to break assumptions built on artist/album/track), Qobuz, SiriusXM and Audible (all app-link, all
+requiring a subscription; SiriusXM's linear channels and Audible's chaptered long-form are each a
+content model nothing here has met).
+
 ## What this is
 
 A Rust rewrite of the Sonos control CLI, split off from the original `x2rock` project. The
