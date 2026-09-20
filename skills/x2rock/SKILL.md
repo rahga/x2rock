@@ -882,8 +882,9 @@ those two apart when telling a user what linking will do.
   resumed), **Spotify does not** (it fails with an unsupported-scheme error until the household adds
   Spotify in the Sonos app, and then plays normally), **Deezer does not** (the room takes the URL
   and never gets past a second, cycling PLAYING/BUFFERING with the position resetting - and plays
-  perfectly once the household has the account), and Radio Paradise's programs do not. **So a
-  fallback that "started" is not a fallback that played**: confirm with `now --json` twice and
+  perfectly once the household has the account), **TIDAL does not** (identically to Deezer), and
+  Radio Paradise's programs do not — so of the five measured, only Amazon Music's fallback plays.
+  **A fallback that "started" is not a fallback that played**: confirm with `now --json` twice and
   require `position_ms` to have moved. A service container (album, playlist) cannot be played whole
   either way; see "A container cannot be played whole".
 - **Read `link`'s last line for which case you are in.** `The household knows this account as

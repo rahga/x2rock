@@ -6900,7 +6900,9 @@ see "Deezer in reverse: what a household registration is actually for".
 TIDAL is the counter-example that keeps the two apart: its household registration exists and
 its content queues, but it sends no `userIdHashCode`, so `match` cannot be attempted at all
 and its account id is still `None`. Registration and association are separate, and a service
-can have the first without the second.
+can have the first without the second. Run deliberately as an experiment on the home household
+afterwards, which is where it stops being a curiosity of one service - see "TIDAL, the same way
+round, where the association can never happen".
 
 ## Two accounts for one service, one per person (home household, 2026-09-18)
 
@@ -7062,6 +7064,40 @@ One practical note for anyone reading this to decide what to do: the reverse ord
 permanent. Linking first simply leaves `account_id` empty until a later relink picks it up, and
 search and browse work throughout - which is exactly what a household wanting search but not
 playback should do.
+
+### TIDAL, the same way round, where the association can never happen (2026-09-19)
+
+Deezer left one objection standing: its `account_id` did fill in at the end, so someone could argue
+the association mattered after all and step 3 merely ran ahead of it. **TIDAL closes that**, because
+TIDAL sends no `userIdHashCode` - `match` is not refused there, it is never attempted - so
+`account_id` is `null` before, during and permanently after.
+
+| # | what changed | `match` | `play-item` on `track/36313419` |
+|---|---|---|---|
+| 1 | `x2rock link TIDAL`, no household account | **skipped**, no hash to attempt it with | - |
+| 2 | nothing | - | `AddURIToQueue` **UPnP 800**, stream fallback **stalls** at 0ms |
+| 3 | TIDAL added in the Sonos app, nothing else | still impossible | **queues and plays**, `sn_27`, 8.2s → 17.6s |
+
+`account_id` read `null` with the same `linked` stamp across every row, including the one where the
+music started. So the local token buys search and browse and **nothing whatsoever** of playback,
+which is as cleanly as this can be shown: no association existed to take the credit.
+
+It also answers the older note that kept TIDAL as the counter-example "whose registration exists and
+whose content queues, but whose account id is still `None`" - that is not a curiosity of the office
+household, it is what every no-hash service does everywhere.
+
+**And the queue behaves normally on it**, which matters because TIDAL is the first service tested
+here with a catalogue of ordinary tracks rather than stations or podcasts. With one track playing,
+two more were queued without disturbing it, `play 3` jumped to the third, and removing track 1
+renumbered the playing track 3 → 2 with playback continuing uninterrupted (12.5s and climbing).
+`queue clear` emptied it and left the room `IDLE`. Nothing about the queue is service-specific once
+the household holds the account.
+
+**The stream fallback is now 1-for-4.** Amazon Music plays unregistered on a presigned CloudFront
+URL; Spotify, Radio Paradise, Deezer and TIDAL all fail, TIDAL exactly as Deezer does - the room
+takes the URL, reports `PLAYING`, and never passes 0ms. The long-standing guess that TIDAL would be
+the service to return `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry is neither
+confirmed nor needed: whatever the reason, the fallback does not play.
 
 ## Open questions
 
