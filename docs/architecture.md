@@ -246,12 +246,13 @@ Roughly 108 services appear in a household's catalogue; 23 are searchable here t
 `x2rock link`. The live per-household answer is always `x2rock search` (bare) and `x2rock link`
 (bare), which read the catalogue and the credential store rather than this table.
 
-**Untested and worth something, in the order they would teach the most:** Saavn (device-link, free,
-very large catalogue - the only cheap test of non-Latin metadata through SMAPI, DIDL and the
-widget), Classical Archives (device-link - work/movement/composer metadata, the shape most likely
-to break assumptions built on artist/album/track), Qobuz, SiriusXM and Audible (all app-link, all
-requiring a subscription; SiriusXM's linear channels and Audible's chaptered long-form are each a
-content model nothing here has met).
+**Untested and worth something.** The free candidates are now spent: Saavn was linked and passes
+(non-Latin metadata survives SMAPI, DIDL and playback), and Classical Archives cannot be linked at
+all. What remains all costs a subscription, and each would teach something no service here has
+shown: **Qobuz** (hi-res FLAC, and a classical tier that would finally exercise work/movement
+metadata against code that assumes artist/album/track), **SiriusXM** (linear channels - neither
+stations nor on-demand, with no per-track identity) and **Audible** (chaptered long-form, where
+resume position and multi-hour durations get a real workout).
 
 ## What this is
 
