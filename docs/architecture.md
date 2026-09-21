@@ -23,6 +23,24 @@ and nothing whatsoever to spend it on. (It also retro-explains the older note th
 `getDeviceAuthToken` with an immediate HTTP 500 "rather than a pending fault": 500 is simply how
 this service says things. The deliberate re-test linked cleanly, polling ~75s.)
 
+**And the same account cannot register with the household either - which is what proves the gate is
+the service's, not this client's.** Adding Saavn through the *official Sonos app* the same evening
+reached "Sonos Connected!" and then stopped: *"Before you can use JioSaavn on Sonos, you must
+download the JioSaavn app and sign up as a JioSaavn Pro user."* The household registry afterwards
+lists Deezer, iHeartRadio ×2, Sonos Radio, TIDAL and YouTube Music - **no Saavn** - and no saved
+content carries `sid=164`. So Sonos's own first-party client, holding whatever credentials it
+holds, gets no further than x2rock did.
+
+That is worth stating because it is the opposite of the YouTube Music case, and the two are easy to
+confuse. YouTube Music **discriminates by caller**: its endpoint answers Sonos and refuses us.
+Saavn **discriminates by subscription tier**: it refuses everyone equally, the Sonos app included.
+Only the first is a wall this project could ever have been on the wrong side of.
+
+It also adds a third place a service can say no, after "refuses the token" and "refuses the
+content": **refusing to be registered at all.** Every other service tested either completed a
+household registration (Deezer, TIDAL, iHeartRadio) or was never asked; Saavn is the first to
+accept an authorization and then decline to provision one.
+
 **Read the "playback" column carefully: it is not a property of the service.** On-demand content is
 enqueued and the *player* resolves it with a registration the household made in the Sonos app.
 "Enqueue ✓" therefore means "works in a household that has added this service", not "works". The
@@ -36,7 +54,7 @@ local token buys search and browse, and nothing of playback.
 | **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
 | **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
 | **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
-| **Saavn (JioSaavn)** | device-link | ✓ token minted | **✗ — `User not Pro`** on every category and on `getMetadata root` | untestable without Pro | 2026-09-21, home |
+| **Saavn (JioSaavn)** | device-link | ✓ token minted | **✗ — `User not Pro`** on every category and on `getMetadata root` | ✗ — the Sonos app cannot register it either without Pro | 2026-09-21, home |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
