@@ -852,7 +852,9 @@ music service"). Whether or not a service is linked, three routes reach what the
 
 ## Linking a music service: `link`, `accounts`, `unlink`
 
-**A link buys search and browse. It does not, by itself, buy playback of on-demand tracks.** Keep
+**A link usually buys search and browse, and never by itself buys playback of on-demand tracks.**
+A service may also gate its catalogue behind its own paid tier - Saavn links, then refuses every
+search and browse with `User not Pro`, so a linked account is not proof of a usable one. Keep
 those two apart when telling a user what linking will do.
 
 - **Linking needs a person.** `x2rock link '<Service>'` opens the service's own login page in the

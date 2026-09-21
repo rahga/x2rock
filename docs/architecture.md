@@ -14,6 +14,15 @@ One table, kept here rather than in the README, because every row is a measureme
 a household attached rather than a product capability. `README.md` summarises the tiers; the agent
 skill carries a short scoreboard derived from this; **this is the source both defer to.**
 
+**A link does not always buy search, either.** That was stated as a rule everywhere in this project
+until Saavn broke it on 2026-09-21: the device link completes, a real token is stored, and then
+*every* content call is refused with `Client.LoginInvalid` / `User not Pro` over HTTP 500 - all four
+search categories and `getMetadata root` alike. The refusal is at account level, so there is no
+station or free shelf to fall back to. A free JioSaavn account therefore yields a valid credential
+and nothing whatsoever to spend it on. (It also retro-explains the older note that Saavn answered
+`getDeviceAuthToken` with an immediate HTTP 500 "rather than a pending fault": 500 is simply how
+this service says things. The deliberate re-test linked cleanly, polling ~75s.)
+
 **Read the "playback" column carefully: it is not a property of the service.** On-demand content is
 enqueued and the *player* resolves it with a registration the household made in the Sonos app.
 "Enqueue ✓" therefore means "works in a household that has added this service", not "works". The
@@ -27,6 +36,7 @@ local token buys search and browse, and nothing of playback.
 | **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
 | **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
 | **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
+| **Saavn (JioSaavn)** | device-link | ✓ token minted | **✗ — `User not Pro`** on every category and on `getMetadata root` | untestable without Pro | 2026-09-21, home |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |

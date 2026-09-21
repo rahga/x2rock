@@ -505,7 +505,9 @@ x2rock accounts                 # what is linked here
 x2rock unlink bandcamp
 ```
 
-**A link buys search and browse. It does not, by itself, buy playback of on-demand tracks.** An
+**A link usually buys search and browse. It does not, by itself, buy playback of on-demand
+tracks.** "Usually", because a service may gate its catalogue behind its own subscription: Saavn
+links fine and then refuses every search and every browse with `User not Pro`. An
 on-demand track is added to the queue and the *player* resolves it, using a registration the
 household made in the Sonos app — so it plays if the household has that service, and refuses if it
 does not, whatever this machine holds. A stream (a station) needs none of that.
