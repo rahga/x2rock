@@ -964,11 +964,19 @@ pub async fn device_auth_token(
     {
         Ok(body) => body,
         Err(fault) if fault.is_pending() => return Ok(None),
-        Err(fault) => bail!(
-            "{} refused getDeviceAuthToken: {}",
-            service.name,
-            fault.message
-        ),
+        // Coded, so the poll loop can tell "the service said no" from "the
+        // socket had a bad moment". Only the first is a reason to stop asking.
+        Err(fault) => {
+            return Err(crate::hint::Hint::new(
+                format!(
+                    "{} refused getDeviceAuthToken: {}",
+                    service.name, fault.message
+                ),
+                "link_refused",
+                None,
+            )
+            .into());
+        }
     };
     parse_device_auth(&service.name, &body).map(Some)
 }

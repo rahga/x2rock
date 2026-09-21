@@ -564,6 +564,10 @@ where
 {
     let deadline = tokio::time::Instant::now() + sonos::smapi::LINK_DEADLINE;
     eprint!("Waiting for you to finish");
+    // Kept so the give-up message can say what kept going wrong, rather than
+    // reporting a plain timeout over a service that was answering with an
+    // error every time.
+    let mut last_err: Option<String> = None;
     loop {
         match poll().await {
             Ok(Some(got)) => {
@@ -575,17 +579,39 @@ where
                 eprint!(".");
                 let _ = std::io::stderr().flush();
             }
-            Err(e) => {
+            // **A failed poll is evidence about the poll, not about the link.**
+            // The same reasoning `stream_url` uses. One six-second socket
+            // timeout to `www.saavn.com` used to end the whole flow *after* the
+            // person had already finished logging in, throwing away a link code
+            // that is single-use - so the browser trip had to be made again for
+            // a blip that would have cleared on the next poll two seconds
+            // later. Verified against Saavn, 2026-09-21.
+            //
+            // A refusal is different: the service answered, and said no. That
+            // still stops immediately, because asking it again cannot help.
+            Err(e) if hint::of(&e).0 == "link_refused" => {
                 eprintln!();
                 return Err(e);
+            }
+            Err(e) => {
+                use std::io::Write;
+                eprint!("?");
+                let _ = std::io::stderr().flush();
+                last_err = Some(format!("{e:#}"));
             }
         }
         if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
             eprintln!();
-            bail!(
-                "{service_name} never confirmed the link. Run `x2rock link {service_name}` \
-                 again to start over."
-            );
+            match last_err {
+                Some(why) => bail!(
+                    "{service_name} never confirmed the link, and the last attempt to ask \
+                     failed ({why}). Run `x2rock link {service_name}` again to start over."
+                ),
+                None => bail!(
+                    "{service_name} never confirmed the link. Run `x2rock link {service_name}` \
+                     again to start over."
+                ),
+            }
         }
         tokio::time::sleep(sonos::smapi::LINK_POLL).await;
     }

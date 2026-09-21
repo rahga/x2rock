@@ -853,8 +853,11 @@ music service"). Whether or not a service is linked, three routes reach what the
 ## Linking a music service: `link`, `accounts`, `unlink`
 
 **A link usually buys search and browse, and never by itself buys playback of on-demand tracks.**
-A service may also gate its catalogue behind its own paid tier - Saavn links, then refuses every
-search and browse with `User not Pro`, so a linked account is not proof of a usable one. Keep
+A service may also gate its catalogue behind its own paid tier - Saavn links on a free account and
+then refuses every search and browse with `User not Pro` (with Pro, both work), so a linked account
+is not proof of a usable one. **And a whole content type can be invisible to `search`**: Saavn
+publishes no podcast category, yet its shows browse fine under `TOPSHOWS:…` - when a service
+"doesn't have" something, try `browse` before believing it. Keep
 those two apart when telling a user what linking will do.
 
 - **Linking needs a person.** `x2rock link '<Service>'` opens the service's own login page in the

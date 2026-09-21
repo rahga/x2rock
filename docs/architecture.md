@@ -41,6 +41,54 @@ content": **refusing to be registered at all.** Every other service tested eithe
 household registration (Deezer, TIDAL, iHeartRadio) or was never asked; Saavn is the first to
 accept an authorization and then decline to provision one.
 
+### With Pro, the same day: everything works, and two findings fall out
+
+The account was upgraded to JioSaavn Pro and connected again through the Sonos Android app - which
+landed the registration on the **office** household rather than home, a detail worth keeping
+because it is what made the next part legible. Relinking from the laptop then printed:
+
+> Linked Saavn. … **The household knows this account as `sn_13`.**
+
+**`match` succeeded**, which is the third independent confirmation that it *associates* with a
+registration the Sonos app made and never creates one - after Spotify (`sn_22`) and Deezer
+(`sn_26`). Search and browse worked immediately; the `User not Pro` refusal is purely the
+subscription tier, and nothing about the token or the client changed between the two states.
+
+Playback is ordinary. A track queued behind what was playing and a podcast episode queued after it,
+both on `x-sonos-http:` with `flags=8232` and `sid=164&sn=13` - the same shape YouTube Music and
+Mixcloud use. The episode was played to be sure rather than assumed: *"Shaan"*, 8.6s and climbing
+against a 28:36 duration.
+
+**Podcasts are browse-only, and search cannot see them.** Saavn declares four search categories -
+tracks, albums, playlists, artists - and `--all-categories` returns nothing else. Its shows live
+behind `getMetadata` alone, four levels down:
+
+```
+root → TOPSHOWS:hindi,tamil,telugu → SHOWS:62 ("Talking Music") → SEASONS:1<>62 → EPISODE:pbp1vvHK
+```
+
+This is the clearest case yet for the rule already stated elsewhere - **`browse` reaches more of a
+service than `search` does** - because here an entire content type is invisible to one and routine
+to the other. An agent that only searches would conclude Saavn has no podcasts.
+
+A smaller note on encoding, since Saavn was linked partly to test it: a **Devanagari query** round
+-trips correctly (`कैसरिया` → `Kesariya`), so the term reaches the service intact. The catalogue
+answers in romanised Latin, though, so the harder half - non-Latin *titles* through DIDL, the queue
+and the widget - is still untested. Saavn was the cheap candidate for it and does not deliver it.
+
+### The link poll used to throw away a finished login (fixed 2026-09-21)
+
+Found by being bitten: `wait_for_link` returned on *any* `Err`, so a single six-second socket
+timeout to `www.saavn.com` ended the flow **after** the browser step had already been completed -
+and a link code is single-use, so the only recovery was to walk through the login again for a blip
+that would have cleared on the next poll two seconds later.
+
+The fix is the principle `stream_url` already followed and this path had not: **a failed poll is
+evidence about the poll, not about the link.** A transport failure now prints `?`, keeps polling to
+the deadline, and is reported in the give-up message if nothing ever succeeds. A *refusal* - the
+service answering with a fault - still stops at once, since asking again cannot help; it is
+distinguished by a `link_refused` hint code rather than by matching error text.
+
 **Read the "playback" column carefully: it is not a property of the service.** On-demand content is
 enqueued and the *player* resolves it with a registration the household made in the Sonos app.
 "Enqueue ✓" therefore means "works in a household that has added this service", not "works". The
@@ -54,7 +102,7 @@ local token buys search and browse, and nothing of playback.
 | **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
 | **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
 | **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
-| **Saavn (JioSaavn)** | device-link | ✓ token minted | **✗ — `User not Pro`** on every category and on `getMetadata root` | ✗ — the Sonos app cannot register it either without Pro | 2026-09-21, home |
+| **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it every category and `getMetadata root` answer `User not Pro` | ✓ tracks and podcast episodes both enqueue and play | 2026-09-21, office (Pro); home (free) |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
