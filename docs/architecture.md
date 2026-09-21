@@ -164,6 +164,46 @@ resolves correctly (`कैसरिया` → `Kesariya`, `मुझे कौ
 query in, metadata out, DIDL round trip - is clean, and the earlier worry that it was merely
 untested rather than working can be retired.
 
+### Classical Archives is a catch-22, not a refusal (2026-09-21)
+
+Picked as the cheapest remaining test of a *metadata shape* rather than a service - classical
+repertoire is work/movement/composer/performer, which is the structure most likely to break code
+that assumes artist/album/track. It cannot be reached at all, and the reason is worth separating
+from every other "no" in this document.
+
+**Both link methods are stubbed.** `getDeviceLinkCode` answers HTTP 500 with
+`s:Server.ServiceUnknownError` and a faultstring of exactly `str3` - reproducing the 2026-09-10
+sweep to the character. Asking `getAppLink` instead, by hand, gets **the identical `str3` fault**,
+so there is no second door. `str3` reads like an untranslated string key or a placeholder left in.
+
+**But the content side is alive and authenticating**, which is what makes this a catch-22 rather
+than a dead service. Walking the envelope in by hand, it validates field by field:
+
+| sent | answer |
+|---|---|
+| no `loginToken` | `path not found: /Envelope/Header/credentials/loginToken/token` |
+| token + key, no household | `path not found: /Envelope/Header/credentials/loginToken/householdId` |
+| complete envelope, bogus token | **`s:Client.AuthTokenExpired`** - a proper SMAPI fault |
+
+So `getMetadata` is implemented and checks credentials; the only thing missing is any way to mint
+one. Content requires a token, and both documented flows for obtaining a token answer with a stub.
+
+Two things fall out of it:
+
+- **A broken service is not a closed one, and the difference is visible.** Murfie is a zombie whose
+  company shut down; YouTube Music refuses *this caller* while serving Sonos; Saavn refuses a free
+  *tier* and says so plainly. Classical Archives is alive, implemented, and broken in one place -
+  and nobody outside can route around it, the Sonos app included, since the app has the same two
+  methods to choose from.
+- It corroborates a comment in `app_link_code`: the note that omitting the `loginToken` block reads
+  to Plex as an *expired* credential rather than a missing one. The same shape shows here from the
+  other end - a complete block with nonsense inside it is what produces `AuthTokenExpired`, while
+  an absent one produces a structural complaint.
+
+The work/movement metadata question therefore stays open, and the cheap candidates for it are now
+exhausted: every remaining service with a catalogue shaped unlike pop (Qobuz's classical tier,
+Audible's chaptered long-form, SiriusXM's linear channels) costs a subscription.
+
 ### The link poll used to throw away a finished login (fixed 2026-09-21)
 
 Found by being bitten: `wait_for_link` returned on *any* `Err`, so a single six-second socket
@@ -197,6 +237,7 @@ local token buys search and browse, and nothing of playback.
 | **TuneIn (New)** | anonymous | n/a | ✓ | streams ✓ with no registration anywhere | 2026-09-04 |
 | **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
+| **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
 | **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
 | **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
