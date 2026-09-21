@@ -76,6 +76,94 @@ A smaller note on encoding, since Saavn was linked partly to test it: a **Devana
 answers in romanised Latin, though, so the harder half - non-Latin *titles* through DIDL, the queue
 and the widget - is still untested. Saavn was the cheap candidate for it and does not deliver it.
 
+### A curated shelf is not the addressable set (Saavn podcasts, 2026-09-21)
+
+`Top Shows` holds exactly **92** shows - the whole list, fetched with `--count 100`. A podcast the
+household wanted, *Kidsstoppress Podcast*, was not among them, and the first conclusion drawn here
+was that such a show is simply unreachable. **That was wrong**, and the way it was disproved is
+worth keeping.
+
+JioSaavn's own web page for an episode carries a numeric id in its HTML - `"id":"182716"` - in the
+same id space SMAPI uses (`SHOWS:62`, `SHOWS:175427`). Handing it straight to `getMetadata`:
+
+```
+SHOWS:182716 → SEASONS:1<>182716 … SEASONS:5<>182716   "Kidsstoppress Podcast - Your Parenting Happy Hour"
+SEASONS:5<>182716 → EPISODE:pWv0JyH5   "EP 527: Do You Have A Storage Or Burner Physique ?"
+```
+
+Queued and played: 2:23, matching the web page exactly. So the id space is open and only the
+*directory* is limited. **`Top Shows` is a curated shelf, not the set of addressable shows** - a
+distinction worth carrying to every other service, because "not in the browse tree" has been read
+as "not reachable" more than once in this document.
+
+Confirmed from the other side by a screenshot of jiosaavn.com's own Podcasts page: of eight shows
+trending there, exactly **one** (*Shri Krishna Amritvani*) appears in SMAPI's 92. The two are not
+the same list abridged - they are different curations over one catalogue.
+
+**Web ids transfer for shows and not for episodes**, which is the asymmetry nobody would guess:
+
+| id | source | queued | played |
+|---|---|---|---|
+| `EPISODE:pWv0JyH5` | SMAPI browse | with title and duration | **plays** |
+| `EPISODE:g2yVMb0HtgU_` | the jiosaavn.com URL | accepted, **empty title, no duration** | **skipped**, the player wrapped to position 1 |
+| `SHOWS:182716` | the jiosaavn.com page's HTML | - | browses perfectly |
+
+Two lessons in that table. **`AddURIToQueue` validates nothing** - it took a web token and produced
+a row that could never play, the same trap iHeartRadio's live stations set from a different angle;
+a queue row with an empty title is the tell. And **`getMetadata` does validate**: a made-up show id
+was refused cleanly with `Item not found (SEASONS:g2yVMb0HtgU_)`, which also leaks that the server
+rewrites `SHOWS:x` into `SEASONS:x` internally.
+
+Podcasts remain **unsearchable**: Saavn declares tracks, albums, playlists and artists, and
+`--all-categories` finds nothing else. Its playlists are songs only - even one named "Suno Toh Sahi
+Podcast Playlist" is 18 `TRACK_NEW:` rows. So an agent that only searches concludes Saavn has no
+podcasts at all, and the Sonos app, consuming the same tree, sees the same 92.
+
+### Four favorite shapes from one service, and a new escape (2026-09-21)
+
+Favorites saved from the Sonos app for radio, album, playlist and track, read off `FV:2`, then each
+played to confirm - all four work:
+
+| favorite | URI | flags | result |
+|---|---|---|---|
+| Happy Radio (`program`) | `x-sonosapi-radio:CHANNEL_STATION%3A76%3C%3E…` | 28780 | plays, no queue position |
+| Irumudi (`album`) | `x-rincon-cpcontainer:1004206cALBUM%3A79488223` | 8300 | expands into the queue |
+| Top Kuthu (`playlist`) | `x-rincon-cpcontainer:1006706cplaylist%3A109815423` | 28780 | expands into the queue |
+| Mallepoola Pallaki (`track`) | `x-sonos-http:TRACK_NEW%3A_Op_JFcG.mp4` | 8232 | one queue row |
+
+**The radio id embeds JSON, and the colons inside it are written `**`:**
+
+```
+CHANNEL_STATION%3A76%3C%3EHappy%20Radio%3C%3E%7B%22mood%22**%5B%22Happy%22%5D%7D%3C%3Ehindi%2Ctamil%2Ctelugu
+                                              {   "mood"  **  [ "Happy" ]  }
+```
+
+Every colon this document has met before was percent-encoded (the Mixcloud `cloudcast:` fix turned
+on exactly that). Here the *separator* colons are `%3A` and the one inside the JSON payload is
+`**`, while `<>` separates fields as `%3C%3E`. Worth knowing before anyone tries to construct one.
+
+Also note the container prefixes: `1004206c` for an album and `1006706c` for a playlist, where
+YouTube Music writes `1004004c` and `1006004c`. **That prefix is per-service**, not a universal
+type code - consistent with what "Object ids are the service's own" already says.
+
+### Non-Latin metadata survives the whole path (verified 2026-09-21)
+
+The question Saavn was linked to answer, finally testable because its `Top Shows` list includes
+Devanagari-titled shows (`दिनभर: पूरा दिन,पूरी ख़बर (Dinbhar)`, `फिल्मी खबर्ची`, `गोतावळा`,
+`दास्तान खौफ की`) even though its music catalogue answers in romanised Latin.
+
+`EPISODE:YmU1NWM2` from that show, queued and played:
+
+- **browse** returned `दिन भर` intact,
+- the **queue row** read back `{"title":"दिन भर","album":"दिनभर: पूरा दिन,पूरी ख़बर (Dinbhar)"}` - so
+  it survived being written into DIDL-Lite and parsed out again,
+- **playback** reported the same, position advancing.
+
+Nothing mangled it at any stage, combining marks included (`ख़बर`). A Devanagari *query* also
+resolves correctly (`कैसरिया` → `Kesariya`, `मुझे कौन पूछता था` → the bhajan). So the encoding path -
+query in, metadata out, DIDL round trip - is clean, and the earlier worry that it was merely
+untested rather than working can be retired.
+
 ### The link poll used to throw away a finished login (fixed 2026-09-21)
 
 Found by being bitten: `wait_for_link` returned on *any* `Err`, so a single six-second socket
@@ -102,7 +190,7 @@ local token buys search and browse, and nothing of playback.
 | **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
 | **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
 | **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
-| **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it every category and `getMetadata root` answer `User not Pro` | ✓ tracks and podcast episodes both enqueue and play | 2026-09-21, office (Pro); home (free) |
+| **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
