@@ -20,9 +20,7 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     let artist = track
         .and_then(|t| t.artist.as_ref())
         .and_then(|a| a.name.as_deref());
-    let album = track
-        .and_then(|t| t.album.as_ref())
-        .and_then(|a| a.name.as_deref());
+    let album = track.and_then(|t| t.collection());
 
     // A state-less event is a daemon concern; the polled reply this reads has
     // always carried one. Named rather than blank so an odd line is legible.
@@ -138,7 +136,11 @@ fn now_json(
         "state": status.state(),
         "title": track.and_then(|t| t.name.as_deref()).or(container.and_then(|c| c.name.as_deref())),
         "artist": track.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
-        "album": track.and_then(|t| t.album.as_ref()).and_then(|a| a.name.as_deref()),
+        "album": track.and_then(|t| t.collection()),
+        // The show, when the episode belongs to one. Also folded into `album`
+        // above so every existing reader shows something; here as well so a
+        // reader that cares can tell an episode from a track.
+        "podcast": track.and_then(|t| t.podcast.as_ref()).and_then(|p| p.name.as_deref()),
         // The player leaves `service` null for some sources (a soundbar playlist,
         // YouTube Music now-playing) while still carrying the sid. Fall back to
         // the catalogue's name for that sid, so `status` names the service
@@ -732,6 +734,7 @@ mod tests {
                 "next_artist",
                 "next_title",
                 "on_tv",
+                "podcast",
                 "position_ms",
                 "queue_position",
                 "repeat",

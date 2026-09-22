@@ -32,7 +32,7 @@ CLI it came from — if the version has moved since you installed the skill, re-
 [
   {
     "room": "Kitchen", "state": "PLAYING", "title": "Solitude",
-    "artist": "…", "album": null, "position_ms": 41000, "duration_ms": null,
+    "artist": "…", "album": null, "podcast": null, "position_ms": 41000, "duration_ms": null,
     "queue_position": 3, "explicit": false, "crossfade": false,
     "next_title": "Blue in Green", "next_artist": "Miles Davis",
     "service": "YouTube Music", "service_id": "284", "art_url": "http://…",
@@ -59,6 +59,9 @@ CLI it came from — if the version has moved since you installed the skill, re-
 
 - Now-playing is **flat** on the room object (`title`, `artist`, `album`, `position_ms`,
   `duration_ms`, `next_title`, `next_artist`), not nested.
+- **A podcast episode has a show, not an album or an artist.** `podcast` carries the show's name,
+  and `album` repeats it so anything reading `album` still has something to show; `artist` stays
+  `null`. A non-zero `podcast` is how to tell an episode from a track.
 - **`queue_position` is 1-based and has no total.** It is `null` whenever the queue is not what is
   driving - a radio stream has no position in a queue - and `0` when the queue is the source but
   empty. For the length, and for whether the queue is the source at all (`in_use`), read
@@ -93,7 +96,7 @@ CLI it came from — if the version has moved since you installed the skill, re-
 ```
 
 `now --json` is a **single bare object** — one room's *now-playing* fields (room, state, title,
-artist, album, service, service_id, position_ms, duration_ms, queue_position, next_title,
+artist, album, podcast, service, service_id, position_ms, duration_ms, queue_position, next_title,
 next_artist, explicit, stream_info, repeat, shuffle, crossfade, on_tv, input_format, surround,
 art_url), with no `-r` picking the household's one group (and erroring if there are several). It is
 the confirm-step after a play. It is a **subset** of a `status` entry: `volume`, `muted`,

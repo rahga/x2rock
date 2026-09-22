@@ -665,9 +665,7 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     let artist = track
         .and_then(|t| t.artist.as_ref())
         .and_then(|a| a.name.as_deref());
-    let album = track
-        .and_then(|t| t.album.as_ref())
-        .and_then(|a| a.name.as_deref());
+    let album = track.and_then(|t| t.collection());
     let art = track
         .and_then(|t| t.image_url.as_deref())
         .or_else(|| container.and_then(|c| c.image_url.as_deref()));

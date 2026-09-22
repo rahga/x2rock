@@ -649,6 +649,11 @@ pub struct Track {
     pub name: Option<String>,
     pub artist: Option<Named>,
     pub album: Option<Named>,
+    /// The show an episode belongs to. A podcast episode carries this and
+    /// neither `artist` nor `album`, so reading only those two leaves every
+    /// episode with a bare title - seen on a YouTube Music podcast playing to
+    /// a real room, where the show name was sitting here unread.
+    pub podcast: Option<Named>,
     /// Served by the player itself on port 1400 - usable as MPRIS `mpris:artUrl`.
     pub image_url: Option<String>,
     pub duration_millis: Option<u64>,
@@ -656,6 +661,21 @@ pub struct Track {
     /// the row. The player also sends `tags: ["TAG_EXPLICIT"]` beside it; this
     /// is the boolean form and the one worth reading.
     pub explicit: Option<bool>,
+}
+
+impl Track {
+    /// What this track belongs to: its album, or for a podcast episode the show.
+    ///
+    /// One accessor rather than three sites reading `album` directly, because
+    /// the fallback has to be the same everywhere - `now`, its JSON and the
+    /// MPRIS metadata the desktop reads - or a podcast is named in one place
+    /// and blank in the next.
+    pub fn collection(&self) -> Option<&str> {
+        self.album
+            .as_ref()
+            .and_then(|v| v.name.as_deref())
+            .or_else(|| self.podcast.as_ref().and_then(|v| v.name.as_deref()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
