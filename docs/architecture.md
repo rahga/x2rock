@@ -233,6 +233,8 @@ So each variable was eliminated in turn, and the refusal never moved:
 | **minted and polled against the right household** | `NOT_LINKED_FAILURE` |
 | browser reports "successfully signed in" | `NOT_LINKED_FAILURE` |
 | **first poll deferred 128s**, honouring the declared `PollInterval="120"` | `NOT_LINKED_FAILURE` |
+| **`deviceId` + `linkDeviceId` sent as the speaker's `R_TrialZPSerial`** (2026-09-22) | `NOT_LINKED_FAILURE` |
+| **polled seconds after minting**, before any browser step (2026-09-22) | `NOT_LINKED_FAILURE` - the code is invalid from birth |
 
 Three of those were real mistakes on this side rather than tests: the first probes carried the
 *home* household id while the laptop sat on the office household; the subscription state was assumed
@@ -7999,6 +8001,136 @@ station-shaped browsing, the `match` that failed, and now a self-authorizing str
 for a caller the household never registered - and it predicts something testable: on an Unlimited
 account, the station shape and the freely-playing stream URL should both change. Worth re-running
 if that subscription ever changes.
+
+## Re-reading the community SMAPI reference against the household (2026-09-22)
+
+[svrooij's music-services page](https://sonos.svrooij.io/music-services) is the only public write-up
+of the SMAPI authentication flows, and it is where this project's understanding of `getAppLink` /
+`getDeviceLinkCode` / `getDeviceAuthToken` originally came from. Read end to end again now that
+there is a dozen services' worth of live experience to check it against. Four claims in it had never
+been tested here, one describes something x2rock already built, and two of its numbers are
+contradicted by the household itself.
+
+### The one sentence in it worth quoting
+
+> You'll still need to connect the service to your speaker with a supported Sonos application to be
+> able to play music from this service.
+
+That is the discovery/playback split, stated by someone who arrived at it independently and years
+earlier. Everything this document records the long way - `match` associating and never creating, a
+token buying search while a household registration buys playback, YouTube Music playing ids it will
+not search - is one line in a disclaimer at the top of that page. Worth citing rather than
+re-deriving, and worth noticing that it has been true long enough to be a known limitation.
+
+### `deviceId`: a header field x2rock has never sent, and does not need
+
+The page is emphatic that **every** authenticated request carries the speaker's own identity:
+
+```xml
+<s:credentials>
+  <s:deviceId>{DEVICE_ID}</s:deviceId>     <!-- SystemProperties GetString R_TrialZPSerial -->
+  <s:loginToken>…</s:loginToken>
+</s:credentials>
+```
+
+x2rock sends `<deviceProvider>Sonos</deviceProvider>` and a `loginToken`, and **no `deviceId` at
+all** - and has linked, searched and played a dozen services that way. So the field is what a
+*speaker* sends, not a minimum any service enforces. The value is real and cheap to get, for the
+day some service does insist:
+
+```
+$ x2rock -r 'Media Room' raw upnp SystemProperties GetString VariableName=R_TrialZPSerial
+48-A6-B8-18-53-E0:5          # the player's MAC, plus a counter
+```
+
+**Tested, not assumed**, because Qobuz was the obvious candidate for "refuses an anonymous caller".
+Two link codes minted seconds apart, one envelope per shape, immediate poll on each:
+
+| shape | `deviceId` header | `linkDeviceId` sent | answer |
+|---|---|---|---|
+| x2rock's | absent | `8e712761` (echoed from the reply) | `Client.NOT_LINKED_FAILURE`, SonosError 6 |
+| the page's | `48-A6-B8-18-53-E0:5` | `48-A6-B8-18-53-E0:5` | **identical** |
+
+Byte-for-byte the same fault, same `"Link Code invalid... Retry link process.."`. Device identity is
+not what Qobuz is missing - **a ninth variable off that list**.
+
+### `linkDeviceId` is minted by the service, not read off the speaker
+
+The page says `<linkDeviceId>` is that same `R_TrialZPSerial`. It is not, at least not here: Qobuz
+returns a **fresh eight-hex value in every `getAppLink` reply** - `8e712761`, then `a7e92253` - which
+is a per-attempt handle, not a device name. x2rock's rule (echo what the link-code reply carried,
+send nothing when it carried nothing) is the right one, and is now tested against the alternative
+rather than merely reasoned about.
+
+### Two more Qobuz variables, closed
+
+`getDeviceLinkCode` is not a fallback path: Qobuz answers `SOAP-ENV:Server` /
+**`Function 'getDeviceLinkCode' doesn't exist`**. App-link is the only door, so there is no
+second flow left untried.
+
+And the sharpest framing of the refusal yet, from the A/B above: a code polled **seconds after
+Qobuz minted it** is already `"Link Code invalid"`. Not *unredeemed* - invalid from birth. Whatever
+the `regUrl` login does, it is not attaching an account to that code, which is consistent with the
+conclusion already recorded (Sonos's cloud completes the app-link exchange, and Qobuz never
+implemented the controller-side poll behind the courtesy `deviceLink` block).
+
+### `PollInterval`: settled against the whole catalogue, not just the linked five
+
+The reverted "fix" (see "Qobuz: the poll-interval hypothesis") rested on five services this
+household happens to have linked. The full descriptor settles it outright. Reading
+`MusicServices ListAvailableServices` off the Media Room player:
+
+| | count |
+|---|---|
+| services advertised | **108** |
+| of those, app-link or device-link | **76** |
+| declaring `PollInterval` of **0 or absent** | **0** |
+
+Every link-flow service in the catalogue declares a positive interval: minimum 30, mode 60 (38 of
+them), up to 3600. Honouring the field as a link-poll rate limit would have broken **every link in
+the catalogue**, not just the five already known. svrooij's own 2021 snapshot agrees - 59 link-flow
+services, none at zero - and adds a shape the live list has no example of: TuneIn declares
+`PollInterval="-1"`. A rate limit cannot be negative; a "never re-ask" sentinel can.
+
+### A service id is not a constant, and the published table proves it
+
+| | svrooij's snapshot | this household |
+|---|---|---|
+| Spotify | Id **9** | Id **12** |
+| endpoint | `https://spotify-v5.ws.sonos.com/smapi` | *identical* |
+
+Same service, same endpoint, different id. The sid is what goes into `?sid=N&sn=M` on every content
+URI and into the `SA_RINCON…` cdudn, so anyone hardcoding "Spotify is 9" off that table builds URIs
+the household will not resolve. x2rock has always read ids out of the household descriptor; this is
+the first hard evidence of *why* that was worth doing rather than merely tidy.
+
+The rest of the drift is regional more than temporal - the two lists differ by 23 services present
+here and absent there (iHeartRadio, SiriusXM, Amazon Music, Pandora, Audacy: a US household against
+a European one) and 6 the other way. Two endpoints have genuinely moved since: FIT Radio
+(`www.fitradio.com` → `prod-sonos.fitradio.com`) and Klassik Radio Plus (`/sonos` →
+`/sonos/smapi/v2`). The table is a useful map, not an address book.
+
+### What the page gets exactly right
+
+**Token refresh.** "If the key and token became invalid … you will get a new key and token in the
+response body in the soap error message and should retry the request." That is precisely the
+`refreshAuthTokenResult`-in-the-fault-detail handling already built and verified live against a
+genuinely expired Spotify token (see "A service can hand back a working token instead of just
+refusing"). Independent agreement on a mechanism that looks too strange to be real.
+
+**`SecureUri` over `Uri`.** x2rock already prefers it. Worth recording that the distinction is
+vestigial: **0 of 108** live services and 0 of 91 in the snapshot give different values for the two.
+
+### The one suggestion declined
+
+> Since you'll need to save the key and token somewhere, why not use the SystemProperties →
+> Get/SetString methods to save them?
+
+Deliberately not. `SetString` writes to the *speaker*, so a token stored there is readable by
+anything on the LAN that can speak UPnP, is shared across every controller in the household rather
+than belonging to the person who linked, and outlives uninstalling x2rock with no way to notice.
+`credentials.json` under the user's own config directory is worse for portability and better for
+every other property that matters.
 
 ## Open questions
 
