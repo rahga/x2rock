@@ -56,17 +56,32 @@ const SALT: [u8; 16] = [
 pub struct StoredAccount {
     /// The Sonos service id, decoded from the account UDN.
     pub service_id: u32,
-    /// `SerialNum0` - the household's own selector for this account, the `sn_N`
-    /// seen elsewhere.
+    /// `SerialNum<i>` - the household's own selector for this account, the
+    /// `sn_N` seen elsewhere.
     pub serial: u32,
     /// `authToken`. Secret.
     pub token: String,
     /// `privateKey`. Secret; empty for some services, which is legitimate.
     pub key: String,
-    /// `Nickname0`, what the person or app named the account. Often empty.
+    /// `Nickname<i>`, what the person or app named the account. Often empty.
+    ///
+    /// The Sonos app names the *second* account of a service after its key -
+    /// `iHeartRadio 885ebbcc` beside a plain `iHeartRadio` - which is how a
+    /// person tells them apart, and why this is worth keeping.
     pub nickname: String,
-    /// `Tier0`, a service-specific tier marker. Kept only for display.
+    /// `Tier<i>`, a service-specific tier marker. Kept only for display.
     pub tier: String,
+    /// The account's own key, out of `Username<i>`: `X_#Svc<type>-<key>-Token`.
+    ///
+    /// Stable per account and independent of the nickname, which a person can
+    /// rename at will. Literally `0` for a service that has no per-account key
+    /// (Sonos Radio and TIDAL show this), so it does **not** on its own
+    /// distinguish two accounts - the serial does that.
+    pub account_key: String,
+    /// `Flags<i>`, unparsed. `4` on every account seen with a real key and `0`
+    /// on those without; kept because it is cheap and nothing is known about it
+    /// beyond that, rather than because anything reads it yet.
+    pub flags: String,
 }
 
 impl StoredAccount {
@@ -131,10 +146,22 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
 
 /// Parse the decrypted account XML.
 ///
-/// Each account is an element with a `UDN` of `SA_RINCON<type>_...`, where
-/// `type / 256` is the service id and `type % 256` a schema revision. The token,
-/// key, nickname, tier and serial ride in `Token0`/`Key0`/`Nickname0`/`Tier0`/
-/// `SerialNum0` attributes.
+/// Each element with a `UDN` of `SA_RINCON<type>_...` is one *service*, where
+/// `type / 256` is the service id and `type % 256` a schema revision.
+///
+/// **The trailing digit on every value is an index, not part of the name.** An
+/// element declares `NumAccounts`, and carries `Token0`/`Key0`/`Nickname0`/
+/// `Tier0`/`SerialNum0`/`Username0` for the first account, `Token1` and the rest
+/// for a second, and so on. Reading only the `0` suffix - as this did until the
+/// indices were noticed - silently drops every account past the first in any
+/// element that holds more than one. Nothing observed here does yet: this
+/// household's two iHeartRadio accounts arrive as two separate elements, each
+/// declaring `NumAccounts="1"`. The walk is what makes that a fact about this
+/// household rather than an assumption baked into the parser.
+///
+/// A missing or unreadable `NumAccounts` is taken as one, which is what every
+/// element seen so far declares, and a run of indices stops early at an entry
+/// with no token or serial rather than padding the list with empty records.
 fn parse_accounts(payload: &[u8]) -> Result<Vec<StoredAccount>> {
     let text = String::from_utf8_lossy(payload);
     let doc = roxmltree::Document::parse(&text).context("decrypted account XML did not parse")?;
@@ -150,19 +177,44 @@ fn parse_accounts(payload: &[u8]) -> Result<Vec<StoredAccount>> {
         else {
             continue;
         };
-        accounts.push(StoredAccount {
-            service_id: encoded_type / 256,
-            serial: node
-                .attribute("SerialNum0")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
-            token: node.attribute("Token0").unwrap_or_default().to_string(),
-            key: node.attribute("Key0").unwrap_or_default().to_string(),
-            nickname: node.attribute("Nickname0").unwrap_or_default().to_string(),
-            tier: node.attribute("Tier0").unwrap_or_default().to_string(),
-        });
+        let count = node
+            .attribute("NumAccounts")
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(1);
+        for i in 0..count {
+            let at = |name: &str| node.attribute(format!("{name}{i}").as_str());
+            // An index the element claims but does not carry is the end of the
+            // real run, not an empty account to report.
+            if i > 0 && at("Token").is_none() && at("SerialNum").is_none() {
+                break;
+            }
+            accounts.push(StoredAccount {
+                service_id: encoded_type / 256,
+                serial: at("SerialNum").and_then(|s| s.parse().ok()).unwrap_or(0),
+                token: at("Token").unwrap_or_default().to_string(),
+                key: at("Key").unwrap_or_default().to_string(),
+                nickname: at("Nickname").unwrap_or_default().to_string(),
+                tier: at("Tier").unwrap_or_default().to_string(),
+                account_key: at("Username").map(account_key_in).unwrap_or_default(),
+                flags: at("Flags").unwrap_or_default().to_string(),
+            });
+        }
     }
     Ok(accounts)
+}
+
+/// The account key inside a `Username` value: `X_#Svc<type>-<key>-Token`.
+///
+/// Anything that does not have that shape is handed back whole - it is a
+/// display-and-keying aid, and a value nobody has seen is better carried
+/// verbatim than silently emptied.
+fn account_key_in(username: &str) -> String {
+    username
+        .rsplit_once("-Token")
+        .map(|(head, _)| head)
+        .and_then(|head| head.rsplit_once('-'))
+        .map(|(_, key)| key.to_string())
+        .unwrap_or_else(|| username.to_string())
 }
 
 /// One MD5 over a sequence of parts, concatenated.
@@ -476,6 +528,59 @@ mod tests {
         assert_eq!(qobuz.key, "qb-key");
         assert_eq!(qobuz.nickname, "Qb1");
         assert!(qobuz.has_token());
+    }
+
+    #[test]
+    fn an_element_holding_two_accounts_yields_both() {
+        // What `NumAccounts` is for. No household has been seen serving this
+        // shape - the two iHeartRadio accounts in the household this was
+        // written against arrive as two elements - so it is pinned with a
+        // synthetic vector rather than left to be discovered by losing a token.
+        const TWO: &str = r#"<ThirdPartyMediaServers>
+            <MediaServer UDN="SA_RINCON1543_X" NumAccounts="2"
+              SerialNum0="24" Token0="ihr-a" Key0="" Nickname0="iHeartRadio"
+              Username0="X_#Svc1543-81dee58d-Token" Flags0="4" Tier0="0"
+              SerialNum1="25" Token1="ihr-b" Key1="" Nickname1="iHeartRadio 885ebbcc"
+              Username1="X_#Svc1543-885ebbcc-Token" Flags1="4" Tier1="0"/>
+        </ThirdPartyMediaServers>"#;
+        let accounts = decrypt_accounts(&seal(TWO, HH, [3u8; 16]), HH).unwrap();
+        assert_eq!(accounts.len(), 2, "both indices are read");
+        assert_eq!(accounts[0].serial, 24);
+        assert_eq!(accounts[0].token, "ihr-a");
+        assert_eq!(accounts[0].account_key, "81dee58d");
+        assert_eq!(accounts[1].serial, 25);
+        assert_eq!(accounts[1].token, "ihr-b");
+        assert_eq!(accounts[1].nickname, "iHeartRadio 885ebbcc");
+        assert_eq!(accounts[1].account_key, "885ebbcc");
+        assert_eq!(accounts[1].service_id, accounts[0].service_id);
+    }
+
+    #[test]
+    fn a_count_larger_than_what_is_there_stops_at_the_real_end() {
+        // A claim is not a promise: three announced, one carried.
+        const OVER: &str = r#"<ThirdPartyMediaServers>
+            <MediaServer UDN="SA_RINCON7943_X" NumAccounts="3"
+              SerialNum0="14" Token0="qb-token" Key0="qb-key" Nickname0="Qb1"/>
+        </ThirdPartyMediaServers>"#;
+        let accounts = decrypt_accounts(&seal(OVER, HH, [5u8; 16]), HH).unwrap();
+        assert_eq!(accounts.len(), 1, "no empty records padded onto the end");
+        assert_eq!(accounts[0].token, "qb-token");
+    }
+
+    #[test]
+    fn an_account_key_is_read_out_of_the_username() {
+        assert_eq!(account_key_in("X_#Svc1543-885ebbcc-Token"), "885ebbcc");
+        // A service with no per-account key writes a literal zero there.
+        assert_eq!(account_key_in("X_#Svc44551-0-Token"), "0");
+        // An unfamiliar shape is carried whole rather than silently emptied.
+        assert_eq!(account_key_in("something-else"), "something-else");
+    }
+
+    #[test]
+    fn an_element_with_no_count_is_one_account_as_before() {
+        let accounts = decrypt_accounts(&seal(XML, HH, [7u8; 16]), HH).unwrap();
+        assert_eq!(accounts.len(), 3, "the un-indexed vector is unchanged");
+        assert_eq!(accounts[0].account_key, "", "no Username0 in that vector");
     }
 
     #[test]

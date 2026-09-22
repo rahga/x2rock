@@ -378,7 +378,8 @@ see "Ask before you act".
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 | Link with no browser at all, from what the household already holds | `x2rock link --from-household ['<Service>']` — the only route to Qobuz, Apple Music and Amazon; needs inbound TCP 3401 from the player |
-| Forget tokens | `x2rock unlink '<Service>'` (every household) / `--household <id>` (one) / `x2rock unlink --all` (wipe) |
+| Forget tokens | `x2rock unlink '<Service>'` (every household, every account) / `--household <id>` (one) / `--account "<nickname>"` (one account) / `x2rock unlink --all` (wipe) |
+| Choose which account a service uses | `x2rock accounts --prefer '<Service>' "<nickname>"` — only where a household holds two accounts for it; `x2rock accounts` marks the current one `*` |
 | Shell completions | `x2rock completions [shell] [--install\|--uninstall]` — auto-detects shell when omitted |
 | Systemd user service | `x2rock service [status\|install\|uninstall] [--json]` |
 | Desktop integration (.desktop & icon) | `x2rock desktop [status\|install\|uninstall] [--json]` |
@@ -900,12 +901,19 @@ those two apart when telling a user what linking will do.
   (the failure names it, `--callback-port N` moves it, and `0` takes an ephemeral one where there
   is nothing to open); and it does **not** get past YouTube Music, whose block is the caller key
   rather than the account — the token imports and search still 403s.
-- **A household can hold two accounts for one service, and only one is kept.** The Sonos app
-  numbers the second in its nickname — `iHeartRadio 885ebbcc` beside plain `iHeartRadio`, observed
-  in a real household 2026-09-22 — and `--from-household` prints a "Kept" line for *each* account
-  it read while the store holds one per service per household, so the last one read wins and the
-  earlier token is not stored. **Count what `x2rock accounts` lists, not the lines the import
-  printed**; they can disagree.
+- **A household can hold two accounts for one service, and both are kept.** The Sonos app numbers
+  the second in its nickname — `iHeartRadio 885ebbcc` beside plain `iHeartRadio`, observed in a real
+  household 2026-09-22 — and the import keeps each one. **One of them is what search and playback
+  use**, exactly as the Sonos app prioritises one, so results come back as one set rather than two
+  interleaved; `x2rock accounts` marks it with a `*` and names the others. Change it with
+  `x2rock accounts --prefer <service> "<nickname>"`, which takes a nickname, a unique nickname
+  prefix, or the account key the listing prints, and refuses an ambiguous one by naming the
+  candidates. The preference survives a re-import. This is the case that matters for a service whose
+  accounts hold different catalogues — two Audible libraries, say — where which account is in use
+  decides what a search can even find.
+- **`unlink <service>` forgets *every* account that service has**, in every household unless
+  `--household` narrows it; `unlink <service> --account "<nickname>"` forgets just one and leaves
+  its siblings. The plain form says how many it dropped, so a service that held two says so.
 - **The per-service scoreboard below is a summary.** What has been tested, with dates and the
   household each result came from, is the table at the top of `docs/architecture.md`; when the two
   disagree, that one is right. The *live* answer for a household is `x2rock search` (bare) and
@@ -940,8 +948,10 @@ those two apart when telling a user what linking will do.
   that is correct rather than a fault: say so and offer `link --from-household` instead of
   re-running a browser login. An auto-refresh on one network never touches the other's token.
   `x2rock accounts` lists every household it holds, under a header only when there is more than one.
-- **`accounts --json`**: `{service, service_id, account_id, nickname, linked, household}` per token
-  this machine holds. `account_id` is the household serial when the account was matched, otherwise
+- **`accounts --json`**: `{service, service_id, account_key, serial, preferred, account_id,
+  nickname, linked, household}` per token this machine holds — **one row per account**, so a service
+  with two accounts is two rows with the same `service`. `preferred` marks the one in use and
+  `account_key` is what `--prefer` and `--account` accept. `account_id` is the household serial when the account was matched, otherwise
   `null` (prose: `no registration from this machine`), and `null` is not an error. `linked` is a
   Unix timestamp. `household` is the household the token was minted against, and it **is** the key
   it is filed under — a token is used on that household's network and not on another's. None of

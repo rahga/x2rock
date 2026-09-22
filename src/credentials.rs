@@ -29,19 +29,29 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::smapi::{DeviceAuth, Token};
 use crate::store;
 
-/// The shape of the file. Schema 2 keys accounts by household; schema 1's flat
-/// `services` map is not read back. There are no users to migrate, so there is
-/// no migration - but a file of any other schema is *refused* rather than read
-/// as empty, because unknown fields are ignored on load and an old file would
-/// otherwise deserialize to an empty store, report every service as unlinked,
-/// and be overwritten by the next save. This file is its own only copy.
-const SCHEMA: u32 = 2;
+/// The shape of the file. Schema 3 holds *several* accounts per service, since a
+/// household can; schema 2 held exactly one; schema 1's flat `services` map is
+/// not read back at all.
+///
+/// Schema 2 **migrates** rather than being refused, and the reason is concrete:
+/// a store written at 2 can hold tokens for a household that is nowhere near
+/// this machine - the office set, while the laptop is at home - and those cannot
+/// be re-imported from here at any price. Schema 1 predates the household key
+/// entirely, so there is nothing in it to place, and it is still refused.
+///
+/// Anything this build does not know is refused too, in both directions: a file
+/// read as empty would report every service as unlinked and then be overwritten
+/// by the next save, and this file is its own only copy.
+const SCHEMA: u32 = 3;
+
+/// The oldest schema this build can still read and convert.
+const OLDEST_READABLE: u32 = 2;
 
 /// Everything past owner read/write. A secret with any of these set is a bug
 /// somewhere, most likely a hand-edit or a careless copy.
@@ -51,22 +61,141 @@ const LOOSE: u32 = 0o177;
 pub struct Credentials {
     #[serde(default)]
     pub schema: u32,
-    /// Household id -> (service id -> the account held for it there).
+    /// Household id -> (service id -> the accounts held for it there).
     ///
     /// Keyed by household because one machine sees more than one - a laptop that
     /// moves between home and the office - and each household holds its own
     /// account for a service, with its own token. Keeping them apart is what
     /// lets a search on the home network use the home token while the office
     /// token sits untouched, and what stops an auto-refresh on one from
-    /// clobbering the other. Within a household it is still one account per
-    /// service; several accounts for one service in one household is a Sonos
-    /// feature nothing has asked for yet.
+    /// clobbering the other.
     ///
-    /// The old flat `services` map (schema 1) is not read back; such a file is
-    /// refused by [`Credentials::check_schema`] with the re-import named, rather
-    /// than loading as no accounts at all.
+    /// Plural at the third level because a household really can hold two
+    /// accounts for one service - the Sonos app numbers the second in its
+    /// nickname, `iHeartRadio 885ebbcc` beside `iHeartRadio` - and collapsing
+    /// them lost a token every import. See [`ServiceAccounts`].
     #[serde(default)]
-    pub households: BTreeMap<String, BTreeMap<String, Account>>,
+    pub households: BTreeMap<String, BTreeMap<String, ServiceAccounts>>,
+}
+
+/// Every account one household holds for one service, and which of them to use.
+///
+/// The Sonos app's own answer to two accounts for a service is to let a person
+/// prioritise one, so that a search comes back with one set of results rather
+/// than two interleaved. This is that: the accounts, and the key of the one
+/// every ordinary read resolves to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceAccounts {
+    /// Account key -> the account. **Not** `#[serde(default)]`, deliberately:
+    /// its absence is what tells a schema-2 record (a bare `Account` object) from
+    /// a schema-3 one when [`StoredService`] deserializes them untagged.
+    pub accounts: BTreeMap<String, Account>,
+    /// Which account key search, browse and playback use. `None` means nothing
+    /// has been chosen, which is the ordinary case for the single-account
+    /// service; [`ServiceAccounts::chosen`] says what that resolves to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<String>,
+}
+
+impl ServiceAccounts {
+    /// The account every read resolves to: the preferred one while it is still
+    /// there, else the only one, else the first by key.
+    ///
+    /// The last arm matters more than it looks. Falling back to *insertion*
+    /// order would make two accounts with no stated preference drift with write
+    /// order - a re-import could quietly change which account a search uses -
+    /// so the fallback is the `BTreeMap`'s own order, which is the same on every
+    /// machine and every run.
+    pub fn chosen(&self) -> Option<(&str, &Account)> {
+        if let Some(key) = &self.preferred
+            && let Some(account) = self.accounts.get(key)
+        {
+            return Some((key.as_str(), account));
+        }
+        self.accounts.iter().next().map(|(k, a)| (k.as_str(), a))
+    }
+
+    /// Whether this key is the one [`chosen`](Self::chosen) would return.
+    pub fn is_chosen(&self, key: &str) -> bool {
+        self.chosen().is_some_and(|(k, _)| k == key)
+    }
+
+    /// The key of an account already holding this exact `authToken`.
+    ///
+    /// Identity, cheaply: the household's stored blob hands back the very bytes
+    /// x2rock filed, so an import that re-reads an account it already has can
+    /// land on the record it already wrote instead of beside it under a second
+    /// key. Without this, a migrated schema-2 record and its own re-import would
+    /// sit side by side as two accounts that are one.
+    fn key_holding(&self, auth_token: &str) -> Option<String> {
+        self.accounts
+            .iter()
+            .find(|(_, a)| a.auth_token == auth_token)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Where an incoming account belongs among the ones already held.
+    ///
+    /// Three questions in order, and the last one is the interesting one:
+    ///
+    /// 1. Is this token already here? Then it is that record, whatever route it
+    ///    came by.
+    /// 2. Does the account identify itself - a household serial, or a service's
+    ///    `userIdHashCode`? Then that is its key, and a genuinely different
+    ///    account lands beside this one rather than on it.
+    /// 3. Neither. Re-linking through the browser is the repair path for a dead
+    ///    token, and a service that sent a hash last time may send none this
+    ///    time - so an unidentifiable account replaces the one already held when
+    ///    there is exactly one, which is the account it is repairing. With
+    ///    *several* held it could be any of them, and guessing would destroy a
+    ///    working token to fix a different one: it is filed as its own record
+    ///    instead, which loses nothing and can be unlinked.
+    fn key_for(&self, account: &Account) -> String {
+        if let Some(key) = self.key_holding(&account.auth_token) {
+            return key;
+        }
+        if let Some(key) = identifying_key(account) {
+            return key;
+        }
+        match self.accounts.len() {
+            1 => self
+                .accounts
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| UNIDENTIFIED.to_string()),
+            _ => UNIDENTIFIED.to_string(),
+        }
+    }
+}
+
+/// The key a browser-linked account gets when nothing identifies it. One such
+/// account per service per household - which is what the store held for *every*
+/// service before it learned the plural, so it is no new limit.
+const UNIDENTIFIED: &str = "link";
+
+/// One service's entry as it appears *on disk*, which is two shapes: schema 3's
+/// [`ServiceAccounts`] and schema 2's bare [`Account`].
+///
+/// Untagged, and the discrimination is structural rather than a version tag:
+/// `ServiceAccounts` requires `accounts`, which no schema-2 record has, and
+/// `Account` requires `auth_token` and friends, which no schema-3 record has at
+/// that level. Order still matters - the richer shape is tried first.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredService {
+    Current(ServiceAccounts),
+    Legacy(Box<Account>),
+}
+
+/// The file as read, before any conversion. Separate from [`Credentials`] so the
+/// in-memory store never carries the legacy shape around.
+#[derive(Debug, Deserialize)]
+struct CredentialsFile {
+    #[serde(default)]
+    schema: u32,
+    #[serde(default)]
+    households: BTreeMap<String, BTreeMap<String, StoredService>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,17 +229,34 @@ pub struct Account {
     /// the account yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The household's own serial for this account - the `sn_N` it is known by
+    /// there - when it is known. `--from-household` reads it straight off the
+    /// stored record (`SerialNum0`); a browser link never sees one unless
+    /// `match` comes back with it, which is what `account_id` holds.
+    ///
+    /// Kept apart from `account_id` on purpose: this one says "the household has
+    /// this account", `account_id` says "the household matched the account *this
+    /// machine* registered". A record can honestly have the first and not the
+    /// second, which is every imported account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<u32>,
     /// When the link completed, epoch seconds - the same unit bookmarks use.
     pub linked: u64,
 }
 
 impl Account {
     /// What goes in the SMAPI credentials header.
-    pub fn token(&self) -> Token {
+    ///
+    /// `account` is the key this record is filed under, carried along for the
+    /// same reason `household` is: a reply that refreshes the token has to be
+    /// written back to the account it came from, and with several accounts per
+    /// service "the one for this service" is no longer an answer.
+    pub fn token(&self, account: &str) -> Token {
         Token {
             token: self.auth_token.clone(),
             key: self.private_key.clone(),
             household: self.household.clone(),
+            account: Some(account.to_string()),
         }
     }
 }
@@ -161,45 +307,48 @@ impl Credentials {
                 }
             }
         }
-        let creds: Self =
+        let file: CredentialsFile =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        creds.check_schema(path)?;
-        Ok(creds)
+        check_schema(file.schema, path)?;
+        Ok(Self::from_file(file))
     }
 
-    /// Refuse a file this build does not write.
+    /// Convert what was read into the current shape, lifting every schema-2
+    /// record into a one-account [`ServiceAccounts`].
     ///
-    /// Serde ignores unknown fields, so a schema-1 file - tokens under a flat
-    /// `services` map - parses happily into zero households. Left there it would
-    /// present itself as "nothing linked", send someone back through a link
-    /// flow, and then be overwritten by the first save that followed, taking the
-    /// only copy of those tokens with it. The same holds in reverse for a file
-    /// from a newer build: whatever it keeps that this one cannot read would not
-    /// survive the round trip.
-    ///
-    /// So this is loud, and it names both ways out: the re-import, or the
-    /// deletion that a wipe would otherwise have done for you (`unlink --all`
-    /// loads the store too, so it cannot be the escape hatch here).
-    fn check_schema(&self, path: &Path) -> Result<()> {
-        if self.schema == SCHEMA {
-            return Ok(());
+    /// The lifted account keeps its token untouched and takes the key a fresh
+    /// write would give it, so a later `link --from-household` that re-reads the
+    /// same account lands *on* it (by [`ServiceAccounts::key_holding`]) rather
+    /// than beside it. `preferred` is left unset: with one account there is
+    /// nothing to prefer, and stating one would outlive the moment a second
+    /// arrives.
+    fn from_file(file: CredentialsFile) -> Self {
+        let households = file
+            .households
+            .into_iter()
+            .map(|(household, services)| {
+                let services = services
+                    .into_iter()
+                    .map(|(id, entry)| {
+                        let accounts = match entry {
+                            StoredService::Current(accounts) => accounts,
+                            StoredService::Legacy(account) => {
+                                let mut lifted = ServiceAccounts::default();
+                                let key = lifted.key_for(&account);
+                                lifted.accounts.insert(key, *account);
+                                lifted
+                            }
+                        };
+                        (id, accounts)
+                    })
+                    .collect();
+                (household, services)
+            })
+            .collect();
+        Self {
+            schema: SCHEMA,
+            households,
         }
-        let path = path.display();
-        if self.schema < SCHEMA {
-            bail!(
-                "{path} is schema {} - an older x2rock keyed tokens by service alone, \
-                 and this build keys them by household. The tokens are still valid at \
-                 their services: re-import them with `x2rock link --from-household`, \
-                 or delete the file to start over.",
-                self.schema
-            );
-        }
-        bail!(
-            "{path} is schema {}, written by a newer x2rock than this one. Upgrade, or \
-             move the file aside - saving over it from here would drop whatever this \
-             build cannot read.",
-            self.schema
-        )
     }
 
     /// Write atomically at 0600.
@@ -218,34 +367,57 @@ impl Credentials {
             schema: SCHEMA,
             households: self.households.clone(),
         };
+        // Written at SCHEMA whatever was read, which is how a migrated schema-2
+        // file becomes a schema-3 one: the first save after the first load.
         store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
     }
 
-    /// The account held for a service *in one household*.
-    pub fn get(&self, household: &str, service_id: &str) -> Option<&Account> {
+    /// The accounts held for a service *in one household*, and which is chosen.
+    pub fn accounts_for(&self, household: &str, service_id: &str) -> Option<&ServiceAccounts> {
         self.households.get(household)?.get(service_id)
+    }
+
+    /// The one account a read resolves to for this service in this household.
+    ///
+    /// Every caller that wants "the token for X" goes through here, which is the
+    /// whole point of holding the preference inside the store: `search`,
+    /// `browse`, `play-item` and the rest never learn that a service can have
+    /// two accounts, and there is exactly one place where which-one is decided.
+    pub fn get(&self, household: &str, service_id: &str) -> Option<&Account> {
+        self.chosen(household, service_id).map(|(_, a)| a)
+    }
+
+    /// As [`get`](Self::get), and says which key it landed on.
+    pub fn chosen(&self, household: &str, service_id: &str) -> Option<(&str, &Account)> {
+        self.accounts_for(household, service_id)?.chosen()
     }
 
     /// The token held for a service in a household - what every play path hands
     /// SMAPI. The household is the one the caller is currently connected to, so
-    /// a machine that moves between systems uses the right account for each.
+    /// a machine that moves between systems uses the right account for each, and
+    /// the token carries the account key so a refresh comes back to the right
+    /// one of them.
     pub fn token_for(&self, household: &str, service_id: &str) -> Option<Token> {
-        self.get(household, service_id).map(Account::token)
+        self.chosen(household, service_id)
+            .map(|(key, account)| account.token(key))
     }
 
     /// Every account, across all households, as `(household, service_id,
-    /// account)`. For `accounts`, which lists what the whole store holds.
-    pub fn all(&self) -> impl Iterator<Item = (&str, &str, &Account)> {
+    /// account_key, account)`. For `accounts`, which lists what the whole store
+    /// holds - every account, not one per service.
+    pub fn all(&self) -> impl Iterator<Item = (&str, &str, &str, &Account)> {
         self.households.iter().flat_map(|(hh, services)| {
-            services
-                .iter()
-                .map(move |(id, account)| (hh.as_str(), id.as_str(), account))
+            services.iter().flat_map(move |(id, held)| {
+                held.accounts
+                    .iter()
+                    .map(move |(key, account)| (hh.as_str(), id.as_str(), key.as_str(), account))
+            })
         })
     }
 
     /// Whether the store holds nothing at all.
     pub fn is_empty(&self) -> bool {
-        self.households.values().all(BTreeMap::is_empty)
+        self.all().next().is_none()
     }
 
     /// The one household this store knows, if it knows exactly one - a fallback
@@ -270,7 +442,7 @@ impl Credentials {
         // Collapse to one entry per service id, since the same service can sit
         // in several households; any household's copy names it.
         let mut by_id: BTreeMap<&str, &Account> = BTreeMap::new();
-        for (_, id, account) in self.all() {
+        for (_, id, _, account) in self.all() {
             by_id.entry(id).or_insert(account);
         }
         if let Some(account) = by_id.get(query) {
@@ -314,28 +486,106 @@ impl Credentials {
     /// for a revoked or expired token, so the new secrets always win, while the
     /// nickname, hash and matched account id survive when the new record omits
     /// them.
-    pub fn remember(&mut self, household: &str, service_id: &str, mut account: Account) {
-        if let Some(old) = self.get(household, service_id) {
+    /// Returns the key it was filed under.
+    pub fn remember(&mut self, household: &str, service_id: &str, account: Account) -> String {
+        let held = self
+            .households
+            .entry(household.to_string())
+            .or_default()
+            .entry(service_id.to_string())
+            .or_default();
+        let key = held.key_for(&account);
+        // A record that arrived with nothing to identify it, and is now being
+        // written again by a route that *does* know which account it is, moves
+        // to the stable key. This is what a migrated schema-2 record does on
+        // its first re-import: it was filed under the fallback because the old
+        // file carried no serial, and the import knows one.
+        if let Some(stable) = identifying_key(&account)
+            && stable != key
+            && held.accounts.contains_key(&key)
+        {
+            if let Some(moved) = held.accounts.remove(&key) {
+                held.accounts.insert(stable.clone(), moved);
+            }
+            if held.preferred.as_deref() == Some(key.as_str()) {
+                held.preferred = Some(stable.clone());
+            }
+            return Self::merge_into(held, stable, account);
+        }
+        Self::merge_into(held, key, account)
+    }
+
+    /// Insert `account` at `key`, keeping what the incoming record does not
+    /// carry. The tail of [`remember`](Self::remember), shared with the rekey
+    /// path above it.
+    fn merge_into(held: &mut ServiceAccounts, key: String, mut account: Account) -> String {
+        if let Some(old) = held.accounts.get(&key) {
             account.nickname = account.nickname.or_else(|| old.nickname.clone());
             account.user_id_hash_code = account
                 .user_id_hash_code
                 .or_else(|| old.user_id_hash_code.clone());
             account.account_id = account.account_id.or_else(|| old.account_id.clone());
+            account.serial = account.serial.or(old.serial);
         }
-        self.households
-            .entry(household.to_string())
-            .or_default()
-            .insert(service_id.to_string(), account);
+        held.accounts.insert(key.clone(), account);
+        key
     }
 
-    /// Forget a service's account in one household. Returns what was dropped.
-    pub fn forget(&mut self, household: &str, service_id: &str) -> Option<Account> {
-        let services = self.households.get_mut(household)?;
-        let dropped = services.remove(service_id);
+    /// Prefer one account for a service, so every read resolves to it. The key
+    /// must be one this service actually holds; an unknown one is refused rather
+    /// than stored, since a preference pointing at nothing reads as no
+    /// preference at all and would look like the setting silently failing.
+    pub fn prefer(&mut self, household: &str, service_id: &str, key: &str) -> Result<()> {
+        let Some(held) = self
+            .households
+            .get_mut(household)
+            .and_then(|s| s.get_mut(service_id))
+        else {
+            bail!("no account is held for that service in this household");
+        };
+        ensure!(
+            held.accounts.contains_key(key),
+            "no account {key:?} is held for that service"
+        );
+        held.preferred = Some(key.to_string());
+        Ok(())
+    }
+
+    /// Forget every account a service has in one household. Returns how many
+    /// were dropped.
+    pub fn forget(&mut self, household: &str, service_id: &str) -> usize {
+        let Some(services) = self.households.get_mut(household) else {
+            return 0;
+        };
+        let dropped = services.remove(service_id).map_or(0, |h| h.accounts.len());
         if services.is_empty() {
             self.households.remove(household);
         }
         dropped
+    }
+
+    /// Forget one account of a service in one household, leaving its siblings.
+    /// Returns what was dropped. A preference pointing at it is cleared with it,
+    /// so the next read falls back rather than resolving through a dangling key.
+    pub fn forget_account(
+        &mut self,
+        household: &str,
+        service_id: &str,
+        key: &str,
+    ) -> Option<Account> {
+        let services = self.households.get_mut(household)?;
+        let held = services.get_mut(service_id)?;
+        let dropped = held.accounts.remove(key)?;
+        if held.preferred.as_deref() == Some(key) {
+            held.preferred = None;
+        }
+        if held.accounts.is_empty() {
+            services.remove(service_id);
+        }
+        if services.is_empty() {
+            self.households.remove(household);
+        }
+        Some(dropped)
     }
 
     /// Drop a whole household. Returns how many accounts it held, so a wipe of
@@ -343,7 +593,7 @@ impl Credentials {
     pub fn forget_household(&mut self, household: &str) -> usize {
         self.households
             .remove(household)
-            .map(|s| s.len())
+            .map(|s| s.values().map(|h| h.accounts.len()).sum())
             .unwrap_or(0)
     }
 
@@ -393,6 +643,125 @@ impl Credentials {
         }
         households.len()
     }
+
+    /// Resolve a query to one account key of a service in a household.
+    ///
+    /// The same ladder the catalogue uses for a service name, over what people
+    /// actually see: the account key itself, then an exact nickname, then a
+    /// unique case-insensitive nickname prefix. Nickname first among the human
+    /// forms because that is what `accounts` prints and what the Sonos app calls
+    /// the account; the key is there for the case a nickname cannot settle -
+    /// two accounts named the same, which the app permits.
+    ///
+    /// Ambiguity is refused by naming the candidates. Picking one would move a
+    /// preference, or forget a token, that nobody asked about.
+    pub fn resolve_account(
+        &self,
+        household: &str,
+        service_id: &str,
+        query: &str,
+    ) -> Result<String> {
+        let Some(held) = self.accounts_for(household, service_id) else {
+            bail!("no account is held for that service in this household");
+        };
+        if held.accounts.contains_key(query) {
+            return Ok(query.to_string());
+        }
+        let named = |a: &Account| a.nickname.clone().unwrap_or_default();
+        if let Some((key, _)) = held
+            .accounts
+            .iter()
+            .find(|(_, a)| named(a).eq_ignore_ascii_case(query))
+        {
+            return Ok(key.clone());
+        }
+        let needle = query.to_lowercase();
+        let matches: Vec<(&String, &Account)> = held
+            .accounts
+            .iter()
+            .filter(|(_, a)| named(a).to_lowercase().starts_with(&needle))
+            .collect();
+        match matches.as_slice() {
+            [(key, _)] => Ok((*key).clone()),
+            [] => bail!(
+                "no account matching {query:?}. This service holds: {}.",
+                describe(&held.accounts)
+            ),
+            several => bail!(
+                "{query:?} matches {} accounts: {}. Give the whole nickname, or the key.",
+                several.len(),
+                several
+                    .iter()
+                    .map(|(key, a)| format!("{} ({key})", named(a)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Name every account of a service the way an error should: nickname and key.
+fn describe(accounts: &BTreeMap<String, Account>) -> String {
+    accounts
+        .iter()
+        .map(|(key, a)| match a.nickname.as_deref() {
+            Some(nick) if !nick.is_empty() => format!("{nick} ({key})"),
+            _ => key.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What an account says about which account it is, if anything:
+///
+/// 1. `serial`, the household's own `sn_N` for it - what `--from-household`
+///    reads off the stored record, and the same namespace `match` answers in,
+///    so the two routes to one account agree on a key.
+/// 2. `user_id_hash_code`, which a device link gets back from the service and a
+///    household import never carries.
+///
+/// `None` when it says neither, which is a browser-linked account for a service
+/// that sent no hash. [`ServiceAccounts::key_for`] decides what to do then.
+fn identifying_key(account: &Account) -> Option<String> {
+    if let Some(serial) = account.serial {
+        return Some(format!("sn{serial}"));
+    }
+    match account.user_id_hash_code.as_deref() {
+        Some(hash) if !hash.is_empty() => Some(hash.to_string()),
+        _ => None,
+    }
+}
+
+/// Refuse a file this build cannot round-trip, and say which way out applies.
+///
+/// Serde ignores unknown fields, so a schema-1 file - tokens under a flat
+/// `services` map - parses happily into zero households. Left there it would
+/// present itself as "nothing linked", send someone back through a link flow,
+/// and then be overwritten by the first save that followed, taking the only copy
+/// of those tokens with it. The same holds in reverse for a file from a newer
+/// build: whatever it keeps that this one cannot read would not survive the
+/// round trip.
+///
+/// Schema 2 is *not* refused - it is lifted by [`Credentials::from_file`]. It
+/// has to be: a schema-2 store can hold a household this machine is nowhere
+/// near, and `link --from-household` cannot re-import what it cannot reach.
+fn check_schema(schema: u32, path: &Path) -> Result<()> {
+    if (OLDEST_READABLE..=SCHEMA).contains(&schema) {
+        return Ok(());
+    }
+    let path = path.display();
+    if schema < OLDEST_READABLE {
+        bail!(
+            "{path} is schema {schema} - an older x2rock keyed tokens by service alone, \
+             with no household. The tokens are still valid at their services: re-import \
+             them with `x2rock link --from-household`, or delete the file to start over."
+        );
+    }
+    bail!(
+        "{path} is schema {schema}, written by a newer x2rock than this one. Upgrade, or \
+         move the file aside - saving over it from here would drop whatever this build \
+         cannot read."
+    )
 }
 
 /// Build an [`Account`] from a fresh `getDeviceAuthToken` reply. The service
@@ -411,6 +780,10 @@ pub fn from_device_auth(
         nickname: nickname.map(str::to_string),
         household: household.map(str::to_string),
         account_id: None,
+        // A device link never learns the household's serial for the account;
+        // only `match`, later, says anything about it, and that lands in
+        // `account_id`. `--from-household` is the path that reads one.
+        serial: None,
         linked: now(),
     }
 }
@@ -431,6 +804,7 @@ mod tests {
             nickname: Some("nick".into()),
             household: Some(HH.into()),
             account_id: Some("42".into()),
+            serial: None,
             linked: 1_000,
         }
     }
@@ -505,6 +879,143 @@ mod tests {
         assert!(err.contains("newer x2rock"), "{err}");
     }
 
+    /// One service's two accounts, the way a household hands them over.
+    fn imported(nick: &str, serial: u32, token: &str) -> Account {
+        Account {
+            service_name: "iHeartRadio".into(),
+            auth_token: token.into(),
+            private_key: String::new(),
+            user_id_hash_code: None,
+            nickname: Some(nick.into()),
+            household: Some(HH.into()),
+            account_id: None,
+            serial: Some(serial),
+            linked: 1_000,
+        }
+    }
+
+    #[test]
+    fn two_accounts_for_one_service_are_both_kept() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        creds.remember(HH, "6", imported("iHeartRadio 885ebbcc", 25, "tok-b"));
+
+        let held = creds.accounts_for(HH, "6").unwrap();
+        assert_eq!(held.accounts.len(), 2, "the second did not overwrite");
+        assert_eq!(creds.all().count(), 2);
+        // With nothing preferred it is the first by key, not by write order.
+        assert_eq!(creds.get(HH, "6").unwrap().auth_token, "tok-a");
+    }
+
+    #[test]
+    fn re_reading_an_account_lands_on_the_record_it_already_wrote() {
+        let mut creds = Credentials::default();
+        let key = creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        // The same token arriving with nothing to identify it - a migrated
+        // record's own re-import - must not become a second account.
+        let mut anonymous = imported("iHeartRadio", 24, "tok-a");
+        anonymous.serial = None;
+        let again = creds.remember(HH, "6", anonymous);
+        assert_eq!(again, key, "matched on the token it already holds");
+        assert_eq!(creds.accounts_for(HH, "6").unwrap().accounts.len(), 1);
+    }
+
+    #[test]
+    fn the_preferred_account_is_what_every_read_resolves_to() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        creds.remember(HH, "6", imported("iHeartRadio 885ebbcc", 25, "tok-b"));
+
+        let key = creds
+            .resolve_account(HH, "6", "iHeartRadio 885ebbcc")
+            .unwrap();
+        creds.prefer(HH, "6", &key).unwrap();
+        assert_eq!(creds.get(HH, "6").unwrap().auth_token, "tok-b");
+        // And the token carries the key, so a refresh knows where to land.
+        let token = creds.token_for(HH, "6").unwrap();
+        assert_eq!(token.account.as_deref(), Some(key.as_str()));
+
+        // A preference pointing at an account that has gone falls back rather
+        // than resolving to nothing - losing search is worse than a fallback.
+        creds.forget_account(HH, "6", &key).unwrap();
+        assert_eq!(creds.get(HH, "6").unwrap().auth_token, "tok-a");
+    }
+
+    #[test]
+    fn forgetting_one_account_leaves_its_sibling() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        creds.remember(HH, "6", imported("iHeartRadio 885ebbcc", 25, "tok-b"));
+
+        let key = creds
+            .resolve_account(HH, "6", "iHeartRadio 885ebbcc")
+            .unwrap();
+        let gone = creds.forget_account(HH, "6", &key).unwrap();
+        assert_eq!(gone.auth_token, "tok-b");
+        assert_eq!(creds.accounts_for(HH, "6").unwrap().accounts.len(), 1);
+        // And forgetting the service drops what is left, counted in accounts.
+        assert_eq!(creds.forget(HH, "6"), 1);
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn an_account_resolves_by_nickname_prefix_and_refuses_an_ambiguous_one() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        creds.remember(HH, "6", imported("iHeartRadio 885ebbcc", 25, "tok-b"));
+
+        // Exact beats prefix: "iHeartRadio" is also a prefix of the other one.
+        let exact = creds.resolve_account(HH, "6", "iHeartRadio").unwrap();
+        assert_eq!(
+            creds.accounts_for(HH, "6").unwrap().accounts[&exact].auth_token,
+            "tok-a"
+        );
+        // A distinguishing prefix resolves.
+        assert!(creds.resolve_account(HH, "6", "iHeartRadio 88").is_ok());
+        // The key itself always works, for two accounts named the same.
+        assert!(creds.resolve_account(HH, "6", "sn25").is_ok());
+        // Ambiguity names the candidates instead of picking one.
+        let err = creds
+            .resolve_account(HH, "6", "iheart")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches 2 accounts"), "{err}");
+        assert!(err.contains("sn24") && err.contains("sn25"), "{err}");
+    }
+
+    #[test]
+    fn a_schema_two_file_is_lifted_rather_than_refused() {
+        let dir = TempDir::new("cred-migrate");
+        let path = dir.path().join("credentials.json");
+        // Schema 2: one Account per service, no `accounts` map. This must
+        // survive - a store written at 2 can hold a household nowhere near this
+        // machine, which `link --from-household` cannot re-import from here.
+        fs::write(
+            &path,
+            r#"{"schema":2,"households":{"Sonos_office":{"31":{"service_name":"Qobuz",
+               "auth_token":"office-tok","private_key":"office-key","nickname":"Qb1",
+               "household":"Sonos_office","linked":1000}}}}"#,
+        )
+        .unwrap();
+
+        let creds = Credentials::load_from(&path).unwrap();
+        let got = creds.get("Sonos_office", "31").expect("the token survived");
+        assert_eq!(got.auth_token, "office-tok");
+        assert_eq!(got.private_key, "office-key");
+        let held = creds.accounts_for("Sonos_office", "31").unwrap();
+        assert_eq!(held.accounts.len(), 1);
+        assert!(held.preferred.is_none(), "one account, nothing to prefer");
+
+        // And it is written back at the current schema, readable again.
+        creds.save_to(&path).unwrap();
+        let back = Credentials::load_from(&path).unwrap();
+        assert_eq!(back.schema, SCHEMA);
+        assert_eq!(
+            back.get("Sonos_office", "31").unwrap().auth_token,
+            "office-tok"
+        );
+    }
+
     #[test]
     fn relinking_replaces_the_secrets_and_keeps_the_registration() {
         let mut creds = Credentials::default();
@@ -549,8 +1060,8 @@ mod tests {
     fn forgetting_says_whether_there_was_anything_to_forget() {
         let mut creds = Credentials::default();
         creds.remember(HH, "200", account("Bandcamp"));
-        assert!(creds.forget(HH, "200").is_some());
-        assert!(creds.forget(HH, "200").is_none());
+        assert_eq!(creds.forget(HH, "200"), 1);
+        assert_eq!(creds.forget(HH, "200"), 0);
         // The now-empty household is dropped, so the store is empty again.
         assert!(creds.is_empty());
     }

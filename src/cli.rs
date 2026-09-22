@@ -692,6 +692,12 @@ pub enum Command {
         /// `link --from-household` re-imports.
         #[arg(long, conflicts_with = "service")]
         all: bool,
+        /// Forget one account of that service, by nickname or account key,
+        /// leaving its siblings. Only needed where a household holds more than
+        /// one account for the service; `x2rock accounts` names them. Without
+        /// it, the service's accounts are all forgotten.
+        #[arg(long, value_name = "ACCOUNT", conflicts_with = "all")]
+        account: Option<String>,
         // `--household` (global) narrows either form to one stored household.
         // Matched against stored ids here, not room names: unlink reaches no
         // player. See the `Unlink` handler.
@@ -707,6 +713,16 @@ pub enum Command {
         // question.
         #[arg(long)]
         content: bool,
+        /// Choose which account a service searches and plays with, where the
+        /// household holds more than one: `--prefer iHeartRadio "<nickname>"`.
+        ///
+        /// The Sonos app's own answer to two accounts for one service, and for
+        /// the same reason - one set of search results rather than two
+        /// interleaved. Takes the service, then the account by nickname or by
+        /// the key `x2rock accounts` prints. Needs a player, or a store holding
+        /// exactly one household, to know which household is meant.
+        #[arg(long, num_args = 2, value_names = ["SERVICE", "ACCOUNT"])]
+        prefer: Option<Vec<String>>,
         #[arg(long)]
         json: bool,
     },

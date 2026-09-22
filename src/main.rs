@@ -324,8 +324,17 @@ async fn run(cli: Cli) -> Result<()> {
         }
         // Both of these are about a file on this machine, so neither needs a
         // player and both work with the household unreachable.
-        Command::Unlink { ref service, all } => {
-            return services::unlink(service.as_deref(), all, cli.household.as_deref());
+        Command::Unlink {
+            ref service,
+            all,
+            ref account,
+        } => {
+            return services::unlink(
+                service.as_deref(),
+                all,
+                account.as_deref(),
+                cli.household.as_deref(),
+            );
         }
         Command::Bookmarks {
             ref action,
@@ -335,8 +344,20 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             return content::run_bookmarks(action.as_ref(), query.as_deref(), all, json);
         }
-        Command::Accounts { content, json } => {
-            return services::accounts(cli.ip, cli.household.as_deref(), room, content, json).await;
+        Command::Accounts {
+            content,
+            ref prefer,
+            json,
+        } => {
+            return services::accounts(
+                cli.ip,
+                cli.household.as_deref(),
+                room,
+                content,
+                prefer.as_deref(),
+                json,
+            )
+            .await;
         }
         Command::Search {
             ref term,

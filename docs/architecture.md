@@ -8406,8 +8406,57 @@ household that holds it ("stop using this service" rather than "on this network"
 lists across households, grouped with a header only when there is more than one - so the ordinary
 single-household output is exactly as it was.
 
-Schema 2, and no migration: there are no users, so one `link --from-household` rebuilds an old flat
-file keyed correctly. But *no migration* is not *no check*. Serde ignores unknown fields, so a
+### A household can hold two accounts for one service (2026-09-22)
+
+It does here. `link --from-household` against the home household read **two iHeartRadio accounts** -
+serials 24 and 25, `Username0` keys `81dee58d` and `885ebbcc`, nicknames `iHeartRadio` and
+`iHeartRadio 885ebbcc` - and the store, keyed `household -> service -> account`, kept one. The
+import printed a "Kept" line for each while `accounts` then listed one, which is how it was caught.
+
+Three things the decrypted blob turned out to be saying that the parser was not reading:
+
+- **`Username<i>` carries a stable per-account key**, `X_#Svc<type>-<key>-Token`. The Sonos app's
+  auto-nickname for a second account is built from it, which is why `iHeartRadio 885ebbcc` looks the
+  way it does. A nickname is renameable - this household has a Deezer account called `Deeznuts` -
+  so the nickname is for display and the key is for keying.
+- **The trailing digit on every value is an index.** Each element declares `NumAccounts`, and
+  `Token0`/`Token1`/… are its accounts. Reading only the `0` suffix would drop the second account of
+  any element that held two. No element seen here does - this household's two iHeartRadio accounts
+  arrive as two elements, each declaring `NumAccounts="1"` - so it was latent rather than active,
+  and is now walked and pinned by a synthetic two-account vector.
+- **`Flags<i>`** is `4` on every account with a real key and `0` on those without (Sonos Radio,
+  TIDAL). Parsed and kept; nothing reads it.
+
+**Schema 3 holds several accounts per service, and one of them is preferred.** The Sonos app's own
+answer to two accounts is to let a person prioritise one, so a search returns one set of results
+rather than two interleaved, and this is that. The preference is resolved *inside* the store, so
+`token_for` kept its signature and not one of the fifteen-odd read sites - search, browse,
+`play-item`, the `usable`/`searchable` gates - learned that a service can have two accounts. Only
+`accounts`, `unlink` and the import did.
+
+The account key is assigned once, at first write, and never rewritten except to *upgrade*: the
+household serial (`sn24`) when the import knows it, else the service's `userIdHashCode`, else the
+constant `link` for a browser-linked account that identifies itself with neither. Two guards keep
+those three from ever making two records out of one account: a write whose `authToken` already
+exists lands on that record whatever key it would otherwise have taken, and a record filed under the
+fallback moves to the stable key the first time a route that knows the serial writes it. That second
+one is what a migrated schema-2 record does on its first re-import - observed here, `link` becoming
+`sn24`/`sn25`.
+
+`smapi::Token` gained an `account` field beside `household`, for the same reason `household` was
+there: a service that answers with a replacement token has to have it written back to the account it
+refreshed. Without the key, a refresh would land on whichever account the service currently resolves
+to - which is right only by accident, and stops being right the moment a preference moves.
+
+**Schema 2 migrates rather than being refused**, and that is a change of policy from the day before.
+The refusal added with the household rekey was correct when the only schema-2 stores were
+re-importable; it stopped being correct the moment one could hold a household this machine is
+nowhere near. The office set here cannot be re-imported from home at any price, so a refusal would
+have meant losing it. Schema 1 is still refused - it predates the household key, so there is nothing
+in it to place.
+
+Schema 2 keyed accounts by household, with exactly one per service: one `link --from-household`
+rebuilds an old flat file keyed correctly. But *no migration* is not *no check*. Serde ignores unknown fields, so a
 schema-1 file parses cheerfully into zero households - it would report every service as unlinked,
 send you back through a link flow, and then be overwritten by the first save that followed, taking
 the only copy of those tokens with it. So the load refuses any schema but its own and names both

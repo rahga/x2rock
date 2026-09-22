@@ -412,6 +412,7 @@ mod tests {
                 nickname: None,
                 household: Some(HH.into()),
                 account_id: None,
+                serial: None,
                 linked: 1,
             },
         );
