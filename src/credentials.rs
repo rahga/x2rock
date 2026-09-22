@@ -298,6 +298,47 @@ impl Credentials {
         dropped
     }
 
+    /// Drop a whole household. Returns how many accounts it held, so a wipe of
+    /// one household can say what it cleared.
+    pub fn forget_household(&mut self, household: &str) -> usize {
+        self.households
+            .remove(household)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// Resolve a household query - an exact stored id, or a unique
+    /// case-insensitive substring of one - to the stored key. Household ids are
+    /// long and ugly, so a distinctive fragment (what `accounts` shows) is
+    /// enough; an ambiguous one is refused by naming the matches rather than
+    /// wiping the wrong household.
+    pub fn resolve_household(&self, query: &str) -> Result<String> {
+        if self.households.contains_key(query) {
+            return Ok(query.to_string());
+        }
+        let needle = query.to_lowercase();
+        let matches: Vec<&String> = self
+            .households
+            .keys()
+            .filter(|h| h.to_lowercase().contains(&needle))
+            .collect();
+        match matches.as_slice() {
+            [only] => Ok((*only).clone()),
+            [] => {
+                bail!("no stored household matches {query:?}. Run `x2rock accounts` to see them.")
+            }
+            several => bail!(
+                "{query:?} matches {} stored households: {}. Give more of the id.",
+                several.len(),
+                several
+                    .iter()
+                    .map(|h| h.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
     /// Forget a service everywhere it is held. Returns how many households it
     /// was dropped from, so `unlink` can say what it did.
     pub fn forget_everywhere(&mut self, service_id: &str) -> usize {
@@ -446,6 +487,45 @@ mod tests {
         assert!(creds.forget(HH, "200").is_none());
         // The now-empty household is dropped, so the store is empty again.
         assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn a_household_can_be_wiped_without_touching_the_others() {
+        let mut creds = Credentials::default();
+        creds.remember("Sonos_home", "31", account("Qobuz"));
+        creds.remember("Sonos_office", "31", account("Qobuz"));
+        creds.remember("Sonos_office", "164", account("Saavn"));
+
+        assert_eq!(creds.forget_household("Sonos_office"), 2);
+        assert!(creds.get("Sonos_office", "31").is_none());
+        // Home is untouched.
+        assert!(creds.get("Sonos_home", "31").is_some());
+    }
+
+    #[test]
+    fn a_household_resolves_by_id_or_unique_fragment() {
+        let mut creds = Credentials::default();
+        creds.remember("Sonos_HomeAbc", "31", account("Qobuz"));
+        creds.remember("Sonos_OfficeXyz", "31", account("Qobuz"));
+
+        assert_eq!(
+            creds.resolve_household("Sonos_HomeAbc").unwrap(),
+            "Sonos_HomeAbc"
+        );
+        // A distinctive fragment, case-insensitive.
+        assert_eq!(
+            creds.resolve_household("office").unwrap(),
+            "Sonos_OfficeXyz"
+        );
+        // "sonos_" is in both.
+        assert!(
+            creds
+                .resolve_household("sonos_")
+                .unwrap_err()
+                .to_string()
+                .contains("matches 2")
+        );
+        assert!(creds.resolve_household("nowhere").is_err());
     }
 
     #[test]

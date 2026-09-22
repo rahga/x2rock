@@ -1894,42 +1894,69 @@ async fn search_everywhere(
 
 /// `x2rock unlink`: forget a linked account, by id, name or unique prefix.
 /// Local only - the token stays valid at the service.
-pub fn unlink(service: Option<&str>, all: bool) -> Result<()> {
+/// `x2rock unlink`: forget stored tokens. Local only - they stay valid at the
+/// service. Scoped by what is given: a service alone forgets that service in
+/// every household; `--household` narrows any variant to one; `--all` clears
+/// whole households.
+///
+/// `household` is the global `--household` selector. Here it has no player to
+/// resolve against, so it is matched against the *stored* household ids (what
+/// `accounts` shows) by exact id or a unique fragment - not against room names.
+pub fn unlink(service: Option<&str>, all: bool, household: Option<&str>) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
+    let scope = household.map(|h| linked.resolve_household(h)).transpose()?;
+
     if all {
-        let count = linked.all().count();
-        linked.households.clear();
+        let (count, where_) = match &scope {
+            Some(hh) => (linked.forget_household(hh), format!(" in household {hh}")),
+            None => {
+                let n = linked.all().count();
+                linked.households.clear();
+                (n, String::new())
+            }
+        };
         linked.save()?;
         if count == 0 {
-            println!("Nothing was linked.");
+            println!("Nothing was linked{where_}.");
         } else {
             println!(
-                "Forgot all {count} tokens. They stay valid at their services - \
+                "Forgot all {count} tokens{where_}. They stay valid at their services - \
                  revoke them there if that matters. Re-import with `x2rock link --from-household`."
             );
         }
         return Ok(());
     }
+
     let Some(service) = service else {
         bail!("name a service to unlink, or pass --all to forget every token.");
     };
-    // No player here, so no single household to scope to: forget the service
-    // from every household that holds it. On the only-PC-so-far case that is one
-    // household; for a machine that roams, unlinking is "stop using this
-    // service" everywhere rather than on one network.
     let (id, name) = linked.find_service_id(service)?;
-    let dropped = linked.forget_everywhere(&id);
+    // With a household named, forget only there; otherwise from every household
+    // that holds it - for a roaming machine, "stop using this service" rather
+    // than "on this one network".
+    let (dropped, where_) = match &scope {
+        Some(hh) => (
+            usize::from(linked.forget(hh, &id).is_some()),
+            format!(" in household {hh}"),
+        ),
+        None => {
+            let n = linked.forget_everywhere(&id);
+            let w = if n > 1 {
+                format!(" (in {n} households)")
+            } else {
+                String::new()
+            };
+            (n, w)
+        }
+    };
     linked.save()?;
     if dropped > 0 {
-        let where_ = if dropped == 1 {
-            String::new()
-        } else {
-            format!(" (in {dropped} households)")
-        };
         println!(
             "Forgot the {name} token{where_}. It is still valid at the service - \
              revoke it there if that matters."
         );
+    } else {
+        println!("No {name} token was held{where_}.");
     }
     Ok(())
 }
