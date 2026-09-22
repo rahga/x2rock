@@ -231,10 +231,28 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
 /// host with a firewall up (a laptop's default), the inbound callback is dropped
 /// and this times out - which is reported as exactly that, with the port named,
 /// since the fix is a firewall rule and not a retry.
-pub async fn capture_envelope(player: IpAddr, timeout: Duration) -> Result<String> {
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+///
+/// `callback_port` is where that connection is accepted. A fixed value is what
+/// makes the firewall rule a one-time thing rather than a moving target: bind
+/// the same port every run and the person opens it once. `0` asks the OS for an
+/// ephemeral one, which suits a host with no firewall and nothing to open.
+pub async fn capture_envelope(
+    player: IpAddr,
+    callback_port: u16,
+    timeout: Duration,
+) -> Result<String> {
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, callback_port))
         .await
-        .context("opening a local callback port for the account event")?;
+        .with_context(|| {
+            if callback_port == 0 {
+                "opening a local callback port for the account event".to_string()
+            } else {
+                format!(
+                    "opening callback port {callback_port} for the account event - \
+                     something else may be using it; pass --callback-port to pick another"
+                )
+            }
+        })?;
     let port = listener.local_addr()?.port();
     let local_ip = local_ip_toward(player)?;
 

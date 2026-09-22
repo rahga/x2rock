@@ -322,6 +322,7 @@ pub async fn run_link(
     no_match: bool,
     from_player: bool,
     from_household: bool,
+    callback_port: u16,
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
@@ -335,7 +336,15 @@ pub async fn run_link(
     }
 
     if from_household {
-        return link_from_household(&session, &catalogue, &mut linked, service, nickname).await;
+        return link_from_household(
+            &session,
+            &catalogue,
+            &mut linked,
+            service,
+            nickname,
+            callback_port,
+        )
+        .await;
     }
 
     let Some(query) = service else {
@@ -576,6 +585,7 @@ async fn link_from_household(
     linked: &mut credentials::Credentials,
     service: Option<&String>,
     nickname: Option<&String>,
+    callback_port: u16,
 ) -> Result<()> {
     // The stored blob is keyed to the *short* household id (no `.suffix`), the
     // form `GetHouseholdID` returns, while the SMAPI header and the credentials
@@ -587,8 +597,12 @@ async fn link_from_household(
         .unwrap_or(&long_household)
         .to_string();
 
-    let encoded =
-        sonos::stored::capture_envelope(session.connection.ip(), HOUSEHOLD_EVENT_TIMEOUT).await?;
+    let encoded = sonos::stored::capture_envelope(
+        session.connection.ip(),
+        callback_port,
+        HOUSEHOLD_EVENT_TIMEOUT,
+    )
+    .await?;
     let accounts = sonos::stored::decrypt_accounts(&encoded, &short_household)?;
 
     // Only accounts that actually carry a token can be injected; the rest are
