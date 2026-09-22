@@ -44,9 +44,21 @@ pub fn save_refreshed_token(
     creds: &mut credentials::Credentials,
     household: &str,
     service_id: &str,
+    account: Option<&str>,
     refreshed: sonos::smapi::RefreshedToken,
 ) {
-    let Some(existing) = creds.get(household, service_id).cloned() else {
+    // The account the token came from, not whichever one this service would
+    // resolve to now: with two accounts for one service, writing the refresh to
+    // the preferred one would overwrite a token that was never stale and leave
+    // the stale one in place.
+    let existing = match account {
+        Some(key) => creds
+            .accounts_for(household, service_id)
+            .and_then(|held| held.accounts.get(key))
+            .cloned(),
+        None => creds.get(household, service_id).cloned(),
+    };
+    let Some(existing) = existing else {
         return;
     };
     let private_key = if refreshed.private_key.is_empty() {
@@ -91,17 +103,18 @@ fn use_refreshed_token(
     } else {
         new_token.private_key.clone()
     };
-    let household = token.and_then(|t| t.household);
+    let (household, account) = token.map_or((None, None), |t| (t.household, t.account));
     // The refresh can only be persisted against the household the token names;
     // a token without one (there should be none from the store) is used for
     // this call and simply not written back.
     if let Some(hh) = &household {
-        save_refreshed_token(creds, hh, service_id, new_token.clone());
+        save_refreshed_token(creds, hh, service_id, account.as_deref(), new_token.clone());
     }
     Some(sonos::smapi::Token {
         token: new_token.auth_token,
         key,
         household,
+        account,
     })
 }
 
@@ -122,6 +135,18 @@ async fn current_household(
         return household;
     }
     linked.sole_household().unwrap_or_default()
+}
+
+/// How one account is named in the listing: the service, and its nickname too
+/// where the service has more than one account and the nickname is what tells
+/// them apart.
+fn account_label(account: &credentials::Account, several: bool) -> String {
+    match account.nickname.as_deref() {
+        Some(nick) if several && !nick.is_empty() => {
+            format!("{} ({nick})", account.service_name)
+        }
+        _ => account.service_name.clone(),
+    }
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -529,7 +554,7 @@ pub async fn run_link(
     // Stored before anything else is attempted. A link code is single-use, so
     // losing the token to a later failure would mean walking back through the
     // browser to fix something that already worked.
-    linked.remember(&household, id, account);
+    let account_key = linked.remember(&household, id, account);
     linked.save()?;
     println!(
         "Linked {}. Search it with: x2rock search -s {}",
@@ -570,6 +595,7 @@ pub async fn run_link(
                 .households
                 .get_mut(&household)
                 .and_then(|s| s.get_mut(id))
+                .and_then(|held| held.accounts.get_mut(&account_key))
             {
                 entry.account_id = account_id.clone();
             }
@@ -654,17 +680,21 @@ async fn link_from_household(
         Some(query) => {
             let chosen = catalogue.find_any(query)?;
             let id = chosen.id.clone();
-            let account = usable
+            // Every account the household holds for it, not the first: naming
+            // a service narrows *which service* to import, and a service with
+            // two accounts has two either way.
+            let matched: Vec<_> = usable
                 .into_iter()
-                .find(|a| a.service_id.to_string() == id)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "the household stores no token for {} - it has not been added \
-                         in the Sonos app on this household",
-                        chosen.name
-                    )
-                })?;
-            vec![(chosen.name.clone(), id, account)]
+                .filter(|a| a.service_id.to_string() == id)
+                .map(|a| (chosen.name.clone(), id.clone(), a))
+                .collect();
+            ensure!(
+                !matched.is_empty(),
+                "the household stores no token for {} - it has not been added \
+                 in the Sonos app on this household",
+                chosen.name
+            );
+            matched
         }
         None => usable
             .into_iter()
@@ -700,8 +730,24 @@ async fn link_from_household(
             private_key: account.key.clone(),
             user_id_hash_code: None,
         };
-        let record = credentials::from_device_auth(name, Some(long_household), Some(&nick), auth);
+        let mut record =
+            credentials::from_device_auth(name, Some(long_household), Some(&nick), auth);
+        // The household's own serial for the account, which only this path ever
+        // sees. It is what keys the record, so two accounts of one service stay
+        // two records instead of the second landing on the first.
+        record.serial = Some(account.serial);
         linked.remember(long_household, id, record);
+    }
+    linked.save()?;
+
+    // Reported per *service*, not per account read, because the two differ:
+    // this household holds two iHeartRadio accounts, and a "Kept" line each
+    // said twice what the store would then show once. Counting what is held
+    // after the writes is the only report that cannot drift from them.
+    let mut services: Vec<(&String, &String)> = wanted.iter().map(|(n, id, _)| (n, id)).collect();
+    services.sort();
+    services.dedup_by(|a, b| a.1 == b.1);
+    for (name, id) in services {
         // A multi-word name has to be quoted or the shell splits it, so the hint
         // is copy-pasteable rather than subtly wrong.
         let quoted = if name.contains(char::is_whitespace) {
@@ -709,9 +755,32 @@ async fn link_from_household(
         } else {
             name.clone()
         };
-        println!("Kept the household's {name} token. Search it with: x2rock search -s {quoted}");
+        let Some(held) = linked.accounts_for(long_household, id) else {
+            continue;
+        };
+        match held.accounts.len() {
+            0 => continue,
+            1 => println!(
+                "Kept the household's {name} token. Search it with: x2rock search -s {quoted}"
+            ),
+            n => {
+                let chosen = held
+                    .chosen()
+                    .and_then(|(_, a)| a.nickname.clone())
+                    .unwrap_or_default();
+                let all: Vec<String> = held
+                    .accounts
+                    .values()
+                    .map(|a| a.nickname.clone().unwrap_or_default())
+                    .collect();
+                println!(
+                    "Kept {n} {name} accounts ({}); searching with {chosen:?}. \
+                     Change that with: x2rock accounts --prefer {quoted} \"<nickname>\"",
+                    all.join(", ")
+                );
+            }
+        }
     }
-    linked.save()?;
     println!(
         "\nNo household match was needed: playback rides the registration the Sonos app \
          already made. Search and browse work now; on-demand tracks play for any service \
@@ -1900,7 +1969,12 @@ async fn search_everywhere(
 /// `household` is the global `--household` selector. Here it has no player to
 /// resolve against, so it is matched against the *stored* household ids (what
 /// `accounts` shows) by exact id or a unique fragment - not against room names.
-pub fn unlink(service: Option<&str>, all: bool, household: Option<&str>) -> Result<()> {
+pub fn unlink(
+    service: Option<&str>,
+    all: bool,
+    account: Option<&str>,
+    household: Option<&str>,
+) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let scope = household.map(|h| linked.resolve_household(h)).transpose()?;
 
@@ -1929,32 +2003,145 @@ pub fn unlink(service: Option<&str>, all: bool, household: Option<&str>) -> Resu
         bail!("name a service to unlink, or pass --all to forget every token.");
     };
     let (id, name) = linked.find_service_id(service)?;
+
+    // One account of the service rather than all of them. Resolved per
+    // household, because the same nickname can name a different account in each
+    // and the key certainly does - so this walks the households in scope and
+    // forgets what each one resolves the query to, rather than resolving once
+    // and assuming the answer travels.
+    if let Some(query) = account {
+        let households: Vec<String> = match &scope {
+            Some(hh) => vec![hh.clone()],
+            None => linked
+                .households
+                .iter()
+                .filter(|(_, s)| s.contains_key(&id))
+                .map(|(hh, _)| hh.clone())
+                .collect(),
+        };
+        let mut dropped = Vec::new();
+        for hh in &households {
+            let key = linked.resolve_account(hh, &id, query)?;
+            if let Some(gone) = linked.forget_account(hh, &id, &key) {
+                dropped.push(gone.nickname.unwrap_or(key));
+            }
+        }
+        linked.save()?;
+        match dropped.len() {
+            0 => println!("No {name} account matching {query:?} was held."),
+            _ => println!(
+                "Forgot the {name} account {}. It is still valid at the service - \
+                 revoke it there if that matters.",
+                dropped.join(", ")
+            ),
+        }
+        return Ok(());
+    }
+
     // With a household named, forget only there; otherwise from every household
     // that holds it - for a roaming machine, "stop using this service" rather
     // than "on this one network".
     let (dropped, where_) = match &scope {
-        Some(hh) => (
-            usize::from(linked.forget(hh, &id).is_some()),
-            format!(" in household {hh}"),
-        ),
+        Some(hh) => (linked.forget(hh, &id), format!(" in household {hh}")),
         None => {
-            let n = linked.forget_everywhere(&id);
-            let w = if n > 1 {
-                format!(" (in {n} households)")
+            // Counted before the removal, and counted in *accounts*: the arm
+            // above drops one household's accounts, so if this one reported
+            // households the same number would mean two different things.
+            let households: Vec<String> = linked
+                .households
+                .iter()
+                .filter(|(_, s)| s.contains_key(&id))
+                .map(|(hh, _)| hh.clone())
+                .collect();
+            let accounts = households
+                .iter()
+                .filter_map(|hh| linked.accounts_for(hh, &id))
+                .map(|held| held.accounts.len())
+                .sum();
+            linked.forget_everywhere(&id);
+            let w = if households.len() > 1 {
+                format!(" (in {} households)", households.len())
             } else {
                 String::new()
             };
-            (n, w)
+            (accounts, w)
         }
     };
     linked.save()?;
     if dropped > 0 {
+        // Plural where it is: forgetting a service that held two accounts is
+        // worth saying out loud, since the other one was not named and went too.
+        let what = if dropped > 1 {
+            format!("all {dropped} {name} tokens")
+        } else {
+            format!("the {name} token")
+        };
         println!(
-            "Forgot the {name} token{where_}. It is still valid at the service - \
-             revoke it there if that matters."
+            "Forgot {what}{where_}. They stay valid at the service - \
+             revoke them there if that matters."
         );
     } else {
         println!("No {name} token was held{where_}.");
+    }
+    Ok(())
+}
+
+/// `x2rock accounts --prefer <service> <account>`: choose which of a household's
+/// accounts for a service everything else uses.
+///
+/// The household is resolved the way `search` and `browse` resolve it - the
+/// reached player's, else the store's sole household - because a preference is
+/// per household by construction: the office's two Audible accounts and the
+/// home system's are different accounts, and a preference stated on one network
+/// has no meaning on the other.
+///
+/// Reaching a player is tried and not required: with one household in the store
+/// there is nothing to disambiguate, and a person sitting away from their
+/// speakers can still say which account to use.
+async fn set_preference(
+    ip: Option<IpAddr>,
+    household: Option<&str>,
+    room: Option<&str>,
+    linked: &mut credentials::Credentials,
+    pair: &[String],
+) -> Result<()> {
+    let [service, account] = pair else {
+        bail!("--prefer takes a service and an account: --prefer <service> <account>");
+    };
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state, household, room).await.ok();
+    let hh = current_household(session.as_ref(), linked).await;
+    ensure!(
+        !hh.is_empty(),
+        "cannot tell which household this is for. Connect to the household's \
+         network, or name it with --household."
+    );
+
+    let (id, name) = linked.find_service_id(service)?;
+    let key = linked.resolve_account(&hh, &id, account)?;
+    let held = linked
+        .accounts_for(&hh, &id)
+        .ok_or_else(|| anyhow!("no {name} account is held in this household"))?;
+    // Saying what it already was is not a failure, but it is worth not
+    // claiming a change that did not happen.
+    let already = held.is_chosen(&key) && held.preferred.is_some();
+    let named = held
+        .accounts
+        .get(&key)
+        .and_then(|a| a.nickname.clone())
+        .unwrap_or_else(|| key.clone());
+    let others = held.accounts.len().saturating_sub(1);
+    linked.prefer(&hh, &id, &key)?;
+    linked.save()?;
+    if already {
+        println!("{name} already searches with {named:?}.");
+    } else if others == 0 {
+        // The only account there is. Stated rather than refused: it is a
+        // perfectly sensible thing to have typed, and it will still be the
+        // preference when a second account arrives.
+        println!("{name} will search with {named:?}, the only account held for it here.");
+    } else {
+        println!("{name} now searches with {named:?}, not the other {others}.");
     }
     Ok(())
 }
@@ -1967,9 +2154,19 @@ pub async fn accounts(
     household: Option<&str>,
     room: Option<&str>,
     content: bool,
+    prefer: Option<&[String]>,
     json: bool,
 ) -> Result<()> {
-    let linked = credentials::Credentials::load()?;
+    let mut linked = credentials::Credentials::load()?;
+
+    // Setting the preference is a different command wearing this one's name -
+    // it writes, and it answers rather than lists - so it returns before any
+    // of the listing below.
+    if let Some(pair) = prefer {
+        return set_preference(ip, household, room, &mut linked, pair).await;
+    }
+    let linked = linked;
+
     // Only `--content` reaches the network, so the default keeps the
     // promise made above: this command reads a file on this machine.
     let serials = if content {
@@ -2006,9 +2203,14 @@ pub async fn accounts(
         None
     };
     if json {
+        // Still a bare array, and still one row per *account*: a service with
+        // two accounts is two rows. The bar widget reduces this to service
+        // names and skips one it has already seen, so the extra row costs it
+        // nothing - but it does require the top level to stay an array, which
+        // is why `--content` wraps and the default never does.
         let rows: Vec<_> = linked
             .all()
-            .map(|(hh, id, a)| {
+            .map(|(hh, id, key, a)| {
                 // Never the token or the key: this is printed to a
                 // terminal, into a widget's stdout, and into whatever
                 // logs those end up in.
@@ -2016,6 +2218,11 @@ pub async fn accounts(
                     "service_id": id,
                     "service": a.service_name,
                     "nickname": a.nickname,
+                    "account_key": key,
+                    "serial": a.serial,
+                    "preferred": linked
+                        .accounts_for(hh, id)
+                        .is_some_and(|held| held.is_chosen(key)),
                     "household": hh,
                     "account_id": a.account_id,
                     "linked": a.linked,
@@ -2048,22 +2255,55 @@ pub async fn accounts(
                 if multi {
                     println!("Household {hh}:");
                 }
-                for (id, a) in services {
-                    // `account_id` is set only when *this machine's* `match`
-                    // succeeded, which has never happened. Saying "not
-                    // registered on the household" read as a fact about the
-                    // household, which this file cannot know: the household
-                    // may hold several accounts for the service already.
-                    let registered = match &a.account_id {
-                        Some(account) => format!("registered from here as {account}"),
-                        None => "no registration from this machine".to_string(),
-                    };
-                    println!(
-                        "{:<20} {:<10} {:<12} {registered}",
-                        a.service_name,
-                        id,
-                        ago(a.linked)
-                    );
+                // The marker column exists for this household only when some
+                // service in it has a choice to make, and the name column is
+                // sized to what it actually has to hold - a nickname pushes a
+                // row well past the width a bare service name needs, and a
+                // fixed width either truncates it or pads every other line to
+                // suit the longest thing that might one day appear.
+                let any_choice = services.values().any(|h| h.accounts.len() > 1);
+                let width = services
+                    .values()
+                    .flat_map(|held| {
+                        let several = held.accounts.len() > 1;
+                        held.accounts
+                            .values()
+                            .map(move |a| account_label(a, several).chars().count())
+                    })
+                    .max()
+                    .unwrap_or(20)
+                    .max(20);
+                for (id, held) in services {
+                    let several = held.accounts.len() > 1;
+                    for (key, a) in &held.accounts {
+                        // `account_id` is set only when *this machine's* `match`
+                        // succeeded, which has never happened. Saying "not
+                        // registered on the household" read as a fact about the
+                        // household, which this file cannot know: the household
+                        // may hold several accounts for the service already.
+                        let registered = match &a.account_id {
+                            Some(account) => format!("registered from here as {account}"),
+                            None => "no registration from this machine".to_string(),
+                        };
+                        // The marker leads the line rather than trailing the
+                        // name, so it lines up whatever the names are doing,
+                        // and it is only drawn where there is a choice to
+                        // make: a lone account is not "preferred over"
+                        // anything, and a column of stars down a
+                        // single-account listing would say nothing while
+                        // looking like it did.
+                        let mark = match (any_choice, several && held.is_chosen(key)) {
+                            (false, _) => "",
+                            (true, true) => "* ",
+                            (true, false) => "  ",
+                        };
+                        let named = account_label(a, several);
+                        println!(
+                            "{mark}{named:<width$} {:<10} {:<12} {registered}",
+                            id,
+                            ago(a.linked)
+                        );
+                    }
                 }
             }
         }

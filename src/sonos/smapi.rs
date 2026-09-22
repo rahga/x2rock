@@ -97,6 +97,15 @@ pub struct Token {
     /// envelope tolerates its absence, and a search run from a cached catalogue
     /// with no player on the LAN has no way to look one up.
     pub household: Option<String>,
+    /// Which of the household's accounts for this service the token came from,
+    /// as the credential store keys it.
+    ///
+    /// Carried for the same reason `household` is, one level down: a service
+    /// that answers with a replacement token has to have it written back to the
+    /// account it refreshed, and "the account for this service" stopped being an
+    /// answer once a household could hold two. Absent for a token this build did
+    /// not read out of the store.
+    pub account: Option<String>,
 }
 
 /// What `getDeviceLinkCode` or `getAppLink` returns: where to send the person,
@@ -888,6 +897,9 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
         token: String::new(),
         key: String::new(),
         household: Some(household.to_string()),
+        // No account: there is no stored account yet, which is the point of
+        // asking for the link in the first place.
+        account: None,
     };
     let body = match call_soap(
         service,
@@ -1268,6 +1280,9 @@ async fn call(
         token: new.auth_token.clone(),
         key: new.private_key.clone(),
         household: token.and_then(|t| t.household.clone()),
+        // Carried through the retry so the caller can write the refreshed token
+        // back to the account it belongs to and not merely to the service.
+        account: token.and_then(|t| t.account.clone()),
     };
     match call_soap(service, Some(&retry_token), action, params).await? {
         Ok(body) => {
@@ -1748,6 +1763,7 @@ mod tests {
                 token: "a&b".into(),
                 key: "k<1".into(),
                 household: Some("Sonos_house".into()),
+                account: None,
             }),
         );
         assert!(
@@ -1773,6 +1789,7 @@ mod tests {
                 token: "t".into(),
                 key: "k".into(),
                 household: None,
+                account: None,
             }),
         );
         assert!(body.contains("<loginToken><token>t</token><key>k</key></loginToken>"));
@@ -1912,6 +1929,7 @@ mod tests {
                 token: "s3cret-token".into(),
                 key: "s3cret-key".into(),
                 household: Some("Sonos_house".into()),
+                account: None,
             }),
         );
         let dumped = without_credentials(&body);

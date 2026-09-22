@@ -129,7 +129,27 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
             .map(|creds| {
                 creds
                     .all()
-                    .map(|(_, _, a)| a.service_name.clone())
+                    .map(|(_, _, _, a)| a.service_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // The *accounts* themselves, where `accounts` above is the services
+        // they belong to. Two lists rather than one because they complete two
+        // different arguments: `unlink <service>` wants a service name and
+        // `unlink --account <x>` wants one of that service's accounts.
+        //
+        // Nicknames across every household and service, since the shell has no
+        // way to tell which service is being completed - a nickname from
+        // another service is a wrong suggestion, not a wrong command, and the
+        // resolver refuses it by name.
+        "accountnames" => Credentials::load()
+            .map(|creds| {
+                creds
+                    .all()
+                    .map(|(_, _, key, a)| match a.nickname.as_deref() {
+                        Some(nick) if !nick.is_empty() => nick.to_string(),
+                        _ => key.to_string(),
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -189,6 +209,7 @@ fn enhance_bash(script: &str) -> String {
             "--room)" | "-r)" => Some("rooms"),
             "--household)" => Some("households"),
             "--service)" | "-s)" => Some("services"),
+            "--account)" => Some("accountnames"),
             _ => None,
         };
         if let Some(list) = list
@@ -283,6 +304,9 @@ fn enhance_fish(script: &str) -> String {
     s.push_str(
         "complete -c x2rock -s s -l service -x -a '(x2rock __complete services 2>/dev/null)'\n",
     );
+    s.push_str(
+        "complete -c x2rock -l account -x -a '(x2rock __complete accountnames 2>/dev/null)'\n",
+    );
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmark' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from remove' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
@@ -314,6 +338,7 @@ _x2rock_households() { _x2rock_list households }
 _x2rock_services() { _x2rock_list services }
 _x2rock_bookmarks() { _x2rock_list bookmarks }
 _x2rock_accounts() { _x2rock_list accounts }
+_x2rock_accountnames() { _x2rock_list accountnames }
 "#;
     let mut out: Vec<String> = Vec::new();
     // The nearest `(name)` case label above, indented or not: the top-level
@@ -337,7 +362,15 @@ _x2rock_accounts() { _x2rock_list accounts }
             .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_households'")
             .replace(":room:_default'", ":room:_x2rock_rooms'")
             .replace(":rooms:_default'", ":rooms:_x2rock_rooms'")
-            .replace(":SERVICE:_default'", ":SERVICE:_x2rock_services'");
+            // No trailing quote in the pattern: a flag taking two values
+            // renders as `:SERVICE:_default:SERVICE:_default'`, and matching
+            // only the quoted end would hook the second value and leave the
+            // first - the service itself - completing nothing.
+            .replace(":SERVICE:_default", ":SERVICE:_x2rock_services")
+            // A distinct metavar from SERVICE, so this swap reaches the
+            // account argument of `unlink --account` and `accounts --prefer`
+            // without touching the service beside it.
+            .replace(":ACCOUNT:_default'", ":ACCOUNT:_x2rock_accountnames'");
         if matches!(label, Some("link")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_services'");
         }
@@ -509,7 +542,14 @@ mod tests {
     #[test]
     fn fish_appends_the_dynamic_hooks() {
         let s = script(Shell::Fish);
-        for list in ["rooms", "households", "services", "bookmarks", "accounts"] {
+        for list in [
+            "rooms",
+            "households",
+            "services",
+            "bookmarks",
+            "accounts",
+            "accountnames",
+        ] {
             assert!(
                 s.contains(&format!("__complete {list}")),
                 "fish lacks the {list} hook"
@@ -544,6 +584,11 @@ mod tests {
         assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
+        // `unlink --account` and both values of `accounts --prefer`: the
+        // account argument reaches the account list, and the service beside it
+        // still reaches the service list.
+        assert_eq!(s.matches(":ACCOUNT:_x2rock_accountnames'").count(), 1);
+        assert!(s.contains(":SERVICE:_x2rock_services:SERVICE:_x2rock_services'"));
         // unlink's positional is optional now (--all), so it renders `::service`
         // with its help text before the completer.
         assert_eq!(s.matches(":_x2rock_accounts'").count(), 1);
@@ -563,6 +608,7 @@ mod tests {
             "_x2rock_rooms()",
             "_x2rock_households()",
             "_x2rock_services()",
+            "_x2rock_accountnames()",
             "_x2rock_bookmarks()",
             "_x2rock_accounts()",
         ] {
