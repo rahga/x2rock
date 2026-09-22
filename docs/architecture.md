@@ -239,6 +239,7 @@ local token buys search and browse, and nothing of playback.
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
 | **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
+| **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
 | **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
 
@@ -248,11 +249,19 @@ Roughly 108 services appear in a household's catalogue; 23 are searchable here t
 
 **Untested and worth something.** The free candidates are now spent: Saavn was linked and passes
 (non-Latin metadata survives SMAPI, DIDL and playback), and Classical Archives cannot be linked at
-all. What remains all costs a subscription, and each would teach something no service here has
-shown: **Qobuz** (hi-res FLAC, and a classical tier that would finally exercise work/movement
-metadata against code that assumes artist/album/track), **SiriusXM** (linear channels - neither
-stations nor on-demand, with no per-track identity) and **Audible** (chaptered long-form, where
-resume position and multi-hour durations get a real workout).
+all. What remains costs a subscription - so each was first asked for a browser page, which needs no
+account and settles whether the money would be wasted (2026-09-22):
+
+| candidate | `getAppLink` | what it would teach |
+|---|---|---|
+| **Qobuz** | ✓ `qobuz.com/signin/external?linkToken=…` | hi-res FLAC through the new file-transport path, and a classical tier - the work/movement/composer shape that code assuming artist/album/track has never met |
+| **Audible** | ✓ `amazon.com/us/code?cbl-code=…` | chaptered long-form: resume position and multi-hour durations |
+| **SiriusXM** | **✗ `Service Error`** | nothing - **it cannot be linked at all, so a subscription buys no test** |
+
+SiriusXM is therefore struck from the list on evidence rather than on price, and it joins Apple
+Music and SoundCloud as an app-link service that refuses the call outright. Worth doing this probe
+before *any* paid signup: it is free, it takes seconds, and it would have wasted a subscription
+here.
 
 ## What this is
 
