@@ -326,8 +326,7 @@ fn shaped_like_file(status: u16, head: &str) -> bool {
     }
     let total = match status {
         // `bytes 0-0/52299553`, or `/*` where the server will not say.
-        206 => header("content-range")
-            .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok()),
+        206 => header("content-range").and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok()),
         // A server that ignored the range answers the whole thing instead.
         200 => header("content-length").and_then(|v| v.parse::<u64>().ok()),
         _ => None,

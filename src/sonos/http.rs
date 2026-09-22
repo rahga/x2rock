@@ -191,7 +191,14 @@ pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
     let (endpoint, path, tls) = parse_url(url)?;
     let (status, head, _) = tokio::time::timeout(
         timeout,
-        exchange(&endpoint, tls, "GET", &path, &[("Range", "bytes=0-0")], None),
+        exchange(
+            &endpoint,
+            tls,
+            "GET",
+            &path,
+            &[("Range", "bytes=0-0")],
+            None,
+        ),
     )
     .await
     .map_err(|_| anyhow!("timed out after {timeout:?} probing {url}"))??;

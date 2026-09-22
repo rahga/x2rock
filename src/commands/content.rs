@@ -258,7 +258,10 @@ pub async fn play_item(
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
             Err(e) if is_refusal(&e) => {
-                eprintln!("x2rock: {title:?} {} ({e:#}); streaming it", refusal_was(&e))
+                eprintln!(
+                    "x2rock: {title:?} {} ({e:#}); streaming it",
+                    refusal_was(&e)
+                )
             }
             Err(e) => return Err(e),
         }
@@ -350,12 +353,7 @@ async fn enqueue_and_play(
                     target.name
                 );
             }
-            Err(hint::Hint::new(
-                format!("{e:#}"),
-                "not_queue_material",
-                None,
-            )
-            .into())
+            Err(hint::Hint::new(format!("{e:#}"), "not_queue_material", None).into())
         }
     }
 }
