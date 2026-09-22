@@ -1892,8 +1892,6 @@ async fn search_everywhere(
     Ok(())
 }
 
-/// `x2rock unlink`: forget a linked account, by id, name or unique prefix.
-/// Local only - the token stays valid at the service.
 /// `x2rock unlink`: forget stored tokens. Local only - they stay valid at the
 /// service. Scoped by what is given: a service alone forgets that service in
 /// every household; `--household` narrows any variant to one; `--all` clears
