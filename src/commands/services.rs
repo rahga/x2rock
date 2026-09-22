@@ -669,7 +669,14 @@ async fn link_from_household(
         };
         let record = credentials::from_device_auth(name, Some(&long_household), Some(&nick), auth);
         linked.remember(id, record);
-        println!("Kept the household's {name} token. Search it with: x2rock search -s {name}");
+        // A multi-word name has to be quoted or the shell splits it, so the hint
+        // is copy-pasteable rather than subtly wrong.
+        let quoted = if name.contains(char::is_whitespace) {
+            format!("\"{name}\"")
+        } else {
+            name.clone()
+        };
+        println!("Kept the household's {name} token. Search it with: x2rock search -s {quoted}");
     }
     linked.save()?;
     println!(
