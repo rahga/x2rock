@@ -568,6 +568,12 @@ where
     // reporting a plain timeout over a service that was answering with an
     // error every time.
     let mut last_err: Option<String> = None;
+    /// How many polls in a row may fail to reach the service before the link is
+    /// abandoned. Five at `LINK_POLL` is about fifteen seconds of patience -
+    /// long enough for a wifi hiccup or a resume from suspend, short enough
+    /// that a service which is simply down still says so promptly.
+    const GIVE_UP_AFTER: u32 = 5;
+    let mut consecutive = 0u32;
     loop {
         match poll().await {
             Ok(Some(got)) => {
@@ -578,6 +584,7 @@ where
                 use std::io::Write;
                 eprint!(".");
                 let _ = std::io::stderr().flush();
+                consecutive = 0;
             }
             // **A failed poll is evidence about the poll, not about the link.**
             // The same reasoning `stream_url` uses. One six-second socket
@@ -593,11 +600,26 @@ where
                 eprintln!();
                 return Err(e);
             }
+            // **Bounded, or a dead endpoint becomes a seven-minute wait.**
+            // Surviving a blip means tolerating a *few* consecutive failures,
+            // not every failure until the deadline: a service that is down, or
+            // whose name no longer resolves, used to say so in seconds and must
+            // still. The count resets on any answer, so a flaky link that keeps
+            // making progress is never cut off.
             Err(e) => {
                 use std::io::Write;
                 eprint!("?");
                 let _ = std::io::stderr().flush();
+                consecutive += 1;
                 last_err = Some(format!("{e:#}"));
+                if consecutive >= GIVE_UP_AFTER {
+                    eprintln!();
+                    bail!(
+                        "{service_name} could not be reached {consecutive} times running, so \
+                         the link was abandoned. The last attempt failed with: {}",
+                        last_err.unwrap_or_default()
+                    );
+                }
             }
         }
         if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {

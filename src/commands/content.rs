@@ -14,7 +14,7 @@ use super::{connect_for_service, find_named, is_refusal, mmss, refreshed_catalog
 use crate::cli::{BookmarksAction, QueueAction};
 use crate::hint;
 use crate::session::{self, Session, Target};
-use crate::sonos::local::Connection;
+use crate::sonos::local::{ApiError, Connection};
 use crate::sonos::proto::Favorite;
 use crate::sonos::upnp::{self, Upnp};
 use crate::{bookmarks, catalogue, credentials, sonos};
@@ -345,7 +345,16 @@ async fn enqueue_and_play(
         // failure mode already on record from the TIDAL account removal - dead
         // rows accumulating in a room's queue for a person to clear by hand -
         // and here they would accumulate one per attempt.
-        Err(e) => {
+        // **Only the player answering "no" counts.** `start_queued` makes four
+        // network calls, and a timeout or a dropped socket in any of them is
+        // not the content's fault - the distinction `is_refusal` exists to
+        // draw. Treating every failure here as a refusal meant a blip deleted
+        // the row that had just been added successfully and then blamed the
+        // item for it, which is exactly the "spends a second round trip to
+        // fail the same way while printing a sentence that blames the content"
+        // that function warns about. A UPnP fault or an `ApiError` means the
+        // player replied; anything else means it did not.
+        Err(e) if upnp::Fault::of(&e).is_some() || ApiError::of(&e).is_some() => {
             if let Err(cleanup) = upnp.remove_track(length).await {
                 eprintln!(
                     "x2rock: could not take the unplayable row back out of {}'s queue \
@@ -355,6 +364,14 @@ async fn enqueue_and_play(
             }
             Err(hint::Hint::new(format!("{e:#}"), "not_queue_material", None).into())
         }
+        // Unreachable mid-sequence. The row is left alone: it may well be
+        // fine, and a player that cannot be asked to play cannot be asked to
+        // edit its queue either. The error travels as itself, so `is_refusal`
+        // says no and no stream fallback is attempted.
+        Err(e) => Err(e.context(format!(
+            "{} was queued at {length} but the player could not be told to play it",
+            target.name
+        ))),
     }
 }
 

@@ -139,7 +139,7 @@ pub async fn post(
 ) -> Result<(u16, String)> {
     let (status, _, body) = tokio::time::timeout(
         timeout,
-        exchange(endpoint, tls, "POST", path, headers, Some(body)),
+        exchange(endpoint, tls, "POST", path, headers, Some(body), false),
     )
     .await
     .map_err(|_| {
@@ -168,21 +168,28 @@ pub async fn get_with(
     let (endpoint, path, tls) = parse_url(url)?;
     let (status, _, body) = tokio::time::timeout(
         timeout,
-        exchange(&endpoint, tls, "GET", &path, headers, None),
+        exchange(&endpoint, tls, "GET", &path, headers, None, false),
     )
     .await
     .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))??;
     Ok((status, body))
 }
 
-/// Ask a URL what it is, by fetching a single byte of it.
+/// Ask a URL what it is, reading its headers and nothing else.
 ///
 /// Returns the status and the raw response head, for a caller that needs the
 /// headers rather than the body - which so far is one caller, deciding whether
-/// a URL a music service handed back is a finite file or a live broadcast. A
-/// one-byte `Range` keeps it honest: no service seen returns a single-use URL,
-/// but asking for the whole of a 52 MB FLAC to read its `Content-Type` would be
-/// rude even if it worked.
+/// a URL a music service handed back is a finite file or a live broadcast.
+///
+/// **The `Range` is a courtesy; stopping at the headers is the guarantee.** A
+/// one-byte range asks the server to send almost nothing, and most honour it -
+/// but plenty do not: of six stations taken from the radio directory on
+/// 2026-09-22, two (`jking.cdnstream1.com`, `jazzblues.ice.infomaniak.ch`)
+/// ignored it and streamed indefinitely. So the read stops as soon as the
+/// header terminator arrives and the socket is dropped, which bounds this at
+/// one round trip whatever the server decides to send. The first version of
+/// this read to end of stream and would have buffered a live station for the
+/// whole of its caller's timeout, on every fallback play.
 ///
 /// `HEAD` would be the obvious method and is not used: CDNs answer it
 /// inconsistently, and some of the signed URLs here reject it outright while
@@ -198,6 +205,7 @@ pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
             &path,
             &[("Range", "bytes=0-0")],
             None,
+            true,
         ),
     )
     .await
@@ -229,6 +237,11 @@ pub fn urlencode(value: &str) -> String {
     out
 }
 
+/// `head_only` stops the read as soon as the response headers are complete,
+/// leaving the body unread and the socket to be dropped. Only [`probe`] wants
+/// it, and it is not an optimisation: without it a server that ignores `Range`
+/// streams its whole body into memory, which for a live radio station never
+/// ends at all.
 async fn exchange(
     endpoint: &Endpoint,
     tls: bool,
@@ -236,6 +249,7 @@ async fn exchange(
     path: &str,
     headers: &[(&str, &str)],
     body: Option<&str>,
+    head_only: bool,
 ) -> Result<(u16, String, String)> {
     let authority = endpoint.authority();
     let stream = TcpStream::connect(&authority)
@@ -273,9 +287,9 @@ async fn exchange(
             .connect(name, stream)
             .await
             .with_context(|| format!("TLS handshake with {host}"))?;
-        round_trip(stream, &request, &authority).await
+        round_trip(stream, &request, &authority, head_only).await
     } else {
-        round_trip(stream, &request, &authority).await
+        round_trip(stream, &request, &authority, head_only).await
     }
 }
 
@@ -283,6 +297,7 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     request: &str,
     authority: &str,
+    head_only: bool,
 ) -> Result<(u16, String, String)> {
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
@@ -295,10 +310,22 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // A truncated body is still caught downstream, by the parse.
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
+    // Where to resume looking for the header terminator, so a `head_only` read
+    // does not rescan everything it already has on each pass. Three back, since
+    // the terminator can straddle a chunk boundary.
+    let mut scanned = 0usize;
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if head_only {
+                    if raw[scanned..].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    scanned = raw.len().saturating_sub(3);
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => break,
             Err(e) => return Err(e).with_context(|| format!("reading from {authority}")),
         }
@@ -432,6 +459,106 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A socket that serves a canned response and counts what was taken from
+    /// it, so a test can assert the reader *stopped* rather than just that it
+    /// returned the right thing.
+    struct Tap {
+        data: Vec<u8>,
+        read: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl tokio::io::AsyncRead for Tap {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let at = self.read.load(std::sync::atomic::Ordering::SeqCst);
+            let remaining = &self.data[at.min(self.data.len())..];
+            // A byte at a time: a real socket delivers the head across several
+            // reads, and this is where an off-by-one in the terminator scan
+            // would hide.
+            let n = remaining.len().min(1).min(buf.remaining());
+            if n > 0 {
+                buf.put_slice(&remaining[..n]);
+                self.read.store(at + n, std::sync::atomic::Ordering::SeqCst);
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for Tap {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The case that made `head_only` necessary: a server that ignores `Range`
+    /// and sends a body that, on a live station, never ends. Reading to end of
+    /// stream here would consume all of it - and on the real thing, would run
+    /// until the caller's timeout on every fallback play.
+    #[tokio::test]
+    async fn a_head_only_read_stops_at_the_headers_and_leaves_the_body() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 40000\r\n\r\n";
+        let mut data = head.as_bytes().to_vec();
+        data.extend(std::iter::repeat_n(b'A', 40_000));
+        let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tap = Tap {
+            data,
+            read: std::sync::Arc::clone(&read),
+        };
+
+        let (status, got_head, body) = round_trip(tap, "GET / HTTP/1.1\r\n\r\n", "test", true)
+            .await
+            .expect("a complete head is a complete response");
+
+        assert_eq!(status, 200);
+        assert!(got_head.contains("Content-Length: 40000"));
+        assert!(body.is_empty(), "the body must not be collected");
+        let consumed = read.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            consumed,
+            head.len(),
+            "read past the header terminator into a body it had no use for"
+        );
+    }
+
+    /// And the ordinary path is unchanged: everything else here needs the body.
+    #[tokio::test]
+    async fn a_normal_read_still_takes_the_whole_body() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_vec();
+        let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (status, _, body) = round_trip(
+            Tap {
+                data,
+                read: std::sync::Arc::clone(&read),
+            },
+            "GET / HTTP/1.1\r\n\r\n",
+            "test",
+            false,
+        )
+        .await
+        .expect("a well-formed response");
+        assert_eq!(status, 200);
+        assert_eq!(body, "hello");
+    }
 
     #[test]
     fn gunzip_reads_a_real_member_with_a_filename_in_its_header() {

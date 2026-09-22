@@ -196,6 +196,17 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+impl ApiError {
+    /// The refusal inside an error chain, if it is one. The Control API's
+    /// counterpart to [`crate::sonos::upnp::Fault::of`], and asked for the same
+    /// reason: **the player answering "no" and the player not answering at all
+    /// must not be treated alike.** A caller holding a fallback wants the
+    /// first; the second means the fallback will fail the same way.
+    pub fn of(e: &anyhow::Error) -> Option<&ApiError> {
+        e.downcast_ref()
+    }
+}
+
 impl Connection {
     pub async fn open(ip: IpAddr) -> Result<Self> {
         let mut request = format!("wss://{ip}:{PORT}/websocket/api").into_client_request()?;
@@ -432,6 +443,35 @@ async fn keepalive(inner: Arc<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `enqueue_and_play` decides whether to delete a queue row and fall back to
+    /// streaming on whether this downcast finds anything, so the mechanism is
+    /// pinned rather than assumed - including under a `context` layer, since
+    /// adding one is the kind of tidy-up that would silently turn every player
+    /// refusal into "could not reach the player".
+    #[test]
+    fn a_refusal_is_recognisable_through_the_error_chain() {
+        let refusal: anyhow::Error = ApiError {
+            what: "playback:1 play".to_string(),
+            code: Some("ERROR_PLAYBACK_FAILED".to_string()),
+            reason: None,
+        }
+        .into();
+        assert_eq!(
+            ApiError::of(&refusal).and_then(|e| e.code.as_deref()),
+            Some("ERROR_PLAYBACK_FAILED")
+        );
+
+        let wrapped = refusal.context("while starting the room");
+        assert!(
+            ApiError::of(&wrapped).is_some(),
+            "context must not hide the refusal"
+        );
+
+        // A lost socket is the case that must *not* look like a refusal.
+        let lost = anyhow::anyhow!("timed out after 8s reading from 192.168.1.2:1400");
+        assert!(ApiError::of(&lost).is_none());
+    }
 
     fn pending_with(ids: &[u64]) -> (Pending, Vec<oneshot::Receiver<Reply>>) {
         let mut pending = Pending::default();
