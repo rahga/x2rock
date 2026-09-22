@@ -36,9 +36,11 @@ use crate::sonos::smapi::{DeviceAuth, Token};
 use crate::store;
 
 /// The shape of the file. Schema 2 keys accounts by household; schema 1's flat
-/// `services` map is not read back - unknown fields are ignored on load, so an
-/// old file deserializes to an empty store and `link --from-household` rebuilds
-/// it. There are no users to migrate.
+/// `services` map is not read back. There are no users to migrate, so there is
+/// no migration - but a file of any other schema is *refused* rather than read
+/// as empty, because unknown fields are ignored on load and an old file would
+/// otherwise deserialize to an empty store, report every service as unlinked,
+/// and be overwritten by the next save. This file is its own only copy.
 const SCHEMA: u32 = 2;
 
 /// Everything past owner read/write. A secret with any of these set is a bug
@@ -60,9 +62,9 @@ pub struct Credentials {
     /// service; several accounts for one service in one household is a Sonos
     /// feature nothing has asked for yet.
     ///
-    /// The old flat `services` map (schema 1) simply drops on load - there are
-    /// no users to migrate, and re-running `link --from-household` rebuilds it
-    /// keyed correctly.
+    /// The old flat `services` map (schema 1) is not read back; such a file is
+    /// refused by [`Credentials::check_schema`] with the re-import named, rather
+    /// than loading as no accounts at all.
     #[serde(default)]
     pub households: BTreeMap<String, BTreeMap<String, Account>>,
 }
@@ -159,7 +161,45 @@ impl Credentials {
                 }
             }
         }
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let creds: Self =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        creds.check_schema(path)?;
+        Ok(creds)
+    }
+
+    /// Refuse a file this build does not write.
+    ///
+    /// Serde ignores unknown fields, so a schema-1 file - tokens under a flat
+    /// `services` map - parses happily into zero households. Left there it would
+    /// present itself as "nothing linked", send someone back through a link
+    /// flow, and then be overwritten by the first save that followed, taking the
+    /// only copy of those tokens with it. The same holds in reverse for a file
+    /// from a newer build: whatever it keeps that this one cannot read would not
+    /// survive the round trip.
+    ///
+    /// So this is loud, and it names both ways out: the re-import, or the
+    /// deletion that a wipe would otherwise have done for you (`unlink --all`
+    /// loads the store too, so it cannot be the escape hatch here).
+    fn check_schema(&self, path: &Path) -> Result<()> {
+        if self.schema == SCHEMA {
+            return Ok(());
+        }
+        let path = path.display();
+        if self.schema < SCHEMA {
+            bail!(
+                "{path} is schema {} - an older x2rock keyed tokens by service alone, \
+                 and this build keys them by household. The tokens are still valid at \
+                 their services: re-import them with `x2rock link --from-household`, \
+                 or delete the file to start over.",
+                self.schema
+            );
+        }
+        bail!(
+            "{path} is schema {}, written by a newer x2rock than this one. Upgrade, or \
+             move the file aside - saving over it from here would drop whatever this \
+             build cannot read.",
+            self.schema
+        )
     }
 
     /// Write atomically at 0600.
@@ -437,6 +477,32 @@ mod tests {
         fs::write(&path, "{ not json").unwrap();
         // Unlike the service catalogue: this cannot be refetched in a second.
         assert!(Credentials::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn an_old_flat_file_is_refused_rather_than_read_as_no_accounts() {
+        let dir = TempDir::new("cred-schema");
+        let path = dir.path().join("credentials.json");
+        // Schema 1: tokens under a flat `services` map, which this build's
+        // `households` field cannot see. Loading it as an empty store would
+        // report "nothing linked" and then overwrite the only copy.
+        fs::write(
+            &path,
+            r#"{"schema":1,"services":{"200":{"service_name":"Bandcamp",
+               "auth_token":"tok","private_key":"key","linked":1000}}}"#,
+        )
+        .unwrap();
+
+        let err = Credentials::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("schema 1"), "{err}");
+        assert!(err.contains("--from-household"), "{err}");
+        // And the file it refused is still there to re-import or delete.
+        assert!(path.exists());
+
+        // A file from a newer build is refused for the mirror-image reason.
+        fs::write(&path, r#"{"schema":99,"households":{}}"#).unwrap();
+        let err = Credentials::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("newer x2rock"), "{err}");
     }
 
     #[test]

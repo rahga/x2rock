@@ -8406,10 +8406,16 @@ household that holds it ("stop using this service" rather than "on this network"
 lists across households, grouped with a header only when there is more than one - so the ordinary
 single-household output is exactly as it was.
 
-Schema 2, and no migration: there are no users, so an old flat file deserializes to an empty store
-(unknown fields are ignored) and one `link --from-household` rebuilds it keyed correctly. Which is
-the discipline the whole feature runs on - the household's own stored tokens are the source of truth,
-and the local store is a cache of them for the household you are standing in.
+Schema 2, and no migration: there are no users, so one `link --from-household` rebuilds an old flat
+file keyed correctly. But *no migration* is not *no check*. Serde ignores unknown fields, so a
+schema-1 file parses cheerfully into zero households - it would report every service as unlinked,
+send you back through a link flow, and then be overwritten by the first save that followed, taking
+the only copy of those tokens with it. So the load refuses any schema but its own and names both
+ways out (the re-import, or deleting the file - `unlink --all` loads the store too, so it cannot be
+the escape hatch), and refuses a *newer* schema for the mirror-image reason: whatever this build
+cannot read would not survive the round trip. Which is the discipline the whole feature runs on -
+the household's own stored tokens are the source of truth, and the local store is a cache of them
+for the household you are standing in.
 
 ## Open questions
 
