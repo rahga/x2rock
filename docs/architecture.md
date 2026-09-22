@@ -5393,6 +5393,27 @@ browser has now demonstrated it. The flow-shape taxonomy grows to five: Bandcamp
 `regUrl`), iHeartRadio (typed code), Mixcloud (OAuth, `linkCode` in `redirect_uri`), Plex (SMAPI
 link dead; own PIN flow), TuneIn (OAuth, `linkCode` in base64-JSON `state`, service-side redirect).
 
+**Six, with Saavn (2026-09-22): a typed code that an existing session does not shortcut.** Relinked
+deliberately after an `unlink`, it took **39 seconds over 13 polls**, most of that the person rather
+than the service - Saavn confirmed within a poll or two of the browser step finishing, so it is not
+slow on its side. What makes it feel different, in the household's words, is that "most other
+services haven't had me click on something if I'm already logged in and running. Saavn did, and the
+Facebook integration seemed clumsy."
+
+That is the distinguishing property and it is visible in the protocol: Saavn sends
+`showLinkCode: true`, so the code has to be read off one screen and entered on another, and it
+requires an explicit approval even for an already-authenticated session. The flows that feel
+invisible are the ones where the code rides in the URL (`showLinkCode: false` - Bandcamp, TuneIn,
+Qobuz), where an existing session can carry the user straight through. Worth knowing when judging a
+link flow: **`showLinkCode` predicts how much work the person is about to do**, and it is in the
+`getDeviceLinkCode` reply before anyone opens a browser.
+
+The relink also re-confirmed two things at no cost: `match` returned **the same `sn_13`** rather
+than minting a new serial, so the association is stable across relinks (a fourth confirmation that
+it associates and never creates); and search worked immediately afterwards, so the local token is
+genuinely disposable - forgetting it and minting another disturbs nothing, because the household
+registration is what playback rides on.
+
 ### What worked, and the one loose end
 
 Search verified the same minute: `search -s "TuneIn (New)" "radio paradise"` returns the station
