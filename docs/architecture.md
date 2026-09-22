@@ -8380,6 +8380,37 @@ One lock this does *not* pick, exactly as predicted: **YouTube Music imports a v
 `403`s on search.** Its block is the caller API key, not the account, and an account credential does
 not reach it. The token is kept because it is real; the 403 is unchanged.
 
+### The credential store became household-aware, because the import made it have to (2026-09-22)
+
+`link --from-household` exposed a latent flaw the moment it existed. The store was keyed by service
+id alone - one Qobuz slot, one Saavn slot - which was fine while a machine only ever saw one
+household. A laptop that imports the office household's tokens and then, at home, imports the home
+household's, was overwriting each with the other on every trip. Worse, the **auto-refresh** would
+have made it silent and permanent: a search on the home network refreshes the home token and writes
+it back to the one Qobuz slot, so the office token is gone without anyone unlinking anything.
+
+So the store is now keyed **household → service → account**. Both halves of the fix are the same
+change and had to ship together:
+
+- **Every read resolves the current household first.** Search, browse, play, rate, and the
+  linked-or-not listings all ask "which household am I on?" - the reached player's, or (for a command
+  run offline against the cached catalogue) the store's sole household when it holds exactly one -
+  and look the token up under it. A machine on the home network uses the home token; the office token
+  sits untouched two hundred miles away.
+- **Auto-refresh writes back to the slot it refreshed.** The refreshed token carries its own
+  household, so the write lands on `(that household, service)` and never on another network's copy.
+  This is the part that would have corrupted things quietly if the storage change had shipped alone.
+
+Two commands have no live player and so no single household: `unlink` forgets a service from *every*
+household that holds it ("stop using this service" rather than "on this network"), and `accounts`
+lists across households, grouped with a header only when there is more than one - so the ordinary
+single-household output is exactly as it was.
+
+Schema 2, and no migration: there are no users, so an old flat file deserializes to an empty store
+(unknown fields are ignored) and one `link --from-household` rebuilds it keyed correctly. Which is
+the discipline the whole feature runs on - the household's own stored tokens are the source of truth,
+and the local store is a cache of them for the household you are standing in.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
