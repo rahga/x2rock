@@ -377,6 +377,8 @@ see "Ask before you act".
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
+| Link with no browser at all, from what the household already holds | `x2rock link --from-household ['<Service>']` — the only route to Qobuz, Apple Music and Amazon; needs inbound TCP 3401 from the player |
+| Forget tokens | `x2rock unlink '<Service>'` (every household) / `--household <id>` (one) / `x2rock unlink --all` (wipe) |
 | Shell completions | `x2rock completions [shell] [--install\|--uninstall]` — auto-detects shell when omitted |
 | Systemd user service | `x2rock service [status\|install\|uninstall] [--json]` |
 | Desktop integration (.desktop & icon) | `x2rock desktop [status\|install\|uninstall] [--json]` |
@@ -590,6 +592,10 @@ systems on the same network (test households included).
   them). Two other outputs carry a household id too: `status --json --full` (`household`) and
   `accounts --json` (`household`, the one a token was minted against). Treat all three as
   identifying before pasting them anywhere public.
+- **A machine that moves between households holds a token per household.** The credential store is
+  keyed by household, so the office's Qobuz and the home system's are separate accounts and neither
+  is used on the other's network. A service that reads as unlinked after moving is that working, not
+  a lost token — see "Linking a music service".
 - **A household that has been replaced is forgotten on its own.** After a factory reset or a
   replaced system, the old household id would sit beside the new one with the same room names and
   make every command ask which. So a scan that finds *every* remembered address of a household now
@@ -876,10 +882,30 @@ those two apart when telling a user what linking will do.
   **YouTube Music** (`refused getAppLink: HTTP 403`), **Apple Music** and **SoundCloud** refuse.
   A refusal is immediate, changes nothing, and exits 1 — report it plainly. YouTube Music's refusal
   is not something x2rock can get past (its endpoint wants a key Sonos seals in its own apps). For a
-  service not named here, just try it rather than predicting.
+  service not named here, just try it rather than predicting. **A refusal is not the end of the
+  road**: if the household already holds that account, `--from-household` below takes its token
+  without any login page at all.
 - **Plex** links through Plex's own PIN flow. `link plex --from-player` needs no browser: it reads
   the token of the household's own Plex integration while Plex is playing or paused in some room,
   and can browse a server's root where a fresh token sometimes cannot.
+- **`link --from-household` needs no browser, and reaches what `link` cannot.** Every zone player
+  keeps the token the Sonos app minted for each account the household holds, and publishes the set
+  encrypted in its initial topology event; this reads it and stores it. Name a service to take just
+  that one, or omit it to import every service the household holds a usable token for. It is the
+  only route to a service whose own link flow refuses x2rock — **Qobuz, Apple Music, Amazon** — and
+  it needs no `match` step, because playback already rides the registration the Sonos app made.
+  Three things to tell a user before running it: it is **read-only on the household** (nothing is
+  added or changed there, and the app keeps working); it **needs the player to open a connection
+  back to this machine**, TCP **3401** by default, so a host firewall must allow that inbound port
+  (the failure names it, `--callback-port N` moves it, and `0` takes an ephemeral one where there
+  is nothing to open); and it does **not** get past YouTube Music, whose block is the caller key
+  rather than the account — the token imports and search still 403s.
+- **A household can hold two accounts for one service, and only one is kept.** The Sonos app
+  numbers the second in its nickname — `iHeartRadio 885ebbcc` beside plain `iHeartRadio`, observed
+  in a real household 2026-09-22 — and `--from-household` prints a "Kept" line for *each* account
+  it read while the store holds one per service per household, so the last one read wins and the
+  earlier token is not stored. **Count what `x2rock accounts` lists, not the lines the import
+  printed**; they can disagree.
 - **The per-service scoreboard below is a summary.** What has been tested, with dates and the
   household each result came from, is the table at the top of `docs/architecture.md`; when the two
   disagree, that one is right. The *live* answer for a household is `x2rock search` (bare) and
@@ -907,12 +933,27 @@ those two apart when telling a user what linking will do.
   match` or `sent no userIdHashCode` means only that this account was not matched; the household may
   still hold its own account for the service (on-demand tracks then play from *that* account) or
   may hold none. The honest move is to try a track and read the result, not to predict.
+- **Tokens are held per household, not just per machine.** A laptop that moves between two Sonos
+  systems — home and an office — keeps a separate account per service for each, and every search,
+  browse and play resolves the household it is standing in before looking a token up. So a service
+  linked at the office reads as **unlinked at home** until it is linked or imported there too, and
+  that is correct rather than a fault: say so and offer `link --from-household` instead of
+  re-running a browser login. An auto-refresh on one network never touches the other's token.
+  `x2rock accounts` lists every household it holds, under a header only when there is more than one.
 - **`accounts --json`**: `{service, service_id, account_id, nickname, linked, household}` per token
   this machine holds. `account_id` is the household serial when the account was matched, otherwise
   `null` (prose: `no registration from this machine`), and `null` is not an error. `linked` is a
-  Unix timestamp. `household` is the household the token was minted against; it does not limit
-  where the token works. None of this is the household's own account list, which no command can
-  read (see the `accounts --content` note above).
+  Unix timestamp. `household` is the household the token was minted against, and it **is** the key
+  it is filed under — a token is used on that household's network and not on another's. None of
+  this is the household's own account list, which no command can read (see the `accounts --content`
+  note above).
+- **`unlink` is scoped by what you give it, and never revokes anything.** A service alone forgets it
+  in *every* household that holds it ("stop using this service" rather than "on this network");
+  `--household` narrows that to one; `--all` wipes every stored token; `--all --household <id>`
+  wipes one household. Because `unlink` reaches no player, its `--household` is matched against the
+  **stored** household ids that `accounts` shows — by exact id or a unique fragment — not against
+  room names, so a room name there is an error rather than a selector. The tokens stay valid at
+  their services, and `link --from-household` re-imports what a wipe cleared.
 - **An expired token usually heals itself.** When a service answers with a replacement token,
   x2rock retries once and stores the new one, silently. If a linked service starts failing with a
   plain refusal instead, `x2rock link '<Service>'` again.
