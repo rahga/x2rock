@@ -669,6 +669,13 @@ pub enum Command {
         /// - a host firewall must allow the inbound connection the command names.
         #[arg(long, conflicts_with = "from_player")]
         from_household: bool,
+        /// Which local TCP port the player calls back on for `--from-household`.
+        /// A fixed default so a firewall rule is set once and reused; change it
+        /// only if something else holds that port. `0` picks an ephemeral one,
+        /// which suits a host with no firewall to open. Ignored without
+        /// `--from-household`.
+        #[arg(long, default_value_t = 3401)]
+        callback_port: u16,
     },
     /// Forget a linked account's stored token.
     ///
