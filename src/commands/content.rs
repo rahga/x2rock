@@ -832,7 +832,8 @@ pub async fn bookmark(
                     bookmark.name,
                     refusal_was(&e)
                 );
-                let token = credentials::Credentials::load()?.token_for(&service.id);
+                let household = session.connection.household_id().await?;
+                let token = credentials::Credentials::load()?.token_for(&household, &service.id);
                 stream_item(
                     session,
                     room,

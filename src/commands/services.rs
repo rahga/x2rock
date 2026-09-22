@@ -42,10 +42,11 @@ use crate::{bookmarks, catalogue, credentials, hint, sonos};
 /// report - there is no account left to attach the refresh to.
 pub fn save_refreshed_token(
     creds: &mut credentials::Credentials,
+    household: &str,
     service_id: &str,
     refreshed: sonos::smapi::RefreshedToken,
 ) {
-    let Some(existing) = creds.get(service_id).cloned() else {
+    let Some(existing) = creds.get(household, service_id).cloned() else {
         return;
     };
     let private_key = if refreshed.private_key.is_empty() {
@@ -54,6 +55,7 @@ pub fn save_refreshed_token(
         refreshed.private_key
     };
     creds.remember(
+        household,
         service_id,
         credentials::Account {
             auth_token: refreshed.auth_token,
@@ -90,12 +92,36 @@ fn use_refreshed_token(
         new_token.private_key.clone()
     };
     let household = token.and_then(|t| t.household);
-    save_refreshed_token(creds, service_id, new_token.clone());
+    // The refresh can only be persisted against the household the token names;
+    // a token without one (there should be none from the store) is used for
+    // this call and simply not written back.
+    if let Some(hh) = &household {
+        save_refreshed_token(creds, hh, service_id, new_token.clone());
+    }
     Some(sonos::smapi::Token {
         token: new_token.auth_token,
         key,
         household,
     })
+}
+
+/// Which household's tokens apply for this command right now.
+///
+/// The reached player's household when one is in hand; otherwise, for a command
+/// running against a cached catalogue with no player (an offline browse), the
+/// store's sole household if it holds exactly one. Empty when it cannot be told,
+/// in which case every service resolves as unlinked: anonymous ones still
+/// browse, and that is the honest answer when the account cannot be located.
+async fn current_household(
+    session: Option<&session::Session>,
+    linked: &credentials::Credentials,
+) -> String {
+    if let Some(session) = session
+        && let Ok(household) = session.connection.household_id().await
+    {
+        return household;
+    }
+    linked.sole_household().unwrap_or_default()
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -229,7 +255,8 @@ pub async fn run_rate(
     );
 
     let mut linked = credentials::Credentials::load()?;
-    let token = linked.token_for(&service.id);
+    let household = player.household_id().await?;
+    let token = linked.token_for(&household, &service.id);
 
     let mut refreshed = None;
     let properties = sonos::smapi::extended_metadata(
@@ -334,12 +361,16 @@ pub async fn run_link(
     {
         catalogue.save()?;
     }
+    // Which household these tokens belong to - resolved once, up front, because
+    // even the "what is linked?" listing is now a per-household question.
+    let household = session.connection.household_id().await?;
 
     if from_household {
         return link_from_household(
             &session,
             &catalogue,
             &mut linked,
+            &household,
             service,
             nickname,
             callback_port,
@@ -361,7 +392,7 @@ pub async fn run_link(
                     json!({
                         "id": s.id,
                         "name": s.name,
-                        "linked": linked.get(&s.id).is_some(),
+                        "linked": linked.get(&household, &s.id).is_some(),
                     })
                 })
                 .collect();
@@ -370,7 +401,7 @@ pub async fn run_link(
         }
         println!("{} services can be linked:", linkable.len());
         for s in &linkable {
-            let mark = match linked.get(&s.id) {
+            let mark = match linked.get(&household, &s.id) {
                 Some(a) => format!("  (linked {})", ago(a.linked)),
                 None => String::new(),
             };
@@ -391,8 +422,6 @@ pub async fn run_link(
         "{} needs no account at all - search it as it is.",
         chosen.name
     );
-
-    let household = session.connection.household_id().await?;
 
     // Plex first: its SMAPI link half is dead in both flavours - `getAppLink`
     // answers `Server.ServiceUnknownError` and `getDeviceLinkCode` answers
@@ -500,7 +529,7 @@ pub async fn run_link(
     // Stored before anything else is attempted. A link code is single-use, so
     // losing the token to a later failure would mean walking back through the
     // browser to fix something that already worked.
-    linked.remember(id, account);
+    linked.remember(&household, id, account);
     linked.save()?;
     println!(
         "Linked {}. Search it with: x2rock search -s {}",
@@ -537,7 +566,11 @@ pub async fn run_link(
         .await
     {
         Ok(account_id) => {
-            if let Some(entry) = linked.services.get_mut(id) {
+            if let Some(entry) = linked
+                .households
+                .get_mut(&household)
+                .and_then(|s| s.get_mut(id))
+            {
                 entry.account_id = account_id.clone();
             }
             linked.save()?;
@@ -583,6 +616,7 @@ async fn link_from_household(
     session: &session::Session,
     catalogue: &catalogue::Catalogue,
     linked: &mut credentials::Credentials,
+    long_household: &str,
     service: Option<&String>,
     nickname: Option<&String>,
     callback_port: u16,
@@ -590,11 +624,10 @@ async fn link_from_household(
     // The stored blob is keyed to the *short* household id (no `.suffix`), the
     // form `GetHouseholdID` returns, while the SMAPI header and the credentials
     // record want the long one. The short is the long up to its first dot.
-    let long_household = session.connection.household_id().await?;
     let short_household = long_household
         .split('.')
         .next()
-        .unwrap_or(&long_household)
+        .unwrap_or(long_household)
         .to_string();
 
     let encoded = sonos::stored::capture_envelope(
@@ -667,8 +700,8 @@ async fn link_from_household(
             private_key: account.key.clone(),
             user_id_hash_code: None,
         };
-        let record = credentials::from_device_auth(name, Some(&long_household), Some(&nick), auth);
-        linked.remember(id, record);
+        let record = credentials::from_device_auth(name, Some(long_household), Some(&nick), auth);
+        linked.remember(long_household, id, record);
         // A multi-word name has to be quoted or the shell splits it, so the hint
         // is copy-pasteable rather than subtly wrong.
         let quoted = if name.contains(char::is_whitespace) {
@@ -822,12 +855,13 @@ pub async fn run_browse(
     }
 
     let mut linked = credentials::Credentials::load()?;
+    let household = current_household(reached.as_ref().ok(), &linked).await;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
     // published search category on top of that. This comment used to say the
     // two sets were the same - Radio Paloma is the counterexample, browse-only,
     // and filtering here would have removed the one route that works for it.
-    let usable = catalogue.usable(&linked);
+    let usable = catalogue.usable(&linked, &household);
 
     let Some(query) = service else {
         let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
@@ -845,7 +879,7 @@ pub async fn run_browse(
     };
 
     let chosen = catalogue::Catalogue::find(&usable, query)?.clone();
-    let token = linked.token_for(&chosen.id);
+    let token = linked.token_for(&household, &chosen.id);
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
     let at = container.unwrap_or("root");
@@ -1023,6 +1057,7 @@ pub async fn run_search(
     }
 
     let mut linked = credentials::Credentials::load()?;
+    let household = current_household(reached.as_ref().ok(), &linked).await;
 
     // A term with no service is the merged search. Checked before the listing
     // below, which is what a bare term used to fall into: it printed the
@@ -1031,9 +1066,9 @@ pub async fn run_search(
         && let Some(term) = term
     {
         let candidates: Vec<sonos::smapi::Service> = catalogue
-            .searchable(&linked)
+            .searchable(&linked, &household)
             .into_iter()
-            .filter(|s| !only_linked || linked.get(&s.id).is_some())
+            .filter(|s| !only_linked || linked.get(&household, &s.id).is_some())
             .cloned()
             .collect();
         if dirty {
@@ -1042,6 +1077,7 @@ pub async fn run_search(
         return search_everywhere(
             &mut catalogue,
             &mut linked,
+            &household,
             &reached,
             room,
             candidates,
@@ -1057,7 +1093,7 @@ pub async fn run_search(
         .await;
     }
     let count = count.unwrap_or(20);
-    let usable = catalogue.searchable(&linked);
+    let usable = catalogue.searchable(&linked, &household);
 
     let Some(query) = service else {
         let mut sorted = usable.clone();
@@ -1071,7 +1107,7 @@ pub async fn run_search(
             let linkable = catalogue
                 .linkable()
                 .iter()
-                .filter(|s| linked.get(&s.id).is_none())
+                .filter(|s| linked.get(&household, &s.id).is_none())
                 .count();
             println!(
                 "{} of {} services can be searched:",
@@ -1082,7 +1118,7 @@ pub async fn run_search(
                 // By id, as every other site asks: a name in Sonos's
                 // catalogue can change under a stable id, and the store is
                 // keyed by the id for exactly that reason.
-                let mark = if linked.get(&s.id).is_some() {
+                let mark = if linked.get(&household, &s.id).is_some() {
                     "  (linked)"
                 } else {
                     ""
@@ -1165,6 +1201,7 @@ pub async fn run_search(
         return search_everywhere(
             &mut catalogue,
             &mut linked,
+            &household,
             &reached,
             room,
             vec![chosen.clone()],
@@ -1210,7 +1247,7 @@ pub async fn run_search(
         return Ok(());
     };
 
-    let token = linked.token_for(&chosen.id);
+    let token = linked.token_for(&household, &chosen.id);
     let mut refreshed = None;
     let (items, total) = sonos::smapi::search(
         chosen,
@@ -1489,6 +1526,7 @@ fn interleave(per_category: ByCategory<'_>, cap: usize) -> Vec<(&str, sonos::sma
 async fn search_everywhere(
     catalogue: &mut catalogue::Catalogue,
     linked: &mut credentials::Credentials,
+    household: &str,
     reached: &Result<session::Session>,
     room: Option<&str>,
     candidates: Vec<sonos::smapi::Service>,
@@ -1573,7 +1611,7 @@ async fn search_everywhere(
     // belonging to one service, so nothing downstream has to put it back
     // together.
     let answers = futures_util::future::join_all(plan.iter().map(|search| {
-        let token = linked.token_for(&search.service.id);
+        let token = linked.token_for(household, &search.service.id);
         async move {
             let per_category =
                 futures_util::future::join_all(search.asking.iter().map(|(id, mapped)| {
@@ -1638,7 +1676,7 @@ async fn search_everywhere(
         // Sequentially, after the fan-out: this writes the credentials file, and
         // several tasks racing to rewrite it is a good way to lose a token.
         if refresh.is_some() {
-            let token = linked.token_for(&service.id);
+            let token = linked.token_for(household, &service.id);
             let _ = use_refreshed_token(linked, &service.id, token, refresh);
         }
         // Named once however many of its categories failed. Five timeout lines
@@ -1670,7 +1708,7 @@ async fn search_everywhere(
     // rank their own hits and reordering within one would discard that.
     rows.sort_by_key(|r| {
         (
-            linked.get(&r.service.id).is_none(),
+            linked.get(household, &r.service.id).is_none(),
             r.service.name.to_lowercase(),
         )
     });
@@ -1689,7 +1727,7 @@ async fn search_everywhere(
             row.item.id
         );
         let session = reached.as_ref().map_err(hint::no_player_to_play)?;
-        let token = linked.token_for(&row.service.id);
+        let token = linked.token_for(household, &row.service.id);
         return play_item(
             session,
             room,
@@ -1728,7 +1766,7 @@ async fn search_everywhere(
                     "art_url": r.item.art_url,
                     "container": r.item.container,
                     "queueable": queueable(&r.item, r.service),
-                    "linked": linked.get(&r.service.id).is_some(),
+                    "linked": linked.get(household, &r.service.id).is_some(),
                     // Unconditional, even when only one category was asked: a
                     // caller grouping by it should not have to work out whether
                     // the field exists before it can read it.
@@ -1858,16 +1896,22 @@ async fn search_everywhere(
 /// Local only - the token stays valid at the service.
 pub fn unlink(service: &str) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
-    let (id, _) = linked
-        .find_service(service)
-        .map(|(id, a)| (id.to_string(), a))?;
-    let dropped = linked.forget(&id);
+    // No player here, so no single household to scope to: forget the service
+    // from every household that holds it. On the only-PC-so-far case that is one
+    // household; for a machine that roams, unlinking is "stop using this
+    // service" everywhere rather than on one network.
+    let (id, name) = linked.find_service_id(service)?;
+    let dropped = linked.forget_everywhere(&id);
     linked.save()?;
-    if let Some(account) = dropped {
+    if dropped > 0 {
+        let where_ = if dropped == 1 {
+            String::new()
+        } else {
+            format!(" (in {dropped} households)")
+        };
         println!(
-            "Forgot the {} token. It is still valid at the service - \
-             revoke it there if that matters.",
-            account.service_name
+            "Forgot the {name} token{where_}. It is still valid at the service - \
+             revoke it there if that matters."
         );
     }
     Ok(())
@@ -1921,9 +1965,8 @@ pub async fn accounts(
     };
     if json {
         let rows: Vec<_> = linked
-            .services
-            .iter()
-            .map(|(id, a)| {
+            .all()
+            .map(|(hh, id, a)| {
                 // Never the token or the key: this is printed to a
                 // terminal, into a widget's stdout, and into whatever
                 // logs those end up in.
@@ -1931,7 +1974,7 @@ pub async fn accounts(
                     "service_id": id,
                     "service": a.service_name,
                     "nickname": a.nickname,
-                    "household": a.household,
+                    "household": hh,
                     "account_id": a.account_id,
                     "linked": a.linked,
                 })
@@ -1952,25 +1995,34 @@ pub async fn accounts(
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        if linked.services.is_empty() {
+        if linked.is_empty() {
             println!("No accounts linked. Run `x2rock link` to see what can be.");
         } else {
-            for (id, a) in &linked.services {
-                // `account_id` is set only when *this machine's* `match`
-                // succeeded, which has never happened. Saying "not
-                // registered on the household" read as a fact about the
-                // household, which this file cannot know: the household
-                // may hold several accounts for the service already.
-                let registered = match &a.account_id {
-                    Some(account) => format!("registered from here as {account}"),
-                    None => "no registration from this machine".to_string(),
-                };
-                println!(
-                    "{:<20} {:<10} {:<12} {registered}",
-                    a.service_name,
-                    id,
-                    ago(a.linked)
-                );
+            // Grouped by household, with a header only when there is more than
+            // one - the roaming case - so the ordinary single-household listing
+            // reads exactly as it did.
+            let multi = linked.households.len() > 1;
+            for (hh, services) in &linked.households {
+                if multi {
+                    println!("Household {hh}:");
+                }
+                for (id, a) in services {
+                    // `account_id` is set only when *this machine's* `match`
+                    // succeeded, which has never happened. Saying "not
+                    // registered on the household" read as a fact about the
+                    // household, which this file cannot know: the household
+                    // may hold several accounts for the service already.
+                    let registered = match &a.account_id {
+                        Some(account) => format!("registered from here as {account}"),
+                        None => "no registration from this machine".to_string(),
+                    };
+                    println!(
+                        "{:<20} {:<10} {:<12} {registered}",
+                        a.service_name,
+                        id,
+                        ago(a.linked)
+                    );
+                }
             }
         }
         if let Some(found) = &serials {

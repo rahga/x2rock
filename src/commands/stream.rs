@@ -49,9 +49,10 @@ pub async fn stream_item(
     let mut refreshed = None;
     let uri = sonos::smapi::media_uri(service, token, id, &mut refreshed).await?;
     if let Some(new_token) = refreshed
+        && let Some(household) = token.and_then(|t| t.household.as_deref())
         && let Ok(mut creds) = credentials::Credentials::load()
     {
-        save_refreshed_token(&mut creds, &service.id, new_token);
+        save_refreshed_token(&mut creds, household, &service.id, new_token);
     }
     // A direct stream, not a queued track: the player fetches a URL the service
     // signed, so it neither pauses-and-resumes nor survives that URL ageing out

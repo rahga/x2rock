@@ -193,9 +193,10 @@ pub async fn connect_for_service(
     let session = session::connect(ip, &mut state, household, room).await?;
     let catalogue = refreshed_catalogue(&session).await?;
     let linked = credentials::Credentials::load()?;
-    let usable = catalogue.usable(&linked);
+    let household = session.connection.household_id().await?;
+    let usable = catalogue.usable(&linked, &household);
     let chosen = catalogue::Catalogue::find(&usable, service)?.clone();
-    let token = linked.token_for(&chosen.id);
+    let token = linked.token_for(&household, &chosen.id);
     Ok((session, chosen, token))
 }
 

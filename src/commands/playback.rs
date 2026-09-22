@@ -344,7 +344,8 @@ async fn try_resume_stream(
         .player(&target.coordinator_id)
         .map(|p| p.name.as_str())
         .ok_or_else(|| anyhow!("no player for {}", target.name))?;
-    let token = credentials::Credentials::load()?.token_for(&service.id);
+    let household = session.connection.household_id().await?;
+    let token = credentials::Credentials::load()?.token_for(&household, &service.id);
     eprintln!(
         "x2rock: {:?} was a direct stream whose URL expired; fetching a fresh one.",
         stream.title

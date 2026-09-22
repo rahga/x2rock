@@ -128,9 +128,8 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
         "accounts" => Credentials::load()
             .map(|creds| {
                 creds
-                    .services
-                    .values()
-                    .map(|a| a.service_name.clone())
+                    .all()
+                    .map(|(_, _, a)| a.service_name.clone())
                     .collect()
             })
             .unwrap_or_default(),
