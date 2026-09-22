@@ -11,7 +11,16 @@ keywords = ["sonos", "mpris", "cli", "audio", "upnp"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
+# AES-128-CBC and MD5, for reading the music-service tokens a household already
+# stores (see `src/sonos/stored.rs`). This tree's other crypto is `ring`, via
+# rustls, and it offers neither primitive - it omits MD5 as broken and offers
+# only AEAD, not CBC. Both are load-bearing and not a choice: Sonos derives the
+# account-blob key with MD5 and encrypts the blob AES-128-CBC, and reading it
+# back means doing exactly that. Pure Rust, no C step; the three share
+# `cipher`/`digest` and pull only typenum/generic-array besides.
+aes = "0.8.4"
 anyhow = "1.0.104"
+cbc = "0.1.2"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 # Maintained by clap's authors; shares clap_lex with clap itself, so adding it
 # pulls no new transitives into the tree.
@@ -32,6 +41,8 @@ if-addrs = "0.15.0"
 # for weeks as a service that simply did not work. Pure Rust, no C step, and it
 # brings only adler2 with it; `default-features = false` drops the compressor
 # half, which nothing here sends.
+# See the note on `aes` above; this is the second half of the same pair.
+md-5 = "0.10.6"
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 mpris-server = { version = "0.10.0", features = ["tokio"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

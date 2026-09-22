@@ -321,6 +321,7 @@ pub async fn run_link(
     nickname: Option<&String>,
     no_match: bool,
     from_player: bool,
+    from_household: bool,
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
@@ -331,6 +332,10 @@ pub async fn run_link(
         .await?
     {
         catalogue.save()?;
+    }
+
+    if from_household {
+        return link_from_household(&session, &catalogue, &mut linked, service, nickname).await;
     }
 
     let Some(query) = service else {
@@ -548,6 +553,116 @@ pub async fn run_link(
             chosen.name
         ),
     }
+    Ok(())
+}
+
+/// How long to wait for the player's account event. Generous: it is one round
+/// trip, but it depends on the player choosing to open a connection back, and a
+/// firewall that is going to drop it will drop it for the whole window.
+const HOUSEHOLD_EVENT_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// `x2rock link --from-household`: keep the token the household already stores,
+/// with no browser flow.
+///
+/// The counterpart to the whole device-link dance: instead of minting a token,
+/// read the one the Sonos app minted and left on the speaker. Named a service
+/// takes just that one; unnamed imports every service the household holds a
+/// usable token for. No `match` step - this path never carries a
+/// `userIdHashCode`, and playback rides the household's own registration, which
+/// adding the service in the Sonos app already made.
+async fn link_from_household(
+    session: &session::Session,
+    catalogue: &catalogue::Catalogue,
+    linked: &mut credentials::Credentials,
+    service: Option<&String>,
+    nickname: Option<&String>,
+) -> Result<()> {
+    // The stored blob is keyed to the *short* household id (no `.suffix`), the
+    // form `GetHouseholdID` returns, while the SMAPI header and the credentials
+    // record want the long one. The short is the long up to its first dot.
+    let long_household = session.connection.household_id().await?;
+    let short_household = long_household
+        .split('.')
+        .next()
+        .unwrap_or(&long_household)
+        .to_string();
+
+    let encoded =
+        sonos::stored::capture_envelope(session.connection.ip(), HOUSEHOLD_EVENT_TIMEOUT).await?;
+    let accounts = sonos::stored::decrypt_accounts(&encoded, &short_household)?;
+
+    // Only accounts that actually carry a token can be injected; the rest are
+    // placeholders. Keyed by service id, which is how the catalogue and the
+    // credentials store both file them.
+    let usable: Vec<_> = accounts.into_iter().filter(|a| a.has_token()).collect();
+    ensure!(
+        !usable.is_empty(),
+        "the household stores no music-service token this machine can read. \
+         Add a service in the Sonos app first, then run this again."
+    );
+
+    // With a service named, resolve it to an id and keep only that one; the
+    // resolution also gives the catalogue's own name for the record.
+    let wanted = match service {
+        Some(query) => {
+            let chosen = catalogue.find_any(query)?;
+            let id = chosen.id.clone();
+            let account = usable
+                .into_iter()
+                .find(|a| a.service_id.to_string() == id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "the household stores no token for {} - it has not been added \
+                         in the Sonos app on this household",
+                        chosen.name
+                    )
+                })?;
+            vec![(chosen.name.clone(), id, account)]
+        }
+        None => usable
+            .into_iter()
+            .map(|a| {
+                let id = a.service_id.to_string();
+                // The catalogue names the service where it knows it; a token for
+                // a service not in this household's catalogue is still kept, under
+                // its own stored nickname or its id.
+                let name = catalogue
+                    .name_of(&id)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        if a.nickname.is_empty() {
+                            format!("service {id}")
+                        } else {
+                            a.nickname.clone()
+                        }
+                    });
+                (name, id, a)
+            })
+            .collect(),
+    };
+
+    for (name, id, account) in &wanted {
+        // The stored nickname is the app's own label ("Qb1"); prefer an explicit
+        // --nickname, then that, then this machine's default.
+        let nick = nickname
+            .map(String::to_string)
+            .or_else(|| (!account.nickname.is_empty()).then(|| account.nickname.clone()))
+            .unwrap_or_else(default_nickname);
+        let auth = sonos::smapi::DeviceAuth {
+            auth_token: account.token.clone(),
+            private_key: account.key.clone(),
+            user_id_hash_code: None,
+        };
+        let record = credentials::from_device_auth(name, Some(&long_household), Some(&nick), auth);
+        linked.remember(id, record);
+        println!("Kept the household's {name} token. Search it with: x2rock search -s {name}");
+    }
+    linked.save()?;
+    println!(
+        "\nNo household match was needed: playback rides the registration the Sonos app \
+         already made. Search and browse work now; on-demand tracks play for any service \
+         whose account the household still holds."
+    );
     Ok(())
 }
 

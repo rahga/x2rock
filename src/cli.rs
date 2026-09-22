@@ -658,6 +658,17 @@ pub enum Command {
         /// relinked to Sonos - the browser flow's token is the durable one.
         #[arg(long)]
         from_player: bool,
+        /// No browser at all: read the token the household already stores for
+        /// this service - the one the Sonos app minted when it was added there -
+        /// and keep it. This is how a service whose own link flow x2rock cannot
+        /// complete (Qobuz, Apple Music, Amazon) still becomes searchable, and
+        /// it needs no `match`: playback already rides the household's own
+        /// registration. Name a service to take just that one, or omit it to
+        /// import every service the household holds a usable token for. Requires
+        /// a player, and that this machine can receive an event callback from it
+        /// - a host firewall must allow the inbound connection the command names.
+        #[arg(long, conflicts_with = "from_player")]
+        from_household: bool,
     },
     /// Forget a linked account's stored token.
     ///

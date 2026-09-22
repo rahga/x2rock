@@ -4,6 +4,7 @@ pub mod local;
 pub mod plex;
 pub mod proto;
 pub mod smapi;
+pub mod stored;
 pub mod upnp;
 
 use std::net::IpAddr;

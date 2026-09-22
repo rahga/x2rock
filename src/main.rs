@@ -305,6 +305,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref nickname,
             no_match,
             from_player,
+            from_household,
         } => {
             return services::run_link(
                 cli.ip,
@@ -315,6 +316,7 @@ async fn run(cli: Cli) -> Result<()> {
                 nickname.as_ref(),
                 no_match,
                 from_player,
+                from_household,
             )
             .await;
         }
