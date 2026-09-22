@@ -8346,9 +8346,39 @@ are real and worth stating before building:
   opt-in, never a silent background sweep. (The session's own tooling classifier blocked every step
   of this test for exactly that reason, which is the right instinct.)
 
-Undecided, and deliberately left to a separate session: whether x2rock grows a `link --from-household`
-(or similar) that does this, or whether it stays a documented capability that a person wires up by
-hand. The finding is settled; the product decision is not.
+### Built: `link --from-household` (2026-09-22)
+
+The decision was made to build it, and it shipped the same day. `src/sonos/stored.rs` holds the
+mechanism in two halves that the module keeps deliberately apart:
+
+- **`decrypt_accounts` is pure** - `2:` envelope in, `Vec<StoredAccount>` out - so the whole crypto
+  path (base64 → AES-128-CBC → PKCS#7 → the four-byte MD5 integrity tail → account XML) is unit-tested
+  against synthetic vectors that a test seals with a made-up household id. No live household, no real
+  token, so the tests carry no secret and a tooling classifier watching for credential access has
+  nothing to catch. AES/MD5 come from the `aes`/`cbc`/`md-5` crates - `ring`, this tree's other
+  crypto, offers neither - and base64 is a dozen hand-rolled lines, its only caller being the envelope.
+- **`capture_envelope` is the only network-touching part.** It subscribes to the player's
+  `ZoneGroupTopology` events, catches the initial state the player POSTs back, pulls the one variable,
+  and unsubscribes.
+
+The command is a sibling of `--from-player`: **name a service** to import just its stored token,
+**omit it** to import every service the household holds a usable token for in one pass. There is no
+`match` step - this path carries no `userIdHashCode`, and playback rides the registration the Sonos
+app already made. Verified against the office household: `link Qobuz --from-household` reproduced the
+hand-injected token exactly, and Qobuz searched.
+
+**The firewall cost turned out to be the real design point.** The first cut bound an ephemeral
+callback port, which is unusable on the one host that needs a firewall rule - the port changed every
+run, so there was nothing stable to allow. It now binds a fixed default (3401), with `--callback-port`
+to move it and `0` to ask for an ephemeral one where there is no firewall to open. So the honest
+shape is: a host with no inbound firewall needs nothing; a host with one opens a single documented
+port once. The constraint itself cannot be removed - the token lives only in an event the player
+sends *back*, and the plaintext `/status/accounts` path is 403 on current firmware - so something has
+to accept an inbound connection; the design just makes it a one-time, opt-in, named thing.
+
+One lock this does *not* pick, exactly as predicted: **YouTube Music imports a valid token and still
+`403`s on search.** Its block is the caller API key, not the account, and an account credential does
+not reach it. The token is kept because it is real; the 403 is unchanged.
 
 ## Open questions
 
