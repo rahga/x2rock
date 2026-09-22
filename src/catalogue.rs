@@ -163,10 +163,10 @@ impl Catalogue {
     /// This is the set for browsing, and for resolving a name that is about to
     /// be called - `play-item`, `queue-item`. It is deliberately *wider* than
     /// [`searchable`](Self::searchable); see the note there.
-    pub fn usable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
+    pub fn usable<'a>(&'a self, linked: &Credentials, household: &str) -> Vec<&'a Service> {
         self.services
             .iter()
-            .filter(|s| s.auth == smapi::Auth::Anonymous || linked.get(&s.id).is_some())
+            .filter(|s| s.auth == smapi::Auth::Anonymous || linked.get(household, &s.id).is_some())
             .collect()
     }
 
@@ -185,8 +185,8 @@ impl Catalogue {
     /// [`categories_for`](Self::categories_for) has come back empty for it, and
     /// not before. A cold cache still over-promises once, which is the price of
     /// not fetching 108 presentation maps to print a list.
-    pub fn searchable<'a>(&'a self, linked: &Credentials) -> Vec<&'a Service> {
-        self.usable(linked)
+    pub fn searchable<'a>(&'a self, linked: &Credentials, household: &str) -> Vec<&'a Service> {
+        self.usable(linked, household)
             .into_iter()
             .filter(|s| !self.publishes_no_categories(&s.id))
             .collect()
@@ -397,9 +397,12 @@ mod tests {
         }
     }
 
+    const HH: &str = "Sonos_test";
+
     fn linked(service_id: &str) -> Credentials {
         let mut creds = Credentials::default();
         creds.remember(
+            HH,
             service_id,
             crate::credentials::Account {
                 service_name: "Bandcamp".into(),
@@ -407,7 +410,7 @@ mod tests {
                 private_key: "key".into(),
                 user_id_hash_code: None,
                 nickname: None,
-                household: None,
+                household: Some(HH.into()),
                 account_id: None,
                 linked: 1,
             },
@@ -418,7 +421,7 @@ mod tests {
     #[test]
     fn searchable_is_the_anonymous_ones_until_something_is_linked() {
         let cat = three_tiers();
-        let usable = cat.searchable(&Credentials::default());
+        let usable = cat.searchable(&Credentials::default(), HH);
         assert_eq!(usable.len(), 1);
         assert_eq!(usable[0].name, "TuneIn");
         assert_eq!(cat.services().len(), 3, "the full list is still there");
@@ -428,7 +431,7 @@ mod tests {
     fn a_stored_token_makes_its_service_searchable() {
         let cat = three_tiers();
         let names: Vec<&str> = cat
-            .searchable(&linked("200"))
+            .searchable(&linked("200"), HH)
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -441,7 +444,7 @@ mod tests {
         // catalogue should not be the thing standing in the way.
         let cat = three_tiers();
         let names: Vec<&str> = cat
-            .searchable(&linked("2"))
+            .searchable(&linked("2"), HH)
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -466,11 +469,15 @@ mod tests {
         let cat = browse_only();
         let creds = Credentials::default();
 
-        let usable: Vec<&str> = cat.usable(&creds).iter().map(|s| s.name.as_str()).collect();
+        let usable: Vec<&str> = cat
+            .usable(&creds, HH)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
         assert_eq!(usable, ["TuneIn", "Radio Paloma"]);
 
         let searchable: Vec<&str> = cat
-            .searchable(&creds)
+            .searchable(&creds, HH)
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -484,7 +491,7 @@ mod tests {
         let cat = three_tiers();
         assert!(!cat.publishes_no_categories("1"));
         assert!(!cat.categories_cached("1"));
-        assert_eq!(cat.searchable(&Credentials::default()).len(), 1);
+        assert_eq!(cat.searchable(&Credentials::default(), HH).len(), 1);
 
         // And a service with categories stays in.
         let mut warm = three_tiers();
@@ -497,7 +504,7 @@ mod tests {
         );
         assert!(warm.categories_cached("1"));
         assert!(!warm.publishes_no_categories("1"));
-        assert_eq!(warm.searchable(&Credentials::default()).len(), 1);
+        assert_eq!(warm.searchable(&Credentials::default(), HH).len(), 1);
     }
 
     #[test]
@@ -505,10 +512,10 @@ mod tests {
         // `refresh` clears categories when the version moves, so a service that
         // gains search later is not held out by a stale no.
         let mut cat = browse_only();
-        assert_eq!(cat.searchable(&Credentials::default()).len(), 1);
+        assert_eq!(cat.searchable(&Credentials::default(), HH).len(), 1);
         cat.categories.clear();
         assert_eq!(
-            cat.searchable(&Credentials::default()).len(),
+            cat.searchable(&Credentials::default(), HH).len(),
             2,
             "a cleared cache means unasked again, not answered-no"
         );

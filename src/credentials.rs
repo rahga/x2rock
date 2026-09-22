@@ -18,8 +18,10 @@
 //! scoped to one music service, it is revocable from that service's own account
 //! page, and this file leans on the disk encryption a laptop already has.
 //!
-//! Keyed by **service id**, not name, because a name in Sonos's catalogue can
-//! change under a stable id. The name is kept alongside for display.
+//! Keyed by **household, then service id** - not by name, because a name in
+//! Sonos's catalogue can change under a stable id, and not by service alone,
+//! because a machine that moves between households holds a separate account for
+//! each. The name is kept alongside for display.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,10 +35,11 @@ use serde::{Deserialize, Serialize};
 use crate::sonos::smapi::{DeviceAuth, Token};
 use crate::store;
 
-/// The shape of the file. As with bookmarks and *unlike* the catalogue, a
-/// mismatch here would be migrated rather than discarded - re-linking means
-/// walking a person back through a browser flow.
-const SCHEMA: u32 = 1;
+/// The shape of the file. Schema 2 keys accounts by household; schema 1's flat
+/// `services` map is not read back - unknown fields are ignored on load, so an
+/// old file deserializes to an empty store and `link --from-household` rebuilds
+/// it. There are no users to migrate.
+const SCHEMA: u32 = 2;
 
 /// Everything past owner read/write. A secret with any of these set is a bug
 /// somewhere, most likely a hand-edit or a careless copy.
@@ -46,11 +49,22 @@ const LOOSE: u32 = 0o177;
 pub struct Credentials {
     #[serde(default)]
     pub schema: u32,
-    /// Service id -> the account linked for it. One account per service: Sonos
-    /// allows several, and choosing between them is a feature nothing has asked
-    /// for yet.
+    /// Household id -> (service id -> the account held for it there).
+    ///
+    /// Keyed by household because one machine sees more than one - a laptop that
+    /// moves between home and the office - and each household holds its own
+    /// account for a service, with its own token. Keeping them apart is what
+    /// lets a search on the home network use the home token while the office
+    /// token sits untouched, and what stops an auto-refresh on one from
+    /// clobbering the other. Within a household it is still one account per
+    /// service; several accounts for one service in one household is a Sonos
+    /// feature nothing has asked for yet.
+    ///
+    /// The old flat `services` map (schema 1) simply drops on load - there are
+    /// no users to migrate, and re-running `link --from-household` rebuilds it
+    /// keyed correctly.
     #[serde(default)]
-    pub services: BTreeMap<String, Account>,
+    pub households: BTreeMap<String, BTreeMap<String, Account>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,36 +176,74 @@ impl Credentials {
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let copy = Self {
             schema: SCHEMA,
-            services: self.services.clone(),
+            households: self.households.clone(),
         };
         store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
     }
 
-    pub fn get(&self, service_id: &str) -> Option<&Account> {
-        self.services.get(service_id)
+    /// The account held for a service *in one household*.
+    pub fn get(&self, household: &str, service_id: &str) -> Option<&Account> {
+        self.households.get(household)?.get(service_id)
     }
 
-    /// Find a linked account by service id, exact name, or unique name prefix.
+    /// The token held for a service in a household - what every play path hands
+    /// SMAPI. The household is the one the caller is currently connected to, so
+    /// a machine that moves between systems uses the right account for each.
+    pub fn token_for(&self, household: &str, service_id: &str) -> Option<Token> {
+        self.get(household, service_id).map(Account::token)
+    }
+
+    /// Every account, across all households, as `(household, service_id,
+    /// account)`. For `accounts`, which lists what the whole store holds.
+    pub fn all(&self) -> impl Iterator<Item = (&str, &str, &Account)> {
+        self.households.iter().flat_map(|(hh, services)| {
+            services
+                .iter()
+                .map(move |(id, account)| (hh.as_str(), id.as_str(), account))
+        })
+    }
+
+    /// Whether the store holds nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.households.values().all(BTreeMap::is_empty)
+    }
+
+    /// The one household this store knows, if it knows exactly one - a fallback
+    /// for a command running with no player reached (an offline browse of a
+    /// cached catalogue), where there is no live household to ask. `None` when
+    /// zero or several are held, since then it cannot be guessed.
+    pub fn sole_household(&self) -> Option<String> {
+        let mut keys = self.households.keys();
+        let first = keys.next()?;
+        keys.next().is_none().then(|| first.clone())
+    }
+
+    /// Resolve a query (service id, exact name, or unique name prefix) to a
+    /// service id, searching across every household. For `unlink`, which has no
+    /// player and so no single household in hand: it forgets the named service
+    /// from all of them.
     ///
-    /// Three ways because `accounts` prints both the id and the name, and
-    /// either is a reasonable thing to type back. A prefix that matches
-    /// several is refused **by name** rather than resolved to the first:
-    /// forgetting the wrong token is a quiet mistake, one that only shows up
-    /// the next time that service is asked to play something.
-    pub fn find_service<'a>(&'a self, query: &str) -> Result<(&'a str, &'a Account)> {
-        if let Some((id, account)) = self.services.get_key_value(query) {
-            return Ok((id.as_str(), account));
+    /// A prefix that matches several distinct services is refused by name
+    /// rather than resolved to the first - forgetting the wrong token is a quiet
+    /// mistake that only surfaces the next time that service is asked to play.
+    pub fn find_service_id(&self, query: &str) -> Result<(String, String)> {
+        // Collapse to one entry per service id, since the same service can sit
+        // in several households; any household's copy names it.
+        let mut by_id: BTreeMap<&str, &Account> = BTreeMap::new();
+        for (_, id, account) in self.all() {
+            by_id.entry(id).or_insert(account);
         }
-        if let Some((id, account)) = self
-            .services
+        if let Some(account) = by_id.get(query) {
+            return Ok((query.to_string(), account.service_name.clone()));
+        }
+        if let Some((id, account)) = by_id
             .iter()
             .find(|(_, a)| a.service_name.eq_ignore_ascii_case(query))
         {
-            return Ok((id.as_str(), account));
+            return Ok((id.to_string(), account.service_name.clone()));
         }
         let needle = query.to_lowercase();
-        let matches: Vec<_> = self
-            .services
+        let matches: Vec<_> = by_id
             .iter()
             .filter(|(_, a)| a.service_name.to_lowercase().starts_with(&needle))
             .collect();
@@ -199,7 +251,7 @@ impl Credentials {
             0 => bail!("no account linked for {query:?}. Run `x2rock accounts` to see them."),
             1 => {
                 let (id, account) = matches[0];
-                Ok((id.as_str(), account))
+                Ok((id.to_string(), account.service_name.clone()))
             }
             several => {
                 let shown: Vec<_> = matches
@@ -215,34 +267,50 @@ impl Credentials {
         }
     }
 
-    /// The token held for a service, if any - what every play path hands SMAPI.
-    pub fn token_for(&self, service_id: &str) -> Option<Token> {
-        self.get(service_id).map(Account::token)
-    }
-
-    /// Record a completed link, keeping what the service did not send this time.
+    /// Record a completed link for a household, keeping what the service did not
+    /// send this time.
     ///
-    /// Re-linking a service that is already linked is the repair path - a
-    /// revoked or expired token - so the new secrets always win, while the
-    /// household registration `match` established is kept unless the new link
-    /// names a different household.
-    pub fn remember(&mut self, service_id: &str, mut account: Account) {
-        if let Some(old) = self.services.get(service_id) {
+    /// Re-linking a service already linked in this household is the repair path
+    /// for a revoked or expired token, so the new secrets always win, while the
+    /// nickname, hash and matched account id survive when the new record omits
+    /// them.
+    pub fn remember(&mut self, household: &str, service_id: &str, mut account: Account) {
+        if let Some(old) = self.get(household, service_id) {
             account.nickname = account.nickname.or_else(|| old.nickname.clone());
             account.user_id_hash_code = account
                 .user_id_hash_code
                 .or_else(|| old.user_id_hash_code.clone());
-            if account.household == old.household {
-                account.account_id = account.account_id.or_else(|| old.account_id.clone());
-            }
+            account.account_id = account.account_id.or_else(|| old.account_id.clone());
         }
-        self.services.insert(service_id.to_string(), account);
+        self.households
+            .entry(household.to_string())
+            .or_default()
+            .insert(service_id.to_string(), account);
     }
 
-    /// Forget a service's account. Returns what was dropped, so the caller can
-    /// name it and say nothing was there when it was not.
-    pub fn forget(&mut self, service_id: &str) -> Option<Account> {
-        self.services.remove(service_id)
+    /// Forget a service's account in one household. Returns what was dropped.
+    pub fn forget(&mut self, household: &str, service_id: &str) -> Option<Account> {
+        let services = self.households.get_mut(household)?;
+        let dropped = services.remove(service_id);
+        if services.is_empty() {
+            self.households.remove(household);
+        }
+        dropped
+    }
+
+    /// Forget a service everywhere it is held. Returns how many households it
+    /// was dropped from, so `unlink` can say what it did.
+    pub fn forget_everywhere(&mut self, service_id: &str) -> usize {
+        let households: Vec<String> = self
+            .households
+            .iter()
+            .filter(|(_, s)| s.contains_key(service_id))
+            .map(|(hh, _)| hh.clone())
+            .collect();
+        for hh in &households {
+            self.forget(hh, service_id);
+        }
+        households.len()
     }
 }
 
@@ -271,6 +339,8 @@ mod tests {
     use super::*;
     use crate::testdir::TempDir;
 
+    const HH: &str = "Sonos_house";
+
     fn account(name: &str) -> Account {
         Account {
             service_name: name.into(),
@@ -278,7 +348,7 @@ mod tests {
             private_key: "key".into(),
             user_id_hash_code: Some("hash".into()),
             nickname: Some("nick".into()),
-            household: Some("Sonos_house".into()),
+            household: Some(HH.into()),
             account_id: Some("42".into()),
             linked: 1_000,
         }
@@ -289,7 +359,7 @@ mod tests {
         let dir = TempDir::new("cred-mode");
         let path = dir.path().join("credentials.json");
         let mut creds = Credentials::default();
-        creds.remember("200", account("Bandcamp"));
+        creds.remember(HH, "200", account("Bandcamp"));
         creds.save_to(&path).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -297,7 +367,7 @@ mod tests {
 
         let back = Credentials::load_from(&path).unwrap();
         assert_eq!(back.schema, SCHEMA);
-        let got = back.get("200").unwrap();
+        let got = back.get(HH, "200").unwrap();
         assert_eq!(got.auth_token, "tok");
         assert_eq!(got.private_key, "key");
         assert_eq!(got.household.as_deref(), Some("Sonos_house"));
@@ -319,12 +389,7 @@ mod tests {
     fn a_missing_file_is_no_accounts_and_a_corrupt_one_is_an_error() {
         let gone = TempDir::new("cred-missing");
         let missing = gone.path().join("nothing-here.json");
-        assert!(
-            Credentials::load_from(&missing)
-                .unwrap()
-                .services
-                .is_empty()
-        );
+        assert!(Credentials::load_from(&missing).unwrap().is_empty());
 
         let dir = TempDir::new("cred-corrupt");
         let path = dir.path().join("credentials.json");
@@ -336,7 +401,7 @@ mod tests {
     #[test]
     fn relinking_replaces_the_secrets_and_keeps_the_registration() {
         let mut creds = Credentials::default();
-        creds.remember("200", account("Bandcamp"));
+        creds.remember(HH, "200", account("Bandcamp"));
 
         let mut fresh = account("Bandcamp");
         fresh.auth_token = "newtok".into();
@@ -344,9 +409,9 @@ mod tests {
         fresh.nickname = None;
         fresh.user_id_hash_code = None;
         fresh.account_id = None;
-        creds.remember("200", fresh);
+        creds.remember(HH, "200", fresh);
 
-        let got = creds.get("200").unwrap();
+        let got = creds.get(HH, "200").unwrap();
         assert_eq!(got.auth_token, "newtok", "the new secret always wins");
         assert_eq!(got.private_key, "newkey");
         assert_eq!(got.nickname.as_deref(), Some("nick"), "kept, not blanked");
@@ -355,63 +420,67 @@ mod tests {
     }
 
     #[test]
-    fn linking_against_a_different_household_drops_the_old_account_id() {
+    fn the_same_service_in_two_households_is_two_independent_accounts() {
         let mut creds = Credentials::default();
-        creds.remember("200", account("Bandcamp"));
+        creds.remember(HH, "31", account("Qobuz"));
 
-        let mut elsewhere = account("Bandcamp");
-        elsewhere.household = Some("Sonos_other".into());
-        elsewhere.account_id = None;
-        creds.remember("200", elsewhere);
+        let mut other = account("Qobuz");
+        other.auth_token = "office-tok".into();
+        other.account_id = Some("sn_9".into());
+        creds.remember("Sonos_office", "31", other);
 
-        // An account id is the *household's* name for the account, so it means
-        // nothing on a different one.
-        assert!(creds.get("200").unwrap().account_id.is_none());
+        // Neither clobbered the other; each household keeps its own token.
+        assert_eq!(creds.get(HH, "31").unwrap().auth_token, "tok");
+        assert_eq!(
+            creds.get("Sonos_office", "31").unwrap().auth_token,
+            "office-tok"
+        );
+        assert_eq!(creds.all().count(), 2);
     }
 
     #[test]
     fn forgetting_says_whether_there_was_anything_to_forget() {
         let mut creds = Credentials::default();
-        creds.remember("200", account("Bandcamp"));
-        assert!(creds.forget("200").is_some());
-        assert!(creds.forget("200").is_none());
+        creds.remember(HH, "200", account("Bandcamp"));
+        assert!(creds.forget(HH, "200").is_some());
+        assert!(creds.forget(HH, "200").is_none());
+        // The now-empty household is dropped, so the store is empty again.
+        assert!(creds.is_empty());
     }
 
     #[test]
-    fn find_service_matches_by_id_name_and_prefix() {
+    fn forget_everywhere_drops_a_service_from_every_household() {
         let mut creds = Credentials::default();
-        creds.remember("200", account("Bandcamp"));
-        creds.remember("284", account("YouTube Music"));
+        creds.remember(HH, "31", account("Qobuz"));
+        creds.remember("Sonos_office", "31", account("Qobuz"));
+        creds.remember(HH, "200", account("Bandcamp"));
 
-        // Match by ID
-        let (id, acct) = creds.find_service("200").unwrap();
-        assert_eq!(id, "200");
-        assert_eq!(acct.service_name, "Bandcamp");
+        assert_eq!(creds.forget_everywhere("31"), 2);
+        assert!(creds.get(HH, "31").is_none());
+        assert!(creds.get("Sonos_office", "31").is_none());
+        // Bandcamp untouched.
+        assert!(creds.get(HH, "200").is_some());
+    }
 
-        // Match by exact name (case-insensitive)
-        let (id, acct) = creds.find_service("bandcamp").unwrap();
-        assert_eq!(id, "200");
-        assert_eq!(acct.service_name, "Bandcamp");
+    #[test]
+    fn find_service_id_matches_by_id_name_and_prefix_across_households() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "200", account("Bandcamp"));
+        // In a different household, so the search has to span them.
+        creds.remember("Sonos_office", "284", account("YouTube Music"));
 
-        let (id, acct) = creds.find_service("youtube music").unwrap();
-        assert_eq!(id, "284");
-        assert_eq!(acct.service_name, "YouTube Music");
+        assert_eq!(creds.find_service_id("200").unwrap().1, "Bandcamp");
+        assert_eq!(creds.find_service_id("bandcamp").unwrap().0, "200");
+        assert_eq!(creds.find_service_id("youtube music").unwrap().0, "284");
+        assert_eq!(creds.find_service_id("band").unwrap().0, "200");
+        assert!(creds.find_service_id("Spotify").is_err());
 
-        // Match by unique prefix
-        let (id, acct) = creds.find_service("band").unwrap();
-        assert_eq!(id, "200");
-        assert_eq!(acct.service_name, "Bandcamp");
-
-        // Non-existent
-        assert!(creds.find_service("Spotify").is_err());
-
-        // A prefix matching two is refused, and names both rather than
-        // forgetting whichever happens to sort first.
-        creds.remember("285", account("YouTube"));
-        let ambiguous = creds.find_service("you").unwrap_err().to_string();
+        // A prefix matching two is refused, and names both.
+        creds.remember(HH, "285", account("YouTube"));
+        let ambiguous = creds.find_service_id("you").unwrap_err().to_string();
         assert!(ambiguous.contains("YouTube Music (id 284)"), "{ambiguous}");
         assert!(ambiguous.contains("YouTube (id 285)"), "{ambiguous}");
         // The whole name still resolves, though it is a prefix of the other.
-        assert_eq!(creds.find_service("YouTube").unwrap().0, "285");
+        assert_eq!(creds.find_service_id("YouTube").unwrap().0, "285");
     }
 }
