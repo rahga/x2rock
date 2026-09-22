@@ -204,6 +204,94 @@ The work/movement metadata question therefore stays open, and the cheap candidat
 exhausted: every remaining service with a catalogue shaped unlike pop (Qobuz's classical tier,
 Audible's chaptered long-form, SiriusXM's linear channels) costs a subscription.
 
+### Qobuz: a working login page over a token exchange that never honours it (2026-09-22)
+
+Subscribed to on the strength of the free `getAppLink` probe above, which Qobuz passes: it answers
+with a real page, `https://www.qobuz.com/signin/external?linkToken=…`, and a `linkDeviceId`. The
+browser step then genuinely succeeds - Qobuz's own page reports **"You are successfully signed in
+to Qobuz"**. And `getDeviceAuthToken` refuses anyway:
+
+```
+<faultcode>ns1:Client.NOT_LINKED_FAILURE</faultcode>
+<faultstring>Link Code invalid...</faultstring>
+<ns1:SonosError>6</ns1:SonosError>  <ns1:ExceptionInfo>Retry link process..</ns1:ExceptionInfo>
+```
+
+**The error carries no information at all**, which is what made this take several passes to pin
+down: a deliberately fake code (`ZZZZZZZZ`) produces byte-identical output. Unapproved, approved
+and nonsense are one answer.
+
+So each variable was eliminated in turn, and the refusal never moved:
+
+| what was true | answer |
+|---|---|
+| fresh code, not yet approved | `NOT_LINKED_FAILURE` |
+| approved in the browser | `NOT_LINKED_FAILURE` |
+| garbage code, never minted | `NOT_LINKED_FAILURE` |
+| **paid trial subscription live** | `NOT_LINKED_FAILURE` |
+| **household registered via the Sonos Android app** (`sn_14`) | `NOT_LINKED_FAILURE` |
+| **minted and polled against the right household** | `NOT_LINKED_FAILURE` |
+| browser reports "successfully signed in" | `NOT_LINKED_FAILURE` |
+
+The last three matter because two of them were real mistakes on this side: the first probes carried
+the *home* household id while the laptop sat on the office household, and the subscription state was
+assumed rather than confirmed. Both were fixed and neither was the cause.
+
+**What this is.** Qobuz is app-link, and in that tier *Sonos's own cloud* completes the exchange -
+the nested `deviceLink` is a courtesy for controllers with nothing to hand off to. Qobuz populates
+it and does not implement the controller-side poll behind it. The Android app links perfectly well
+because it never takes that path. So `NOT_LINKED_RETRY` (SonosError 5) is never sent, x2rock's
+spec-correct treatment of 6 as fatal is right, and no client-side change can help.
+
+**A third refusal shape, then**, after "refuses the token" (YouTube Music, by caller) and "refuses
+the tier" (Saavn, by subscription): **hands over a login page it will never honour.** Classical
+Archives is its cousin - it refuses at the previous step instead.
+
+### What the subscription did buy, and one thing Sonos cannot do with it
+
+Not nothing. The household registration is what playback rides on, and Qobuz content plays:
+
+```
+Your Freedom Is the End of Me - Melanie De Biasio, "Lilies"
+x-sonos-http:track%3a41805683%3a7.flac?sid=31&flags=8232&sn=14   (hi-res FLAC)
+```
+
+`now --json` reads all of it - title, artist, album, service, duration, queue position - and
+transport, volume and queue control all work on a 114-row queue the phone filled.
+
+**And an id can be enqueued with no local token whatsoever.** Hand-built and sent by
+`AddURIToQueue` with the cdudn `SA_RINCON7943_X_#Svc7943-0-Token`, a Qobuz track was accepted and
+**the player overwrote the placeholder title with the real metadata** - proof it resolved the id
+against the household's own account. Which exposes a gate that is *x2rock's*, not Sonos's:
+`queue-item --service Qobuz <id>` refuses with "no searchable service matching Qobuz", because
+`play-item` and `queue-item` resolve the service from the *linked* list. The enqueue path needs
+only the sid, the `service_type` for the cdudn (both already in `services.json`) and an id. Every
+app-link service the household has registered but we cannot link - Qobuz, YouTube Music, Apple
+Music - could take an id today. Not changed yet; recorded as a real gap.
+
+**The one thing that genuinely fails is a Sonos Favorite**, and the household saw it as an error in
+the app. A favorite is not a URI: it carries an embedded `<r:resMD>` whose inner DIDL needs a
+numeric-prefixed object id, a `parentID`, and a `<desc id="cdudn">` naming the account - as a
+working Deezer favorite shows:
+
+```xml
+<item id="10032028tr-flac%3a2386586085" parentID="00020000search-track:fe!n">
+  <upnp:class>object.item.audioItem.musicTrack.#DEFAULT</upnp:class>
+  <desc id="cdudn">SA_RINCON519_X_#Svc519-0-Token</desc>
+</item>
+```
+
+Qobuz's queue rows carry **none of it** - no cdudn, no prefixed id, no parentID; the account is
+named only by `sn=14` inside the URI query. So Sonos has nothing to build `resMD` from and the
+favorite fails, while every *Qobuz-specific* action in the same menu (add to Qobuz favourites, add
+to a Qobuz playlist, album info, browse artist) works, because those are SMAPI calls forwarded to
+Qobuz using ids Qobuz already knows. Sonos only struggles when it must **author** metadata about
+Qobuz, never when it plays it.
+
+That also removes the usual workaround: "save it as a favorite in the app" is how YouTube Music
+content becomes reachable, and for Qobuz it is unavailable - which promotes the `play-item`-by-id
+gap above from a convenience to the only route.
+
 ### The link poll used to throw away a finished login (fixed 2026-09-21)
 
 Found by being bitten: `wait_for_link` returned on *any* `Err`, so a single six-second socket
@@ -240,6 +328,7 @@ local token buys search and browse, and nothing of playback.
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
 | **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
 | **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
+| **Qobuz** | app-link | ✗ `getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE` | — | ✓ by id, with no local token: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-22, office |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
 | **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
 
@@ -262,6 +351,11 @@ SiriusXM is therefore struck from the list on evidence rather than on price, and
 Music and SoundCloud as an app-link service that refuses the call outright. Worth doing this probe
 before *any* paid signup: it is free, it takes seconds, and it would have wasted a subscription
 here.
+
+**And it is necessary but not sufficient - Qobuz proved that the same day, at the cost of a
+subscription.** See below: Qobuz passes this probe with a real, working login page and then refuses
+every token exchange. The probe answers "will this service talk to us at all", not "can this
+service be linked".
 
 ## What this is
 
