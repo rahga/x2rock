@@ -926,8 +926,9 @@ fn sealed_key_note(fault: &Fault) -> &'static str {
         || lower.contains("api consumer identity")
     {
         return ". This is the service refusing x2rock as a caller, not refusing your account, \
-                and adding the service in the Sonos app does not change it: the key it wants is \
-                sealed in Sonos's own firmware. A household registration still does the half that \
+                and adding the service in the Sonos app does not change it: the key it wants ships \
+                in the open, encrypted to Sonos's own apps and speakers. A household registration \
+                still does the half that \
                 matters - the player resolves and plays this service's content from the queue \
                 (favorites, bookmarks and `play-item` all work); only search and browse from here \
                 are out of reach";

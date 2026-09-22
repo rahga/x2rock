@@ -7519,11 +7519,36 @@ back to the whole document otherwise. No service here puts a `Category` in anoth
 one is free to, and the maps that would - display types, artwork sizes - are about showing
 rather than searching.
 
-**Still unfixed, and untriggered here: Multiple Library Search.** Sonos documents declaring
-the same category id twice, `mappedId` suffixed `:0` and `:1`, to search a global and a
-personal library in one category. `pick_categories` resolves a name with `find` - first match
-only - so one library would be searched and the other silently ignored. No service in this
-catalogue does it.
+**Multiple Library Search.** Sonos documents declaring the same category id twice, `mappedId`
+suffixed `:0` and `:1`, to search a global and a personal library in one category.
+`pick_categories` resolves a name with `find` - first match only - so one library would be
+searched and the other silently ignored.
+
+~~No service in this catalogue does it.~~ **Wrong, corrected 2026-09-22 by fetching all 108
+maps.** Two do, in a notation the spec does not describe: **two separate `<SearchCategories>`
+blocks**, each with its own `stringId`, repeating the canonical ids across them.
+
+| service | catalogue block | library block |
+|---|---|---|
+| Apple Music | `tracks`→`song`, `albums`→`album`, `artists`→`artist`, `playlists`→`playlist`, `all`→`all` | `tracks`→`librarysong`, `albums`→`libraryalbum`, `artists`→`libraryartist`, `playlists`→`libraryplaylist`, `all`→`LibraryAll` |
+| YouTube Music | `tracks`→`SONGS`, `albums`→`ALBUMS`, `artists`→`ARTISTS`, `playlists`→`PLAYLISTS` | `tracks`→`UPLOADED_SONGS`, `albums`→`UPLOADED_ALBUMS`, `artists`→`UPLOADED_ARTISTS`, `playlists`→`LIBRARY_PLAYLISTS` |
+
+Ten categories between them, every one unreachable. **Storytel** has two blocks too
+(`SEARCH_STORYTEL_BOOKSHELF`, `SEARCH_STORYTEL_GLOBAL`) and no repeated id, which shows the
+second block is not itself the problem - the collision is.
+
+Fixed by giving a repeat its `mappedId` as its name, which is the rule `<CustomCategory>`
+already follows: with no canonical word left to use, the service's own word is the honest one.
+So Apple Music's uploads are `-c librarysong` and YouTube Music's are `-c UPLOADED_SONGS`,
+and both now appear under `--all-categories` instead of vanishing. An entry that sends what an
+earlier entry already sends is dropped rather than renamed, so a map that merely repeats itself
+still yields one category.
+
+Honesty about the test: **neither affected service can be searched from this machine** -
+YouTube Music refuses the caller, Apple Music is not linked - so this is verified against their
+real presentation maps and the unit tests built from them, not against a live search. Nine other
+services put a colon inside a `mappedId` (`search:station`, `catalog:tracks:search`); nothing
+here splits on it, and nothing should start.
 
 ## Every searchable service was played, and every one works (2026-09-18)
 
@@ -8131,6 +8156,93 @@ anything on the LAN that can speak UPnP, is shared across every controller in th
 than belonging to the person who linked, and outlives uninstalling x2rock with no way to notice.
 `credentials.json` under the user's own config directory is worse for portability and better for
 every other property that matters.
+
+## YouTube Music, attempted again: where the key actually lives (2026-09-22)
+
+Asked to try linking it once more. It refuses exactly as before - and this time the household
+registration was made **minutes earlier**, from the Sonos Android app, with a podcast playing to the
+Media Room while the attempt ran:
+
+```
+Error: YouTube Music refused getAppLink: HTTP 403.
+```
+
+That is worth having. x2rock's own error message asserts *"adding the service in the Sonos app does
+not change it"*, and until now that sentence was reasoning rather than a measurement. A registration
+under ten minutes old, live and playing, changes nothing about the 403. **The sentence is true and
+now tested.**
+
+### "Sealed in firmware" was the wrong phrase: it is sealed in public
+
+Every service descriptor names a manifest on Sonos's CDN, and it is fetchable by anyone with no
+credential at all:
+
+```
+<Manifest Version="278" Uri="https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432"/>
+```
+
+That document holds the presentation map, the strings file, a reporting endpoint - and this:
+
+```json
+"apiKey": { "cr": "iGSZygAAALoAAQAAAAAAAAEAAAAU…", "zp": "iGSZygAAALoAAQAAAAAAAAEAAAAU…" }
+```
+
+**Two copies of the same secret, encrypted to two different recipients.** Both decode to 266 bytes
+with the same header - magic `886499ca`, a declared length of 186, a 20-byte identifier, a 128-byte
+wrapped key and an 80-byte payload: ordinary hybrid encryption, one blob per audience. `cr` is the
+controller, `zp` the zone player, and the private halves live respectively in Sonos's own apps and
+in the speakers. That is why the desktop controller can call
+`https://music.googleapis.com/v1:sendRequest` and this cannot: not because the key is hidden, but
+because it is enciphered to two parties x2rock is not.
+
+No attempt was made to break either blob and none should be - it is a content key, and the interest
+here is architectural. But the correction matters for what x2rock *says*: the key is not sealed
+inside a speaker's flash where no one can see it. It is published, and addressed to someone else.
+
+### The player will not make the call on x2rock's behalf
+
+The obvious follow-up, since the speaker *does* hold the `zp` key: ask it to do the talking. The
+`MusicServices` UPnP service has exactly three actions, and only one looks like a door:
+
+```
+GetSessionId ( ServiceId:in, Username:in, SessionId:out )
+```
+
+It is not one. **UPnP error 806 for every service id tried** - YouTube Music, Qobuz, Saavn, Deezer,
+both Spotify ids - including services this household has registered and is actively playing. A
+vestige of the session-based SMAPI tier, not a credential the player will lend out. `GetSessionId`
+can be crossed off.
+
+### What a registration does buy, in this household's own bytes
+
+The half that works, captured from the queue row that was playing:
+
+```xml
+<res protocolInfo="sonos.com-http:*:application/x-mpegURL:*" duration="0:24:49">
+  x-sonosapi-hls-static:ALkSOiE_5bsFlwh…?sid=284&flags=24616&sn=15</res>
+<upnp:class>object.item.audioItem.podcast</upnp:class>
+<r:podcast>The Real Eisman Playbook</r:podcast>
+<r:releaseDate>2026-09-18T20:15:24Z</r:releaseDate>
+```
+
+Three things recorded there. The scheme is **`x-sonosapi-hls-static:`** over
+`application/x-mpegURL` - HLS, not the `x-sonos-http:` track form every other service here uses.
+The registration is **`sn=15`**, the office household's third (Saavn 13, Qobuz 14). And the DIDL
+carries `<r:podcast>` and `<r:releaseDate>`, neither of which anything here read.
+
+That last one was a real gap rather than a curiosity: the Control API sends the same fact as
+`track.podcast.name`, an episode has no `artist` and no `album`, and so `now`, its JSON and the
+MPRIS metadata the desktop reads all showed a title and nothing else. Now fixed - `album` falls back
+to the show, and a `podcast` field keeps the distinction - and confirmed against the room that
+prompted it:
+
+```
+PLAYING  Stock Picking in Difficult Times with George Noble | … (The Real Eisman Playbook)
+         · on YouTube Music  6:18 / 50:52
+```
+
+A fourth lock, then, to go with the three already recorded - and the only one that ever moved was
+the one on this side.
 
 ## Open questions
 
