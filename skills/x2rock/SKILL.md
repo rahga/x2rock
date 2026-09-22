@@ -894,8 +894,9 @@ those two apart when telling a user what linking will do.
   household adds Spotify in the Sonos app, after which it plays normally), and Radio Paradise's
   programs do not (it implements no `getMediaURI` at all). Two things to know about a fallback that
   is a file: it **replaces what the room was playing**, queue included, where a station-shaped
-  stream plays alongside the queue; and `now --json` reports `duration_ms: null` for it even though
-  the player knows the duration. **A fallback that "started" is still not a fallback that played**:
+  stream plays alongside the queue; and `now --json` reports its `duration_ms` (read over UPnP, since
+  the Control API carries none for a transport-set URI) while `status --json` leaves it null - the
+  sweep does not make that extra call. **A fallback that "started" is still not a fallback that played**:
   confirm with `now --json` twice and require `position_ms` to have moved. A service container
   (album, playlist) cannot be played whole either way; see "A container cannot be played whole".
 - **Read `link`'s last line for which case you are in.** `The household knows this account as

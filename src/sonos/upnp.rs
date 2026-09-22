@@ -1914,6 +1914,34 @@ impl Upnp {
             .to_owned())
     }
 
+    /// How long the current track runs, when the player knows and the Control
+    /// API does not.
+    ///
+    /// **This exists for one gap.** `now --json` takes its `duration_ms` from
+    /// the Control API's track metadata, which carries none for a URI set
+    /// straight on the transport - the path `stream_url` uses for a finite file
+    /// (see [`Self::play_url_as_track`]). The player knows perfectly well:
+    /// measured 2026-09-22 against a Deezer FLAC playing that way, the metadata
+    /// reported no duration for the whole track while `GetPositionInfo` said
+    /// `0:09:22` throughout. Waiting does not help; it is never filled in.
+    ///
+    /// `None` rather than zero for a live broadcast, which reports `0:00:00`
+    /// and has no duration to report - and for `NOT_IMPLEMENTED`, which some
+    /// players answer with instead.
+    pub async fn track_duration(&self) -> Result<Option<Duration>> {
+        let text = self
+            .soap(
+                Service::AvTransport,
+                "GetPositionInfo",
+                &[("InstanceID", "0")],
+            )
+            .await?;
+        let doc = Document::parse(&text).context("parsing GetPositionInfo response")?;
+        Ok(text_of(&doc, "TrackDuration")
+            .and_then(parse_hms)
+            .filter(|d| !d.is_zero()))
+    }
+
     /// 1-based queue index of the current track; 0 when nothing is loaded.
     pub async fn current_track(&self) -> Result<u32> {
         let text = self

@@ -7,10 +7,11 @@
 use anyhow::Result;
 use serde_json::json;
 
-use super::mmss;
+use super::{mmss, upnp_ip};
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{Groups, MetadataStatus, PlaybackStatus, Repeat, Volume};
+use crate::sonos::upnp::Upnp;
 use crate::{catalogue, hint, netid};
 
 fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
@@ -496,14 +497,48 @@ pub async fn now(player: &Connection, target: &Target, json: bool) -> Result<()>
     let meta = player.metadata(&target.group_id).await?;
     if json {
         let services = catalogue::Catalogue::load();
-        println!(
-            "{}",
-            now_json(&target.name, &status, &meta, Some(&services))
-        );
+        let mut out = now_json(&target.name, &status, &meta, Some(&services));
+        fill_missing_duration(player, target, &mut out).await;
+        println!("{out}");
     } else {
         println!("{}", now_line(&status, &meta));
     }
     Ok(())
+}
+
+/// Ask the player for a duration the Control API did not carry.
+///
+/// **One room, and only when there is a gap to fill.** A URI set straight on
+/// the transport - what `stream_url` does for a finite file - plays with no
+/// duration in the Control API's metadata, while `GetPositionInfo` has it (see
+/// [`Upnp::track_duration`]). So a single extra UPnP round trip buys back a
+/// field that is otherwise silently null.
+///
+/// **`status` deliberately does not do this.** It answers for every room in one
+/// call, and a conditional per-room UPnP request would turn the household
+/// snapshot into N+1 of them - for a field that is null on the live streams
+/// making up most of the rooms that would trigger it. `now` is the single-room
+/// command, and can afford to ask.
+///
+/// Failure is silent: this is an improvement on a null, and a room that will
+/// not answer UPnP should not turn a working `now` into an error.
+async fn fill_missing_duration(player: &Connection, target: &Target, out: &mut serde_json::Value) {
+    if !wants_duration_lookup(out) {
+        return;
+    }
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
+    if let Ok(Some(duration)) = upnp.track_duration().await {
+        out["duration_ms"] = json!(duration.as_millis() as u64);
+    }
+}
+
+/// Whether the extra round trip is worth making. Pure, so the two guards that
+/// keep it from running on every `now` are pinned rather than assumed: a
+/// duration the Control API already gave, and a room with nothing loaded, must
+/// both cost nothing.
+fn wants_duration_lookup(out: &serde_json::Value) -> bool {
+    out["duration_ms"].is_null()
+        && matches!(out["state"].as_str(), Some("PLAYING") | Some("PAUSED"))
 }
 
 #[cfg(test)]
@@ -512,6 +547,22 @@ mod tests {
     use crate::commands::admin::SKILL;
     use crate::sonos::proto::{Group, Player};
     use anyhow::anyhow;
+
+    #[test]
+    fn a_duration_is_only_looked_up_when_one_is_missing_and_something_is_playing() {
+        let asks = |state: &str, duration: serde_json::Value| {
+            wants_duration_lookup(&json!({ "state": state, "duration_ms": duration }))
+        };
+        // The gap this exists for: a file set straight on the transport.
+        assert!(asks("PLAYING", json!(null)));
+        assert!(asks("PAUSED", json!(null)));
+        // Ordinary queue playback already has one - asking again would be a
+        // round trip per `now` for nothing.
+        assert!(!asks("PLAYING", json!(210000)));
+        // And a room with nothing loaded has nothing to report either way.
+        assert!(!asks("IDLE", json!(null)));
+        assert!(!asks("BUFFERING", json!(null)));
+    }
 
     #[test]
     fn the_service_id_comes_off_the_art_url_encoded_or_not() {

@@ -7820,9 +7820,18 @@ Verified on hardware afterwards, Dining Room at volume 0:
 What it costs, stated plainly because `play-url --help` now says it too: **a file replaces what the
 room was playing.** A session plays alongside the queue; the transport does not. That is the worse
 of two behaviours and better than the only alternative, which was silence. One loose end left
-unfixed: `now --json` reports `duration_ms: null` on a file played this way, though the player
-knows the duration perfectly well and `GetPositionInfo` reports it - the LAN API's metadata for a
-transport-set URI simply carries none.
+**fixed 2026-09-22**: `now --json` used to report `duration_ms: null` on a file played this way,
+because the LAN API's metadata for a transport-set URI carries none. Waiting does not help - measured
+against a Deezer FLAC, the metadata reported no duration for the whole track while `GetPositionInfo`
+said `0:09:22` throughout. `now` therefore makes one extra UPnP call, but **only when there is a gap
+to fill**: the Control API gave no duration *and* the room is PLAYING or PAUSED. Ordinary queue
+playback already carries a duration and costs nothing extra (measured: `now --json` still answers in
+0.44s), and a live stream, which genuinely has no duration, correctly stays null.
+
+`status` deliberately does **not** do this. It answers for every room in one call, and a conditional
+per-room UPnP request would turn the household snapshot into N+1 of them - so a file played through
+the fallback shows its duration in `now` and `null` in `status`. That asymmetry is the price of
+keeping the sweep cheap, and is the one place the two JSON shapes disagree.
 
 **Why Amazon might be the odd one out.** The household's reading, on the evidence of what that
 account is: it is a Prime membership, not Amazon Music Unlimited, and a free tier has a reason to
