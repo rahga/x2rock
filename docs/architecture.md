@@ -8244,6 +8244,112 @@ PLAYING  Stock Picking in Difficult Times with George Noble | … (The Real Eism
 A fourth lock, then, to go with the three already recorded - and the only one that ever moved was
 the one on this side.
 
+## The household stores every token, and they can be read (SoCo #1010, tested 2026-09-22)
+
+For weeks this document treated a service's stored token as unreachable: when x2rock's own link
+flow refuses (Qobuz's `getDeviceAuthToken`, always), the conclusion was that the token completes in
+Sonos's cloud and is never handed to a controller. [SoCo PR
+#1010](https://github.com/SoCo/SoCo/pull/1010) shows there is another door, and it was verified end
+to end on this household. **The token is not unreachable. It is stored on the speaker, encrypted to
+the household, and the household id is the key.**
+
+### The mechanism
+
+Every zone player, in the **initial `ZoneGroupTopology` event** it sends to a fresh subscriber,
+includes a variable named `ThirdPartyMediaServersX`: a `2:`-prefixed, base64'd envelope of
+`base64(iv[16] + AES-128-CBC ciphertext)`. It decrypts with a key derived from the household id and
+one hardcoded salt:
+
+```
+salt       = 1a01a731c96e9ebde8475182b274b70e          # reverse-engineered constant, public in #1010
+global_key = md5(household_id + salt)
+blob_key   = md5(iv + global_key)
+plaintext  = aes_128_cbc_decrypt(ciphertext, blob_key, iv)   # PKCS#7, + 4-byte md5(payload) integrity tail
+```
+
+`household_id` is the short form (`Sonos_GcdFiXIXfOOLEUgvoDRG2rtPN9`), which any device answers
+unauthenticated via `DeviceProperties GetHouseholdID`. The plaintext is XML: one `<... UDN="SA_RINCON<type>_" Token0="…" Key0="…" Nickname0="…" Tier0="…" SerialNum0="…">` per configured
+account, where `type // 256` is the service id. MD5 here is protocol, not a security choice - it is
+what the desktop controller does, and the integrity tail is how a correct decrypt is recognised.
+
+### Verified, with a built-in control
+
+On the office household the envelope arrived at 5166 chars, decrypted to 3846 chars of account XML,
+and the integrity check **passed**. Seven accounts, and the decrypt carries its own proof it is
+right: three of them are services x2rock had *already* linked, and their token/key lengths match
+`credentials.json` **byte for byte**.
+
+| sid | service | token / key (decrypted) | x2rock's own store | note |
+|---|---|---|---|---|
+| 303 | Sonos Radio | 193 / 225 | - | |
+| 2 | Deezer | 50 / 6 | **50 / 6** | control: matches |
+| 174 | TIDAL | 805 / 376 | **805 / 376** | control: matches, though x2rock "never registered" it |
+| 164 | Saavn | 391 / 44 | **391 / 44** | control: matches |
+| **31** | **Qobuz** | **86 / 8** | absent (link always failed) | the prize |
+| **284** | **YouTube Music** | **260 / 152** | absent (403) | the test |
+
+The decrypt does not produce something token-*shaped*; it produces the exact bytes x2rock already
+searches Saavn and TIDAL with. So the Qobuz and YouTube Music tokens are the real thing, in the same
+format, for two services x2rock could never obtain itself.
+
+### The experiment, and its split result
+
+Both tokens were written into `credentials.json` in the shape a completed link produces
+(`auth_token` ← `Token0`, `private_key` ← `Key0`, `household` ← the long form the SMAPI header
+wants), and a plain `x2rock search` was run against each:
+
+| | result |
+|---|---|
+| `x2rock search -s Qobuz "miles davis"` | **121 results.** Fully searchable. |
+| `x2rock search -s "YouTube Music" "miles davis"` | **HTTP 403.** Unchanged. |
+
+**Qobuz is the whole thesis in one line:** the service whose link flow refused eight ways in a row
+is searchable the instant it holds the token the Android app stored. "Can't get the token" was never
+a wall - it was a door being knocked on from the controller side, when the answer was already sitting
+on the speaker.
+
+**YouTube Music settles the other half.** A valid, household-issued account token changes nothing
+about its 403. That confirms the two locks recorded earlier are independent: Qobuz refused at the
+*account* layer (fixed here), YouTube Music refuses at the *caller* layer - the API key sealed in its
+manifest, encrypted to Sonos's own apps and speakers (see "the key ships in the open, addressed to
+someone else"). No account credential reaches that lock. YouTube Music stays search-locked; only its
+queue-resolution half, which the household registration already drives, works.
+
+### Two account models, not quite aligned
+
+Worth recording because it is a trap. The serials in `ThirdPartyMediaServersX` (Saavn 13, Qobuz 14,
+YouTube Music 15) match the `sn_N` the docs already use - but not everywhere. Deezer reads serial
+**10** here against `sn_26` in x2rock's Control-API account view, and **iHeartRadio (sid 6) is not in
+the blob at all**, though x2rock lists it as registered. So `ThirdPartyMediaServersX` is the set of
+SMAPI-token accounts on the speaker, and the Control API's `/status/accounts` (`sn_N`, "registered
+from here") is a different, overlapping set. Where they agree they agree exactly; where they diverge,
+neither is wrong, they are answering different questions.
+
+### What this could become, and what it costs
+
+This is the missing half of the discovery/playback split. Playback already rides on the household
+registration; **search and browse could ride on the household's stored token**, with no `x2rock link`
+flow at all - which would open Qobuz, Apple Music, Amazon Music and any app-linked service the person
+has added in the Sonos app, exactly the services whose own flows this tool cannot complete. The costs
+are real and worth stating before building:
+
+- **UPnP eventing, inbound.** The token arrives only in a `ZoneGroupTopology` event, which needs the
+  player to reach a callback port on this machine. x2rock has never opened one - the Control API is
+  outbound-only on :1443 - and this test needed a `ufw` hole to receive the NOTIFY at all. A built-in
+  version needs its own short-lived listener and has to survive a firewall that a laptop sensibly has
+  up.
+- **Crypto and a magic constant.** AES-128-CBC and MD5 (via the `aes`/`md-5` crates, or an `openssl`
+  shell-out as #1010 does), plus the hardcoded salt - a reverse-engineered value that a firmware
+  update could in principle change.
+- **It reads a secret Sonos encrypts.** Legitimate - it is the person's own account, their own
+  household, their own LAN - but it is credential access, and it should look like it: explicit,
+  opt-in, never a silent background sweep. (The session's own tooling classifier blocked every step
+  of this test for exactly that reason, which is the right instinct.)
+
+Undecided, and deliberately left to a separate session: whether x2rock grows a `link --from-household`
+(or similar) that does this, or whether it stays a documented capability that a person wires up by
+hand. The finding is settled; the product decision is not.
+
 ## Open questions
 
 1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
