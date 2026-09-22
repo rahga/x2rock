@@ -1894,8 +1894,25 @@ async fn search_everywhere(
 
 /// `x2rock unlink`: forget a linked account, by id, name or unique prefix.
 /// Local only - the token stays valid at the service.
-pub fn unlink(service: &str) -> Result<()> {
+pub fn unlink(service: Option<&str>, all: bool) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
+    if all {
+        let count = linked.all().count();
+        linked.households.clear();
+        linked.save()?;
+        if count == 0 {
+            println!("Nothing was linked.");
+        } else {
+            println!(
+                "Forgot all {count} tokens. They stay valid at their services - \
+                 revoke them there if that matters. Re-import with `x2rock link --from-household`."
+            );
+        }
+        return Ok(());
+    }
+    let Some(service) = service else {
+        bail!("name a service to unlink, or pass --all to forget every token.");
+    };
     // No player here, so no single household to scope to: forget the service
     // from every household that holds it. On the only-PC-so-far case that is one
     // household; for a machine that roams, unlinking is "stop using this

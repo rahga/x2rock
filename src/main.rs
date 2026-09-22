@@ -324,7 +324,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         // Both of these are about a file on this machine, so neither needs a
         // player and both work with the household unreachable.
-        Command::Unlink { ref service } => return services::unlink(service),
+        Command::Unlink { ref service, all } => {
+            return services::unlink(service.as_deref(), all);
+        }
         Command::Bookmarks {
             ref action,
             ref query,
