@@ -681,7 +681,16 @@ pub enum Command {
     ///
     /// Local only: it does not revoke anything at the service, which is done
     /// from that service's own account page.
-    Unlink { service: String },
+    Unlink {
+        /// Which account to forget, by id, name or unique prefix. Forgotten from
+        /// every household that holds it. Omit only with `--all`.
+        service: Option<String>,
+        /// Forget every stored token, in every household - a clean wipe of what
+        /// this machine holds. The tokens stay valid at their services; this
+        /// clears only the local copies. `link --from-household` re-imports them.
+        #[arg(long, conflicts_with = "service")]
+        all: bool,
+    },
     /// List the accounts this machine holds a token for.
     Accounts {
         /// Also show the account serials this household's favorites and queues

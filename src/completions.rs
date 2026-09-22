@@ -341,7 +341,10 @@ _x2rock_accounts() { _x2rock_list accounts }
         if matches!(label, Some("link")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_services'");
         }
-        if matches!(label, Some("unlink")) && line.starts_with("':service") {
+        // `::service` now, not `:service`: unlink's positional became optional
+        // when `--all` was added, and clap marks an optional positional with the
+        // double colon.
+        if matches!(label, Some("unlink")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_accounts'");
         }
         if matches!(label, Some("bookmark" | "remove" | "pin" | "rename"))
@@ -541,7 +544,11 @@ mod tests {
         assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
-        assert_eq!(s.matches(":service:_x2rock_accounts'").count(), 1);
+        // unlink's positional is optional now (--all), so it renders `::service`
+        // with its help text before the completer.
+        assert_eq!(s.matches(":_x2rock_accounts'").count(), 1);
+        assert!(s.contains("::service -- Which account to forget"));
+        assert!(s.contains(":_x2rock_accounts'"));
         assert!(s.contains("::service -- Which service, by name. Omit to list the ones that can be linked:_x2rock_services'"));
         assert_eq!(
             s.matches(":query:_x2rock_bookmarks'").count(),
