@@ -246,13 +246,29 @@ explained why an approved code looks identical to garbage, the code having been 
 browser step. It is not that: a code minted, left alone, approved, and polled once at 128 seconds
 refuses the same way.
 
-**It did expose a genuine gap, though: x2rock never reads `PollInterval` at all.** The field appears
-in this codebase only inside test fixtures; the live parser drops it, and `wait_for_link` polls
-every `LINK_POLL` (3s) regardless. It has cost nothing so far because every service successfully
-linked here declares `PollInterval="0"` - Deezer, Bandcamp, TIDAL, Saavn - and Qobuz, the only one
-asking for a real interval, refuses for unrelated reasons. But polling a service forty times faster
-than it asked is the kind of thing that earns a rate-limit or a block from some future service, and
-the field is published on every descriptor.
+**And the "gap" it looked like exposing is not one - honouring `PollInterval` would break every
+working link.** x2rock does not read the field (it appears in this codebase only inside test
+fixtures), which looked like an oversight worth fixing until the household's own descriptors were
+read. Every service linked successfully here declares a *non-zero* interval, and every one was
+polled at 3s regardless:
+
+| service | declares | linked at 3s polling? |
+|---|---|---|
+| iHeartRadio | **3600** | yes |
+| Deezer | 300 | yes |
+| Saavn | 120 | yes, in ~75s |
+| TIDAL, Bandcamp | 60 | yes |
+| Mixcloud | 30 | yes |
+
+Honouring those literally would mean polling iHeartRadio **once an hour** and Deezer every five
+minutes - no device link could ever complete. Saavn's took about 75 seconds of polling and would
+not have survived a first poll deferred to 120s.
+
+So `PollInterval` is not a rate limit on the link flow, and no service enforces it as one. It is
+the interval at which a *player* should re-ask a service whether its content has changed - the
+`getLastUpdate` side of SMAPI, which x2rock does not implement and has no session for. Ignoring it
+is correct here, and a change to honour it was written, tested against the real descriptors, and
+reverted before it shipped. Worth the note so nobody else reads the missing parser as a bug.
 
 **What this is.** Qobuz is app-link, and in that tier *Sonos's own cloud* completes the exchange -
 the nested `deviceLink` is a courtesy for controllers with nothing to hand off to. Qobuz populates
