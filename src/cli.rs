@@ -683,13 +683,18 @@ pub enum Command {
     /// from that service's own account page.
     Unlink {
         /// Which account to forget, by id, name or unique prefix. Forgotten from
-        /// every household that holds it. Omit only with `--all`.
+        /// every household that holds it, unless `--household` names one. Omit
+        /// only with `--all`.
         service: Option<String>,
-        /// Forget every stored token, in every household - a clean wipe of what
-        /// this machine holds. The tokens stay valid at their services; this
-        /// clears only the local copies. `link --from-household` re-imports them.
+        /// Forget every stored token - a clean wipe. Across all households, or
+        /// within one when `--household` names it. The tokens stay valid at
+        /// their services; this clears only the local copies, which
+        /// `link --from-household` re-imports.
         #[arg(long, conflicts_with = "service")]
         all: bool,
+        // `--household` (global) narrows either form to one stored household.
+        // Matched against stored ids here, not room names: unlink reaches no
+        // player. See the `Unlink` handler.
     },
     /// List the accounts this machine holds a token for.
     Accounts {
