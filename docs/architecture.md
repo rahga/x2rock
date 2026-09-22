@@ -232,10 +232,27 @@ So each variable was eliminated in turn, and the refusal never moved:
 | **household registered via the Sonos Android app** (`sn_14`) | `NOT_LINKED_FAILURE` |
 | **minted and polled against the right household** | `NOT_LINKED_FAILURE` |
 | browser reports "successfully signed in" | `NOT_LINKED_FAILURE` |
+| **first poll deferred 128s**, honouring the declared `PollInterval="120"` | `NOT_LINKED_FAILURE` |
 
-The last three matter because two of them were real mistakes on this side: the first probes carried
-the *home* household id while the laptop sat on the office household, and the subscription state was
-assumed rather than confirmed. Both were fixed and neither was the cause.
+Three of those were real mistakes on this side rather than tests: the first probes carried the
+*home* household id while the laptop sat on the office household; the subscription state was assumed
+rather than confirmed; and every poll until the last fired ~3s after minting, against a service
+whose descriptor asks for 120. Each was corrected in turn and none was the cause.
+
+**The poll-interval attempt deserves its own note, because the hypothesis was good and wrong.**
+Qobuz's descriptor reads `<Policy Auth="AppLink" PollInterval="120"/>`, and `"Retry link process.."`
+is exactly what a service would say if a premature poll had burnt the code - which would also have
+explained why an approved code looks identical to garbage, the code having been killed before the
+browser step. It is not that: a code minted, left alone, approved, and polled once at 128 seconds
+refuses the same way.
+
+**It did expose a genuine gap, though: x2rock never reads `PollInterval` at all.** The field appears
+in this codebase only inside test fixtures; the live parser drops it, and `wait_for_link` polls
+every `LINK_POLL` (3s) regardless. It has cost nothing so far because every service successfully
+linked here declares `PollInterval="0"` - Deezer, Bandcamp, TIDAL, Saavn - and Qobuz, the only one
+asking for a real interval, refuses for unrelated reasons. But polling a service forty times faster
+than it asked is the kind of thing that earns a rate-limit or a block from some future service, and
+the field is published on every descriptor.
 
 **What this is.** Qobuz is app-link, and in that tier *Sonos's own cloud* completes the exchange -
 the nested `deviceLink` is a courtesy for controllers with nothing to hand off to. Qobuz populates
