@@ -434,27 +434,50 @@ pub async fn categories(service: &Service) -> Result<Vec<Category>> {
 /// document is read otherwise, which is what this always did - no service here
 /// puts a `Category` anywhere else, but a map is free to, and the ones that
 /// would are about display rather than search.
+///
+/// **A map may declare the same canonical id twice**, in two `<SearchCategories>`
+/// blocks - one for the service's catalogue and one for the person's own library.
+/// Apple Music (`song` / `librarysong`) and YouTube Music (`SONGS` /
+/// `UPLOADED_SONGS`) both do, which is the shape Sonos documents as Multiple
+/// Library Search in its `:0`/`:1` notation and these two write out longhand.
+/// Two entries called `tracks` make the second unreachable - every lookup here
+/// is first-match - so a repeat takes its `mappedId` as its name instead. That
+/// is the same rule a `<CustomCategory>` already follows: when there is no
+/// canonical word left to use, the service's own word is the honest one.
 fn search_categories(doc: &Document) -> Vec<Category> {
     let search = doc
         .descendants()
         .find(|n| n.has_tag_name("PresentationMap") && n.attribute("type") == Some("Search"));
     let within = search.unwrap_or(doc.root());
+    let mut names: Vec<String> = Vec::new();
+    let mut sent: Vec<String> = Vec::new();
     within
         .descendants()
         .filter(|n| n.has_tag_name("Category") || n.has_tag_name("CustomCategory"))
-        .filter_map(|n| match n.attribute("id") {
-            // `mappedId` is optional on a standard category: omitted, the
-            // canonical id is what the service answers to.
-            Some(id) => Some(Category {
-                id: id.to_string(),
-                mapped_id: n.attribute("mappedId").unwrap_or(id).to_string(),
-            }),
-            // A custom one is useless without both: no name to ask for, or
-            // nothing to send.
-            None => Some(Category {
-                id: n.attribute("stringId")?.to_string(),
-                mapped_id: n.attribute("mappedId")?.to_string(),
-            }),
+        .filter_map(|n| {
+            let (id, mapped) = match n.attribute("id") {
+                // `mappedId` is optional on a standard category: omitted, the
+                // canonical id is what the service answers to.
+                Some(id) => (id, n.attribute("mappedId").unwrap_or(id)),
+                // A custom one is useless without both: no name to ask for, or
+                // nothing to send.
+                None => (n.attribute("stringId")?, n.attribute("mappedId")?),
+            };
+            // Two entries that send the same thing are one entry, however many
+            // times the map writes it out.
+            let taken = |seen: &[String], s: &str| seen.iter().any(|t| t.eq_ignore_ascii_case(s));
+            if taken(&sent, mapped) {
+                return None;
+            }
+            // The library half of a duplicate pair is named by what it sends,
+            // since the canonical word is already spoken for.
+            let name = if taken(&names, id) { mapped } else { id };
+            names.push(name.to_string());
+            sent.push(mapped.to_string());
+            Some(Category {
+                id: name.to_string(),
+                mapped_id: mapped.to_string(),
+            })
         })
         .collect()
 }
@@ -1577,6 +1600,56 @@ mod tests {
         let got = search_categories(&doc);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "tracks");
+    }
+
+    #[test]
+    fn a_library_category_repeating_a_canonical_id_keeps_its_own_name() {
+        // YouTube Music's real map, trimmed: two SearchCategories blocks, the
+        // second the person's own uploads. Reading these first-match made
+        // everything in the library block unreachable.
+        let doc = Document::parse(
+            r#"<PresentationMap type="Search"><Match>
+                 <SearchCategories stringId="YouTube Music">
+                   <Category id="tracks" mappedId="SONGS"/>
+                   <Category id="albums" mappedId="ALBUMS"/>
+                 </SearchCategories>
+                 <SearchCategories stringId="Library">
+                   <Category id="tracks" mappedId="UPLOADED_SONGS"/>
+                   <Category id="albums" mappedId="UPLOADED_ALBUMS"/>
+                 </SearchCategories>
+               </Match></PresentationMap>"#,
+        )
+        .unwrap();
+        let found = search_categories(&doc);
+        let got: Vec<(&str, &str)> = found
+            .iter()
+            .map(|c| (c.id.as_str(), c.mapped_id.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("tracks", "SONGS"),
+                ("albums", "ALBUMS"),
+                ("UPLOADED_SONGS", "UPLOADED_SONGS"),
+                ("UPLOADED_ALBUMS", "UPLOADED_ALBUMS"),
+            ],
+            "the catalogue keeps the canonical name; the library half is named by what it sends"
+        );
+    }
+
+    #[test]
+    fn the_same_category_declared_twice_over_is_not_given_a_third_name() {
+        // A map that repeats itself exactly says nothing new the second time.
+        let doc = Document::parse(
+            r#"<PresentationMap type="Search"><Match><SearchCategories>
+                 <Category id="tracks" mappedId="STRK"/>
+                 <Category id="tracks" mappedId="STRK"/>
+               </SearchCategories></Match></PresentationMap>"#,
+        )
+        .unwrap();
+        let got = search_categories(&doc);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].mapped_id, "STRK");
     }
 
     #[test]
