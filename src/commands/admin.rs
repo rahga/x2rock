@@ -759,6 +759,97 @@ pub fn completions(
 mod tests {
     use super::*;
 
+    /// Long flags named in the skill that are not x2rock's, and never will be.
+    const NOT_OURS: &[&str] = &[
+        // `journalctl --user -u x2rock.service`, in the daemon section.
+        "--user",
+    ];
+
+    /// Every long flag anywhere in the command tree, nested subcommands
+    /// included - `--duration` lives on `alarms add`, not on `alarms`.
+    fn long_flags(cmd: &clap::Command, out: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                out.push(format!("--{long}"));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            long_flags(sub, out);
+        }
+    }
+
+    /// Every `--flag` mentioned anywhere in a body of text.
+    fn flags_named_in(text: &str) -> Vec<String> {
+        let bytes: Vec<char> = text.chars().collect();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i + 2 < bytes.len() {
+            let starts = bytes[i] == '-'
+                && bytes[i + 1] == '-'
+                && bytes[i + 2].is_ascii_lowercase()
+                && (i == 0 || !matches!(bytes[i - 1], 'a'..='z' | '-'));
+            if !starts {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_lowercase() || bytes[j] == '-') {
+                j += 1;
+            }
+            // A trailing dash is prose ("the `--room` and `--all` flags--") not
+            // part of the name.
+            let name: String = bytes[i..j].iter().collect();
+            found.push(name.trim_end_matches('-').to_string());
+            i = j;
+        }
+        found
+    }
+
+    /// The skill is a hand-written file that ships inside this binary, and
+    /// nothing else ties it to the CLI it documents - which is how
+    /// `--from-household` went eleven commits without being written down, and
+    /// how a renamed flag would go unnoticed until someone read the prose and
+    /// believed it.
+    ///
+    /// This deliberately does **not** check that every flag is documented. The
+    /// skill's job is to carry an agent through the ordinary 80% of the work
+    /// and to pin the JSON shapes; the rest is discoverable from `--help` by
+    /// anything that can read JSON, and a skill that listed every flag would be
+    /// longer, staler and no more useful.
+    ///
+    /// What it checks is the half that cannot be discovered: that every flag
+    /// the skill *names* still exists. A rename or a removal fails here instead
+    /// of quietly teaching an assistant a command that errors.
+    #[test]
+    fn every_flag_the_skill_names_still_exists() {
+        use clap::CommandFactory;
+        let cli = crate::cli::Cli::command();
+        // clap adds these at parse time, so they are absent from the derived
+        // command's own argument list while being perfectly real.
+        let mut flags = vec!["--help".to_string(), "--version".to_string()];
+        long_flags(&cli, &mut flags);
+
+        let missing: Vec<String> = flags_named_in(SKILL)
+            .into_iter()
+            .filter(|f| !flags.contains(f) && !NOT_OURS.contains(&f.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the skill names {} flag(s) the CLI does not have: {}. \
+             Either the flag was renamed or removed and the skill was not \
+             updated, or it belongs in NOT_OURS.",
+            missing.len(),
+            missing.join(", ")
+        );
+
+        // A guard on the guard: if the extraction ever silently stops finding
+        // anything, the assertion above passes for the wrong reason.
+        assert!(
+            flags_named_in(SKILL).len() > 50,
+            "suspiciously few flags found in the skill - has the extraction broken?"
+        );
+    }
+
     /// `--json` is global on `service` for the sake of a bare `x2rock service
     /// --json`, so the rule about where it actually means something lives here
     /// rather than in clap, and is held to it.
