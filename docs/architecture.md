@@ -363,7 +363,7 @@ local token buys search and browse, and nothing of playback.
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
 | **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
 | **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
-| **Qobuz** | app-link | ✗ `getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE` | — | ✓ by id, with no local token: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-22, office |
+| **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
 | **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
 
@@ -8522,16 +8522,17 @@ nowhere near. The office set here cannot be re-imported from home at any price, 
 have meant losing it. Schema 1 is still refused - it predates the household key, so there is nothing
 in it to place.
 
-Schema 2 keyed accounts by household, with exactly one per service: one `link --from-household`
-rebuilds an old flat file keyed correctly. But *no migration* is not *no check*. Serde ignores unknown fields, so a
-schema-1 file parses cheerfully into zero households - it would report every service as unlinked,
-send you back through a link flow, and then be overwritten by the first save that followed, taking
-the only copy of those tokens with it. So the load refuses any schema but its own and names both
-ways out (the re-import, or deleting the file - `unlink --all` loads the store too, so it cannot be
-the escape hatch), and refuses a *newer* schema for the mirror-image reason: whatever this build
-cannot read would not survive the round trip. Which is the discipline the whole feature runs on -
-the household's own stored tokens are the source of truth, and the local store is a cache of them
-for the household you are standing in.
+Schema 1 is refused because it cannot be *placed*, not because refusing is a policy. It predates the
+household key entirely, and serde ignores unknown fields, so its flat `services` map parses
+cheerfully into zero households - which would report every service as unlinked, send someone back
+through a link flow, and then be overwritten by the first save that followed, taking the only copy
+of those tokens with it. The refusal names both ways out: the re-import, or deleting the file, since
+`unlink --all` loads the store too and so cannot be the escape hatch. A schema *newer* than this
+build is refused for the mirror-image reason - whatever it holds that this cannot read would not
+survive the round trip. The accepted range is therefore `2..=3`, and anything outside it stops the
+command rather than being read as empty. Which is the discipline the whole feature runs on: the
+household's own stored tokens are the source of truth, and the local store is a cache of them for
+the household you are standing in.
 
 ## Open questions
 
@@ -8563,6 +8564,13 @@ for the household you are standing in.
 
    So for YouTube Music specifically, **playback is exactly as solved as the household's
    registration is present — only discovery is missing on x2rock's side.**
+
+   **One more door tested and closed, 2026-09-22.** The household's *own* YouTube Music token can
+   now be read off the speaker (see "The household stores every token"), which is the credential the
+   Sonos app itself searches with. It imports cleanly, is the same shape as tokens that work, and
+   SMAPI still answers **403** - in both households. So the block is not the account and never was:
+   it is the caller. This rules out the most promising remaining shortcut, and leaves the OAuth
+   identity probe below as the only live thread rather than one of two.
 
    **The discovery half: the sealed-key path is closed, but discovery is not — re-opened
    2026-09-01.** This entry first said one judgement call stood between here and a search (present
