@@ -195,8 +195,10 @@ lines below record the reversals rather than warn about text that still says oth
   identity probe is answered.** A self-service API key gets `SERVICE_DISABLED` for "YouTube Music API
   (Partner)", method `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and
   cannot be enabled by a self-service project; an OAuth token would be judged against the same
-  project. Every "the one live thread is the OAuth probe" line is superseded. See "TASK: the OAuth
-  identity probe".
+  project. It is a party-to-party API defined for Sonos - `google.music.sonos.v1` - not a public
+  one with a gate, so there is nothing to self-serve and nothing to wait for short of Google
+  publishing a YouTube Music API generally. Every "the one live thread is the OAuth probe" line is
+  superseded. See "TASK: the OAuth identity probe".
 
 ## Open questions
 
@@ -4358,6 +4360,16 @@ truth is one level up - Google has enabled a partner API for Sonos's project(s) 
 can create a project themselves. Nothing self-service reaches it: not a key, not a token, not the
 public YouTube Data API v3, which is a different service and does not carry the YouTube Music
 catalogue. This is the same shape as the sealed key, seen from Google's side instead of Sonos's.
+
+**More precisely: this is a party-to-party API, not a public one with a gate.** The method is
+`google.music.sonos.v1.Sonos.SendRequest` - a service Google defined *for Sonos*, with Sonos's name
+in its namespace - and Google titles it "(Partner)". It exists under an agreement between two
+companies and is provisioned to the party to that agreement. "Enable it on your project" is
+therefore a category error for anyone who is not Sonos, which is why the Library has no card and the
+activation URL leads nowhere: there is nothing to self-serve. The 2026-09-01 tree said a
+`PERMISSION_DENIED` closure would be "revisitable only if Google ever opens the client set"; the
+condition is now "only if Google publishes a YouTube Music API to the general public", which the
+partner namespace makes the wrong thing to wait for. Closed, and closed for a structural reason.
 
 What it leaves standing is what stood before: the household's registration plays the service, and
 `keep`/`bookmark`/favorites reach anything it has ever played. Discovery from this machine is
