@@ -357,19 +357,27 @@ _x2rock_accountnames() { _x2rock_list accountnames }
         {
             label = Some(name);
         }
+        // `--prefer` takes *two* values, and clap_complete labels both with the
+        // first value name - so the account arrives as a second `:SERVICE:`
+        // and the `ACCOUNT` name declared beside it never reaches the script.
+        // The trailing one is the account, and it has to be claimed here,
+        // before the generic swap below takes both for services.
+        let line = if line.contains("--prefer=") {
+            line.replace(":SERVICE:_default'", ":ACCOUNT:_x2rock_accountnames'")
+        } else {
+            line.to_string()
+        };
         let mut line = line
             .replace(":ROOM:_default'", ":ROOM:_x2rock_rooms'")
             .replace(":HOUSEHOLD:_default'", ":HOUSEHOLD:_x2rock_households'")
             .replace(":room:_default'", ":room:_x2rock_rooms'")
             .replace(":rooms:_default'", ":rooms:_x2rock_rooms'")
-            // No trailing quote in the pattern: a flag taking two values
-            // renders as `:SERVICE:_default:SERVICE:_default'`, and matching
-            // only the quoted end would hook the second value and leave the
-            // first - the service itself - completing nothing.
+            // No trailing quote in the pattern: the first of `--prefer`'s two
+            // values renders as `:SERVICE:_default:` with no quote to match,
+            // and would otherwise be left completing nothing.
             .replace(":SERVICE:_default", ":SERVICE:_x2rock_services")
-            // A distinct metavar from SERVICE, so this swap reaches the
-            // account argument of `unlink --account` and `accounts --prefer`
-            // without touching the service beside it.
+            // A distinct metavar from SERVICE, which is what `unlink
+            // --account` declares and gets.
             .replace(":ACCOUNT:_default'", ":ACCOUNT:_x2rock_accountnames'");
         if matches!(label, Some("link")) && line.starts_with("'::service") {
             line = line.replace(":_default'", ":_x2rock_services'");
@@ -584,11 +592,17 @@ mod tests {
         assert!(s.matches(":room:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":rooms:_x2rock_rooms'").count() >= 1);
         assert!(s.matches(":SERVICE:_x2rock_services'").count() >= 4);
-        // `unlink --account` and both values of `accounts --prefer`: the
-        // account argument reaches the account list, and the service beside it
-        // still reaches the service list.
-        assert_eq!(s.matches(":ACCOUNT:_x2rock_accountnames'").count(), 1);
-        assert!(s.contains(":SERVICE:_x2rock_services:SERVICE:_x2rock_services'"));
+        // `unlink --account`, and `accounts --prefer`'s second value: both
+        // reach the account list. Two of them, since clap gives `--prefer` its
+        // own.
+        assert_eq!(s.matches(":ACCOUNT:_x2rock_accountnames'").count(), 2);
+        // And `--prefer`'s first value still reaches the service list, having
+        // arrived with the same metavar as its second.
+        assert!(s.contains(":SERVICE:_x2rock_services:ACCOUNT:_x2rock_accountnames'"));
+        assert!(
+            !s.contains(":SERVICE:_x2rock_services:SERVICE:"),
+            "the account value must not complete as a service"
+        );
         // unlink's positional is optional now (--all), so it renders `::service`
         // with its help text before the completer.
         assert_eq!(s.matches(":_x2rock_accounts'").count(), 1);

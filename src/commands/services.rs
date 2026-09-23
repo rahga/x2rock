@@ -137,6 +137,24 @@ async fn current_household(
     linked.sole_household().unwrap_or_default()
 }
 
+/// Collapse `(name, service id)` pairs to one row per service, keeping the
+/// first name each service is known by.
+///
+/// Sorted by **id** first, not name: `dedup_by` only drops *adjacent*
+/// duplicates, and two accounts of one service do not always carry the same
+/// name - for a service the catalogue cannot name, the import falls back to
+/// each account's own nickname. Sorting by name would then leave them apart and
+/// the service would be reported twice, which is the bug this whole report was
+/// rewritten to avoid.
+fn one_row_per_service<'a>(
+    pairs: impl Iterator<Item = (&'a String, &'a String)>,
+) -> Vec<(&'a String, &'a String)> {
+    let mut rows: Vec<(&String, &String)> = pairs.collect();
+    rows.sort_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)));
+    rows.dedup_by(|a, b| a.1 == b.1);
+    rows
+}
+
 /// How one account is named in the listing: the service, and its nickname too
 /// where the service has more than one account and the nickname is what tells
 /// them apart.
@@ -744,9 +762,7 @@ async fn link_from_household(
     // this household holds two iHeartRadio accounts, and a "Kept" line each
     // said twice what the store would then show once. Counting what is held
     // after the writes is the only report that cannot drift from them.
-    let mut services: Vec<(&String, &String)> = wanted.iter().map(|(n, id, _)| (n, id)).collect();
-    services.sort();
-    services.dedup_by(|a, b| a.1 == b.1);
+    let services = one_row_per_service(wanted.iter().map(|(n, id, _)| (n, id)));
     for (name, id) in services {
         // A multi-word name has to be quoted or the shell splits it, so the hint
         // is copy-pasteable rather than subtly wrong.
@@ -2021,7 +2037,16 @@ pub fn unlink(
         };
         let mut dropped = Vec::new();
         for hh in &households {
-            let key = linked.resolve_account(hh, &id, query)?;
+            // A household that holds this service but no account by that name
+            // is passed over, not fatal: with several households in scope the
+            // nickname naturally names an account in only some of them, and
+            // failing here would abandon the removals already made in the
+            // others - silently, since nothing had been saved yet. An
+            // *ambiguous* name still stops everything, because passing over
+            // that would forget an account nobody named.
+            let Some(key) = linked.try_resolve_account(hh, &id, query)? else {
+                continue;
+            };
             if let Some(gone) = linked.forget_account(hh, &id, &key) {
                 dropped.push(gone.nickname.unwrap_or(key));
             }
@@ -2110,7 +2135,18 @@ async fn set_preference(
     };
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state, household, room).await.ok();
-    let hh = current_household(session.as_ref(), linked).await;
+    let mut hh = current_household(session.as_ref(), linked).await;
+    // With a player reached, `connect` has already honoured `--household` and
+    // the answer above is authoritative. With none - the offline case this
+    // command deliberately supports - `--household` is still the answer, and
+    // is matched against the stored ids the way `unlink` matches it, since
+    // there is no live household to check a room name against. Without this,
+    // naming the household and being told to name the household.
+    if hh.is_empty()
+        && let Some(named) = household
+    {
+        hh = linked.resolve_household(named)?;
+    }
     ensure!(
         !hh.is_empty(),
         "cannot tell which household this is for. Connect to the household's \
@@ -2340,6 +2376,25 @@ pub async fn accounts(
 mod tests {
     use super::*;
     use crate::sonos::smapi::Category;
+
+    #[test]
+    fn two_accounts_of_one_service_are_reported_once_even_when_named_apart() {
+        // The import names each account after the catalogue's service name, but
+        // falls back to the account's own nickname for a service the catalogue
+        // does not carry - so one service id can arrive under two names. Sorting
+        // by name would leave them non-adjacent and `dedup_by` would keep both.
+        let (a, b, c) = (
+            "Account A".to_string(),
+            "Account B".to_string(),
+            "Deezer".to_string(),
+        );
+        let (six, two) = ("6".to_string(), "2".to_string());
+        let rows = one_row_per_service([(&a, &six), (&c, &two), (&b, &six)].into_iter());
+        assert_eq!(rows.len(), 2, "one row per service id, not per account");
+        // Grouped by id, and the first name by sort order stands for the pair.
+        assert_eq!(rows[0], (&c, &two));
+        assert_eq!(rows[1], (&a, &six));
+    }
 
     fn cats(ids: &[&str]) -> Vec<Category> {
         ids.iter()
