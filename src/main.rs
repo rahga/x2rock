@@ -163,7 +163,13 @@ async fn run(cli: Cli) -> Result<()> {
              name the rooms with --room, or use --each for one group's members"
         );
     }
-    if cli.all && !matches!(cli.command, Command::Bookmarks { .. }) {
+    // `--all` is global, so it reaches every subcommand - and two of them give
+    // it their own meaning rather than "every room". `bookmarks --all` includes
+    // daemon-noticed history; `unlink --all` wipes every stored token. Both
+    // must be let past the fan-out guard below, which otherwise refuses them as
+    // "not a per-room command" - which is how `unlink --all` came to error from
+    // the day it shipped, the global flag shadowing the subcommand's own.
+    if cli.all && !commands::all_is_the_commands_own(&cli.command) {
         ensure!(
             cli.room.is_empty(),
             "--all already means every room; drop the -r (an exported X2ROCK_ROOM is set aside on its own)"
