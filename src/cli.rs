@@ -676,6 +676,22 @@ pub enum Command {
         /// `--from-household`.
         #[arg(long, default_value_t = 3401)]
         callback_port: u16,
+        /// Read the household's stored accounts and print them, storing
+        /// nothing. Only with `--from-household`.
+        ///
+        /// Every attribute of every account record, exactly as the decrypted
+        /// payload carries it, with each secret replaced by its byte length,
+        /// which is the one property of a token worth comparing across two
+        /// reads.
+        ///
+        /// For looking at what a household actually holds before importing it,
+        /// and for the research the format still needs: the suffix on
+        /// `Token0`/`SerialNum0` is an index against a `NumAccounts` that has
+        /// so far always read 1, and no amount of reasoning settles what a
+        /// household with two accounts of one service does about it. Only
+        /// looking at one does.
+        #[arg(long, requires = "from_household")]
+        dry_run: bool,
     },
     /// Forget a linked account's stored token.
     ///

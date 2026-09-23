@@ -313,6 +313,7 @@ async fn run(cli: Cli) -> Result<()> {
             from_player,
             from_household,
             callback_port,
+            dry_run,
         } => {
             return services::run_link(
                 cli.ip,
@@ -325,6 +326,7 @@ async fn run(cli: Cli) -> Result<()> {
                 from_player,
                 from_household,
                 callback_port,
+                dry_run,
             )
             .await;
         }
