@@ -23,6 +23,10 @@ the whole surface.
 > app](#what-stays-with-the-sonos-app). A terminal UI and an Omarchy bar widget ride on the daemon
 > as two of its consumers.
 
+![The x2rock bar popup: every room with per-room transport, volume and TV badges](quickshell/x2rock.sonos/preview.png)
+
+*Screenshot from the included Quickshell widget*
+
 ## Quick start
 
 ```sh
@@ -390,8 +394,6 @@ speaker's volume run this same binary as a subprocess, and an error there is the
 Favorites, the queue, alarms and tone stay CLI commands: MPRIS carries none of them.
 
 ### Omarchy bar widget
-
-![The x2rock bar popup: every room with per-room transport, volume and TV badges](quickshell/x2rock.sonos/preview.png)
 
 `quickshell/x2rock.sonos/` is a Quickshell plugin for [Omarchy](https://omarchy.org)'s bar: every
 room in a popup with now-playing, transport, repeat and shuffle, and the piece nothing else on a
