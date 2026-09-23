@@ -736,6 +736,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 |---|---|---|
 | `unknown_room` | the `-r` name is not a room (or is a group's composite label) | `x2rock rooms` (and see `did_you_mean`) |
 | `needs_link` | this machine holds no token for that music service | `x2rock link '<service>'` — **a browser login a person must finish**, so run it only with the user present and say what they will be asked to do; see "Linking a music service" |
+| `link_refused` | `link <service>` asked the service for a token and it refused — `getDeviceAuthToken` answered with a fault, whose own words are in the message (Qobuz always does this). Nothing was stored; exit 1 | null — but if the household already holds that account in the Sonos app, `x2rock link --from-household '<service>'` takes its token instead, and for a service that refuses this is the only route |
 | `no_search_categories` | the service publishes no search categories — it is browse-only, not broken | `x2rock browse -s "<service>"` |
 | `bad_stream_url` | `play-url` was given something that is not an `http`/`https` URL | null (only an http(s) URL can be a stream) |
 | `stream_did_not_play` | the player took the stream URL and the room is still idle 10s later — the stream is almost certainly dead, the room is fine | null (try a different stream) |
