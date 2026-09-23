@@ -134,9 +134,10 @@ lines below record the reversals rather than warn about text that still says oth
 - **The bar widget can be driven from a script through the keyboard** (`summon` plus `wtype`), just
   not the pointer.
 - **A player does serve a `/status` index**, and `/status/accounts` is not an endpoint: any unknown
-  name under `/status` answers with the same empty `ZPSupportInfo`. Neither changes the conclusion
-  that the household's account registry cannot be read over the LAN, re-probed on 97.1-80312. See
-  "How good the serial proxy actually is".
+  name under `/status` answers with the same empty `ZPSupportInfo` (re-probed on 97.1-80312; `/status/zp`
+  and `/status/ifconfig` still serve data). This bullet used to add that the conclusion - the
+  registry cannot be read over the LAN - was unchanged. **That conclusion was overturned on
+  2026-09-22**; see the next entry. See "How good the serial proxy actually is" for the probe.
 - **The Control API *can* switch a soundbar to its TV input.** Early notes say it cannot; that was
   only true of `loadLineIn` (analog line-in). `homeTheater:1 loadHomeTheaterPlayback` does it -
   though x2rock still uses UPnP for the group-preserving handoff. See "Soundbars: the TV input".
@@ -176,6 +177,19 @@ lines below record the reversals rather than warn about text that still says oth
   token is no longer an `"all"`-only feature. Changed 2026-09-18/19.
 - **`remember()` writes once per track because the daemon dedupes per room**, not because `note()`
   does. See "Cheap by construction" under the bookmarks section; corrected 2026-09-19.
+- **The household's account registry *can* be read over the LAN, tokens included.** Every player
+  publishes it encrypted in the initial `ZoneGroupTopology` event as `ThirdPartyMediaServersX`, keyed
+  to the household id. The serial harvest was a proxy for something readable outright, and every
+  "cannot be read" above it is superseded. See "The household stores every token, and they can be
+  read".
+- **The credential store is keyed household → service → account and holds several accounts per
+  service.** "One token per service, per machine" was the 2026-08-31 description and was true of the
+  store then. The protocol finding beneath it stands - a token is not scoped to a household at the
+  service. See "The credential store became household-aware" and "A household can hold two accounts
+  for one service".
+- **YouTube Music's key is sealed *in public*, not "in firmware".** The manifest hands the encrypted
+  envelopes to anyone who asks; what is private is the key that opens them. The framing changed on
+  2026-09-22, the conclusion did not. See "YouTube Music, attempted again".
 
 ## Open questions
 
@@ -808,132 +822,11 @@ This is not a promise to support other desktops. It is a note that the CLI and t
 cost nothing to use elsewhere, and that MPRIS is where most of the widget's value already lives -
 `playerctl`, Waybar, GNOME and KDE all drive it without knowing what Sonos is.
 
-## Porting to Android TV (Kotlin), with no Sonos account
-
-Written 2026-08-29 for the `x2rocktv` line, whose driving requirement is an Android TV app that
-does **not** depend on logging in to a Sonos account.
-
-That requirement is not a preference. **Sonos's OAuth consent page cannot be completed with a
-remote** - reaching and activating its Sign In control wants a mouse and keyboard, which is not
-what a television has. A login flow that assumes a pointer is a login flow an Android TV app cannot
-ship, whatever else is right about it. The usual escape on this platform is a second-screen or
-device-code grant, where the TV shows a short code and the sign-in happens on a phone; that is not
-offered here. So the account path is not merely undesirable on TV, it is closed, and a transport
-that never asks for one is the only way the app exists at all.
-
-**That requirement is already met by the central finding here, and cheaply.** All of the control -
-rooms, transport, volume, grouping, favorites, queue read *and* write, soundbar TV input, what the
-TV is sending - runs over the LAN with no login, no token, no OAuth, no internet. See "Integration
-path". The features that do leave the LAN (music-service search, browse and linking, and the radio
-directory) talk to those services directly and never need a Sonos login either. The only
-capability that needs a Sonos account is control from outside the house.
-So the port does not need a reduced feature set to avoid OAuth; it needs the same feature set over
-a different transport than the cloud API, and that transport is fully documented above.
-
-### Re-derive, do not inherit: discovery
-
-This is the one place where copying a conclusion from this document would be a mistake.
-
-"Discovery" says multicast is not dependable and to use an outbound TCP connect-scan of port 1443.
-That is a true statement about **an Omarchy laptop**, and the cause is named in "The firewall
-problem": `ufw default deny incoming` drops the speakers' unicast SSDP replies because they do not
-match the conntrack entry for the multicast query. It was proven by fixing it with a single
-`ufw allow from <speaker-ip>`, and re-confirmed 2026-08-29 - an M-SEARCH for
-`urn:schemas-upnp-org:device:ZonePlayer:1` from this host still gets **zero replies** while five
-players sit on the same subnet answering everything else instantly.
-
-The network passes multicast fine. The speakers answer. A **stock Android TV device has no host
-firewall doing this**, so SSDP is likely to work there and would replace the subnet scan entirely -
-faster, politer, and without the "looks like reconnaissance on corporate gear" problem. Test it
-first rather than porting the scan.
-
-Two Android caveats if you do: multicast receive needs a `WifiManager.MulticastLock` held across
-the query, and an Android TV box is usually on Ethernet, where that lock is not the relevant
-control - so verify on the transport the device actually uses, not on an emulator. Keep the port
-1443 connect-scan as the documented fallback, because it works through anything.
-
-### Platform translations
-
-| This implementation | Android TV equivalent | Note |
-|---|---|---|
-| `rustls` verifier accepting any cert | custom `X509TrustManager` (the Sonos root is not in the handshake), and the **default** hostname verifier via the `sonos-<MAC>.local` name | the cert is CA-signed (Sonos root), SAN `sonos-<MAC>.local` with no IP — so only the trust anchor needs supplying, not the hostname check; connect by the `.local` name (derivable from the RINCON id) with a name→IP mapping. x2rocktv verified this on device 2026-09-07 |
-| `tokio-tungstenite` on `wss://ip:1443` | OkHttp `WebSocket` | `Sec-WebSocket-Protocol: v1.api.smartspeaker.audio` and **no `Origin` header**; confirm the client library lets you control both before building on it |
-| MPRIS2 over D-Bus, one bus name per group | `MediaSession` per room, or one session plus a room switcher | this is the biggest design decision in the port and has no obvious right answer |
-| `x2rock:*` MPRIS metadata keys | `MediaMetadata` / `MediaSession` extras | same idea: the standard has no notion of "which rooms are grouped", "is this on TV", or "what channels is the TV sending", so they ride as custom keys |
-| systemd user unit | foreground service | Android TV rarely sleeps, but a background service will still be killed |
-| logind `PrepareForSleep`, NetworkManager `StateChanged` | `ConnectivityManager.NetworkCallback` | the *reasons* in "Connection lifecycle" all still apply; only the signal changes |
-| `$XDG_STATE_HOME/x2rock/` keyed by network | app-private storage keyed the same way | "Identify the network before deciding what to try" is not Linux-specific |
-| `/proc/net/arp` + interface netmask | `ConnectivityManager` `LinkProperties` | only needed if you keep the connect-scan |
-
-### Android traps this codebase never had to face
-
-- **UPnP is plain HTTP, and Android blocks cleartext by default.** Everything in "Queue mutation
-  over UPnP" runs over `http://<player>:1400` with no TLS. Since API 28 that is refused unless a
-  network security config permits it. Get this wrong and the whole queue layer fails - possibly
-  quietly, which is the worst kind. It is the first thing to prove on device, before writing any
-  SOAP.
-- **Two different trust relaxations, for two different ports.** 1443's cert is CA-signed (Sonos
-  root) but the root is not sent in the handshake, so it needs *either* the Sonos root supplied as
-  a trust anchor - after which it validates normally by the `sonos-<MAC>.local` name - *or*
-  verification relaxed; 1400 needs cleartext allowed. They are configured in different places and
-  neither implies the other.
-- **Scope both narrowly.** These are local speakers on a home LAN; a blanket "trust everything"
-  config is a real weakness in a shipped app, not a shortcut.
-- **Chunked responses.** The players answer UPnP with `Transfer-Encoding: chunked` and
-  `Connection: close`. A normal HTTP client handles this; this codebase hand-rolls it only because
-  its client is deliberately minimal. Do not port `dechunk`.
-
-### What does not transfer at all
-
-D-Bus and MPRIS, systemd, XDG paths, `/proc`, logind, NetworkManager, Quickshell and every QML
-section, and the Rust crate choices. The Quickshell notes are still worth skimming for *what a
-control surface needs to show* - per-room volume, group membership, the TV format at a glance -
-which was learned from use rather than from the protocol.
-
-### What the Rust version learned that the Kotlin one predates
-
-Beyond the protocol sections, four hard-won bugs are worth carrying over as design rules, all
-written up above: one connection **per coordinator** rather than one per household (routing group
-commands down an arbitrary socket published one room out of five and then retried forever);
-`playerVolume:1` addressed to the player itself and never the coordinator; topology compared
-properly before republishing, or every snapshot flaps every bus name; and a member's socket treated
-as best-effort so one flaky portable cannot tear down the household.
-
-## Target platform: Omarchy 4.0 "Quattro"
-
-Confirmed from Omarchy's own repo (`basecamp/omarchy`, `quattro` branch) as of this writing:
-
-- Quattro (released 2026-08-14) rewrote Omarchy's entire shell — bar, launcher, notifications,
-  OSDs, lock screen — into one long-running **Quickshell** process with a plugin architecture.
-  This fully replaced the prior Waybar + Hyprland-config-script stack. **Do not design for
-  pre-Quattro Omarchy or generic Waybar-first integration** — Quattro is the only target.
-- Quickshell bar plugins support three integration shapes (source:
-  `shell/plugins/bar/README.md` in that repo):
-  1. **Command polling** — a plugin config declares `{"type":"command","exec":"...","interval":N}`;
-     output is plain text or Waybar-style JSON (`text`/`tooltip`/`class`). This is the lowest-effort
-     integration path and probably where `x2rock`'s CLI binary plugs in first.
-  2. **Native QML widgets** — get `bar`/`moduleName`/`settings` injected, can fire-and-forget shell
-     commands via `bar.run(...)`. More work, richer UI (needed for anything MPRIS can't express).
-  3. **Direct D-Bus/MPRIS subscription** — for widgets that want live now-playing data without
-     polling a command.
-- **MPRIS is still the built-in, first-class mechanism.** Omarchy ships a built-in (off-by-default)
-  `omarchy.media` plugin that reads MPRIS now-playing data directly (scrolling track/artist, cover
-  art, click/scroll transport controls) — see `manual/05-the-top-bar.md`. Enabled via
-  `omarchy plugin enable omarchy.media --section center`; config lives in
-  `~/.config/omarchy/shell.json` under `bar`.
-- **Practical implication**: publish a standard MPRIS2 interface and Omarchy's own `omarchy.media`
-  widget picks it up with zero custom code, same as Waybar's `mpris` module did before. A bespoke
-  Quickshell widget is only needed for things MPRIS genuinely can't express: multi-room grouping,
-  per-room/per-player volume, favorites. As built, that widget is a **native QML** plugin: it reads
-  x2rock's MPRIS players directly (`Quickshell.Services.Mpris`, with custom `x2rock:*` metadata
-  keys) and shells out to the `x2rock` binary, usually with `--json`, for anything MPRIS cannot
-  carry. It does not poll. Quickshell widgets are QML/JS; there is no Rust-native integration point.
-- No official upstream Quickshell documentation was directly verified — everything above comes
-  through Omarchy's own docs of how it uses Quickshell. If Quickshell has more integration surface
-  than Omarchy exposes, that is still undiscovered.
-- Later, also support Waybar per the original ask — since MPRIS is the shared mechanism, this
-  should come close to free once the MPRIS server exists; Waybar's `mpris` module needs no code on
-  x2rock's side at all.
+The platform notes that used to follow this section - the Omarchy 4.0 "Quattro" plugin
+architecture, and the Quickshell and QML facts learned wiring the volume sliders and the favorites
+picker - moved to the widget's own README, `quickshell/x2rock.sonos/README.md`, under "Facts
+learned building this" (2026-09-23). They are facts about the one component that has a desktop
+dependency, and belong with it.
 
 ## Search, as built (2026-08-31)
 
@@ -2265,6 +2158,11 @@ Two questions had been open behind every `match` probe: whether a service token 
 service or to the household, and whether the household's registration is per-service or once. Both
 are now answered, and neither was answered by `match`, which had not succeeded at the time.
 
+> **The registry is now read outright, tokens and all** - from the encrypted `ThirdPartyMediaServersX`
+> variable, see "The household stores every token, and they can be read (SoCo #1010)". What follows is
+> the 2026-08-31 reading through the serials that saved content carries, kept because its findings
+> about token scope and per-account registration still stand.
+
 ### Token scope is per service. Settled by a control, not by a guess
 
 The test that mattered was not "link a service and see if it searches", which passes under either
@@ -2282,6 +2180,12 @@ One variable moved and Mixcloud did not follow it. `credentials.json` holds exac
 `6`, with its own token — so **one token per service, per machine**, as `credentials.rs` already
 modelled. The `household` field on an `Account` describes the household a token was minted against;
 it does not scope the token.
+
+> **Store shape superseded 2026-09-22.** The protocol finding stands - the service does not scope a
+> token to a household - but the store no longer looks like this. It is keyed household → service →
+> account and holds several accounts per service, because a machine that moves between households
+> holds a different account in each. See "The credential store became household-aware" and "A
+> household can hold two accounts for one service".
 
 The stronger evidence is that the iHeartRadio search returned 51 results while its `account_id` was
 `none`, `match` having failed. Search worked against a token the household had never registered. If
@@ -3494,52 +3398,6 @@ had already cleared by then, and `qs ipc call shell call omarchy.media close ""`
 `unknown`. Worth a second look at home, where several players may make the trigger obvious.
 
 
-## Quickshell facts learned wiring the per-room volume sliders (2026-08-29)
-
-- **An `ai` metadata value does not reach QML as an array.** MPRIS metadata
-  carrying a D-Bus array of *strings* (`as`) arrives as an ordinary JS array;
-  the same shape as *ints* (`ai`) arrives with no length and no indexing. Member
-  volumes were published as `ai` and every slider silently read zero, while the
-  volumes themselves were being set correctly the whole time. Publish numbers as
-  decimal strings and parse them on the far side.
-- **Assigning the same object reference back is not a change.** A `property var`
-  holding a JS object, mutated in place and reassigned, notifies nothing - the
-  bindings that read it never re-run. Build a fresh object instead. This is what
-  made an optimistic "hold the value the user just asked for" fix appear to do
-  nothing at all.
-- **`PanelSlider` returns its handle to the bound value on release**
-  (`liveValue = value`). That is invisible for a slider bound to MPRIS, which
-  updates in the same frame, and very visible for one whose value has to go out
-  through the CLI and come back as an event. Anything in the second category
-  needs to hold the requested value until the device confirms it.
-- **A row that contains a control must not also be a click target.** The member
-  rows were MouseAreas whose click removed the room from the group, with a
-  volume slider inside them. Give the action its own small target and let the
-  control have the rest.
-- Debugging any of this from the outside is not possible: the fix was
-  `console.log` inside the QML, read back from
-  `/run/user/1000/quickshell/by-id/*/log.qslog`, which showed `members` arriving
-  as an array and `memberVolumes` as `""` in the same line.
-
-## Quickshell facts learned building the favorites picker (2026-08-29)
-
-- **A bar popup cannot take keyboard focus.** Omarchy's `PopupCard` takes a `HyprlandFocusGrab`,
-  which is for click-away dismissal only; it never sets `WlrLayershell.keyboardFocus`. Nothing in a
-  bar popup can be typed into, which is why no bar widget has a search box. `Ui/KeyboardPanel`
-  is the surface that does ask for keyboard focus, and it is what the menu, clipboard and emoji
-  pickers use. So the picker is a second surface, and opening it closes the room list. (The room
-  list itself later moved onto a `KeyboardPanel` too, which is what made it keyboard-driven; the
-  widget now uses no `PopupCard` at all.)
-- **Two surfaces must not share an `owner`.** Both `PopupCard` and `KeyboardPanel` dismiss by
-  calling `owner.close()`, so one owner means each closes the other. The picker gets its own.
-- **`Ui/PanelKeyCatcher` cannot carry a text filter.** It claims `h`/`j`/`k`/`l` as arrows, `x` as
-  delete and space as activate *before* emitting `textKey`, so a typed name loses letters. Its own
-  documentation points at the alternative - a real `TextField` with focus - which is what this uses,
-  with arrows and Enter handled on the field itself.
-- **Quickshell's Mpris has no `Playlists` interface**, only a `Playlist` loop-state value. Favorites
-  could not have reached the widget over MPRIS even if the daemon published them, which is why it
-  shells out to the CLI instead.
-
 ## Soundbars: the TV input, and what is arriving on it (verified 2026-08-29)
 
 - **`capabilities` already says which rooms are soundbars.** `getGroups` returns
@@ -4023,75 +3881,22 @@ rediscover these the hard way:
     `$XDG_RUNTIME_DIR/x2rock` still belong to the Kotlin CLI. Only the runtime dir could collide,
     and only if the Rust tool ever gains OAuth.
 
+The porting guidance that ran the other way - what an Android TV app needs from the LAN transport,
+and why the OAuth consent page cannot be completed with a remote - moved to x2rocktv's own
+`docs/porting-from-x2rock.md` on 2026-09-23. The finding it rests on stays here: see
+"Integration path".
+
 ## Rust ecosystem notes
 
-- **WebSocket client**: `tokio-tungstenite`, with a `rustls` certificate verifier that accepts the
-  speaker's cert (leaf-only chain, CA-signed by the Sonos root but with the root not sent - see
-  "Certificates are validated here" for the real shape). This is the main new dependency the
-  revised design needs.
-- **MPRIS server**: use **`mpris-server`** (built on `zbus`) — the modern, maintained crate for
-  *exposing* an MPRIS interface (server-side, which is what x2rock needs). Don't use
-  `mpris`/`mpris-player` — those are client-side and/or unmaintained.
-- **Sonos client**: still write from scratch. Crates on crates.io (`sonos-api`, `sonor`,
-  `sonos-sdk`, `wez-sonos`, `sonos.rs`) all target local UPnP/SOAP. That is now *partially*
-  relevant — they may be worth reading for the `ContentDirectory` browse path — but none of them
-  speak the LAN WebSocket Control API, which is the spine of this design.
-  - `ronor` (github.com/mlang/ronor) targets the cloud Control API with OAuth. Since the local API
-    uses the same namespaces and command shapes, it remains useful prior art for endpoint shapes.
-    Maintenance status unconfirmed — reference, not a dependency.
-- **HTTP client**: hand-rolled and minimal (`sonos/http.rs`), plain HTTP to a player and TLS to a
-  service, on the `tokio-rustls` already in the tree, plus `miniz_oxide` for gunzip alone.
-  **Sonos OAuth**: not needed and not built.
-- A ~60-line dependency-free Python reference implementation of the LAN WebSocket client (handshake,
-  framing, command/subscribe) was written during this investigation and is a direct model for the
-  Rust port.
+Two dependency decisions that `Cargo.toml` records the outcome of but not the reason for:
 
-## Where this stopped (2026-08-31, end of session)
-
-A handoff note, written because the next session is on a different account and inherits nothing but
-this repository.
-
-### Settled today, and where it is written up
-
-- **A service token is scoped to the service**, per machine. `credentials.json` holds one entry per
-  service id. Search never consults the household — iHeartRadio returned 51 results while its
-  `account_id` was `none`.
-- **Household registration is per account**, and one service may hold several: `sid 6` held `sn_5`
-  and `sn_15` simultaneously, TuneIn now holds `sn_14` and `sn_19`.
-- **Serials are `highest currently-live serial + 1`** - settled 2026-09-01 after three sessions of
-  argument. **"Not recycled" was right**: `sn_6` was freed by removing Virgin Radio UK and the next
-  account, Audible, took `sn_8` rather than filling it. **"Monotonic" was wrong**: the counter is
-  derived, not persisted, so it *falls* when the highest accounts are removed - which is the whole
-  of the `sn_20` (08-31) to `sn_5` (09-01) drop that looked like recycling. A serial is unique
-  among live registrations and means nothing across time. Read an account live rather than
-  inferring it from a favorite, which may be a fossil. See "Household registration is per
-  *account*".
-- **The two playback paths run as different identities.** `loadStreamUrl` uses this machine's token,
-  the enqueue path lets the player substitute the household default. Content type selects the
-  account, which is nobody's intent.
-- **`match` had never succeeded that day**, and was beside the point: the Sonos app performed four
-  registrations in seconds each. (It succeeded once later, for Spotify on 2026-09-10; see "The real
-  fix: the enqueue URI itself was wrong".)
-
-All of it is in "The household's account registry, read at last" and the sections after it. The
-negative result there, that no listing verb exists, was checked against Sonos's published reference
-by the next session and stands; see "The published reference confirms it".
-
-### Also unfinished
-
-- **Account selection when a service has several is unresolved.** Both observed cases used the
-  higher serial, but that is confounded with "the one most recently set up". Separating them needs a
-  household whose *older* account is active.
-- **`RemoveAccount` is declared but not demonstrably functional**, and 806 cannot distinguish a bad
-  `AccountID` from a dead action. Removal was done from the phone instead.
-
-### Live state changed on the household today
-
-So the next session is not confused by it: TIDAL was added and then removed (`sn_18`, gone), Mixcloud
-was added and left in place (`sn_17`), TuneIn was added (`sn_19`), Kitchen's queue was cleared of 25
-TIDAL tracks that were unplayable anyway, and one podcast episode was enqueued to Living Room and
-removed again. The iHeartRadio token this machine holds was linked today and is the same account as
-the earlier session's (`13012528881`).
+- **The Sonos client is written from scratch.** Every Sonos crate on crates.io when this was surveyed
+  (`sonos-api`, `sonor`, `sonos-sdk`, `wez-sonos`, `sonos.rs`) targets local UPnP/SOAP; none speaks
+  the LAN WebSocket Control API that is the spine of this design. `ronor` (github.com/mlang/ronor)
+  targets the *cloud* Control API with OAuth, and since the local transport shares its namespaces
+  and command shapes it remains useful prior art for endpoint shapes - reference, not a dependency.
+- **`mpris-server`** (on `zbus`) for MPRIS, because it *exposes* an interface, which is what a daemon
+  publishing players needs; `mpris` and `mpris-player` are client-side, for controlling one.
 
 ## The picker discovers linked services (decided 2026-08-31)
 
@@ -8725,55 +8530,23 @@ record the `rate` work was built from.
 
 ## Resolved since the original draft
 
-- ~~Should a bookmark store the account serial?~~ — **closed 2026-08-31: the question dissolved.**
-  The player ignores the serial on the enqueue path and resolves the household's current
-  registration for the sid, so storing one can neither pin nor break anything — proven when the
-  same bookmark played as `sn_16`'s successor `sn_20` after a remove-and-re-add of the same
-  YouTube Premium subscription. Provenance at most. See "Re-added the same day: `sn_20`, and the
-  bookmark resurrected".
-
-- ~~A Spotify track added to the queue cannot be seeked to or played, even under the household's
-  own legitimate registration~~ — **closed 2026-09-10: `bookmarks::service_uri()` was enqueuing
-  every service under one hardcoded URI scheme, `x-sonosapi-hls-static`, which is genuinely what
-  the player writes for YouTube Music and Mixcloud but not for Spotify, whose real scheme
-  (`x-sonos-spotify`) was sitting unread in an officially-added queue item's own `art_url` the whole
-  time. Fixed with a two-line per-service scheme lookup and verified three ways across three rooms —
-  `keep`/`bookmark` replay, a fresh direct search-and-play, and the original failing case rerun.
-  See "The real fix: the enqueue URI itself was wrong" above.
-
-- ~~Should x2rock present Sonos's API key to unlock YouTube Music search?~~ — **closed
-  2026-09-01: the question dissolved, like the bookmark-serial one before it.** There is no key in
-  the manifest to present — only two encrypted envelopes whose private keys live in the controller
-  app and the player firmware, so the act was never "send a public string" and always "extract a
-  key from a binary". Recorded with the byte layout, entropy controls against random baselines, a
-  reproduction script, and the objections it pre-answers, in "The YouTube Music `apiKey` is sealed,
-  and that closes the question". Two older claims died with it: the manifest does not carry a
-  usable key, and app-link does not require a mobile hand-off — the Sonos PC controller does it too.
-
-- ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ —
-  **decided 2026-08-31: discover what was linked, hand-configure what was not.** Linking is itself
-  configuration, so the picker reads `x2rock accounts --json` on open; the anonymous services stay
-  behind `searchService`/`browseServices`, and an explicit `browseServices` overrides everything.
-  See "The picker discovers linked services (decided 2026-08-31)".
-
-- ~~Music search is out of scope~~ — **decided 2026-08-29, reversed 2026-08-31.** The 08-29 entry
-  gave two reasons. The first, that search "needs SMAPI, with per-service endpoints and
-  authentication", was wrong: it read *service* authentication as a *Sonos account*, when a service
-  is linked to the household and the LAN gives up the endpoint for free. The second — that
-  `AddURIToQueue` refuses service-backed containers and stations, so a search might have had
-  nothing it could enqueue — **is refuted, and this summary said otherwise long after the body of
-  the document had settled it.** A service *track* enqueues and plays: first from a phone-started
-  album (see "A service *track* can be enqueued"), then from a search hit, and finally as the
-  mechanism `play-item` now uses for all on-demand content. Only containers and stations are
-  refused, which is the distinction `upnp:class` draws.
-  The entry is kept rather than deleted because the way it went wrong is worth remembering:
-  a single unexamined word in a rationale closed a feature for two days. See "Music service search,
-  reopened (verified 2026-08-31)".
-
-- ~~Is a bespoke Quickshell widget worth building in v1?~~ — built, 2026-08-28/29, and it went
-  further than the question imagined: per-room volume, transport, favorites with a type-to-filter
-  picker, grouping and party mode, and cover art. What the question got wrong was calling it a
-  stretch goal; the widget is where a household that is not the author actually uses this.
+- ~~Should a bookmark store the account serial?~~ - **closed 2026-08-31: dissolved.** The enqueue path
+  sends none and the player resolves the household's current registration, so a stored serial can
+  neither pin nor break anything. See "Re-added the same day: `sn_20`, and the bookmark resurrected".
+- ~~A Spotify track added to the queue cannot be played, even under the household's own
+  registration~~ - **closed 2026-09-10.** The enqueue URI scheme was hardcoded to one service's;
+  it is looked up per service now. See "The real fix: the enqueue URI itself was wrong".
+- ~~Should x2rock present Sonos's API key to unlock YouTube Music search?~~ - **closed 2026-09-01:
+  dissolved.** There is no key to present, only encrypted envelopes whose keys live in the apps.
+  See "The YouTube Music `apiKey` is sealed".
+- ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ - **decided
+  2026-08-31: discover what was linked, hand-configure what was not.** See "The picker discovers
+  linked services".
+- ~~Music search is out of scope~~ - **decided 2026-08-29, reversed 2026-08-31.** The rationale read
+  *service* authentication as a *Sonos account*; one unexamined word closed a feature for two days,
+  which is why the entry stays. See "Music service search, reopened".
+- ~~Is a bespoke Quickshell widget worth building in v1?~~ - **built 2026-08-28/29**, and went further
+  than the question imagined. See the widget README.
 
 - ~~Cloud Control API is the only integration path~~ — false; the LAN WebSocket API is better.
 - ~~Build WebSocket from day one, or ship polling v1 first?~~ — settled: push from day one, and it
