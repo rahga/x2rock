@@ -122,15 +122,31 @@ fn use_refreshed_token(
 ///
 /// The reached player's household when one is in hand; otherwise, for a command
 /// running against a cached catalogue with no player (an offline browse), the
-/// store's sole household if it holds exactly one. Empty when it cannot be told,
-/// in which case every service resolves as unlinked: anonymous ones still
-/// browse, and that is the honest answer when the account cannot be located.
+/// household named with `--household`, or the store's sole household if it holds
+/// exactly one. Empty when it cannot be told, in which case every service resolves
+/// as unlinked: anonymous ones still browse, and that is the honest answer when the
+/// account cannot be located.
+///
+/// **Advisory, never fatal.** An unusable `--household` degrades to "not known"
+/// rather than failing the command, because the flag is not always a claim about
+/// this command: it is documented as ignored on a single-household network, it is
+/// env-settable as `X2ROCK_HOUSEHOLD` and so is often simply *set*, and it accepts
+/// a **room name**, which no stored household id will ever match. Failing a browse
+/// because a room name could not be matched against a store would break the one
+/// case this fallback exists to serve. A caller that genuinely cannot proceed
+/// without a household resolves it strictly itself - see [`set_preference`].
 async fn current_household(
     session: Option<&session::Session>,
     linked: &credentials::Credentials,
+    named_household: Option<&str>,
 ) -> String {
     if let Some(session) = session
         && let Ok(household) = session.connection.household_id().await
+    {
+        return household;
+    }
+    if let Some(named) = named_household
+        && let Ok(household) = linked.resolve_household(named)
     {
         return household;
     }
@@ -940,7 +956,7 @@ pub async fn run_browse(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let household = current_household(reached.as_ref().ok(), &linked).await;
+    let household = current_household(reached.as_ref().ok(), &linked, household).await;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
     // published search category on top of that. This comment used to say the
@@ -1142,7 +1158,7 @@ pub async fn run_search(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let household = current_household(reached.as_ref().ok(), &linked).await;
+    let household = current_household(reached.as_ref().ok(), &linked, household).await;
 
     // A term with no service is the merged search. Checked before the listing
     // below, which is what a bare term used to fall into: it printed the
@@ -2135,13 +2151,12 @@ async fn set_preference(
     };
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state, household, room).await.ok();
-    let mut hh = current_household(session.as_ref(), linked).await;
-    // With a player reached, `connect` has already honoured `--household` and
-    // the answer above is authoritative. With none - the offline case this
-    // command deliberately supports - `--household` is still the answer, and
-    // is matched against the stored ids the way `unlink` matches it, since
-    // there is no live household to check a room name against. Without this,
-    // naming the household and being told to name the household.
+    let mut hh = current_household(session.as_ref(), linked, household).await;
+    // Strict where the advisory resolution above is not: this command writes to
+    // one household's slot and has nothing sensible to do without knowing which,
+    // so a `--household` that matched nothing is named as such rather than
+    // falling through to "cannot tell which household", which would be the one
+    // message guaranteed to be unhelpful to someone who just named it.
     if hh.is_empty()
         && let Some(named) = household
     {
@@ -2202,12 +2217,33 @@ pub async fn accounts(
         return set_preference(ip, household, room, &mut linked, pair).await;
     }
     let linked = linked;
+    // Which household to list, when one was named. Matched against the *stored*
+    // ids, as `unlink` matches it, since this command reaches no player of its
+    // own. With `--content` it does reach one, and a room name - a documented
+    // form of this flag - only resolves there, so the failure is deferred and
+    // the session's household stands in below.
+    let mut scope = match household {
+        None => None,
+        Some(named) => match linked.resolve_household(named) {
+            Ok(hh) => Some(hh),
+            Err(e) if !content => return Err(e),
+            Err(_) => None,
+        },
+    };
 
     // Only `--content` reaches the network, so the default keeps the
     // promise made above: this command reads a file on this machine.
     let serials = if content {
         let mut state = State::load()?;
         let session = session::connect(ip, &mut state, household, room).await?;
+        // A `--household` that named a room rather than a stored id resolves
+        // here, where a player can say which household that room is in.
+        if scope.is_none()
+            && household.is_some()
+            && let Ok(reached) = session.connection.household_id().await
+        {
+            scope = Some(reached);
+        }
         // Favorites are household-wide, so any player answers for the
         // half that matters, and demanding --room to read them would be
         // a question with no bearing on the answer. A room is honoured
@@ -2246,6 +2282,7 @@ pub async fn accounts(
         // is why `--content` wraps and the default never does.
         let rows: Vec<_> = linked
             .all()
+            .filter(|(hh, _, _, _)| scope.as_deref().is_none_or(|target| *hh == target))
             .map(|(hh, id, key, a)| {
                 // Never the token or the key: this is printed to a
                 // terminal, into a widget's stdout, and into whatever
@@ -2282,64 +2319,72 @@ pub async fn accounts(
     } else {
         if linked.is_empty() {
             println!("No accounts linked. Run `x2rock link` to see what can be.");
-        } else {
-            // Grouped by household, with a header only when there is more than
-            // one - the roaming case - so the ordinary single-household listing
-            // reads exactly as it did.
-            let multi = linked.households.len() > 1;
-            for (hh, services) in &linked.households {
-                if multi {
-                    println!("Household {hh}:");
-                }
-                // The marker column exists for this household only when some
-                // service in it has a choice to make, and the name column is
-                // sized to what it actually has to hold - a nickname pushes a
-                // row well past the width a bare service name needs, and a
-                // fixed width either truncates it or pads every other line to
-                // suit the longest thing that might one day appear.
-                let any_choice = services.values().any(|h| h.accounts.len() > 1);
-                let width = services
-                    .values()
-                    .flat_map(|held| {
-                        let several = held.accounts.len() > 1;
-                        held.accounts
-                            .values()
-                            .map(move |a| account_label(a, several).chars().count())
-                    })
-                    .max()
-                    .unwrap_or(20)
-                    .max(20);
-                for (id, held) in services {
+            return Ok(());
+        }
+        let households: Vec<_> = match &scope {
+            Some(target) => linked
+                .households
+                .get_key_value(target)
+                .into_iter()
+                .collect(),
+            None => linked.households.iter().collect(),
+        };
+        // Grouped by household, with a header only when there is more than
+        // one - the roaming case - so the ordinary single-household listing
+        // reads exactly as it did.
+        let multi = scope.is_none() && linked.households.len() > 1;
+        for (hh, services) in households {
+            if multi {
+                println!("Household {hh}:");
+            }
+            // The marker column exists for this household only when some
+            // service in it has a choice to make, and the name column is
+            // sized to what it actually has to hold - a nickname pushes a
+            // row well past the width a bare service name needs, and a
+            // fixed width either truncates it or pads every other line to
+            // suit the longest thing that might one day appear.
+            let any_choice = services.values().any(|h| h.accounts.len() > 1);
+            let width = services
+                .values()
+                .flat_map(|held| {
                     let several = held.accounts.len() > 1;
-                    for (key, a) in &held.accounts {
-                        // `account_id` is set only when *this machine's* `match`
-                        // succeeded, which has never happened. Saying "not
-                        // registered on the household" read as a fact about the
-                        // household, which this file cannot know: the household
-                        // may hold several accounts for the service already.
-                        let registered = match &a.account_id {
-                            Some(account) => format!("registered from here as {account}"),
-                            None => "no registration from this machine".to_string(),
-                        };
-                        // The marker leads the line rather than trailing the
-                        // name, so it lines up whatever the names are doing,
-                        // and it is only drawn where there is a choice to
-                        // make: a lone account is not "preferred over"
-                        // anything, and a column of stars down a
-                        // single-account listing would say nothing while
-                        // looking like it did.
-                        let mark = match (any_choice, several && held.is_chosen(key)) {
-                            (false, _) => "",
-                            (true, true) => "* ",
-                            (true, false) => "  ",
-                        };
-                        let named = account_label(a, several);
-                        println!(
-                            "{mark}{named:<width$} {:<10} {:<12} {registered}",
-                            id,
-                            ago(a.linked)
-                        );
-                    }
+                    held.accounts
+                        .values()
+                        .map(move |a| account_label(a, several).chars().count())
+                })
+                .max()
+                .unwrap_or(20)
+                .max(20);
+            for (id, held) in services {
+                let several = held.accounts.len() > 1;
+                for (key, a) in &held.accounts {
+                    // `account_id` is set only when *this machine's* `match`
+                    // succeeded, which has never happened. Saying "not
+                    // registered on the household" read as a fact about the
+                    // household, which this file cannot know: the household
+                    // may hold several accounts for the service already.
+                    let registered = match &a.account_id {
+                        Some(account) => format!("registered from here as {account}"),
+                        None => "no registration from this machine".to_string(),
+                    };
+                    // The marker leads the line rather than trailing the
+                    // name, so it lines up whatever the names are doing,
+                    // and it is only drawn where there is a choice to
+                    // make: a lone account is not "preferred over"
+                    // anything, and a column of stars down a
+                    // single-account listing would say nothing while
+                    // looking like it did.
+                    let mark = match (any_choice, several && held.is_chosen(key)) {
+                        (false, _) => "",
+                        (true, true) => "* ",
+                        (true, false) => "  ",
+                    };
+                    let named = account_label(a, several);
+                    println!(
+                        "{mark}{named:<width$} {:<10} {:<12} {registered}",
+                        id,
+                        ago(a.linked)
+                    );
                 }
             }
         }
@@ -2394,6 +2439,49 @@ mod tests {
         // Grouped by id, and the first name by sort order stands for the pair.
         assert_eq!(rows[0], (&c, &two));
         assert_eq!(rows[1], (&a, &six));
+    }
+
+    #[tokio::test]
+    async fn current_household_resolves_named_household_offline() {
+        let mut creds = credentials::Credentials::default();
+        let auth = sonos::smapi::DeviceAuth {
+            auth_token: "tok".into(),
+            private_key: "key".into(),
+            user_id_hash_code: None,
+        };
+        creds.remember(
+            "Sonos_home.123",
+            "2",
+            credentials::from_device_auth("Deezer", Some("Sonos_home.123"), None, auth.clone()),
+        );
+        creds.remember(
+            "Sonos_office.456",
+            "2",
+            credentials::from_device_auth("Deezer", Some("Sonos_office.456"), None, auth),
+        );
+
+        // When offline with multiple households and no household named, resolves to empty:
+        assert_eq!(current_household(None, &creds, None).await, "");
+
+        // When offline with a household named, resolves it against the store:
+        assert_eq!(
+            current_household(None, &creds, Some("office")).await,
+            "Sonos_office.456"
+        );
+        assert_eq!(
+            current_household(None, &creds, Some("home")).await,
+            "Sonos_home.123"
+        );
+
+        // A name that matches no stored household degrades to "not known"
+        // rather than failing. `--household` takes a **room name** as well as
+        // an id, and a room name can only ever be resolved by a player - so
+        // refusing here would break `browse`/`search` offline for the
+        // documented spelling of the flag, and for anyone who simply has
+        // X2ROCK_HOUSEHOLD exported. Commands that cannot proceed without a
+        // household resolve it strictly themselves.
+        assert_eq!(current_household(None, &creds, Some("Kitchen")).await, "");
+        assert_eq!(current_household(None, &creds, Some("beach")).await, "");
     }
 
     fn cats(ids: &[&str]) -> Vec<Category> {

@@ -210,6 +210,7 @@ fn enhance_bash(script: &str) -> String {
             "--household)" => Some("households"),
             "--service)" | "-s)" => Some("services"),
             "--account)" => Some("accountnames"),
+            "--prefer)" => Some("services"),
             _ => None,
         };
         if let Some(list) = list
@@ -266,6 +267,21 @@ fn enhance_bash(script: &str) -> String {
             continue;
         }
 
+        // For `accounts`, the second value after `--prefer` is an account nickname.
+        if block == Some("x2rock__subcmd__accounts")
+            && trimmed.starts_with(r#"COMPREPLY=( $(compgen -W "${opts}""#)
+            && lines.get(i.saturating_sub(1)).map(|l| l.trim()) == Some("esac")
+        {
+            let pad = indent(line);
+            let inner = format!("{pad}    ");
+            out.push(format!(
+                r#"{pad}if [[ ${{COMP_WORDS[COMP_CWORD-2]}} == "--prefer" ]] ; then"#
+            ));
+            out.extend(dynamic_reply("accountnames", &inner));
+            out.push(format!("{inner}return 0"));
+            out.push(format!("{pad}fi"));
+        }
+
         out.push(line.to_string());
         i += 1;
     }
@@ -315,6 +331,7 @@ fn enhance_fish(script: &str) -> String {
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from link' -x -a '(x2rock __complete services 2>/dev/null)'\n");
     s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from unlink' -x -a '(x2rock __complete accounts 2>/dev/null)'\n");
+    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from accounts' -l prefer -x -a '(x2rock __complete services 2>/dev/null)'\n");
     s
 }
 
@@ -539,11 +556,28 @@ mod tests {
             "link completes service names"
         );
 
+        let accounts = s
+            .find("x2rock__subcmd__accounts)")
+            .expect("an accounts block");
+        let accounts_end = s[accounts..]
+            .find("\n        x2rock__subcmd__")
+            .map(|e| accounts + e)
+            .unwrap_or(s.len());
+        assert!(
+            s[accounts..accounts_end].contains("__complete services"),
+            "accounts --prefer first value completes service names"
+        );
+        assert!(
+            s[accounts..accounts_end].contains("__complete accountnames"),
+            "accounts --prefer second value completes account names"
+        );
+
         assert!(
             s.contains("__complete rooms")
                 && s.contains("__complete households")
                 && s.contains("__complete services")
                 && s.contains("__complete accounts")
+                && s.contains("__complete accountnames")
         );
     }
 
@@ -567,6 +601,9 @@ mod tests {
         assert!(s.contains("seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms"));
         assert!(s.contains("seen_subcommand_from link' -x -a '(x2rock __complete services"));
         assert!(s.contains("seen_subcommand_from unlink' -x -a '(x2rock __complete accounts"));
+        assert!(s.contains(
+            "seen_subcommand_from accounts' -l prefer -x -a '(x2rock __complete services"
+        ));
         assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks"));
         assert!(s.contains("seen_subcommand_from bookmarks; and __fish_seen_subcommand_from rename' -x -a '(x2rock __complete bookmarks"));
     }
