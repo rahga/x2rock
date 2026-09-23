@@ -4371,6 +4371,27 @@ activation URL leads nowhere: there is nothing to self-serve. The 2026-09-01 tre
 condition is now "only if Google publishes a YouTube Music API to the general public", which the
 partner namespace makes the wrong thing to wait for. Closed, and closed for a structural reason.
 
+**Control, the same day, prompted by a fair objection.** The key and the project were days old, and
+`SERVICE_DISABLED` with an activation URL is exactly what a fresh project says about *any* API not
+yet enabled - on its own it would have proven nothing. So a public API went through the identical
+path. YouTube Data API v3 was enabled from the Library (it has a card) and added to the key's
+allowed list, which in the current console can only hold APIs the project has enabled. Then the
+same key, same project, same minute:
+
+| request | HTTP | answer |
+|---|---|---|
+| `youtube.googleapis.com/youtube/v3/videos?part=id&id=…` | **200** | the video, `kind: youtube#videoListResponse` |
+| `music.googleapis.com/v1:sendRequest`, key as query | 403 | `API_KEY_SERVICE_BLOCKED` for `google.music.sonos.v1.Sonos.SendRequest` |
+| the same, key as header | 403 | the same |
+
+The key works. The project works. A public API's door opens on demand. The partner API cannot be
+enabled, so it cannot be added to the key's list, so it is blocked - the same fact the first run
+surfaced through the *enablement* check now surfacing through the *restriction* check. (The first
+run's `SERVICE_DISABLED`, the answer that carried the activation URL and the "(Partner)" title, came
+before the key's restriction list had been touched; once that list was re-saved, Google reports the
+restriction first. Same gate, checked in a different order - as with the header path.) Between the
+200 and the 403 the only variable is which API.
+
 What it leaves standing is what stood before: the household's registration plays the service, and
 `keep`/`bookmark`/favorites reach anything it has ever played. Discovery from this machine is
 closed, and the reason now has a name.
