@@ -183,6 +183,17 @@ no command line carries. This is a permanent decision rather than a missing feat
 to find a way round it. `raw upnp` could technically send `BeginSoftwareUpdate`; do not suggest it
 and do not run it, even when asked in passing - point the user at the Sonos app.
 
+**`battery` reads each portable's own `/status/batterystatus`**, because this is one of the few
+things the cloud Control API has never exposed. Charge, health, temperature and what it is drawing
+power from. Mains-powered speakers are skipped rather than listed as having no battery — which would
+be most of a household — so an empty table means no portables, not a failure. **A portable that has
+gone completely flat is not on the network at all**, so it cannot appear here: that absence is the
+diagnosis, and is worth saying out loud rather than reporting an empty result.
+
+**There is one command not to run: `x2rock tui`.** It takes over the terminal with a full-screen
+interface meant for a person, and needs the daemon. Nothing an agent does with a CLI can drive it,
+and launching it blocks. Mention it if someone asks what to use at a keyboard; never invoke it.
+
 **`system` is the only command that speaks in speakers rather than rooms**, and it is what to run
 for "what speakers do I have", "what model is X", "how is the living room set up" or anything about
 firmware, hardware or bonding. Everything else here hides bonding deliberately - a room is a room
@@ -350,6 +361,7 @@ see "Ask before you act".
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
+| Battery on the portables | `x2rock battery --json` (sweeps) / `-r <Room>` (one) — mains speakers are skipped, not listed as empty |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
 | Which Sonos household(s) are reachable | `x2rock households --json` — only matters with more than one; see "Addressing a household" |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
