@@ -335,8 +335,38 @@ pub fn fans_out(command: &Command) -> bool {
     per_room(command).is_some()
 }
 
+/// Whether `--all` belongs to this command rather than meaning "every room".
+///
+/// `--all` is global, so it reaches every subcommand - and two of them give it
+/// their own meaning. `bookmarks --all` includes daemon-noticed history;
+/// `unlink --all` wipes every stored token. Both have to be let past the
+/// fan-out guard, which otherwise refuses them for not being per-room commands.
+///
+/// That is exactly how `unlink --all` failed from the day it shipped: the
+/// subcommand declared its own `--all`, the global one reached the guard first,
+/// and the guard refused the command before the handler ever saw the flag.
+pub fn all_is_the_commands_own(command: &Command) -> bool {
+    matches!(command, Command::Bookmarks { .. } | Command::Unlink { .. })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_belongs_to_the_two_commands_that_redefine_it() {
+        use clap::Parser;
+        let owns = |args: &[&str]| {
+            let cli = crate::cli::Cli::parse_from(args);
+            super::all_is_the_commands_own(&cli.command)
+        };
+        // These two mean something of their own by `--all`, and the global
+        // fan-out guard has to let them through.
+        assert!(owns(&["x2rock", "unlink", "--all"]));
+        assert!(owns(&["x2rock", "bookmarks", "--all"]));
+        // Everything else means "every room", or is refused for not fanning out.
+        assert!(!owns(&["x2rock", "vol", "10"]));
+        assert!(!owns(&["x2rock", "accounts"]));
+    }
+
     #[test]
     fn the_article_matches_the_word_after_it() {
         // "is a artist" is what prompted this.
