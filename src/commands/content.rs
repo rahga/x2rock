@@ -371,7 +371,7 @@ async fn enqueue_and_play(
             // go in the queue" on stderr. If a caller is ever added that
             // propagates this with `?`, it becomes observable and belongs in
             // that table.
-            Err(hint::Hint::new(format!("{e:#}"), "not_queue_material", None).into())
+            Err(hint::Hint::new(format!("{e:#}"), hint::Code::NotQueueMaterial, None).into())
         }
         // Unreachable mid-sequence. The row is left alone: it may well be
         // fine, and a player that cannot be asked to play cannot be asked to
@@ -391,7 +391,7 @@ async fn enqueue_and_play(
 /// queue bug that is not there.
 fn refusal_was(e: &anyhow::Error) -> &'static str {
     match hint::of(e).0 {
-        "not_queue_material" => "went in the queue and then would not play",
+        hint::Code::NotQueueMaterial => "went in the queue and then would not play",
         _ => "would not go in the queue",
     }
 }

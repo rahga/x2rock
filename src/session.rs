@@ -453,7 +453,10 @@ mod tests {
             ),
         ];
         let error = resolve_household(&households, None).unwrap_err();
-        assert_eq!(crate::hint::of(&error).0, "multiple_households");
+        assert_eq!(
+            crate::hint::of(&error).0,
+            crate::hint::Code::MultipleHouseholds
+        );
     }
 
     #[test]
@@ -549,7 +552,10 @@ mod tests {
             ),
         ];
         let error = resolve_household(&households, Some("Bedroom")).unwrap_err();
-        assert_eq!(crate::hint::of(&error).0, "unknown_household");
+        assert_eq!(
+            crate::hint::of(&error).0,
+            crate::hint::Code::UnknownHousehold
+        );
     }
 
     fn player(id: &str, name: &str, ip: &str) -> Player {
@@ -615,7 +621,7 @@ mod tests {
         // has to fail as a room-resolution error rather than resolve to
         // something plausible.
         let error = target(&household(), Some("Dining Room + 1")).unwrap_err();
-        assert_eq!(crate::hint::of(&error).0, "unknown_room");
+        assert_eq!(crate::hint::of(&error).0, crate::hint::Code::UnknownRoom);
     }
 
     #[test]

@@ -262,7 +262,7 @@ impl Service {
                 crate::hint::shell_arg(&self.name)
             )),
         };
-        crate::hint::Hint::new(self.needs_link(), "needs_link", fix)
+        crate::hint::Hint::new(self.needs_link(), crate::hint::Code::NeedsLink, fix)
     }
 
     /// What to say when a service publishes no search categories at all.
@@ -282,7 +282,7 @@ impl Service {
                  Its own containers can still be walked.",
                 self.name
             ),
-            "no_search_categories",
+            crate::hint::Code::NoSearchCategories,
             Some(format!(
                 "x2rock browse -s {}",
                 crate::hint::shell_arg(&self.name)
@@ -1008,7 +1008,7 @@ pub async fn device_auth_token(
                     "{} refused getDeviceAuthToken: {}",
                     service.name, fault.message
                 ),
-                "link_refused",
+                crate::hint::Code::LinkRefused,
                 None,
             )
             .into());
@@ -1326,7 +1326,7 @@ mod tests {
         let tunein = services.iter().find(|s| s.name == "TuneIn").unwrap();
         let hint = tunein.no_search_categories_hint();
 
-        assert_eq!(hint.code, "no_search_categories");
+        assert_eq!(hint.code, crate::hint::Code::NoSearchCategories);
         // Not a credential problem, so it must not send an agent to `link`.
         assert!(!format!("{hint}").contains("link"), "{hint}");
         assert!(format!("{hint}").contains("can still be walked"));

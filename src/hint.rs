@@ -18,6 +18,80 @@ use std::fmt;
 use anyhow::Error;
 use serde_json::{Value, json};
 
+/// The machine code an error carries: the thing an agent branches on.
+///
+/// A closed enum rather than a string, so the whole set is knowable and can be
+/// held to the skill's error table in **both directions** (see the test in
+/// `commands::admin`): a code raised here that the table does not name fails,
+/// and so does a table row naming a code that no longer exists.
+///
+/// Enum, `ALL` and `as_str` come out of one macro invocation, so adding a code
+/// is one line and cannot leave the list behind. The only other place a new
+/// code has to go is `skills/x2rock/SKILL.md` - unless an agent can never see
+/// it, in which case say so in [`Code::observable`] instead.
+macro_rules! codes {
+    ($($variant:ident => $text:literal),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Code { $($variant),* }
+
+        impl Code {
+            /// Every code, in one place, for the tests that hold the skill to it.
+            /// Read only by those tests; the binary never needs to enumerate.
+            #[allow(dead_code)]
+            pub const ALL: &[Code] = &[$(Code::$variant),*];
+
+            /// The stable snake_case form that goes into `--json` output and
+            /// that the skill's table is written in.
+            pub fn as_str(self) -> &'static str {
+                match self { $(Code::$variant => $text),* }
+            }
+        }
+    };
+}
+
+codes! {
+    UnknownRoom => "unknown_room",
+    NeedsLink => "needs_link",
+    NoSearchCategories => "no_search_categories",
+    BadStreamUrl => "bad_stream_url",
+    StreamDidNotPlay => "stream_did_not_play",
+    StreamUnverified => "stream_unverified",
+    PlaybackFailed => "playback_failed",
+    NoPlayer => "no_player",
+    UnregisteredNetwork => "unregistered_network",
+    TooManyRooms => "too_many_rooms",
+    MultipleHouseholds => "multiple_households",
+    UnknownHousehold => "unknown_household",
+    HouseholdUnreachable => "household_unreachable",
+    LinkRefused => "link_refused",
+    NotQueueMaterial => "not_queue_material",
+    Unknown => "unknown",
+}
+
+impl Code {
+    /// Whether an agent can ever see this code at the top level.
+    ///
+    /// `NotQueueMaterial` cannot: its one raise site is `enqueue_and_play`, and
+    /// every caller reaches it through a match arm on `commands::is_refusal`,
+    /// which names it and turns it into the stream fallback. It exists to pick
+    /// the stderr wording, never to be branched on. So the skill's table must
+    /// *not* list it, and the test that holds the two together skips it here.
+    /// If a caller ever propagates it with a bare `?`, flip this and add the
+    /// row - the test will insist.
+    // Read only by the skill test; production never asks. Kept here rather than
+    // in the test because it is a statement about the code, not about the test.
+    #[allow(dead_code)]
+    pub fn observable(self) -> bool {
+        !matches!(self, Code::NotQueueMaterial)
+    }
+}
+
+impl fmt::Display for Code {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// An error that knows its own machine code and, when there is one, the command
 /// that resolves it.
 #[derive(Debug, Clone)]
@@ -25,7 +99,7 @@ pub struct Hint {
     pub message: String,
     /// A stable, snake_case identifier for the *kind* of failure - the thing an
     /// agent branches on. Stable across wording changes to the message.
-    pub code: &'static str,
+    pub code: Code,
     /// The command that fixes it, verbatim and runnable, when one exists.
     pub fix: Option<String>,
     /// Extra machine-readable detail, merged into the `--json` error object - so
@@ -35,7 +109,7 @@ pub struct Hint {
 }
 
 impl Hint {
-    pub fn new(message: impl Into<String>, code: &'static str, fix: Option<String>) -> Self {
+    pub fn new(message: impl Into<String>, code: Code, fix: Option<String>) -> Self {
         Self {
             message: message.into(),
             code,
@@ -84,12 +158,12 @@ pub fn shell_arg(value: &str) -> String {
 }
 
 /// The `(code, fix)` an error carries, reading the first [`Hint`] in its chain.
-/// A plain error - most of them - is `("unknown", None)`.
-pub fn of(error: &Error) -> (&'static str, Option<String>) {
+/// A plain error - most of them - is `(Code::Unknown, None)`.
+pub fn of(error: &Error) -> (Code, Option<String>) {
     error
         .downcast_ref::<Hint>()
         .map(|h| (h.code, h.fix.clone()))
-        .unwrap_or(("unknown", None))
+        .unwrap_or((Code::Unknown, None))
 }
 
 /// The `--json` error object for a failure: `{error, code, fix}`, plus any
@@ -99,7 +173,10 @@ pub fn error_json(error: &Error) -> Value {
     let hint = error.downcast_ref::<Hint>();
     let mut obj = serde_json::Map::new();
     obj.insert("error".into(), json!(format!("{error:#}")));
-    obj.insert("code".into(), json!(hint.map_or("unknown", |h| h.code)));
+    obj.insert(
+        "code".into(),
+        json!(hint.map_or(Code::Unknown, |h| h.code).as_str()),
+    );
     obj.insert("fix".into(), json!(hint.and_then(|h| h.fix.clone())));
     if let Some(Value::Object(extra)) = hint.and_then(|h| h.data.as_ref()) {
         for (key, value) in extra {
@@ -121,10 +198,10 @@ pub fn error_json(error: &Error) -> Value {
 /// and it cannot be kept as a source.
 pub fn no_player(inner: &Error, message: impl Into<String>) -> Error {
     match of(inner) {
-        (code @ ("unregistered_network" | "no_player"), fix) => {
+        (code @ (Code::UnregisteredNetwork | Code::NoPlayer), fix) => {
             Hint::new(message, code, fix).into()
         }
-        _ => Hint::new(message, "no_player", None).into(),
+        _ => Hint::new(message, Code::NoPlayer, None).into(),
     }
 }
 
@@ -142,7 +219,7 @@ pub fn unregistered_network(fingerprint: &str) -> Error {
              normal away from home. `x2rock discover` will scan this network for speakers - \
              offer it rather than run it unasked - or pass `--ip <speaker>`."
         ),
-        "unregistered_network",
+        Code::UnregisteredNetwork,
         None,
     )
     .into()
@@ -159,7 +236,7 @@ pub fn none_completed_a_session(found: usize, last: &Error) -> Error {
              {last:#}); they may be mid-reboot, or not players at all. `x2rock discover` \
              re-checks once they should be back."
         ),
-        "no_player",
+        Code::NoPlayer,
         None,
     )
     .into()
@@ -185,7 +262,7 @@ pub fn no_players_answered(previously: &[&str]) -> Error {
              they should be back.",
             previously.join(", ")
         ),
-        "no_player",
+        Code::NoPlayer,
         None,
     )
     .into()
@@ -205,7 +282,7 @@ pub fn no_player_to_play(inner: &Error) -> Error {
 /// than a fourth copy of the fix string and the data shape.
 fn household_hint(
     message: impl Into<String>,
-    code: &'static str,
+    code: Code,
     households: &[(String, Vec<String>)],
 ) -> Error {
     let households: Vec<_> = households
@@ -244,7 +321,7 @@ pub fn ambiguous_household(
     message: impl Into<String>,
     households: &[(String, Vec<String>)],
 ) -> Error {
-    household_hint(message, "multiple_households", households)
+    household_hint(message, Code::MultipleHouseholds, households)
 }
 
 /// The error for a household that did not answer a rescan **that other
@@ -279,7 +356,7 @@ pub fn household_unreachable(
             answered.len(),
             summary.join("; "),
         ),
-        "household_unreachable",
+        Code::HouseholdUnreachable,
         answered,
     )
 }
@@ -294,7 +371,7 @@ pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -
             "no household on this network has a room or an id matching {selector:?} (from \
              --room or --household); `x2rock households` lists what is actually reachable"
         ),
-        "unknown_household",
+        Code::UnknownHousehold,
         households,
     )
 }
@@ -331,11 +408,11 @@ mod tests {
     fn a_hinted_error_yields_its_code_and_fix() {
         let e: Error = Hint::new(
             "deezer needs an account",
-            "needs_link",
+            Code::NeedsLink,
             Some("x2rock link deezer".into()),
         )
         .into();
-        assert_eq!(of(&e), ("needs_link", Some("x2rock link deezer".into())));
+        assert_eq!(of(&e), (Code::NeedsLink, Some("x2rock link deezer".into())));
         // Display stays the plain message, so prose output is unchanged.
         assert_eq!(format!("{e}"), "deezer needs an account");
     }
@@ -345,12 +422,12 @@ mod tests {
         // A hint keeps its code even when a caller wraps it with more context.
         let e: Error = Err::<(), _>(Hint::new(
             "no such room",
-            "unknown_room",
+            Code::UnknownRoom,
             Some("x2rock rooms".into()),
         ))
         .context("resolving the target")
         .unwrap_err();
-        assert_eq!(of(&e).0, "unknown_room");
+        assert_eq!(of(&e).0, Code::UnknownRoom);
     }
 
     /// The two "could not reach it" errors differ on evidence, and that
@@ -363,13 +440,13 @@ mod tests {
     #[test]
     fn an_unreachable_household_is_not_an_empty_network() {
         let empty = no_players_answered(&["Kitchen", "Bedroom"]);
-        assert_eq!(of(&empty), ("no_player", None));
+        assert_eq!(of(&empty), (Code::NoPlayer, None));
         assert!(format!("{empty:#}").contains("found nothing"));
 
         let answered = vec![("hh:OTHER".to_string(), vec!["Studio".to_string()])];
         let gone = household_unreachable("hh:MINE", &["Kitchen", "Bedroom"], &answered);
         let (code, fix) = of(&gone);
-        assert_eq!(code, "household_unreachable");
+        assert_eq!(code, Code::HouseholdUnreachable);
         assert_eq!(fix.as_deref(), Some("x2rock households"));
 
         // It must not repeat the empty-network claim, and must name what did
@@ -390,14 +467,14 @@ mod tests {
     #[test]
     fn a_plain_error_falls_back_to_a_generic_code() {
         let e = anyhow!("something went wrong");
-        assert_eq!(of(&e), ("unknown", None));
+        assert_eq!(of(&e), (Code::Unknown, None));
     }
 
     #[test]
     fn error_json_merges_hint_data_but_cannot_shadow_the_standard_fields() {
         let e: Error = Hint::new(
             "no room named \"x\"",
-            "unknown_room",
+            Code::UnknownRoom,
             Some("x2rock rooms".into()),
         )
         // Includes a rogue "code" key that must NOT override the real one.
@@ -422,13 +499,13 @@ mod tests {
         // so a runnable `discover` must not be minted here (a stale --ip on a
         // cafe network reaches exactly this arm).
         let plain = no_player(&anyhow!("timed out"), "no player to play it on");
-        assert_eq!(of(&plain), ("no_player", None));
+        assert_eq!(of(&plain), (Code::NoPlayer, None));
 
         // But an unregistered network keeps its own, better diagnosis - the
         // more specific code, and its deliberately null fix.
         let inner: Error = unregistered_network("192.168.1.1");
         let wrapped = no_player(&inner, "no player to play it on");
-        assert_eq!(of(&wrapped), ("unregistered_network", None));
+        assert_eq!(of(&wrapped), (Code::UnregisteredNetwork, None));
     }
 
     #[test]
@@ -436,10 +513,14 @@ mod tests {
         // A code from a different layer must not ride on this wrapper's message:
         // an "unknown_room" fix (`x2rock rooms`) would not match "no player to
         // play it on". It falls back to no_player rather than being adopted.
-        let inner: Error =
-            Hint::new("no such room", "unknown_room", Some("x2rock rooms".into())).into();
+        let inner: Error = Hint::new(
+            "no such room",
+            Code::UnknownRoom,
+            Some("x2rock rooms".into()),
+        )
+        .into();
         let wrapped = no_player(&inner, "no player to play it on");
-        assert_eq!(of(&wrapped), ("no_player", None));
+        assert_eq!(of(&wrapped), (Code::NoPlayer, None));
     }
 
     #[test]
@@ -452,14 +533,14 @@ mod tests {
         // field withholds it. These are the constructors the production sites
         // in session.rs use, so a regression there fails here.
         let unregistered = unregistered_network("192.168.86.1");
-        assert_eq!(of(&unregistered), ("unregistered_network", None));
+        assert_eq!(of(&unregistered), (Code::UnregisteredNetwork, None));
         assert!(
             format!("{unregistered}").contains("`x2rock discover`"),
             "discovery is offered in prose"
         );
 
         let silent = no_players_answered(&["Kitchen", "Bedroom"]);
-        assert_eq!(of(&silent), ("no_player", None));
+        assert_eq!(of(&silent), (Code::NoPlayer, None));
         assert!(format!("{silent}").contains("previously: Kitchen, Bedroom"));
     }
 
@@ -476,7 +557,7 @@ mod tests {
         ]);
         assert_eq!(
             of(&e),
-            ("multiple_households", Some("x2rock households".into()))
+            (Code::MultipleHouseholds, Some("x2rock households".into()))
         );
         let msg = format!("{e}");
         assert!(msg.contains("2 Sonos households"));
