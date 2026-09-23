@@ -255,7 +255,7 @@ fn playback_failed_message(
              with `favorite`, `bookmark`, or a fresh search to fetch a new one."
         )
     };
-    hint::Hint::new(message, "playback_failed", None).into()
+    hint::Hint::new(message, hint::Code::PlaybackFailed, None).into()
 }
 
 /// A play the player accepted without ever leaving idle, and without raising an
@@ -268,7 +268,7 @@ fn stayed_idle(room: &str) -> anyhow::Error {
              holds, and `favorite`, `bookmark` or a search starts something.",
             STREAM_START.as_secs()
         ),
-        "playback_failed",
+        hint::Code::PlaybackFailed,
         None,
     )
     .into()
@@ -286,7 +286,7 @@ pub async fn play_or_resume(
     let upnp = Upnp::new(upnp_ip(target, player.ip()));
     let failed = match play_confirmed(player, &upnp, &target.group_id, &target.name).await {
         Ok(()) => return Ok(()),
-        Err(e) if hint::of(&e).0 == "playback_failed" => e,
+        Err(e) if hint::of(&e).0 == hint::Code::PlaybackFailed => e,
         Err(e) => return Err(e),
     };
     match try_resume_stream(session, player, target).await {
@@ -298,9 +298,9 @@ pub async fn play_or_resume(
         // not bury the original: the code and remedy a caller branches on stay
         // the play's, and the resume's failure joins the sentence.
         Err(resume) => match hint::of(&resume).0 {
-            "unknown" => Err(hint::Hint::new(
+            hint::Code::Unknown => Err(hint::Hint::new(
                 format!("{failed:#} A resume was tried and failed too: {resume:#}"),
-                "playback_failed",
+                hint::Code::PlaybackFailed,
                 None,
             )
             .into()),
@@ -428,7 +428,7 @@ mod tests {
         for from_queue in [false, true] {
             assert_eq!(
                 hint::of(&playback_failed_message("Media Room", &error, from_queue)).0,
-                "playback_failed"
+                hint::Code::PlaybackFailed
             );
         }
         let queued = playback_failed_message("Media Room", &error, true).to_string();

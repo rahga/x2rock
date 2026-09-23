@@ -587,6 +587,79 @@ mod tests {
 
     /// A `playbackStatus` and a `metadataStatus` as the Media Room actually
     /// sent them (captured 2026-09-03), trimmed of fields nothing here reads.
+    /// `status --json` is the contract the skill says to read first, and `now
+    /// --json` the subset it says is missing exactly seven fields. Both are held
+    /// to the skill's own example object, parsed as JSON - so a key added to a
+    /// row without updating the example fails, as does an example key the row
+    /// stopped emitting. Built from empty bodies, since only the key *set* is
+    /// under test, not the values.
+    #[test]
+    fn a_status_row_and_a_now_object_have_exactly_the_keys_the_skill_documents() {
+        use std::collections::BTreeSet;
+        let keys = |v: &serde_json::Value| -> BTreeSet<String> {
+            v.as_object().expect("an object").keys().cloned().collect()
+        };
+
+        let skill = SKILL;
+        let section = skill
+            .split("### `status --json`")
+            .nth(1)
+            .expect("the skill has a status --json section");
+        let example = section
+            .split("```json")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .expect("a fenced json example");
+        let example: serde_json::Value =
+            serde_json::from_str(example).expect("the skill's status example is valid JSON");
+        let documented = keys(&example[0]);
+
+        let status: PlaybackStatus = serde_json::from_str("{}").unwrap();
+        let meta: MetadataStatus = serde_json::from_str("{}").unwrap();
+        let members = vec!["Kitchen".to_string()];
+        let facts = RoomFacts {
+            name: "Kitchen",
+            members: &members,
+            coordinator: Some("Kitchen"),
+            has_tv: false,
+        };
+        let volume = Volume {
+            volume: 10,
+            muted: false,
+            fixed: false,
+        };
+        let row = room_value(&facts, Ok((status, meta, Some(volume))), None);
+        assert_eq!(
+            keys(&row),
+            documented,
+            "a status row's keys must match the skill's example object exactly"
+        );
+
+        // `now` is documented as the row minus these seven, which live on the
+        // room rather than on what is playing.
+        let status: PlaybackStatus = serde_json::from_str("{}").unwrap();
+        let meta: MetadataStatus = serde_json::from_str("{}").unwrap();
+        let now = now_json("Kitchen", &status, &meta, None);
+        let room_only: BTreeSet<String> = [
+            "volume",
+            "muted",
+            "audible",
+            "fixed",
+            "members",
+            "coordinator",
+            "has_tv",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let expected_now: BTreeSet<String> = documented.difference(&room_only).cloned().collect();
+        assert_eq!(
+            keys(&now),
+            expected_now,
+            "`now --json` must be the row minus the room fields"
+        );
+    }
+
     fn playing_body() -> (PlaybackStatus, MetadataStatus) {
         let status = serde_json::from_str(
             r#"{"_objectType":"playbackStatus","playbackState":"PLAYBACK_STATE_PLAYING",
@@ -904,33 +977,6 @@ mod tests {
         assert_eq!(entry["fixed"], serde_json::Value::Null);
         assert_eq!(entry["volume"], serde_json::Value::Null);
         assert_eq!(entry["muted"], serde_json::Value::Null);
-    }
-
-    /// The other half of `the_embedded_skill_carries_its_frontmatter_and_contracts`.
-    /// That one checks the skill still *says* the right things; this one checks
-    /// the binary still emits what the skill says, so the two cannot drift in
-    /// either direction. An added field that nobody documented fails here.
-    #[test]
-    fn every_field_a_status_entry_emits_is_documented_in_the_skill() {
-        let (status, meta) = playing_body();
-        let members = vec!["Media Room".to_string()];
-        let facts = RoomFacts {
-            name: "Media Room",
-            members: &members,
-            coordinator: Some("Media Room"),
-            has_tv: false,
-        };
-        let entry = room_value(&facts, Ok((status, meta, Some(volume(2, false)))), None);
-
-        for key in entry.as_object().unwrap().keys() {
-            // Quoted, because that is how the skill's worked example writes
-            // them - a bare substring would match half the prose.
-            assert!(
-                SKILL.contains(&format!("\"{key}\"")),
-                "`{key}` is emitted but the skill never names it; \
-                 an agent told to read fields cannot read this one"
-            );
-        }
     }
 
     /// The envelope's shape, which the skill promises as

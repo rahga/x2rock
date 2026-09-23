@@ -182,7 +182,7 @@ impl Groups {
         let did_you_mean = near_matches(name, &rooms);
         crate::hint::Hint::new(
             format!("no room named {name:?}. Rooms: {}", rooms.join(", ")),
-            "unknown_room",
+            crate::hint::Code::UnknownRoom,
             Some("x2rock rooms".into()),
         )
         .with_data(serde_json::json!({

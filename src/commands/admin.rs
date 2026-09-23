@@ -759,6 +759,68 @@ pub fn completions(
 mod tests {
     use super::*;
 
+    /// The codes the skill's error table names: the first backticked cell of
+    /// every row in the table that starts with the `code` header.
+    fn codes_in_skill_table() -> std::collections::BTreeSet<String> {
+        let table = SKILL
+            .split("| `code` | meaning |")
+            .nth(1)
+            .expect("the skill has an error table headed `code` / `meaning`");
+        table
+            .lines()
+            .skip(1) // the |---|---|---| rule
+            .take_while(|l| l.starts_with('|'))
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split('`').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The error table is what an agent branches on, so it is held to the
+    /// codes the binary can actually raise - in both directions. A code added
+    /// to `hint::Code` without a row fails here; so does a row whose code was
+    /// renamed or removed. `not_queue_material` is the one deliberate absence,
+    /// and `Code::observable` is where that is said.
+    #[test]
+    fn the_error_table_names_every_observable_code_and_nothing_else() {
+        use crate::hint::Code;
+        let documented = codes_in_skill_table();
+        let observable: std::collections::BTreeSet<String> = Code::ALL
+            .iter()
+            .filter(|c| c.observable())
+            .map(|c| c.as_str().to_string())
+            .collect();
+
+        // Both directions in one report: a *rename* shows up as one code missing
+        // and one code stale, and seeing only the first half sends a reader
+        // looking for a row to add when the fix is a row to correct.
+        let undocumented: Vec<_> = observable.difference(&documented).collect();
+        let stale: Vec<_> = documented.difference(&observable).collect();
+        assert!(
+            undocumented.is_empty() && stale.is_empty(),
+            "the skill's error table disagrees with hint::Code.\n  observable but undocumented: {undocumented:?}\n  documented but not raisable (renamed, removed, or internal): {stale:?}"
+        );
+        // Guard on the guard: an extraction that finds nothing would pass
+        // vacuously in one direction.
+        assert!(
+            documented.len() >= 10,
+            "found only {} codes in the table",
+            documented.len()
+        );
+    }
+
+    #[test]
+    fn every_code_has_a_distinct_string() {
+        use crate::hint::Code;
+        let strings: std::collections::BTreeSet<&str> =
+            Code::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            strings.len(),
+            Code::ALL.len(),
+            "two variants share a code string"
+        );
+    }
+
     /// Long flags named in the skill that are not x2rock's, and never will be.
     const NOT_OURS: &[&str] = &[
         // `journalctl --user -u x2rock.service`, in the daemon section.
@@ -883,9 +945,10 @@ mod tests {
 
     #[test]
     fn the_embedded_skill_carries_its_frontmatter_and_contracts() {
-        // include_str! guarantees the file exists at build time; this guards its
-        // shape - the frontmatter a skill needs, and the two contracts the skill
-        // exists to teach, so an edit cannot quietly drop them.
+        // include_str! guarantees the file exists at build time; this guards
+        // the shape a skill needs to be discovered at all. The contracts it
+        // teaches - the status snapshot's fields, the error codes - are held
+        // to the code by their own tests, not by a substring here.
         assert!(
             SKILL.starts_with("---\nname: x2rock\n"),
             "needs skill frontmatter"
@@ -897,10 +960,6 @@ mod tests {
         assert!(
             SKILL.contains("x2rock status --json"),
             "should teach the status snapshot"
-        );
-        assert!(
-            SKILL.contains("unregistered_network"),
-            "should teach the error codes"
         );
     }
 }

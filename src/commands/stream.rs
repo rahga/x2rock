@@ -172,7 +172,7 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: &Started) 
                      does not work - nothing is wrong with the room. Try another.",
                     STREAM_START.as_secs()
                 ),
-                "stream_did_not_play",
+                hint::Code::StreamDidNotPlay,
                 None,
             )
             .into());
@@ -213,7 +213,7 @@ fn report_started(room: &str, title: &str, on: Option<&str>, started: &Started) 
                     STREAM_START.as_secs()
                 )
             };
-            return Err(hint::Hint::new(message, "stream_unverified", None).into());
+            return Err(hint::Hint::new(message, hint::Code::StreamUnverified, None).into());
         }
     }
     Ok(())
@@ -614,7 +614,7 @@ fn bad_stream_url(url: &str) -> anyhow::Error {
              HTTP, so nothing else can be one - and note it must be reachable from the speaker \
              rather than from this machine."
         ),
-        "bad_stream_url",
+        hint::Code::BadStreamUrl,
         None,
     )
     .into()
@@ -818,7 +818,7 @@ mod tests {
         // Silent is the one that used to print a cheerful line. It is an error,
         // it carries a code to branch on, and it names the stream.
         let err = report_started("Media Room", ".977 Country", None, &Started::Silent).unwrap_err();
-        assert_eq!(hint::of(&err).0, "stream_did_not_play");
+        assert_eq!(hint::of(&err).0, hint::Code::StreamDidNotPlay);
         assert!(
             hint::of(&err).1.is_none(),
             "no fix: nothing here can mint a stream that plays"
@@ -847,7 +847,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(hint::of(&gone).0, "stream_unverified");
+        assert_eq!(hint::of(&gone).0, hint::Code::StreamUnverified);
         assert!(hint::of(&gone).1.is_none());
         let text = format!("{gone:#}").to_lowercase();
         assert!(text.contains("could not be read"), "{text}");
@@ -886,7 +886,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(hint::of(&mixed).0, "stream_unverified");
+        assert_eq!(hint::of(&mixed).0, hint::Code::StreamUnverified);
         let text = format!("{mixed:#}");
         assert!(text.contains("stale groupId"), "{text}");
         assert!(text.contains("answered every poll"), "{text}");
@@ -910,13 +910,13 @@ mod tests {
         // Failures keep the standard {error, code, fix} shape rather than a
         // second invented one, for both failing outcomes.
         for (outcome, code) in [
-            (Started::Silent, "stream_did_not_play"),
+            (Started::Silent, hint::Code::StreamDidNotPlay),
             (
                 Started::Unverified {
                     answered: false,
                     why: None,
                 },
-                "stream_unverified",
+                hint::Code::StreamUnverified,
             ),
         ] {
             let err =
@@ -965,7 +965,11 @@ mod tests {
             "http://?query",
         ] {
             let err = stream_display_name(bad, None).unwrap_err();
-            assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
+            assert_eq!(
+                hint::of(&err).0,
+                hint::Code::BadStreamUrl,
+                "{bad} was accepted"
+            );
             // No fix: nothing here can mint a working URL for the caller.
             assert!(hint::of(&err).1.is_none(), "{bad} handed out a fix");
         }
@@ -986,7 +990,11 @@ mod tests {
             "spotify:track:1",
         ] {
             let err = require_http_url(bad).unwrap_err();
-            assert_eq!(hint::of(&err).0, "bad_stream_url", "{bad} was accepted");
+            assert_eq!(
+                hint::of(&err).0,
+                hint::Code::BadStreamUrl,
+                "{bad} was accepted"
+            );
         }
     }
 }

@@ -131,7 +131,7 @@ pub fn mmss(duration: Option<std::time::Duration>) -> String {
 /// other, raised by `enqueue_and_play` when the row was accepted and then would
 /// not play. Both mean the same thing to a caller holding a stream fallback.
 pub fn is_refusal(e: &anyhow::Error) -> bool {
-    upnp::Fault::of(e).is_some() || hint::of(e).0 == "not_queue_material"
+    upnp::Fault::of(e).is_some() || hint::of(e).0 == hint::Code::NotQueueMaterial
 }
 
 /// `on`/`off`, for every flag and argument that takes those two words.
@@ -266,7 +266,7 @@ pub async fn fan_out(
 pub fn too_many_rooms() -> anyhow::Error {
     hint::Hint::new(
         "several --room were given, but this command takes a single room",
-        "too_many_rooms",
+        hint::Code::TooManyRooms,
         None,
     )
     .into()

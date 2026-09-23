@@ -990,7 +990,7 @@ where
             //
             // A refusal is different: the service answered, and said no. That
             // still stops immediately, because asking it again cannot help.
-            Err(e) if hint::of(&e).0 == "link_refused" => {
+            Err(e) if hint::of(&e).0 == hint::Code::LinkRefused => {
                 eprintln!();
                 return Err(e);
             }
