@@ -8457,11 +8457,15 @@ attributes:
 | `Type` (attribute) | the encoded type inside `SA_RINCON<type>_` |
 
 `Token0`, `Flags0` and `Tier0` have no legacy counterpart; `OADevID` has no modern one. The legacy
-`<Accounts …  NextSerialNum="5">` also explains the serials: one monotonic counter per household,
-which is what is observed - `1, 9, 10, 11, 13, 14, 15` in one household and `10, 23, 24, 25, 26, 27`
-in the other, sparse where accounts were removed. That is the same namespace `musicServiceAccounts:1
-match` answers in, which is why an imported account and a matched browser-linked one can be keyed
-identically.
+`<Accounts … NextSerialNum="5">` also fits the serials: a **household-wide** counter rather than a
+per-service one, which is what is observed - `1, 9, 10, 11, 13, 14, 15` in one household and
+`10, 23, 24, 25, 26, 27` in the other, a new service landing at the next number rather than at 1.
+Not monotonic, though: an earlier draft of this paragraph said so and was wrong by this document's
+own testing - the counter is `highest live serial + 1` and *falls* when the top account is removed,
+so a serial is unique among live accounts and means nothing across time (see "Household
+registration is per *account*"). The gaps are accounts removed below the current top. It is the
+same namespace `musicServiceAccounts:1 match` answers in, which is why an imported account and a
+matched browser-linked one can be keyed identically.
 
 **`/status/accounts` still responds and returns nothing** - 111 bytes of
 `<ZPSupportInfo></ZPSupportInfo>` on S2 18.8 (`97.1-80312`). It is not being singled out:
