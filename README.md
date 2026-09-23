@@ -22,56 +22,24 @@ the whole surface.
 > onboarding a speaker, editing bonds, running TruePlay); see [What stays with the Sonos
 > app](#what-stays-with-the-sonos-app). A terminal UI and an Omarchy bar widget ride on the daemon
 > as two of its consumers.
->
-> Every feature was exercised against real speakers rather than the protocol documentation, which
-> repeatedly turned out to be the only way to learn what is true. The facts that shaped the design
-> are in [docs/architecture.md](docs/architecture.md).
-
-**Contents** — [Quick start](#quick-start) · [Why local-first](#why-local-first) ·
-[The CLI](#the-cli) · [For scripts and agents](#for-scripts-and-agents) ·
-[The daemon and MPRIS](#the-daemon-and-mpris) · [Front ends](#front-ends) ·
-[Music services](#music-services) · [The queue](#the-queue) · [Probing and debugging](#probing-and-debugging) ·
-[Requirements](#requirements) · [Tested devices](#tested-devices) ·
-[What stays with the Sonos app](#what-stays-with-the-sonos-app) · [Non-goals](#non-goals) ·
-[Licence](#licence)
 
 ## Quick start
 
-Three commands, the same on every Linux:
-
 ```sh
-cargo install --git https://github.com/rahga/x2rock   # the binary, into ~/.cargo/bin
-x2rock discover                     # once per network; every other command reconnects to what this remembers
+cargo install --git https://github.com/rahga/x2rock --root ~/.local   # the binary, into ~/.local/bin
+x2rock discover                     # once per network; everything else reconnects to what this remembers
 x2rock service install --enable     # the daemon as a user service - every room is now an MPRIS player
 ```
 
-`service install` writes the systemd unit pointing at **whichever binary is running it** — from
-`cargo install`, from a clone, from a package — so there is no path to get wrong and nothing to copy
-by hand. It refuses to overwrite a unit whose settings you have edited unless told to with
-`--force`; `--print` shows what it would write. Re-run it if you move or reinstall the binary.
-(`systemd/x2rock.service` is the same unit as a file, for anyone who prefers to copy it; a later
-`service install` replaces that copy without asking, since it carries nothing you wrote.)
-(`x2rock service` or `x2rock service status` reports unit and daemon health; `x2rock service uninstall`
-disables and removes it.)
-
-Discover first: the daemon connects only to players it has been told about and will not scan an
-unfamiliar network on its own. The other order is not fatal — it re-reads the remembered players
-between reconnect attempts, so a later `discover` is picked up within a minute. If `x2rock rooms`
-lists your speakers, the CLI is done.
-
-Cloning gets you the source and the bar widget; the binary itself can install the desktop
-entry and icon (which let MPRIS clients label each room player with a name and icon):
+If `x2rock rooms` lists your speakers, you are done. Needs Rust 1.89 or newer and a C compiler;
+[Requirements](#requirements) covers what bites on Ubuntu and on a machine with no desktop, and
+[Installing it as a service](#installing-it-as-a-service) says what `service install` writes and how
+to check on it. Cloning instead gets you the source and the bar widget:
 
 ```sh
 git clone https://github.com/rahga/x2rock && cd x2rock
 cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
-x2rock desktop install    # or `x2rock service install --enable`, which installs both
-x2rock desktop status     # checks whether desktop entry and icon are installed
-x2rock desktop uninstall  # removes the desktop entry and icon
 ```
-
-Needs Rust 1.89 or newer and a C compiler; see [Requirements](#requirements) for what bites on
-Ubuntu, for a machine with no desktop, and for the one Sonos setting a few commands need.
 
 ## Why local-first
 
@@ -277,19 +245,13 @@ When it is null, read `error` and change the request.**
 | `code` | meaning | `fix` |
 |---|---|---|
 | `unknown_room` | `-r` is not a room (or is a group's composite label); carries `did_you_mean` and `rooms` | `x2rock rooms` |
-| `too_many_rooms` | several `-r` on a command that takes one | null |
 | `needs_link` | no token here for that music service | `x2rock link '<svc>'` — a browser login a person must finish |
-| `no_search_categories` | the service is browse-only, not broken | `x2rock browse -s "<svc>"` |
-| `bad_stream_url` | `play-url` needs an `http(s)` URL | null |
-| `stream_did_not_play` | the player took the URL and is still idle 10 s later — the stream is dead, the room is fine | null (try another) |
-| `stream_unverified` | the room's state could not be read for 10 s — *not* a verdict on the stream | null (re-check with `now`) |
-| `playback_failed` | `play` reached the room but nothing started; the message says which source failed | null (load a fresh source) |
 | `no_player` | known network, remembered speakers, and a rescan found **nothing at all** | **null** — likely powered off; `discover` would only repeat the scan |
 | `unregistered_network` | no speakers are known here — normal away from home | **null** — `discover` is *offered*, never auto-run |
-| `multiple_households` | more than one household, and nothing said which | `x2rock households` |
-| `unknown_household` | the `-r` room or `--household` matched none | `x2rock households` |
-| `household_unreachable` | a rescan found *other* households but not this one — it is off or has moved | `x2rock households` |
-| `unknown` | no known remedy — e.g. `pause` on an idle room | null |
+
+Those are the four a person meets. The full table — every code the binary can raise — is in the
+skill, [`skills/x2rock/SKILL.md`](skills/x2rock/SKILL.md) under *Errors*, and a test holds it to
+the code in both directions, so it cannot drift the way a second copy here would.
 
 The two null network codes matter most. Neither carries `x2rock discover` as a fix on purpose: it
 scans the local network, and a laptop must not probe a hotel or client WiFi unasked. Away from
@@ -324,7 +286,8 @@ x2rock skill --remove     # take it back out of the directories it was written t
 The skill is embedded in the binary, so it matches the CLI it documents; re-run it after an
 upgrade — `x2rock --version` names the commit a binary was built from, so you can tell whether
 it has moved. Its source is [`skills/x2rock/SKILL.md`](skills/x2rock/SKILL.md), and tests hold the
-binary to it: every field `status --json` emits must be named there.
+binary to it in both directions: the fields `status --json` and `now --json` emit, the `--full`
+envelope, every error code, and every flag the skill names are each checked against the code.
 
 ### Shell completions
 
@@ -364,6 +327,24 @@ backs off quietly and republishes when one appears. `journalctl --user -u x2rock
 what it is doing — starting with which binary it is, since a unit can outlive a reinstall by
 another route. For foreground debugging, `x2rock daemon --verbose` logs reconnects and backoff
 progression, while `x2rock daemon --log-events` dumps every incoming event body.
+
+### Installing it as a service
+
+`x2rock service install --enable` writes a systemd user unit pointing at **whichever binary is
+running it** — from `cargo install`, from a clone, from a package — so there is no path to get
+wrong and nothing to copy by hand. It refuses to overwrite a unit whose settings you have edited
+unless told to with `--force`; `--print` shows what it would write. Re-run it if you move or
+reinstall the binary. `x2rock service` (or `service status`) reports unit and daemon health, and
+`service uninstall` disables and removes it. (`systemd/x2rock.service` is the same unit as a file,
+for anyone who prefers to copy it; a later `service install` replaces that copy without asking,
+since it carries nothing you wrote.)
+
+Discover first: the daemon connects only to players it has been told about and will not scan an
+unfamiliar network on its own. The other order is not fatal — it re-reads the remembered players
+between reconnect attempts, so a later `discover` is picked up within a minute.
+
+`service install` also installs the desktop entry and icon that let MPRIS clients label each room
+player by name; `x2rock desktop install|status|uninstall` manages those on their own.
 
 ### What the daemon publishes beyond MPRIS
 
@@ -498,56 +479,66 @@ ten with `stream_did_not_play`. `--no-wait` returns at once for scripts that che
 ### Linking an account
 
 ```sh
-x2rock link                     # services that can be linked
-x2rock link bandcamp            # link one: a browser login you finish
-x2rock link plex                # Plex's own PIN flow
-x2rock accounts                 # what is linked here
+x2rock link                              # services that can be linked
+x2rock link bandcamp                     # link one: a browser login you finish
+x2rock link --from-household             # no browser: take every token the household already holds
+x2rock link --from-household --dry-run   # see what that would take, keeping nothing
+x2rock link plex                         # Plex's own PIN flow
+x2rock accounts                          # what is linked here, and which account each service uses
+x2rock accounts --prefer Qobuz Qb1       # choose, where a household holds two accounts for one service
 x2rock unlink bandcamp
 ```
 
-**A link usually buys search and browse. It does not, by itself, buy playback of on-demand
-tracks.** "Usually", because a service may gate its catalogue behind its own subscription: on a free
-account Saavn links fine and then refuses every search and every browse with `User not Pro`. An
-on-demand track is added to the queue and the *player* resolves it, using a registration the
-household made in the Sonos app — so it plays if the household has that service, and refuses if it
-does not, whatever this machine holds. A stream (a station) needs none of that.
+**A link buys search and browse.** On-demand *playback* is separate: a track is added to the queue
+and the **speaker** fetches it with the household's own account for that service — the one added
+in the Sonos app — so it plays if the household has that service and refuses if it does not,
+whatever this machine holds. A stream (a station) needs none of that. Where the household has no
+account, x2rock falls back to streaming the item with its own token, which some services allow
+(Amazon Music and TuneIn stations play that way), some refuse (Spotify), and some accept and then
+stall on (Deezer never gets past the first second). A fallback that *started* is not one that
+played: check that `now --json` shows `position_ms` moving. A link is not always a catalogue,
+either — Saavn links on a free account and then refuses every search with `User not Pro`, and
+Bandcamp's Sonos interface is *your own collection*, so a fresh account correctly finds nothing.
 
 > **Which services actually work?** Ask this household rather than a table: `x2rock search` with no
 > arguments lists what can be searched here, and `x2rock link` with none lists what can be linked.
 > What has been *tested*, service by service, with dates and the household each result came from,
 > is the table at the top of [docs/architecture.md](docs/architecture.md).
 
-Fifteen services offer *device linking*: `x2rock link <svc>` opens the service's own login page in
-your browser, waits for you to finish, and stores the token the service mints — no Sonos account,
-no partner registration, nothing embedded. Over ssh, `--no-open` prints the URL. The remaining
-services are *app-link*, and that tier is not uniformly closed: `link` asks any of them for a
-browser page and lets the service answer. When last swept, TuneIn (New), Radio Paradise, Amazon
-Music, Pandora and Spotify gave one; **YouTube Music, Apple Music and SoundCloud refuse.**
-YouTube Music is closed for a reason nothing here can move — it wants an API key Sonos seals
-inside its own apps.
+**Two ways to get a token.** Fifteen services offer *device linking*: `x2rock link <svc>` opens the
+service's own login page in your browser, waits for you to finish, and stores the token the service
+mints — no Sonos account, no partner registration. Over ssh, `--no-open` prints the URL. The rest
+are *app-link*, and `link` asks any of them for a browser page and lets the service answer: TuneIn
+(New), Radio Paradise, Amazon Music, Pandora and Spotify gave one when last swept; Apple Music and
+SoundCloud refuse, and Qobuz refuses at the last step, after the login has succeeded.
+
+**`x2rock link --from-household` needs no browser at all**, and is the only route for a service
+whose own flow refuses. Every speaker stores the token the Sonos app minted for each service the
+household has — encrypted, with the household id as the key — and this reads them off a player and
+keeps them: Qobuz, and everything else the household already holds, in one command. Name a service
+to take only that one; `--dry-run` shows every record without keeping any. Two things to know: the
+player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
+change it), so a host firewall needs that one inbound rule; and it does not get past YouTube
+Music, whose token imports cleanly and still answers 403 — that block is a key Sonos seals inside
+its own apps, not the account.
+
+Tokens are kept **per household**, so a laptop that moves between two Sonos systems holds a
+separate account for each and uses the right one wherever it is. A household can also hold two
+accounts for one service; both are kept, `x2rock accounts` marks the one search uses with `*`, and
+`accounts --prefer <svc> "<nickname>"` changes it — the same choice the Sonos app offers, for the
+same reason: one set of results rather than two interleaved.
 
 **Plex** is linked through Plex's own PIN flow, and the token appears on your Plex account's device
 list as `x2rock-<hostname>`, where it can be revoked. On a server without Remote Access,
 `link plex --from-player` reads the household's own Plex token off the art URLs your players
 already broadcast instead.
 
-**Playing an on-demand track is different.** The track is added to the queue and the *speaker*
-fetches it using the **household's own account** for that service, added in the Sonos app — so a
-track plays only if the household has one. Without it, x2rock falls back to streaming the item
-with its own token. That is a bonus some services give, never a substitute: Amazon Music and TuneIn
-stations play that way; Spotify refuses; and Deezer hands back a URL the room then never gets past a
-second on — each plays normally once the household holds the account. A fallback that *started* is
-not one that played, so check that `now --json` shows `position_ms` moving.
 `link` also asks the household to match the account (`--no-match` skips it); it has only ever
 matched an account the household already held, and never creates one.
 
-Linking is not always a catalogue: Bandcamp's Sonos interface is *your own collection*, so on a
-fresh account `search -s Bandcamp` correctly finds nothing. Check what a service exposes before
-assuming a link makes it searchable.
-
-The token lives in `~/.local/state/x2rock/credentials.json` at mode `0600` — deliberately not a
-keyring, which would put a locked or missing keyring between you and your music in a tool expected
-to work over ssh and inside a widget's subprocess. `unlink` forgets the local copy; revoke it on the
+Tokens live in `~/.local/state/x2rock/credentials.json`, keyed by household, at mode `0600` —
+deliberately not a keyring, which would put a locked or missing keyring between you and your music
+in a tool expected to work over ssh and inside a widget's subprocess. `unlink` forgets the local copy; revoke it on the
 service's own site. An expired token usually heals itself: when a service answers with a
 replacement, x2rock retries once and stores it.
 
@@ -686,8 +677,10 @@ for the new one.
 
 ## Tested devices
 
-Everything here was developed against one household — eleven players in five rooms, re-read off
-the speakers 2026-09-13:
+Everything here was developed against two households. The first is below — eleven players in
+five rooms, re-read off the speakers 2026-09-13. The second is a single Sonos One SL in an office,
+on the same firmware; it is where the account import and the two-accounts-for-one-service results
+came from, and it is why tokens are kept per household.
 
 | Device | Firmware | |
 |---|---|---|
