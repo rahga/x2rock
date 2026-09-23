@@ -29,7 +29,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::smapi::{DeviceAuth, Token};
@@ -112,7 +112,9 @@ impl ServiceAccounts {
         {
             return Some((key.as_str(), account));
         }
-        self.accounts.iter().next().map(|(k, a)| (k.as_str(), a))
+        self.accounts
+            .first_key_value()
+            .map(|(k, a)| (k.as_str(), a))
     }
 
     /// Whether this key is the one [`chosen`](Self::chosen) would return.
@@ -157,13 +159,8 @@ impl ServiceAccounts {
         if let Some(key) = identifying_key(account) {
             return key;
         }
-        match self.accounts.len() {
-            1 => self
-                .accounts
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| UNIDENTIFIED.to_string()),
+        match self.accounts.first_key_value() {
+            Some((only, _)) if self.accounts.len() == 1 => only.clone(),
             _ => UNIDENTIFIED.to_string(),
         }
     }
@@ -661,11 +658,39 @@ impl Credentials {
         service_id: &str,
         query: &str,
     ) -> Result<String> {
+        let held = self
+            .accounts_for(household, service_id)
+            .ok_or_else(|| anyhow!("no account is held for that service in this household"))?;
+        self.try_resolve_account(household, service_id, query)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no account matching {query:?}. This service holds: {}.",
+                    describe(&held.accounts)
+                )
+            })
+    }
+
+    /// As [`resolve_account`](Self::resolve_account), separating "nothing here
+    /// matches" from "several do".
+    ///
+    /// `Ok(None)` is the first, and is not always a failure: `unlink <service>
+    /// --account <x>` walks every household holding the service, and a
+    /// household that has no account by that name is one to pass over rather
+    /// than the end of the command. Ambiguity stays an error wherever it is
+    /// found - there is no safe way to pass over *that*, since the point of
+    /// refusing is that one of the candidates would otherwise be forgotten
+    /// without being named.
+    pub fn try_resolve_account(
+        &self,
+        household: &str,
+        service_id: &str,
+        query: &str,
+    ) -> Result<Option<String>> {
         let Some(held) = self.accounts_for(household, service_id) else {
-            bail!("no account is held for that service in this household");
+            return Ok(None);
         };
         if held.accounts.contains_key(query) {
-            return Ok(query.to_string());
+            return Ok(Some(query.to_string()));
         }
         let named = |a: &Account| a.nickname.clone().unwrap_or_default();
         if let Some((key, _)) = held
@@ -673,7 +698,7 @@ impl Credentials {
             .iter()
             .find(|(_, a)| named(a).eq_ignore_ascii_case(query))
         {
-            return Ok(key.clone());
+            return Ok(Some(key.clone()));
         }
         let needle = query.to_lowercase();
         let matches: Vec<(&String, &Account)> = held
@@ -682,11 +707,8 @@ impl Credentials {
             .filter(|(_, a)| named(a).to_lowercase().starts_with(&needle))
             .collect();
         match matches.as_slice() {
-            [(key, _)] => Ok((*key).clone()),
-            [] => bail!(
-                "no account matching {query:?}. This service holds: {}.",
-                describe(&held.accounts)
-            ),
+            [(key, _)] => Ok(Some((*key).clone())),
+            [] => Ok(None),
             several => bail!(
                 "{query:?} matches {} accounts: {}. Give the whole nickname, or the key.",
                 several.len(),
@@ -981,6 +1003,51 @@ mod tests {
             .to_string();
         assert!(err.contains("matches 2 accounts"), "{err}");
         assert!(err.contains("sn24") && err.contains("sn25"), "{err}");
+    }
+
+    #[test]
+    fn a_household_without_the_named_account_is_passed_over_not_fatal() {
+        // What `unlink <service> --account <x>` walks into: two households hold
+        // the service, and the nickname names an account in only one of them.
+        const OTHER: &str = "Sonos_office";
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("Kids", 24, "tok-kids"));
+        creds.remember(OTHER, "6", imported("Main", 99, "tok-main"));
+
+        // Nothing here matches - reported as "nothing", not as an error, so a
+        // caller sweeping households can carry on to the one that does.
+        assert_eq!(creds.try_resolve_account(OTHER, "6", "Kids").unwrap(), None);
+        // A household that holds no such service at all answers the same way.
+        assert_eq!(
+            creds.try_resolve_account(OTHER, "999", "Kids").unwrap(),
+            None
+        );
+        // And where it does match, it resolves.
+        let key = creds.try_resolve_account(HH, "6", "Kids").unwrap();
+        assert_eq!(key.as_deref(), Some("sn24"));
+
+        // Ambiguity is still an error in the permissive form: passing over it
+        // would forget an account nobody named.
+        creds.remember(HH, "6", imported("Kids B", 25, "tok-kids-b"));
+        // "Kids" would still resolve - an exact nickname beats a prefix, and
+        // it is one. "Kid" is the query that matches both and equals neither.
+        assert_eq!(
+            creds
+                .try_resolve_account(HH, "6", "kids")
+                .unwrap()
+                .as_deref(),
+            Some("sn24"),
+            "an exact nickname is not ambiguous just because it prefixes another"
+        );
+        assert!(creds.try_resolve_account(HH, "6", "Kid").is_err());
+
+        // The strict form still names what is held when nothing matches.
+        let err = creds
+            .resolve_account(OTHER, "6", "Kids")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no account matching"), "{err}");
+        assert!(err.contains("Main"), "{err}");
     }
 
     #[test]
