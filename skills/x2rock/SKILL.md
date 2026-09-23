@@ -378,6 +378,7 @@ see "Ask before you act".
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 | Link with no browser at all, from what the household already holds | `x2rock link --from-household ['<Service>']` — the only route to Qobuz, Apple Music and Amazon; needs inbound TCP 3401 from the player |
+| See what the household holds, without keeping it | `x2rock link --from-household --dry-run` — every account record and attribute, tokens shown only as byte lengths |
 | Forget tokens | `x2rock unlink '<Service>'` (every household, every account) / `--household <id>` (one) / `--account "<nickname>"` (one account) / `x2rock unlink --all` (wipe) |
 | Choose which account a service uses | `x2rock accounts --prefer '<Service>' "<nickname>"` — only where a household holds two accounts for it; `x2rock accounts` marks the current one `*` |
 | Shell completions | `x2rock completions [shell] [--install\|--uninstall]` — auto-detects shell when omitted |
@@ -907,10 +908,18 @@ those two apart when telling a user what linking will do.
   use**, exactly as the Sonos app prioritises one, so results come back as one set rather than two
   interleaved; `x2rock accounts` marks it with a `*` and names the others. Change it with
   `x2rock accounts --prefer <service> "<nickname>"`, which takes a nickname, a unique nickname
-  prefix, or the account key the listing prints, and refuses an ambiguous one by naming the
-  candidates. The preference survives a re-import. This is the case that matters for a service whose
+  prefix, or the account key, and refuses an ambiguous one by naming the candidates. **Two accounts
+  can carry the same nickname** - a household that rotated a service's token leaves two records with
+  the name the app gave the service - and then the nickname names neither: the listing shows each
+  account's key instead (`YouTube Music (sn15)`), and that key is what to pass. The preference
+  survives a re-import. This is the case that matters for a service whose
   accounts hold different catalogues — two Audible libraries, say — where which account is in use
   decides what a search can even find.
+- **`link --from-household --dry-run` shows what a household holds and keeps none of it.** Every
+  account record and every attribute, with each token replaced by its byte length. Use it to see
+  what an import would take before taking it, and to answer questions about a household's accounts
+  that `x2rock accounts` cannot - that one lists what *this machine* holds, this lists what the
+  *household* holds. Same firewall requirement as the import, since it is the same event capture.
 - **`unlink <service>` forgets *every* account that service has**, in every household unless
   `--household` narrows it; `unlink <service> --account "<nickname>"` forgets just one and leaves
   its siblings. The plain form says how many it dropped, so a service that held two says so.
