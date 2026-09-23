@@ -174,13 +174,19 @@ fn one_row_per_service<'a>(
 /// How one account is named in the listing: the service, and its nickname too
 /// where the service has more than one account and the nickname is what tells
 /// them apart.
-fn account_label(account: &credentials::Account, several: bool) -> String {
-    match account.nickname.as_deref() {
-        Some(nick) if several && !nick.is_empty() => {
-            format!("{} ({nick})", account.service_name)
-        }
-        _ => account.service_name.clone(),
+fn account_label(account: &credentials::Account, key: &str, several: bool) -> String {
+    if !several {
+        return account.service_name.clone();
     }
+    // Where there is a choice to make, every row has to be *nameable* - the
+    // listing is where someone reads what to hand `--prefer`. A nickname is the
+    // friendly form; with none, the key stands in, because two rows reading
+    // plainly `Plex` tell a person nothing and leave them nothing to type.
+    format!(
+        "{} ({})",
+        account.service_name,
+        credentials::account_display(account.nickname.as_deref(), key)
+    )
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -2023,8 +2029,13 @@ pub fn unlink(
         if count == 0 {
             println!("Nothing was linked{where_}.");
         } else {
+            let what = if count == 1 {
+                "the one stored token".to_string()
+            } else {
+                format!("all {count} tokens")
+            };
             println!(
-                "Forgot all {count} tokens{where_}. They stay valid at their services - \
+                "Forgot {what}{where_}. They stay valid at their services - \
                  revoke them there if that matters. Re-import with `x2rock link --from-household`."
             );
         }
@@ -2064,14 +2075,28 @@ pub fn unlink(
                 continue;
             };
             if let Some(gone) = linked.forget_account(hh, &id, &key) {
-                dropped.push(gone.nickname.unwrap_or(key));
+                dropped.push(credentials::account_display(gone.nickname.as_deref(), &key));
             }
         }
         linked.save()?;
+        // Named the same way the whole-service path names it, which it did not
+        // used to be: this branch returned before `where_` was ever built, so
+        // `unlink X --account Y --household Z` reported as though it had swept
+        // everywhere.
+        let where_ = match &scope {
+            Some(hh) => format!(" in household {hh}"),
+            None if dropped.len() > 1 => format!(" (in {} households)", dropped.len()),
+            None => String::new(),
+        };
+        // One name per account *name*, not per household: the same nickname in
+        // two households is one account as far as a person reading this is
+        // concerned, and "Kids, Kids" reads like a bug.
+        dropped.sort();
+        dropped.dedup();
         match dropped.len() {
-            0 => println!("No {name} account matching {query:?} was held."),
+            0 => println!("No {name} account matching {query:?} was held{where_}."),
             _ => println!(
-                "Forgot the {name} account {}. It is still valid at the service - \
+                "Forgot the {name} account {}{where_}. It is still valid at the service - \
                  revoke it there if that matters.",
                 dropped.join(", ")
             ),
@@ -2176,11 +2201,10 @@ async fn set_preference(
     // Saying what it already was is not a failure, but it is worth not
     // claiming a change that did not happen.
     let already = held.is_chosen(&key) && held.preferred.is_some();
-    let named = held
-        .accounts
-        .get(&key)
-        .and_then(|a| a.nickname.clone())
-        .unwrap_or_else(|| key.clone());
+    let named = credentials::account_display(
+        held.accounts.get(&key).and_then(|a| a.nickname.as_deref()),
+        &key,
+    );
     let others = held.accounts.len().saturating_sub(1);
     linked.prefer(&hh, &id, &key)?;
     linked.save()?;
@@ -2329,6 +2353,19 @@ pub async fn accounts(
                 .collect(),
             None => linked.households.iter().collect(),
         };
+        // Scoped to a household this store holds nothing for. Reachable through
+        // `--content`, where the scope comes from the player that answered
+        // rather than from the store - standing in front of speakers whose
+        // household has no token here is exactly the case - and printing
+        // nothing at all would read as "the command did not run".
+        if households.is_empty() {
+            let where_ = scope.as_deref().unwrap_or_default();
+            println!(
+                "No accounts linked in household {where_}. \
+                 Run `x2rock link --from-household` to import what it holds."
+            );
+            return Ok(());
+        }
         // Grouped by household, with a header only when there is more than
         // one - the roaming case - so the ordinary single-household listing
         // reads exactly as it did.
@@ -2349,8 +2386,8 @@ pub async fn accounts(
                 .flat_map(|held| {
                     let several = held.accounts.len() > 1;
                     held.accounts
-                        .values()
-                        .map(move |a| account_label(a, several).chars().count())
+                        .iter()
+                        .map(move |(key, a)| account_label(a, key, several).chars().count())
                 })
                 .max()
                 .unwrap_or(20)
@@ -2379,7 +2416,7 @@ pub async fn accounts(
                         (true, true) => "* ",
                         (true, false) => "  ",
                     };
-                    let named = account_label(a, several);
+                    let named = account_label(a, key, several);
                     println!(
                         "{mark}{named:<width$} {:<10} {:<12} {registered}",
                         id,

@@ -694,13 +694,21 @@ impl Credentials {
         let Some(held) = self.accounts_for(household, service_id) else {
             return Ok(None);
         };
+        // An empty query names nothing, and must not be allowed to *match*
+        // something: an account with no nickname reads as the empty string, so
+        // `--account ""` would match it exactly, and `starts_with("")` is true
+        // of every account there is. Forgetting a token to a flag that was left
+        // blank is not a thing to leave reachable.
+        if query.trim().is_empty() {
+            return Ok(None);
+        }
         if held.accounts.contains_key(query) {
             return Ok(Some(query.to_string()));
         }
         let exact: Vec<(&String, &Account)> = held
             .accounts
             .iter()
-            .filter(|(_, a)| account_nickname(a).eq_ignore_ascii_case(query))
+            .filter(|(_, a)| account_nickname(a).is_some_and(|n| n.eq_ignore_ascii_case(query)))
             .collect();
         match exact.as_slice() {
             [(key, _)] => return Ok(Some((*key).clone())),
@@ -715,7 +723,9 @@ impl Credentials {
         let matches: Vec<(&String, &Account)> = held
             .accounts
             .iter()
-            .filter(|(_, a)| account_nickname(a).to_lowercase().starts_with(&needle))
+            .filter(|(_, a)| {
+                account_nickname(a).is_some_and(|n| n.to_lowercase().starts_with(&needle))
+            })
             .collect();
         match matches.as_slice() {
             [(key, _)] => Ok(Some((*key).clone())),
@@ -729,17 +739,29 @@ impl Credentials {
     }
 }
 
-fn account_nickname(a: &Account) -> &str {
-    a.nickname.as_deref().unwrap_or("")
+/// An account's nickname, or `None` where it has none *usable* - absent and
+/// present-but-empty are the same thing to everything that reads one, and
+/// treating them apart is how the empty string became a matchable name.
+fn account_nickname(a: &Account) -> Option<&str> {
+    a.nickname.as_deref().filter(|n| !n.is_empty())
+}
+
+/// What to call an account in output: its nickname where it has one, else the
+/// key, which is always something a person can type back.
+pub fn account_display(nickname: Option<&str>, key: &str) -> String {
+    match nickname {
+        Some(nick) if !nick.is_empty() => nick.to_string(),
+        _ => key.to_string(),
+    }
 }
 
 /// Name accounts the way an error should: nickname and key.
 fn describe_accounts<'a>(accounts: impl IntoIterator<Item = (&'a String, &'a Account)>) -> String {
     accounts
         .into_iter()
-        .map(|(key, a)| match a.nickname.as_deref() {
-            Some(nick) if !nick.is_empty() => format!("{nick} ({key})"),
-            _ => key.clone(),
+        .map(|(key, a)| match account_nickname(a) {
+            Some(nick) => format!("{nick} ({key})"),
+            None => key.clone(),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -1098,6 +1120,32 @@ mod tests {
 
         let tok = creds.token_for(HH, "2").expect("token should be held");
         assert_eq!(tok.household.as_deref(), Some(HH));
+    }
+
+    #[test]
+    fn a_blank_query_names_no_account() {
+        let mut creds = Credentials::default();
+        let mut no_nickname = imported("", 24, "tok-a");
+        no_nickname.nickname = None;
+        creds.remember(HH, "6", no_nickname);
+
+        // An account with no nickname reads as the empty string, so a blank
+        // `--account` would otherwise match it exactly and forget it. One
+        // account held, so nothing is ambiguous and nothing protects it but
+        // this.
+        assert_eq!(creds.try_resolve_account(HH, "6", "").unwrap(), None);
+        assert_eq!(creds.try_resolve_account(HH, "6", "   ").unwrap(), None);
+        // A present-but-empty nickname is the same as none.
+        creds.remember(HH, "6", imported("", 25, "tok-b"));
+        assert_eq!(creds.try_resolve_account(HH, "6", "").unwrap(), None);
+        // And such an account is still reachable by its key.
+        assert_eq!(creds.resolve_account(HH, "6", "sn25").unwrap(), "sn25");
+        // The error names them by key, since they have no other name.
+        let err = creds
+            .resolve_account(HH, "6", "nothing")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sn24") && err.contains("sn25"), "{err}");
     }
 
     #[test]
