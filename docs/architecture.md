@@ -4392,6 +4392,18 @@ before the key's restriction list had been touched; once that list was re-saved,
 restriction first. Same gate, checked in a different order - as with the header path.) Between the
 200 and the 403 the only variable is which API.
 
+**And seen directly, not inferred.** Everything above is a refusal of one kind or another - a 403, a
+page that would not load, a search with no card, a directory without the name - and refusals always
+leave "something on our side was broken" standing as an alternative. The key's own restriction
+dropdown is a different kind of evidence: a positive enumeration, rendered by the console from the
+project's enabled services, captioned by Google itself *"This list includes only APIs enabled in
+this project."* Read to its end on 2026-09-23 it runs alphabetically through the project's defaults
+to **YouTube Data API v3**, the last entry, and stops. "YouTube Music API (Partner)" would sort
+immediately after it, and there is nothing after it. The key was created 2026-09-20 on a fresh
+trial account carrying its default APIs. Three independent surfaces - the API's own answer, the
+Library, and the enumeration of what the project has - give one answer, and the last of them is a
+listing rather than a refusal.
+
 What it leaves standing is what stood before: the household's registration plays the service, and
 `keep`/`bookmark`/favorites reach anything it has ever played. Discovery from this machine is
 closed, and the reason now has a name.
