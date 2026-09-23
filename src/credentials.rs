@@ -395,8 +395,13 @@ impl Credentials {
     /// the token carries the account key so a refresh comes back to the right
     /// one of them.
     pub fn token_for(&self, household: &str, service_id: &str) -> Option<Token> {
-        self.chosen(household, service_id)
-            .map(|(key, account)| account.token(key))
+        self.chosen(household, service_id).map(|(key, account)| {
+            let mut tok = account.token(key);
+            if tok.household.is_none() && !household.is_empty() {
+                tok.household = Some(household.to_string());
+            }
+            tok
+        })
     }
 
     /// Every account, across all households, as `(household, service_id,
@@ -692,19 +697,25 @@ impl Credentials {
         if held.accounts.contains_key(query) {
             return Ok(Some(query.to_string()));
         }
-        let named = |a: &Account| a.nickname.clone().unwrap_or_default();
-        if let Some((key, _)) = held
+        let exact: Vec<(&String, &Account)> = held
             .accounts
             .iter()
-            .find(|(_, a)| named(a).eq_ignore_ascii_case(query))
-        {
-            return Ok(Some(key.clone()));
+            .filter(|(_, a)| account_nickname(a).eq_ignore_ascii_case(query))
+            .collect();
+        match exact.as_slice() {
+            [(key, _)] => return Ok(Some((*key).clone())),
+            [_, _, ..] => bail!(
+                "{query:?} matches {} accounts: {}. Give the key.",
+                exact.len(),
+                describe_accounts(exact.iter().copied())
+            ),
+            [] => {}
         }
         let needle = query.to_lowercase();
         let matches: Vec<(&String, &Account)> = held
             .accounts
             .iter()
-            .filter(|(_, a)| named(a).to_lowercase().starts_with(&needle))
+            .filter(|(_, a)| account_nickname(a).to_lowercase().starts_with(&needle))
             .collect();
         match matches.as_slice() {
             [(key, _)] => Ok(Some((*key).clone())),
@@ -712,26 +723,31 @@ impl Credentials {
             several => bail!(
                 "{query:?} matches {} accounts: {}. Give the whole nickname, or the key.",
                 several.len(),
-                several
-                    .iter()
-                    .map(|(key, a)| format!("{} ({key})", named(a)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                describe_accounts(several.iter().copied())
             ),
         }
     }
 }
 
-/// Name every account of a service the way an error should: nickname and key.
-fn describe(accounts: &BTreeMap<String, Account>) -> String {
+fn account_nickname(a: &Account) -> &str {
+    a.nickname.as_deref().unwrap_or("")
+}
+
+/// Name accounts the way an error should: nickname and key.
+fn describe_accounts<'a>(accounts: impl IntoIterator<Item = (&'a String, &'a Account)>) -> String {
     accounts
-        .iter()
+        .into_iter()
         .map(|(key, a)| match a.nickname.as_deref() {
             Some(nick) if !nick.is_empty() => format!("{nick} ({key})"),
             _ => key.clone(),
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Name every account of a service the way an error should: nickname and key.
+fn describe(accounts: &BTreeMap<String, Account>) -> String {
+    describe_accounts(accounts)
 }
 
 /// What an account says about which account it is, if anything:
@@ -1048,6 +1064,40 @@ mod tests {
             .to_string();
         assert!(err.contains("no account matching"), "{err}");
         assert!(err.contains("Main"), "{err}");
+    }
+
+    #[test]
+    fn identical_nicknames_refuse_ambiguous_query_and_require_key() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("Kids", 24, "tok-a"));
+        creds.remember(HH, "6", imported("Kids", 25, "tok-b"));
+
+        // Two accounts named identically: querying the nickname is ambiguous.
+        let err = creds
+            .resolve_account(HH, "6", "Kids")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches 2 accounts"), "{err}");
+        assert!(
+            err.contains("Kids (sn24)") && err.contains("Kids (sn25)"),
+            "{err}"
+        );
+        assert!(err.contains("Give the key"), "{err}");
+
+        // The key settles it.
+        assert_eq!(creds.resolve_account(HH, "6", "sn24").unwrap(), "sn24");
+        assert_eq!(creds.resolve_account(HH, "6", "sn25").unwrap(), "sn25");
+    }
+
+    #[test]
+    fn token_for_attaches_household_when_account_omits_it() {
+        let mut creds = Credentials::default();
+        let mut acct = account("Deezer");
+        acct.household = None;
+        creds.remember(HH, "2", acct);
+
+        let tok = creds.token_for(HH, "2").expect("token should be held");
+        assert_eq!(tok.household.as_deref(), Some(HH));
     }
 
     #[test]
