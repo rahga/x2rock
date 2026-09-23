@@ -43,7 +43,8 @@ Quickshell sections are implementation.
 **Mixed:** "Connection lifecycle and network mobility" - the *reasons* to reconnect are universal,
 the logind and NetworkManager mechanisms are not.
 
-A concrete porting guide is under "Porting to Android TV" below.
+A concrete porting guide lives in x2rocktv's own `docs/porting-from-x2rock.md`, where it moved on
+2026-09-23.
 
 ## Music services: what has actually been tested
 
