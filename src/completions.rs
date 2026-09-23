@@ -712,25 +712,29 @@ mod tests {
     }
 
     #[test]
-    fn complete_rooms_runs_without_error() {
-        let mut out = Vec::new();
-        complete("rooms", None, &mut out).unwrap();
-        // Just verify it doesn't crash or error on this machine:
-        let _ = String::from_utf8(out).unwrap();
-    }
-
-    #[test]
-    fn complete_households_runs_without_error() {
-        let mut out = Vec::new();
-        complete("households", None, &mut out).unwrap();
-        let _ = String::from_utf8(out).unwrap();
-    }
-
-    #[test]
-    fn complete_accounts_runs_without_error() {
-        let mut out = Vec::new();
-        complete("accounts", None, &mut out).unwrap();
-        let _ = String::from_utf8(out).unwrap();
+    fn every_list_answers_on_a_machine_with_no_state() {
+        // The shell calls these on every keystroke, so none of them may panic
+        // or error - including on a machine where the state files this reads do
+        // not exist, which is what CI is and what a fresh install is. One test
+        // over every arm, because three copies differing only in a string
+        // covered less than this does: `bookmarks`, `services` and
+        // `accountnames` had no smoke test at all.
+        for what in [
+            "rooms",
+            "households",
+            "bookmarks",
+            "services",
+            "accounts",
+            "accountnames",
+            // An arm that does not exist answers empty rather than failing: the
+            // shell passes whatever the script says, and a stale script naming
+            // a retired list must not break completion for everything else.
+            "no-such-list",
+        ] {
+            let mut out = Vec::new();
+            complete(what, None, &mut out).unwrap_or_else(|e| panic!("`{what}` failed: {e:#}"));
+            String::from_utf8(out).unwrap_or_else(|e| panic!("`{what}` was not utf-8: {e}"));
+        }
     }
 
     #[test]

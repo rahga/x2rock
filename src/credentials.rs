@@ -1071,10 +1071,14 @@ mod tests {
             creds.accounts_for(HH, "6").unwrap().accounts[&exact].auth_token,
             "tok-a"
         );
-        // A distinguishing prefix resolves.
-        assert!(creds.resolve_account(HH, "6", "iHeartRadio 88").is_ok());
+        // A distinguishing prefix resolves - to the account it distinguishes,
+        // which `is_ok()` on its own would not have told us.
+        assert_eq!(
+            creds.resolve_account(HH, "6", "iHeartRadio 88").unwrap(),
+            "sn25"
+        );
         // The key itself always works, for two accounts named the same.
-        assert!(creds.resolve_account(HH, "6", "sn25").is_ok());
+        assert_eq!(creds.resolve_account(HH, "6", "sn25").unwrap(), "sn25");
         // Ambiguity names the candidates instead of picking one.
         let err = creds
             .resolve_account(HH, "6", "iheart")
@@ -1127,29 +1131,6 @@ mod tests {
             .to_string();
         assert!(err.contains("no account matching"), "{err}");
         assert!(err.contains("Main"), "{err}");
-    }
-
-    #[test]
-    fn identical_nicknames_refuse_ambiguous_query_and_require_key() {
-        let mut creds = Credentials::default();
-        creds.remember(HH, "6", imported("Kids", 24, "tok-a"));
-        creds.remember(HH, "6", imported("Kids", 25, "tok-b"));
-
-        // Two accounts named identically: querying the nickname is ambiguous.
-        let err = creds
-            .resolve_account(HH, "6", "Kids")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("matches 2 accounts"), "{err}");
-        assert!(
-            err.contains("Kids (sn24)") && err.contains("Kids (sn25)"),
-            "{err}"
-        );
-        assert!(err.contains("Give the key"), "{err}");
-
-        // The key settles it.
-        assert_eq!(creds.resolve_account(HH, "6", "sn24").unwrap(), "sn24");
-        assert_eq!(creds.resolve_account(HH, "6", "sn25").unwrap(), "sn25");
     }
 
     #[test]
@@ -1220,6 +1201,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("matches 2 accounts"), "{err}");
+        assert!(
+            err.contains("Hhh (link)") && err.contains("Hhh (sn15)"),
+            "{err}"
+        );
+        assert!(err.contains("Give the key"), "{err}");
+        // Which is the way out the error names, so it has to work.
+        assert_eq!(creds.resolve_account(HH, "284", "sn15").unwrap(), "sn15");
 
         // Where a nickname *is* unique it stands alone, with no key noise.
         creds.remember(HH, "6", imported("Kids", 24, "k"));

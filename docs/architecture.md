@@ -8413,19 +8413,86 @@ serials 24 and 25, `Username0` keys `81dee58d` and `885ebbcc`, nicknames `iHeart
 `iHeartRadio 885ebbcc` - and the store, keyed `household -> service -> account`, kept one. The
 import printed a "Kept" line for each while `accounts` then listed one, which is how it was caught.
 
-Three things the decrypted blob turned out to be saying that the parser was not reading:
+Three things the decrypted blob turned out to be saying that the parser was not reading. What
+follows separates what has been *measured* from what is *inferred*, because an earlier draft of
+this section stated two inferences as facts and they did not survive a second household.
 
-- **`Username<i>` carries a stable per-account key**, `X_#Svc<type>-<key>-Token`. The Sonos app's
-  auto-nickname for a second account is built from it, which is why `iHeartRadio 885ebbcc` looks the
-  way it does. A nickname is renameable - this household has a Deezer account called `Deeznuts` -
-  so the nickname is for display and the key is for keying.
-- **The trailing digit on every value is an index.** Each element declares `NumAccounts`, and
-  `Token0`/`Token1`/… are its accounts. Reading only the `0` suffix would drop the second account of
-  any element that held two. No element seen here does - this household's two iHeartRadio accounts
-  arrive as two elements, each declaring `NumAccounts="1"` - so it was latent rather than active,
-  and is now walked and pinned by a synthetic two-account vector.
-- **`Flags<i>`** is `4` on every account with a real key and `0` on those without (Sonos Radio,
-  TIDAL). Parsed and kept; nothing reads it.
+- **`Username<i>` is an account selector**, `X_#Svc<type>-<key>-Token`, and the Sonos app's
+  auto-nickname for a second account is built from the key inside it - which is why
+  `iHeartRadio 885ebbcc` looks the way it does. A nickname is renameable (this household has a
+  Deezer account called `Deeznuts`), so the nickname is for display and the key is for keying.
+
+  **It is not a stable identity for an account at its service**, which an earlier draft claimed.
+  The same Deezer account is `X_#Svc519-0-Token` in one household and `X_#Svc519-23e2bc11-Token`
+  in the other, and YouTube Music has different keys in each. It is assigned per registration,
+  per household. Nor is it always synthetic: SoCo #1010's own documentation shows
+  `Username0="user@example.com"`, a shape neither household here produced, so a parser that
+  splits on `-Token` needs a fallback that returns the value whole.
+- **`Flags<i>`** is `4` where `Username<i>` carries a real key and `0` where it carries a literal
+  zero or nothing. Thirteen records for thirteen, across both households. **Deezer appears on both
+  sides**, so it is not a property of the service; what decides it is unknown, and nothing here
+  reads the field.
+- **`NumAccounts` exists, and the `0` suffix is *consistent with* an index** - not proof of one.
+  Every record in both households declares `NumAccounts="1"`, and a service with two accounts is
+  served as two records, one per account. The legacy format did the same: one `<Account>` element
+  per account (see below), which makes the count and the suffix look like leftovers from a shape
+  that could array several accounts into one record. The parser walks `0..NumAccounts` anyway,
+  because being immune costs four lines and a synthetic vector; but **no household has yet produced
+  a record holding two accounts**, and this document should not pretend otherwise.
+
+#### It is Sonos's own legacy account format, flattened (2026-09-23)
+
+SoCo's long-standing `music_services/accounts.py` documents the XML that `/status/accounts` used to
+serve: `<Account Type="2311" SerialNum="1">` with child elements `UN`, `MD`, `NN`, `OADevID`, `Key`.
+Line that up with the blob and the encrypted format is the same field set moved into indexed
+attributes:
+
+| `/status/accounts` | `ThirdPartyMediaServersX` |
+|---|---|
+| `UN` | `Username0` |
+| `MD` | `Md0` - which is what that otherwise unexplained attribute is |
+| `NN` | `Nickname0` |
+| `Key` | `Key0` |
+| `SerialNum` (attribute) | `SerialNum0` |
+| `Type` (attribute) | the encoded type inside `SA_RINCON<type>_` |
+
+`Token0`, `Flags0` and `Tier0` have no legacy counterpart; `OADevID` has no modern one. The legacy
+`<Accounts …  NextSerialNum="5">` also explains the serials: one monotonic counter per household,
+which is what is observed - `1, 9, 10, 11, 13, 14, 15` in one household and `10, 23, 24, 25, 26, 27`
+in the other, sparse where accounts were removed. That is the same namespace `musicServiceAccounts:1
+match` answers in, which is why an imported account and a matched browser-linked one can be keyed
+identically.
+
+**`/status/accounts` still responds and returns nothing** - 111 bytes of
+`<ZPSupportInfo></ZPSupportInfo>` on S2 18.8 (`97.1-80312`). It is not being singled out:
+`/status/topology`, `/status/perf` and `/status/upnp` are equally empty, while `/status/zp` (1547
+bytes) and `/status/ifconfig` (2600 bytes) still serve real data. A batch of diagnostic endpoints was
+emptied, `accounts` among them - which is what makes the decrypt the only route rather than a
+convenience.
+
+#### The event subscription is the only way to read it (tested 2026-09-23)
+
+The inbound callback is the one awkward part of this mechanism, so it is worth recording that it
+cannot be avoided:
+
+- `ThirdPartyMediaServersX` appears in **exactly one of the fourteen** service descriptions the
+  player publishes, `/xml/ZoneGroupTopology1.xml`, declared `sendEvents="yes"`.
+- That service publishes eight actions. `GetZoneGroupState` and `GetZoneGroupAttributes` are the
+  only two that read anything, and neither response contains it.
+- UPnP `QueryStateVariable` for it is refused with `<errorCode>401</errorCode>`.
+
+So `--from-household` needs the firewall hole because there is no request that returns this, not
+because subscribing was the first thing tried.
+
+#### The account key is not a secret, and cannot be
+
+It is in the **cdudn of every favorite that plays from that account**, in plaintext, readable over
+ContentDirectory with no household id and no decryption. Browsing `FV:2` here returns
+`X_#Svc41991-acdaed4d-Token` (Saavn) four times, `X_#Svc7943-6c0ffea0-Token` (Qobuz) once, and
+`X_#Svc519-0-Token` (Deezer) once. It has to be plaintext: the player needs to know which account to
+resolve a track with, and that decision happens outside the encrypted blob. The key authenticates
+nothing - `Token<i>` does - so these strings are safe to paste into a bug report in a way the
+household id, which is the decrypt key, is not.
 
 **Schema 3 holds several accounts per service, and one of them is preferred.** The Sonos app's own
 answer to two accounts is to let a person prioritise one, so a search returns one set of results
