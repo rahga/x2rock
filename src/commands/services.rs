@@ -415,6 +415,7 @@ pub async fn run_link(
     from_player: bool,
     from_household: bool,
     callback_port: u16,
+    dry_run: bool,
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
     let mut state = State::load()?;
@@ -430,6 +431,12 @@ pub async fn run_link(
     // even the "what is linked?" listing is now a per-household question.
     let household = session.connection.household_id().await?;
 
+    if from_household && dry_run {
+        // Not a mode of the import: it keeps nothing, so it shares the capture
+        // and none of the rest.
+        let (short, encoded) = capture_stored(&session, &household, callback_port).await?;
+        return report_stored_accounts(&encoded, &short, &catalogue);
+    }
     if from_household {
         return link_from_household(
             &session,
@@ -664,6 +671,131 @@ pub async fn run_link(
     Ok(())
 }
 
+/// Capture the household's encrypted account blob, with the short household id
+/// the key derives from.
+///
+/// The blob is keyed to the *short* form (no `.suffix`), which is what
+/// `GetHouseholdID` returns, while the SMAPI header and the credentials record
+/// want the long one. The short is the long up to its first dot.
+async fn capture_stored(
+    session: &session::Session,
+    long_household: &str,
+    callback_port: u16,
+) -> Result<(String, String)> {
+    let short = long_household
+        .split('.')
+        .next()
+        .unwrap_or(long_household)
+        .to_string();
+    let encoded = sonos::stored::capture_envelope(
+        session.connection.ip(),
+        callback_port,
+        HOUSEHOLD_EVENT_TIMEOUT,
+    )
+    .await?;
+    Ok((short, encoded))
+}
+
+/// `link --from-household --dry-run`: print what the household stores, keep none
+/// of it.
+///
+/// Every record, every attribute, in the payload's own order - including the
+/// ones x2rock does not model, since an attribute nobody prints is an attribute
+/// nobody discovers. `NumAccounts` is called out per record because the digit
+/// on `Token0`/`SerialNum0` is an index against it, and whether a household
+/// ever sets it above 1 is still an open question that only a household can
+/// answer.
+///
+/// **A token never reaches the terminal.** Its length does, which is the one
+/// property worth comparing between two reads of the same household - a token
+/// that changed length changed, and one that kept it may still have been
+/// rotated, as this household's YouTube Music was.
+fn report_stored_accounts(
+    encoded: &str,
+    short_household: &str,
+    catalogue: &catalogue::Catalogue,
+) -> Result<()> {
+    let records = sonos::stored::decrypt_elements(encoded, short_household)?;
+    println!(
+        "{} account record{} in the household's store. Nothing was kept.\n",
+        records.len(),
+        if records.len() == 1 { "" } else { "s" }
+    );
+    for (tag, attrs) in &records {
+        let named = |key: &str| {
+            attrs
+                .iter()
+                .find(|(n, _)| n == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_default()
+        };
+        // The service id is the same arithmetic the modelled parser does, and
+        // worth printing because the UDN states it only in encoded form.
+        let service = named("UDN")
+            .strip_prefix("SA_RINCON")
+            .and_then(|rest| rest.split('_').next())
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .map(|encoded_type| {
+                let id = (encoded_type / 256).to_string();
+                let name = catalogue.name_of(&id).unwrap_or("not in this catalogue");
+                format!("{name} (sid {id}, schema rev {})", encoded_type % 256)
+            })
+            .unwrap_or_else(|| "unrecognised UDN".to_string());
+        println!("<{tag}> {service}");
+        for (name, value) in attrs {
+            // Secrets by name, not by guess: everything a token or key could be
+            // called carries the index suffix, so the prefix is the test.
+            let shown = if name.starts_with("Token")
+                || name.starts_with("Key")
+                || name.starts_with("Password")
+            {
+                if value.is_empty() {
+                    "<empty>".to_string()
+                } else {
+                    format!("<{} bytes, not shown>", value.len())
+                }
+            } else {
+                format!("{value:?}")
+            };
+            println!("    {name:<14} {shown}");
+        }
+        println!();
+    }
+    let packed: Vec<&str> = records
+        .iter()
+        .filter(|(_, attrs)| {
+            attrs
+                .iter()
+                .any(|(n, v)| n == "NumAccounts" && v.parse::<u32>().unwrap_or(1) > 1)
+        })
+        .map(|(_, attrs)| {
+            attrs
+                .iter()
+                .find(|(n, _)| n == "UDN")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("?")
+        })
+        .collect();
+    if packed.is_empty() {
+        println!(
+            "Every record declares NumAccounts=1, so each holds one account and the \
+             `0` suffix is the only index present."
+        );
+    } else {
+        println!(
+            "NumAccounts is above 1 on {}: {}. The suffixed attributes are indices, \
+             and these records carry more than the `0` set.",
+            if packed.len() == 1 {
+                "a record"
+            } else {
+                "records"
+            },
+            packed.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// How long to wait for the player's account event. Generous: it is one round
 /// trip, but it depends on the player choosing to open a connection back, and a
 /// firewall that is going to drop it will drop it for the whole window.
@@ -687,21 +819,7 @@ async fn link_from_household(
     nickname: Option<&String>,
     callback_port: u16,
 ) -> Result<()> {
-    // The stored blob is keyed to the *short* household id (no `.suffix`), the
-    // form `GetHouseholdID` returns, while the SMAPI header and the credentials
-    // record want the long one. The short is the long up to its first dot.
-    let short_household = long_household
-        .split('.')
-        .next()
-        .unwrap_or(long_household)
-        .to_string();
-
-    let encoded = sonos::stored::capture_envelope(
-        session.connection.ip(),
-        callback_port,
-        HOUSEHOLD_EVENT_TIMEOUT,
-    )
-    .await?;
+    let (short_household, encoded) = capture_stored(session, long_household, callback_port).await?;
     let accounts = sonos::stored::decrypt_accounts(&encoded, &short_household)?;
 
     // Only accounts that actually carry a token can be injected; the rest are

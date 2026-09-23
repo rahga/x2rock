@@ -144,6 +144,38 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
     Ok(payload.to_vec())
 }
 
+/// One record as the payload carries it: the element's name, and its attributes
+/// in the order they appear. Deliberately untyped - see [`decrypt_elements`].
+pub type StoredRecord = (String, Vec<(String, String)>);
+
+/// Every element of the decrypted payload, as its tag and raw attributes.
+///
+/// [`decrypt_accounts`] models what x2rock knows how to use; this models
+/// nothing. It is for *looking* - at a household's records before importing
+/// them, and at the attributes nothing here reads yet (`Md<i>`, `Flags<i>`,
+/// `Password<i>`, and whatever a firmware adds next). An unknown attribute is
+/// only discoverable if something is willing to print one it was not expecting.
+///
+/// Secrets are returned intact: this is a library function, and the caller that
+/// prints them is the one that has to decide what a terminal may see.
+pub fn decrypt_elements(encoded: &str, household_id: &str) -> Result<Vec<StoredRecord>> {
+    let payload = decrypt_payload(encoded, household_id)?;
+    let text = String::from_utf8_lossy(&payload);
+    let doc = roxmltree::Document::parse(&text).context("decrypted account XML did not parse")?;
+    Ok(doc
+        .descendants()
+        .filter(|n| n.is_element() && n.attribute("UDN").is_some())
+        .map(|n| {
+            (
+                n.tag_name().name().to_string(),
+                n.attributes()
+                    .map(|a| (a.name().to_string(), a.value().to_string()))
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
 /// Parse the decrypted account XML.
 ///
 /// Each element with a `UDN` of `SA_RINCON<type>_...` is one *service*, where
@@ -581,6 +613,25 @@ mod tests {
         let accounts = decrypt_accounts(&seal(XML, HH, [7u8; 16]), HH).unwrap();
         assert_eq!(accounts.len(), 3, "the un-indexed vector is unchanged");
         assert_eq!(accounts[0].account_key, "", "no Username0 in that vector");
+    }
+
+    #[test]
+    fn the_raw_view_keeps_attributes_nothing_models() {
+        const ODD: &str = r#"<ThirdPartyMediaServers>
+            <MediaServer UDN="SA_RINCON7943_X" SerialNum0="14" Token0="t" Key0="k"
+              Md0="" Flags0="4" Whatever0="new-in-some-firmware"/>
+            <NotAnAccount Name="no UDN, not a record"/>
+        </ThirdPartyMediaServers>"#;
+        let raw = decrypt_elements(&seal(ODD, HH, [9u8; 16]), HH).unwrap();
+        assert_eq!(raw.len(), 1, "only elements carrying a UDN are records");
+        let (tag, attrs) = &raw[0];
+        assert_eq!(tag, "MediaServer");
+        let named = |k: &str| attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        // Including the ones the modelled parser throws away, which is the
+        // entire reason this exists.
+        assert_eq!(named("Flags0"), Some("4"));
+        assert_eq!(named("Md0"), Some(""));
+        assert_eq!(named("Whatever0"), Some("new-in-some-firmware"));
     }
 
     #[test]
