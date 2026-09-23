@@ -64,7 +64,7 @@ local token buys search and browse, and nothing of playback.
 | **iHeartRadio** | device-link | ✓ | ✓ | live stations stream ✓; podcasts enqueue ✓; `artist_radio_track` ids are per-listener and stream-only | 2026-09-19, home |
 | **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
 | **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
-| **YouTube Music** | app-link | ✗ HTTP 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks) | 2026-09-20, home |
+| **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
@@ -191,85 +191,33 @@ lines below record the reversals rather than warn about text that still says oth
 - **YouTube Music's key is sealed *in public*, not "in firmware".** The manifest hands the encrypted
   envelopes to anyone who asks; what is private is the key that opens them. The framing changed on
   2026-09-22, the conclusion did not. See "YouTube Music, attempted again".
+- **YouTube Music is closed by a Google *project* gate, not a Sonos client pin, and the OAuth
+  identity probe is answered.** A self-service API key gets `SERVICE_DISABLED` for "YouTube Music API
+  (Partner)", method `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and
+  cannot be enabled by a self-service project; an OAuth token would be judged against the same
+  project. Every "the one live thread is the OAuth probe" line is superseded. See "TASK: the OAuth
+  identity probe".
 
 ## Open questions
 
-1. **The app-link barrier, and YouTube Music discovery specifically** (narrowed 2026-08-31 from
-   "which services the picker should offer" — the picker half is decided, see "The picker discovers
-   linked services" above).
+1. **Which account does x2rock's own cdudn resolve to, when a household holds two for one service?**
+   (sharpened 2026-09-23 from the 2026-09-17 question, whose other half is resolved.)
 
-   One loose end that blocks nothing. **`match`** associates this machine with a registration the
-   Sonos app made first - reproduced deliberately on 2026-09-18 against Deezer, see "`match` works,
-   and the name was literal all along", and again the same evening against a household holding two
-   iHeartRadio accounts, where a serial that looked new turned out to be one of them: see "Two
-   accounts for one service, one per person". **Bandcamp** is no longer deferred
-   either; one purchase finished that test.
+   The coexistence is confirmed - see "Two accounts for one service, one per person" (09-18) - and
+   the store now holds them, one preferred: see "A household can hold two accounts for one service"
+   (09-22). What stays open is the cdudn `bookmarks::service_uri` builds for an enqueue,
+   `SA_RINCON<type>_X_#Svc<type>-0-Token`, which names the **service**. The household's own records
+   show that a real account's cdudn carries its account key - `X_#Svc1543-885ebbcc-Token` - and its
+   favorites carry that in plaintext. So with two accounts, x2rock's `-0-` cdudn resolves either to
+   whichever account the player treats as default, or to the account whose `Username0` is literally
+   `-0-` if one exists, or to neither; none of the three has been observed, and every verification of
+   "the player ignores `sn=` and resolves from the cdudn" (Mixcloud) ran against a service with one.
 
-   The 62 app-link services remain a separate call — though no longer a uniform one: **Plex fell
-   outright** (searched, browsed and played the same day it was asked for; see "Plex: the first
-   app-link service to fall"), and `x2rock link` now asks any app-link service for a browser page
-   via `getAppLink` rather than refusing on the tier alone. And **the barrier is now one wall
-   shorter than this list used to claim.** "Protected streams need `httpHeaders` or `contentKey`, which
-   `loadStreamUrl` cannot carry" was never even *observed* - no service has yet returned either field,
-   TIDAL included (2026-09-19) - and it is no longer the whole story either: the enqueue path does not
-   resolve the stream at all, so the player supplies its own credential and protected content plays.
-   A kept YouTube Music track demonstrates it — and the same day showed the condition it rests on,
-   in both directions: the household's account was disconnected and the same id refused at enqueue
-   with UPnP 800, then the account was re-added and the id played again, under the new serial. See
-   "The YouTube Music account was disconnected" and the resurrection section after it. The
-   mechanism is real but **conditional on the household holding an account for the service**,
-   which x2rock can neither create nor detect in advance.
-
-   So for YouTube Music specifically, **playback is exactly as solved as the household's
-   registration is present — only discovery is missing on x2rock's side.**
-
-   **One more door tested and closed, 2026-09-22.** The household's *own* YouTube Music token can
-   now be read off the speaker (see "The household stores every token"), which is the credential the
-   Sonos app itself searches with. It imports cleanly, is the same shape as tokens that work, and
-   SMAPI still answers **403** - in both households. So the block is not the account and never was:
-   it is the caller. This rules out the most promising remaining shortcut, and leaves the OAuth
-   identity probe below as the only live thread rather than one of two.
-
-   **The discovery half: the sealed-key path is closed, but discovery is not — re-opened
-   2026-09-01.** This entry first said one judgement call stood between here and a search (present
-   the manifest `apiKey` or not); that was false, because the `apiKey` is two **encrypted
-   envelopes** (RSA-1024-wrapped key, AES payload, tagged with the fingerprint of a private key in
-   the Sonos app and player firmware), so there is no key to present and getting one means
-   extracting a private key from a binary — circumvention, out of scope. Then the *same day* the
-   endpoint itself corrected the framing: `music.googleapis.com/v1:sendRequest` returns **401
-   "Expected OAuth 2 access token"** the instant a Bearer is presented, so it accepts OAuth as an
-   alternative identity and **the sealed key is one door, not the door.** The live task is now
-   narrow and testable — does a self-service Cloud OAuth client's token clear the endpoint, or is
-   it pinned to Sonos's `client_id`? — and it needs the user to create the OAuth client. Full
-   probe and decision tree are in **"TASK: the OAuth identity probe"** inside "The YouTube Music
-   `apiKey` is sealed" — including three refinements added 2026-09-04 (read `details[].reason`, not
-   the status; a likely fourth branch in `SERVICE_DISABLED`; a free `tokeninfo` pre-step). **The
-   second wall this entry used to name is gone**: Sonos does not re-mint object ids, so
-   `sendRequest` returns ids the enqueue path already accepts and there is no `videoId → objectId`
-   mapping to solve. One request is now the whole of it. The **registered-key proxy** recorded
-   there stays the right pattern for a future service with a registerable endpoint; it does not fit
-   this one.
-
-   Also corrected there: **the Sonos PC controller completes app-link**, so the "hand-off needs the
-   service's mobile app, which Linux cannot do" wall this entry used to claim was never real. The
-   presentation map specifies YouTube Music search in full, nine categories across two groups — the
-   interface is defined and waiting, and an accepted identity for `sendRequest` is the whole of
-   what stands in front of it.
-
-   What remains open under this heading is only the *rest* of the app-link tier — and one of them
-   has now answered: **TuneIn (New) linked through `getAppLink` outright** (see "TuneIn (New): the
-   first front-door AppLink completion"), proving the tier is per-service policy rather than a wall.
-   Asking costs nothing. YouTube Music remains not one of them.
-
-   Worth noting what is *not* a route, so it is not re-tried: the Control API has no content
-   discovery anywhere in its 53 paths (Sonos's *private* cloud content API does — see "The
-   first-party web app has a third API" — and it is gated behind a Sonos account session, which is
-   the axiom, not a wall), UPnP `Search` reports empty `SearchCaps`, `musicService:1 search` does
-   not exist and that namespace is about accounts, and `GetSessionId` answers 806 even for a
-   service that plays. And the object id cannot be derived from outside —
-   `ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H` is 48 opaque characters, not a YouTube video
-   id, so searching YouTube by another route gives nothing a player would accept. **The opacity is
-   Google's own** (2026-09-04), which is why no Sonos-side decoding exists to be found.
+   **The test**, home household, two iHeartRadio accounts: `play-item` an iHeartRadio item through
+   x2rock, then read `accountId` from `raw api --scope group playback:1 getMetadataStatus` - `sn_24`
+   or `sn_25` says which account the `-0-` cdudn landed on. Then build the cdudn from the *preferred*
+   account's key instead of `-0-`, play again, and see whether the serial follows the key. If it
+   does, `--prefer` can drive playback as well as search. Deferred until the laptop is home.
 
 2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
@@ -281,33 +229,6 @@ lines below record the reversals rather than warn about text that still says oth
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
-
-4. **Does a service with two accounts break the one-account assumption?** (deferred 2026-09-17,
-   needs the office household and one action in the Sonos app.)
-
-   Sonos does not make you choose between two accounts for the same service — they coexist, with
-   different ids in the app. This household may hold two iHeartRadio accounts, one per person. Two
-   places in this tree assume one:
-
-   - `bookmarks::service_uri` passes `sn=None` and justifies it as "the player does not need it:
-     the cdudn names the account". The supporting evidence is Mixcloud, where a *wrong* serial
-     also played — which shows the player ignored `sn=` and resolved from the cdudn. But the cdudn
-     we build, `SA_RINCON<type>_X_#Svc<type>-0-Token`, names the **service**, not an account, and
-     every one of those verifications ran against a service with exactly one. With two, nothing in
-     the URI says which, and how a player chooses has never been observed.
-   - `credentials.rs` keys the store by service id alone, one token per service, so relinking
-     replaces rather than adding. If Sonos's model is side-by-side accounts, x2rock can represent
-     only one of them.
-
-   **The test.** Favorite an iHeartRadio station in the Sonos app — ideally one from each account —
-   then run `x2rock accounts --content`, which harvests `(service id, account serial)` pairs from
-   the household's favorites and queue. Two serials under `sid 6` confirm it. A favorite is the
-   surer source than playback: that command's own footer notes an account which has only played a
-   station never appears.
-
-   **Not** an explanation for `musicServiceAccounts:1 match` refusing. An earlier guess that the
-   household was declining an extra registration is withdrawn — if accounts coexist, there is no
-   count to decline on.
 
 ## Scope
 
@@ -4323,7 +4244,7 @@ with search living on the service `uri` rather than a custom endpoint — the cl
 is about caller identity, and the sealed key is only one form of it: the endpoint also evaluates
 OAuth, which is what the next section probes.
 
-### TASK: the OAuth identity probe (open, needs a Google Cloud OAuth client — 2026-09-01)
+### TASK: the OAuth identity probe (2026-09-01; answered 2026-09-23 — it is a project gate)
 
 Prompted by the observation that a Sonos app linking YouTube Music shows a ~9-character code and
 hands it to **Google**, which authenticates the account and approves the connection. That is the
@@ -4395,6 +4316,62 @@ that registration already buys the half that matters. Verified the same evening 
 favourite played in Dining Room from the queue (`queue_position: 1`, position advancing), resolved
 by the player with the household's own `sn=2`. What the sealed key costs is search and browse from
 this machine, not playback.
+
+**Run 2026-09-23, and answered without the OAuth client.** The decision tree above expected to
+need a device-grant token. It turned out that a self-service **API key** answers the same question
+one step earlier, because both are evaluated against the *project* that owns them - and the endpoint
+named that project gate itself.
+
+Baseline first, re-run today: no identity → `403 PERMISSION_DENIED` "unregistered callers";
+malformed Bearer → `401 UNAUTHENTICATED` "Expected OAuth 2 access token, login cookie…". Unchanged
+since 2026-09-01. Then a real, self-service Google Cloud API key, sent the two ways Google accepts:
+
+| sent | HTTP | `details[].reason` | Google's message |
+|---|---|---|---|
+| `?key=<key>` | 403 | **`SERVICE_DISABLED`** | "**YouTube Music API (Partner)** has not been used in project *N* before or it is disabled. Enable it by visiting `console.developers.google.com/apis/api/music.googleapis.com/overview?project=N`" |
+| `x-goog-api-key: <key>` | 403 | `API_KEY_SERVICE_BLOCKED` | "Requests to this API music.googleapis.com method **`google.music.sonos.v1.Sonos.SendRequest`** are blocked." |
+
+Three things Google said here that nothing in this document had before. The service is formally
+**"YouTube Music API (Partner)"**. Its method is **`google.music.sonos.v1.Sonos.SendRequest`** -
+namespaced *Sonos* in the API definition itself. And the refusal is `SERVICE_DISABLED` for the
+calling project, with an activation URL - the standard "you have not enabled this API" answer, not
+a client check. (The header path hit the key's own API-restriction list first, which is why it
+reads differently; same gate, checked in a different order.)
+
+**The activation URL is a door painted on a wall.** Logged in, it redirects to the API Library page
+for `music.googleapis.com`, which shows "Failed to load … please try again" - and again on Retry -
+and a Library search for "YouTube Music" returns no card. The service's own discovery document
+answers `403 PERMISSION_DENIED` (not 404: it exists and is gated), and Google's public directory
+lists 534 APIs with no `music` among them. So the API is real, is enableable *by some projects*, and
+is not offered to a self-service one. That is the "likely fourth branch" from 2026-09-04, confirmed.
+
+**Why this answers the OAuth probe without running it.** A Google OAuth access token is evaluated
+against the project that owns the *client* that minted it, for enablement and quota alike. A
+self-service project cannot enable this service, so a token from any OAuth client it owns arrives as
+the same consumer the API key did and meets the same `SERVICE_DISABLED`. The device-grant harness
+was built and smoke-tested (two phases, so a person can be handed the code; kept out of the repo as
+the design required) and was not needed.
+
+**So the wall is a project allowlist, not a client allowlist**, and the distinction is the finding.
+"Pinned to Sonos's `client_id`" was the closure this section was written to reach or rule out; the
+truth is one level up - Google has enabled a partner API for Sonos's project(s) and for nobody who
+can create a project themselves. Nothing self-service reaches it: not a key, not a token, not the
+public YouTube Data API v3, which is a different service and does not carry the YouTube Music
+catalogue. This is the same shape as the sealed key, seen from Google's side instead of Sonos's.
+
+What it leaves standing is what stood before: the household's registration plays the service, and
+`keep`/`bookmark`/favorites reach anything it has ever played. Discovery from this machine is
+closed, and the reason now has a name.
+
+**And what is *not* a route, so none of it is re-tried** (moved here from the open question when it closed, 2026-09-23): the Control API has no content
+discovery anywhere in its 53 paths (Sonos's *private* cloud content API does — see "The
+first-party web app has a third API" — and it is gated behind a Sonos account session, which is
+the axiom, not a wall), UPnP `Search` reports empty `SearchCaps`, `musicService:1 search` does
+not exist and that namespace is about accounts, and `GetSessionId` answers 806 even for a
+service that plays. And the object id cannot be derived from outside —
+`ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H` is 48 opaque characters, not a YouTube video
+id, so searching YouTube by another route gives nothing a player would accept. **The opacity is
+Google's own** (2026-09-04), which is why no Sonos-side decoding exists to be found.
 
 ### The cheaper experiment: *a* key rather than *the* key (2026-09-19)
 
@@ -8549,6 +8526,16 @@ record the `rate` work was built from.
 - ~~Is a bespoke Quickshell widget worth building in v1?~~ - **built 2026-08-28/29**, and went further
   than the question imagined. See the widget README.
 
+- ~~Can YouTube Music be searched from this machine - is there any identity `sendRequest` accepts
+  from us?~~ - **closed 2026-09-23: no, and the reason is Google's, with a name.** A self-service API
+  key gets `SERVICE_DISABLED` for "YouTube Music API (Partner)", method
+  `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and cannot be enabled by a
+  self-service project; an OAuth token is judged against the same project. A project allowlist, not
+  a client pin. Playback through the household's registration is untouched. See "TASK: the OAuth
+  identity probe".
+- ~~Does a service with two accounts break the one-account assumption?~~ - **the store half closed
+  2026-09-22**: it holds several per service with one preferred (schema 3). The cdudn half is
+  sharper and still open - see open question 1.
 - ~~Cloud Control API is the only integration path~~ — false; the LAN WebSocket API is better.
 - ~~Build WebSocket from day one, or ship polling v1 first?~~ — settled: push from day one, and it
   costs *less* than polling, not more.
