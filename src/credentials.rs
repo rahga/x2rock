@@ -117,6 +117,47 @@ impl ServiceAccounts {
             .map(|(k, a)| (k.as_str(), a))
     }
 
+    /// How to name one of these accounts so a person can tell it from its
+    /// siblings and type it back at `--prefer` or `--account`.
+    ///
+    /// A nickname where that is enough, the key where it is not. Both halves
+    /// are needed: an account can carry no nickname, and two accounts can carry
+    /// the *same* one - a household that rotated a service's token leaves the
+    /// old record and the new one both called `Hhh`, and two identical rows are
+    /// no more useful than two blank ones.
+    pub fn label_for(&self, key: &str) -> String {
+        let Some(account) = self.accounts.get(key) else {
+            return key.to_string();
+        };
+        let Some(nick) = account_nickname(account) else {
+            return key.to_string();
+        };
+        if self.nickname_is_unique(key, nick) {
+            nick.to_string()
+        } else {
+            format!("{nick} ({key})")
+        }
+    }
+
+    /// The shortest thing that tells this account from its siblings: its
+    /// nickname where that is unique among them, else the key.
+    ///
+    /// For the listing, where the service name is already printed beside it and
+    /// a repeated nickname would be noise rather than information.
+    pub fn distinguisher(&self, key: &str) -> String {
+        match self.accounts.get(key).and_then(account_nickname) {
+            Some(nick) if self.nickname_is_unique(key, nick) => nick.to_string(),
+            _ => key.to_string(),
+        }
+    }
+
+    fn nickname_is_unique(&self, key: &str, nick: &str) -> bool {
+        !self
+            .accounts
+            .iter()
+            .any(|(k, a)| k.as_str() != key && account_nickname(a) == Some(nick))
+    }
+
     /// Whether this key is the one [`chosen`](Self::chosen) would return.
     pub fn is_chosen(&self, key: &str) -> bool {
         self.chosen().is_some_and(|(k, _)| k == key)
@@ -1146,6 +1187,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("sn24") && err.contains("sn25"), "{err}");
+    }
+
+    #[test]
+    fn two_accounts_sharing_a_nickname_are_still_told_apart() {
+        // A household that rotated a service's token leaves the record written
+        // before it and the one written after, both carrying the nickname the
+        // app gave that service. Observed on a real household: two YouTube
+        // Music records, both `Hhh`.
+        // In the order it really happened: the unidentified record first (a
+        // schema-2 row, lifted with no serial), then the import that knows one.
+        // The reverse order is a *re-link* of the one account held, which
+        // replaces it - see `key_for`.
+        let mut creds = Credentials::default();
+        let mut older = imported("Hhh", 15, "old-token");
+        older.serial = None;
+        creds.remember(HH, "284", older);
+        creds.remember(HH, "284", imported("Hhh", 15, "new-token"));
+
+        let held = creds.accounts_for(HH, "284").unwrap();
+        assert_eq!(held.accounts.len(), 2, "different tokens, kept apart");
+        // Neither is nameable by the nickname alone, so both carry their key.
+        let labels: Vec<String> = held.accounts.keys().map(|k| held.label_for(k)).collect();
+        assert_eq!(labels, vec!["Hhh (link)", "Hhh (sn15)"]);
+        // The listing drops the repeated nickname: it is already beside the
+        // service name, and saying it twice distinguishes nothing.
+        assert_eq!(held.distinguisher("link"), "link");
+        assert_eq!(held.distinguisher("sn15"), "sn15");
+        // And the nickname is refused as a selector, naming both.
+        let err = creds
+            .resolve_account(HH, "284", "Hhh")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches 2 accounts"), "{err}");
+
+        // Where a nickname *is* unique it stands alone, with no key noise.
+        creds.remember(HH, "6", imported("Kids", 24, "k"));
+        creds.remember(HH, "6", imported("Grown-ups", 25, "g"));
+        let held = creds.accounts_for(HH, "6").unwrap();
+        assert_eq!(held.label_for("sn24"), "Kids");
+        assert_eq!(held.distinguisher("sn25"), "Grown-ups");
     }
 
     #[test]

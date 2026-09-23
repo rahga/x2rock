@@ -174,19 +174,19 @@ fn one_row_per_service<'a>(
 /// How one account is named in the listing: the service, and its nickname too
 /// where the service has more than one account and the nickname is what tells
 /// them apart.
-fn account_label(account: &credentials::Account, key: &str, several: bool) -> String {
-    if !several {
+fn account_label(
+    held: &credentials::ServiceAccounts,
+    account: &credentials::Account,
+    key: &str,
+) -> String {
+    if held.accounts.len() < 2 {
         return account.service_name.clone();
     }
     // Where there is a choice to make, every row has to be *nameable* - the
-    // listing is where someone reads what to hand `--prefer`. A nickname is the
-    // friendly form; with none, the key stands in, because two rows reading
-    // plainly `Plex` tell a person nothing and leave them nothing to type.
-    format!(
-        "{} ({})",
-        account.service_name,
-        credentials::account_display(account.nickname.as_deref(), key)
-    )
+    // listing is where someone reads what to hand `--prefer`. `label_for`
+    // settles what that takes: the nickname alone where it distinguishes this
+    // account, the key alongside or instead where it does not.
+    format!("{} ({})", account.service_name, held.distinguisher(key))
 }
 
 /// A rough age, for a list where the exact second has never mattered.
@@ -804,12 +804,12 @@ async fn link_from_household(
             n => {
                 let chosen = held
                     .chosen()
-                    .and_then(|(_, a)| a.nickname.clone())
+                    .map(|(key, _)| held.label_for(key))
                     .unwrap_or_default();
                 let all: Vec<String> = held
                     .accounts
-                    .values()
-                    .map(|a| a.nickname.clone().unwrap_or_default())
+                    .keys()
+                    .map(|key| held.label_for(key))
                     .collect();
                 println!(
                     "Kept {n} {name} accounts ({}); searching with {chosen:?}. \
@@ -2384,10 +2384,9 @@ pub async fn accounts(
             let width = services
                 .values()
                 .flat_map(|held| {
-                    let several = held.accounts.len() > 1;
                     held.accounts
                         .iter()
-                        .map(move |(key, a)| account_label(a, key, several).chars().count())
+                        .map(move |(key, a)| account_label(held, a, key).chars().count())
                 })
                 .max()
                 .unwrap_or(20)
@@ -2416,7 +2415,7 @@ pub async fn accounts(
                         (true, true) => "* ",
                         (true, false) => "  ",
                     };
-                    let named = account_label(a, key, several);
+                    let named = account_label(held, a, key);
                     println!(
                         "{mark}{named:<width$} {:<10} {:<12} {registered}",
                         id,
