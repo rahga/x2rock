@@ -362,6 +362,15 @@ async fn enqueue_and_play(
                     target.name
                 );
             }
+            // An *internal* code, and deliberately absent from the skill's error
+            // table. Every caller of this function reaches it through a match
+            // arm on `is_refusal`, which names this code and turns it into the
+            // stream fallback with the wording `refusal_was` picks - so it never
+            // reaches `main` and an agent can never observe it. It exists to
+            // tell "went in the queue and then would not play" from "would not
+            // go in the queue" on stderr. If a caller is ever added that
+            // propagates this with `?`, it becomes observable and belongs in
+            // that table.
             Err(hint::Hint::new(format!("{e:#}"), "not_queue_material", None).into())
         }
         // Unreachable mid-sequence. The row is left alone: it may well be
