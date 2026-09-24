@@ -104,8 +104,10 @@ dead end.
 
 **Why it is worth the trouble.** On current Sonos firmware, the old and honest way to read these
 tokens - a plain status page - now returns nothing. This scrambled announcement is the only route
-left. It is what lets x2rock search Qobuz, Apple Music and Amazon Music - services whose normal
-sign-in x2rock cannot complete on its own - because the working token was never truly out of reach.
+left. It is what lets x2rock search Qobuz and Amazon Music - services whose normal sign-in x2rock
+cannot complete on its own - because the working token was never truly out of reach. (Not everything
+it reaches becomes searchable: Apple Music imports too, but the credential the speaker holds for it
+is incomplete, and its search stays locked - see the Apple Music entry below.)
 It was sitting on the speaker the whole time, behind a lock that opens with a key the design hands
 you.
 
@@ -136,7 +138,7 @@ local token buys search and browse, and nothing of playback.
 | **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
-| **Apple Music** | app-link | ✗ refuses `getAppLink` | — | — | 2026-09-10 |
+| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token | enqueue ✓ for ids the registration plays; the app plays it fine | 2026-09-24, office |
 | **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
 | **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
@@ -8592,6 +8594,56 @@ survive the round trip. The accepted range is therefore `2..=3`, and anything ou
 command rather than being read as empty. Which is the discipline the whole feature runs on: the
 household's own stored tokens are the source of truth, and the local store is a cache of them for
 the household you are standing in.
+
+## Apple Music: playback yes, search no - the household holds no usable search credential (2026-09-24, office)
+
+The last app-link service left untested, now tested. A fresh Apple Music subscription was added in
+the Sonos app; `link --from-household` imports what the household stores for it, and that turns out
+to be a credential the speaker cannot search with.
+
+**Both routes to a search credential are closed.**
+
+- **The browser flow does not start.** `getAppLink` is refused - "There was an error processing your
+  request" - re-confirmed 2026-09-24 with the fresh account, exactly as on 2026-09-10. No login page,
+  no token to mint.
+- **The household token imports but is invalid.** The decrypt reads Apple Music (`sid 204`) cleanly -
+  `Token0` 180 bytes, `Key0` **empty** - and every authenticated SMAPI call refuses it: `search` and
+  `browse` both answer `com.apple.its.commerce.sonos.resource.error.InvalidTokenException`. The
+  `loginToken` header x2rock sends is correct - services with tiny non-empty keys work, and the error
+  names the *token*, not the key - so this is not a usage bug.
+
+**The read is fresh and byte-accurate, which is what makes the token itself the problem rather than
+the reading of it.** Re-running the decrypt's own control on this read, every imported service's
+decrypted token/key lengths match `credentials.json` exactly (Sonos Radio 193/225, Deezer 50/6, TIDAL
+805/376, Saavn 391/44, Qobuz 86/8, YouTube Music 260/152); the same decrypt reads Apple's 180/empty.
+The blob is the speaker's live initial-event value, re-read on each subscription, and the household is
+visibly rotating tokens under it - Amazon's read 718 bytes in one dry-run and 733 by the time it
+stored. A re-auth in the app changed nothing. The decisive tell is the empty `Key0`: a *stale* token
+would still carry whatever key it was minted with, so an empty key is a private key that was **never
+provisioned**, not one gone out of date. Apple Music is the only authenticated account in either
+household with no `privateKey`.
+
+**What it means.** Apple hands the speaker a playback *registration* - the app plays Apple Music, and
+already-known ids (favorites, bookmarks) enqueue through it - but never a complete SMAPI *search*
+credential. This is the second "playback yes, search no" service, blocked for the opposite reason to
+the first:
+
+| service | search blocked at | by |
+|---|---|---|
+| YouTube Music | the *caller* layer | Google's project gate (`SERVICE_DISABLED`); no account token helps |
+| Apple Music | the *account* layer | an invalid, incomplete credential (empty key); no controller link mints one either |
+
+Same outcome for a user, opposite mechanism: YouTube Music imports a syntactically-valid token that a
+project gate rejects, while Apple Music is denied a usable credential by *every* route - browser link
+refused, blob credential incomplete. It reads as Apple keeping the third-party control surface
+playback-only by design, which fits a partner of that scale. Not searchable via x2rock, and there is
+no fresher or different read left to try.
+
+*Note on the account form:* this Apple Music record came back hex-keyed with `Flags0="4"` as an
+apparently-first account, which looks like a counterexample to "the first account of a service is
+`-0-`" recorded above. Its registration is incomplete (the empty key) and its auth was flapping when
+read, so it is a poor case to judge that rule by; the rule stands until a *complete* first-account
+registration contradicts it.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
