@@ -8407,13 +8407,26 @@ this section stated two inferences as facts and they did not survive a second ho
   per household. Nor is it always synthetic: SoCo #1010's own documentation shows
   `Username0="user@example.com"`, a shape neither household here produced, so a parser that
   splits on `-Token` needs a fallback that returns the value whole.
-- **`Flags<i>`** is `4` where `Username<i>` carries a real key and `0` where it carries a literal
-  zero or nothing. Thirteen records for thirteen, across both households. **Deezer appears on both
-  sides**, so it is not a property of the service; what decides it is unknown, and nothing here
-  reads the field.
+- **`Flags<i>`** is `4` where `Username<i>` carries a real per-account key and `0` where it carries
+  a literal zero or nothing - and what decides *that* is now measured: **registration order**. A
+  controlled experiment on 2026-09-24 against the office household's Amazon Music (`sid 201`): the
+  first account of a service is registered `Username0="X_#Svc<type>-0-Token"`, `Flags0="0"`; a
+  second account added beside it gets a distinct hex key and `Flags0="4"`
+  (`X_#Svc51463-139f5452-Token`). Removing the primary left the survivor hex - the form is fixed at
+  registration, not recomputed for whoever is now first - and re-adding the *very same* account
+  brought it back as another additional account (`X_#Svc51463-fe30b018-Token`/`4`) at a new serial,
+  never reclaiming its old `-0-`. So the `-0-`-vs-key form and `Flags` are one fact: was this the
+  primary account at the moment it was registered. That is why **Deezer appears on both sides** -
+  primary in one household, additional in the other - and why iHeartRadio shows two keyed accounts
+  and no `-0-`: its `-0-` primary was registered first and later removed, leaving two that were each
+  added beside an existing one. Nothing here reads the field; it is recorded because it explains
+  where the `-0-` cdudn comes from - it is the primary account's own key.
 - **`NumAccounts` exists, and the `0` suffix is *consistent with* an index** - not proof of one.
   Every record in both households declares `NumAccounts="1"`, and a service with two accounts is
-  served as two records, one per account. The legacy format did the same: one `<Account>` element
+  served as two records, one per account. A controlled test on 2026-09-24 sharpened this: *adding* a
+  second Amazon Music account made it arrive as a second record (`NumAccounts="1"`), not bump the
+  first to `"2"` - so the split is what the player does when an account is added, not merely how
+  these two households happened to be arranged. The legacy format did the same: one `<Account>` element
   per account (see below), which makes the count and the suffix look like leftovers from a shape
   that could array several accounts into one record. The parser walks `0..NumAccounts` anyway,
   because being immune costs four lines and a synthetic vector; but **no household has yet produced
