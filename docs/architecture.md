@@ -194,8 +194,8 @@ lines below record the reversals rather than warn about text that still says oth
 - **YouTube Music is closed by a Google *project* gate, not a Sonos client pin, and the OAuth
   identity probe is answered.** A self-service API key gets `SERVICE_DISABLED` for "YouTube Music API
   (Partner)", method `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and
-  cannot be enabled by a self-service project; an OAuth token would be judged against the same
-  project. It is a party-to-party API defined for Sonos - `google.music.sonos.v1` - not a public
+  cannot be enabled by a self-service project; an OAuth token is judged against the same project
+  (measured 2026-09-23, both scopes). It is a party-to-party API defined for Sonos - `google.music.sonos.v1` - not a public
   one with a gate, so there is nothing to self-serve and nothing to wait for short of Google
   publishing a YouTube Music API generally. Every "the one live thread is the OAuth probe" line is
   superseded. See "TASK: the OAuth identity probe".
@@ -4347,12 +4347,44 @@ answers `403 PERMISSION_DENIED` (not 404: it exists and is gated), and Google's 
 lists 534 APIs with no `music` among them. So the API is real, is enableable *by some projects*, and
 is not offered to a self-service one. That is the "likely fourth branch" from 2026-09-04, confirmed.
 
-**Why this answers the OAuth probe without running it.** A Google OAuth access token is evaluated
-against the project that owns the *client* that minted it, for enablement and quota alike. A
-self-service project cannot enable this service, so a token from any OAuth client it owns arrives as
-the same consumer the API key did and meets the same `SERVICE_DISABLED`. The device-grant harness
-was built and smoke-tested (two phases, so a person can be handed the code; kept out of the repo as
-the design required) and was not needed.
+**The cookie probe, and why it reopened the question (2026-09-23).** Before running the OAuth flow,
+one cheaper thing was tried, because the endpoint's own 401 named "OAuth 2 access token, **login
+cookie**, or other valid credential". A login cookie (SAPISID) is a *user* identity with no Cloud
+project behind it - so it might sidestep the project gate. It did. A live `music.youtube.com`
+session cookie (control: it authenticated to YTM's own `youtubei/v1/browse`, HTTP 200) presented to
+`sendRequest` returned **not** `SERVICE_DISABLED` but **400 `INVALID_ARGUMENT` "Origin doesn't match
+Host for XD3"** - the endpoint accepted the identity and stopped on Google's cross-domain (anti-CSRF)
+check. So a projectless user identity clears the enablement gate; the barrier for a cookie is the
+Origin allowlist, which for this endpoint has no entry any real client can present (the native Sonos
+app sends no Origin and authenticates by key). Getting past it means forging same-origin - defeating
+a security control - and the cookie path is ToS-offside besides. Recorded because it is what made the
+OAuth run worth doing: it showed *user* identity is evaluated on a different track from the
+API-key/project one.
+
+**The OAuth device grant, run and measured (2026-09-23).** Own Cloud OAuth client (device-grant, "TVs
+and Limited Input Devices"), own account, own consent - the sanctioned flow, nothing forged. Two
+scopes, and read together they give the check *order*, which is the whole result:
+
+| scope granted | HTTP | `reason` |
+|---|---|---|
+| `auth/youtube.readonly` | 403 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` |
+| `auth/youtube` (full) | 403 | **`SERVICE_DISABLED`**, project 111580529088 |
+
+Google's pipeline is authenticate → **scope** → **enablement**. The readonly token failed the scope
+check and short-circuited *before* the project check - which for one turn read like "the token
+cleared the project gate", and it had not; it had not reached it. The full-`youtube` token passes the
+scope check, the request proceeds to enablement, and it hits the **same `SERVICE_DISABLED`, attributed
+to the OAuth client's own project** - the same wall the API key hit. So the 2026-09-01 inference
+stands, now by measurement: an OAuth token is judged against its client's project, and a self-service
+project cannot enable the partner API. A useful corollary falls out - the required scope is
+`auth/youtube`, which *any* client can obtain, so **scope was never the barrier; the project is.**
+
+**What this settles for x2rocktv** (the Android TV sibling, whose whole appeal here was that a TV is
+already signed into a Google account with a YTM subscription): it does not help. `sendRequest`
+attributes the token to *x2rocktv's* OAuth client's project, not to the user's YTM entitlement, and
+x2rocktv's project can no more enable a party-to-party API than any other self-service one. Google
+Sign-In yields a valid user token with the right scope; it still `SERVICE_DISABLED`s on the project.
+The clean sanctioned path exists for the *token*; the wall is one layer past it.
 
 **So the wall is a project allowlist, not a client allowlist**, and the distinction is the finding.
 "Pinned to Sonos's `client_id`" was the closure this section was written to reach or rule out; the
@@ -8575,7 +8607,8 @@ record the `rate` work was built from.
   from us?~~ - **closed 2026-09-23: no, and the reason is Google's, with a name.** A self-service API
   key gets `SERVICE_DISABLED` for "YouTube Music API (Partner)", method
   `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and cannot be enabled by a
-  self-service project; an OAuth token is judged against the same project. A project allowlist, not
+  self-service project; an OAuth token is judged against the same project (measured, not inferred - a
+device-grant token with `auth/youtube` scope hit the same `SERVICE_DISABLED`). A project allowlist, not
   a client pin. Playback through the household's registration is untouched. See "TASK: the OAuth
   identity probe".
 - ~~Does a service with two accounts break the one-account assumption?~~ - **the store half closed
