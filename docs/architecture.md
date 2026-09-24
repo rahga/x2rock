@@ -57,6 +57,12 @@ have added - the secret tokens that let a speaker pull music from Deezer, TIDAL,
 your behalf - and any program on your home network can read them, because the "encryption" wrapped
 around them is not protecting a real secret. `link --from-household` is x2rock doing exactly that.
 
+The technique - that these tokens sit on the speaker and unscramble to anyone in the household - was
+worked out and published by Simon ([BookCatKid](https://github.com/BookCatKid)) in
+[SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010), "Add modern music service browsing and
+account management". x2rock is an independent Rust reimplementation of it, and the credit for finding
+the door belongs there.
+
 **Where the tokens live, and why.** Sonos is a whole-house system: you add a streaming account once,
 in the app, and every speaker in the house has to be able to use it. To stay in sync, the speakers
 continuously announce their shared state to each other and to any app that is listening - ordinary
