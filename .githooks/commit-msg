@@ -1,0 +1,25 @@
+#!/bin/sh
+# Reject Claude/Anthropic self-attribution in commit messages.
+#
+# The user's global rule forbids Co-Authored-By: Claude trailers and
+# "Generated with Claude Code" lines. A harness reminder re-injects that
+# attribution every session; this hook is the hard backstop under the rule.
+#
+# Other clones opt in with:  git config core.hooksPath .githooks
+#
+# Comment lines (git's own scissors/verbose diff, "#"-prefixed) are ignored.
+
+msg_file="$1"
+
+offenders=$(grep -vE '^\s*#' "$msg_file" | grep -inE \
+  'co-authored-by:.*(claude|anthropic|noreply@anthropic\.com)|generated with .*claude|claude\.(com|ai)/claude-code|🤖 generated with')
+
+if [ -n "$offenders" ]; then
+  echo "commit-msg hook: refusing Claude/Anthropic self-attribution." >&2
+  echo "Offending line(s):" >&2
+  echo "$offenders" | sed 's/^/  /' >&2
+  echo "Remove them and commit again (see ~/.claude-fable/CLAUDE.md)." >&2
+  exit 1
+fi
+
+exit 0
