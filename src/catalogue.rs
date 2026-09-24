@@ -413,6 +413,7 @@ mod tests {
                 household: Some(HH.into()),
                 account_id: None,
                 serial: None,
+                account_key: None,
                 linked: 1,
             },
         );

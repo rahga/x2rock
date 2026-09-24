@@ -894,6 +894,14 @@ async fn link_from_household(
         // sees. It is what keys the record, so two accounts of one service stay
         // two records instead of the second landing on the first.
         record.serial = Some(account.serial);
+        // The per-account `Username` selector, kept as a within-household
+        // identity for the one shape the serial cannot cover: a second account
+        // served with no distinct serial. `0`/empty name no account, so they
+        // are dropped rather than stored as a key that identifies nothing.
+        record.account_key = match account.account_key.as_str() {
+            "" | "0" => None,
+            k => Some(k.to_string()),
+        };
         linked.remember(long_household, id, record);
     }
     linked.save()?;

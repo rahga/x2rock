@@ -278,6 +278,17 @@ pub struct Account {
     /// second, which is every imported account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<u32>,
+    /// The account's own selector out of `Username<i>` (`X_#Svc<type>-<key>-Token`),
+    /// as `--from-household` reads it. Assigned per registration, so it is
+    /// unique per account *within a household* even though the same account gets
+    /// a different one elsewhere - which is exactly enough to tell two accounts
+    /// of one service apart when the blob serves them without distinct serials
+    /// (a single-login family tier could). That is the one case that could
+    /// otherwise make a second imported account land on the first and take its
+    /// token. `None` for a browser link (which never sees a `Username`) and for
+    /// the literal `0`/empty selectors, which name no account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
     /// When the link completed, epoch seconds - the same unit bookmarks use.
     pub linked: u64,
 }
@@ -820,16 +831,28 @@ fn describe(accounts: &BTreeMap<String, Account>) -> String {
 ///    so the two routes to one account agree on a key.
 /// 2. `user_id_hash_code`, which a device link gets back from the service and a
 ///    household import never carries.
+/// 3. `account_key`, the `Username` selector an import carries when it has no
+///    serial. Unique per account within a household, so two accounts of one
+///    service that arrive without distinct serials still key apart instead of
+///    the second landing on the first - the overwrite the multi-account work
+///    set out to remove, in the one shape (a single login serving two seats)
+///    that has no serial to lean on.
 ///
-/// `None` when it says neither, which is a browser-linked account for a service
-/// that sent no hash. [`ServiceAccounts::key_for`] decides what to do then.
+/// `None` when it says none of these: a browser-linked account for a service
+/// that sent no hash, carrying no `Username` selector either.
+/// [`ServiceAccounts::key_for`] decides what to do then.
 fn identifying_key(account: &Account) -> Option<String> {
     if let Some(serial) = account.serial {
         return Some(format!("sn{serial}"));
     }
     match account.user_id_hash_code.as_deref() {
         Some(hash) if !hash.is_empty() => Some(hash.to_string()),
-        _ => None,
+        // No serial and no service hash, but a `--from-household` import still
+        // carries the per-account `Username` selector. A browser link has none,
+        // and a `0`/empty selector is dropped to `None` on the way in, so this
+        // is `None` for exactly the accounts that identify themselves no other
+        // way - which is where `key_for`'s repair path takes over.
+        _ => account.account_key.clone(),
     }
 }
 
@@ -885,6 +908,10 @@ pub fn from_device_auth(
         // only `match`, later, says anything about it, and that lands in
         // `account_id`. `--from-household` is the path that reads one.
         serial: None,
+        // Nor does it see a `Username` selector - that too is the import's to
+        // set. Without either, the account identifies itself only by its hash,
+        // or not at all.
+        account_key: None,
         linked: now(),
     }
 }
@@ -906,6 +933,7 @@ mod tests {
             household: Some(HH.into()),
             account_id: Some("42".into()),
             serial: None,
+            account_key: None,
             linked: 1_000,
         }
     }
@@ -991,6 +1019,7 @@ mod tests {
             household: Some(HH.into()),
             account_id: None,
             serial: Some(serial),
+            account_key: None,
             linked: 1_000,
         }
     }
@@ -1019,6 +1048,69 @@ mod tests {
         let again = creds.remember(HH, "6", anonymous);
         assert_eq!(again, key, "matched on the token it already holds");
         assert_eq!(creds.accounts_for(HH, "6").unwrap().accounts.len(), 1);
+    }
+
+    #[test]
+    fn two_accounts_with_no_serial_key_apart_by_their_username_selector() {
+        // The residual the multi-account work set out to close. A service served
+        // as one login carrying two seats - a paid family/duo tier could - can
+        // hand the blob a second account with no distinct `SerialNum`. Keyed by
+        // nothing that tells it from the first, it would land on it and take its
+        // token: the very silent overwrite this whole effort removed. The
+        // `Username` selector, unique per account within a household, keeps them
+        // apart. No real household has been seen serving this shape (the paid
+        // tier that would is unbought), so it is pinned here rather than left to
+        // be discovered by losing a token.
+        let mut creds = Credentials::default();
+        let mut a = imported("Family A", 24, "tok-a");
+        a.serial = None;
+        a.account_key = Some("aaaa".into());
+        let mut b = imported("Family B", 25, "tok-b");
+        b.serial = None;
+        b.account_key = Some("bbbb".into());
+        let ka = creds.remember(HH, "6", a);
+        let kb = creds.remember(HH, "6", b);
+
+        assert_ne!(ka, kb, "different selectors, different keys");
+        let held = creds.accounts_for(HH, "6").unwrap();
+        assert_eq!(held.accounts.len(), 2, "neither overwrote the other");
+        assert_eq!(held.accounts[&ka].auth_token, "tok-a");
+        assert_eq!(held.accounts[&kb].auth_token, "tok-b");
+
+        // A rotated token for the same seat - same selector, still no serial -
+        // updates that record in place rather than forking a third.
+        let mut a2 = imported("Family A", 24, "tok-a2");
+        a2.serial = None;
+        a2.account_key = Some("aaaa".into());
+        let again = creds.remember(HH, "6", a2);
+        assert_eq!(again, ka, "same selector, same record");
+        let held = creds.accounts_for(HH, "6").unwrap();
+        assert_eq!(held.accounts.len(), 2, "not a third record");
+        assert_eq!(
+            held.accounts[&ka].auth_token, "tok-a2",
+            "token rotated in place"
+        );
+    }
+
+    #[test]
+    fn a_re_link_carrying_no_selector_still_repairs_the_one_held() {
+        // The guard must not swallow the repair path it sits beside: a browser
+        // re-link of a dead token carries no serial, no hash, no `Username`
+        // selector, and with exactly one account held it should replace it, not
+        // file a second.
+        let mut creds = Credentials::default();
+        let mut only = imported("Deezer", 30, "dead");
+        only.serial = None;
+        only.account_key = None;
+        let first = creds.remember(HH, "9", only);
+        let mut relink = imported("Deezer", 30, "fresh");
+        relink.serial = None;
+        relink.account_key = None;
+        let again = creds.remember(HH, "9", relink);
+        assert_eq!(again, first, "the one held is the one repaired");
+        let held = creds.accounts_for(HH, "9").unwrap();
+        assert_eq!(held.accounts.len(), 1, "replaced, not forked");
+        assert_eq!(held.accounts[&first].auth_token, "fresh");
     }
 
     #[test]
