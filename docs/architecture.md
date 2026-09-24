@@ -77,7 +77,8 @@ new listener, and it flatly refuses a direct "just give me that value" request. 
 the speakers do to one another - it subscribes to the announcement, and the speaker sends that first
 update back to a small listener x2rock opens for the moment. That reply is the only time a Sonos
 speaker ever reaches *out* to your computer instead of the other way around, which is why it needs a
-temporary hole poked in the firewall.
+temporary hole poked in your computer's own firewall - the one on the PC running x2rock, not the
+router.
 
 **Why the encryption is not really a lock.** The value is scrambled with a standard cipher (AES), but
 the key that unscrambles it is not a secret - it is *computed*, on the spot, from three things anyone
