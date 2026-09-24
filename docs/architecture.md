@@ -73,7 +73,7 @@ carrying the service, a display name, a serial number, and the two secret string
 speaker logs in with.
 
 **How you get it.** One catch: a speaker only includes this value in the *first* message it sends a
-new listener, and it flatly refuses a direct "just give me that value" request. So x2rock does what
+new listener, and it flatly refuses a direct "just give me that value" request. x2rock does what
 the speakers do to one another - it subscribes to the announcement, and the speaker sends that first
 update back to a small listener x2rock opens for the moment. That reply is the only time a Sonos
 speaker ever reaches *out* to your computer instead of the other way around, which is why it needs a
@@ -92,7 +92,7 @@ on your network already has:
 - a **starter number** (cryptographers call it an IV) that is sent *alongside* the scrambled data, in
   plain sight.
 
-Run those three through a standard scrambling recipe and out comes the key. So the key is just a
+Run those three through a standard scrambling recipe and out comes the key. The key is just a
 recipe applied to public ingredients - a lock with its key taped to the front. What actually keeps
 strangers out is not the cipher; it is being *on the home network* to begin with, which is Sonos's
 entire security model anyway (local control needs no account, because being on your Wi-Fi is treated
