@@ -46,6 +46,53 @@ the logind and NetworkManager mechanisms are not.
 A concrete porting guide lives in x2rocktv's own `docs/porting-from-x2rock.md`, where it moved on
 2026-09-23.
 
+## Reading the household's own tokens: the `ThirdPartyMediaServersX` decrypt
+
+A Sonos household stores every music-service account it holds - the SMAPI `authToken`/`privateKey`
+for Deezer, TIDAL, Amazon, Qobuz and the rest - on the speakers themselves, and hands them to any
+device on the LAN that asks the right way. `link --from-household` reads them. This is the summary;
+the measured detail, the control that proves the decrypt is real, and the build are under "The
+household stores every token, and they can be read".
+
+**What it is.** `ThirdPartyMediaServersX` is a UPnP state variable on `ZoneGroupTopology:1` - one of
+the fourteen services a player publishes, and the only one that carries it. Its value is an encrypted
+blob whose plaintext is XML: one record per configured account - `UDN="SA_RINCON<type>_…"` where
+`type // 256` is the service id, `Token0`/`Key0` the credential, plus `Nickname0`, `Username0`,
+`SerialNum0`, `Flags0`, `Tier0`. It exists because a household is multi-room: an account added once,
+in the app, has to reach every player, and `ZoneGroupTopology` is the channel that syncs
+household-wide state. The credentials ride that same broadcast.
+
+**How it is read.** Only from the *initial* event a player sends a fresh subscriber -
+`GetZoneGroupState`/`GetZoneGroupAttributes` omit it, and `QueryStateVariable` on it returns UPnP
+401. So `--from-household` subscribes to `ZoneGroupTopology`, catches the inbound NOTIFY the player
+POSTs back, decrypts, and lifts the token. That inbound callback is the one time a Sonos speaker
+reaches *to* this machine - which is why it needs a firewall hole; the Control API is otherwise
+outbound-only.
+
+**Nothing in the key is secret.** The envelope is `2:` + `base64(iv ‖ ciphertext)`, AES-128-CBC, with
+
+```
+key = md5( iv ‖ md5( household_id ‖ salt ) )
+```
+
+and every input is public. The **salt** is a fixed constant, the same for every household on earth,
+reverse-engineered out of Sonos's own client - *not* documented by Sonos; it reached this project via
+SoCo #1010. The **household id** is an identifier any LAN device answers unauthenticated
+(`DeviceProperties GetHouseholdID`). The **IV** is transmitted in the clear. So the key is a
+deterministic function of public data: this is *obfuscation, not encryption*. The real access control
+is network position - you must be on the LAN and able to receive the event - which is Sonos's whole
+local-trust model anyway. The genuinely-sensitive thing is what the blob *contains* (the account
+tokens), not any key protecting it; anyone holding the ciphertext already holds everything needed to
+derive the key. A rotated salt would be re-extractable the moment a client ran it, and `stored.rs`
+checks the `2:` version and fails loudly, so chasing a future format bump is a one-file change, not a
+wall.
+
+**Why it matters.** On S2 18.8 the old plaintext route (`/status/accounts`) returns an empty
+envelope, so this event is the only way left to read the household's tokens. It is what makes Qobuz,
+Apple Music and Amazon Music - services whose own device-link flow x2rock cannot complete -
+searchable at all: the token was never unreachable, only sitting on the speaker, encrypted to a key
+the design hands you.
+
 ## Music services: what has actually been tested
 
 One table, kept here rather than in the README, because every row is a measurement with a date and
