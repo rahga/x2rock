@@ -9,8 +9,10 @@
 #
 # It runs against real speakers. It touches exactly two rooms - $K and $R,
 # Kitchen and Dining Room unless overridden in the environment - and puts
-# them back: volumes to 9, crossfade/shuffle/repeat off, ungrouped. It reads
-# every room once (`--all vol`) and writes to no other. There is deliberately
+# them back: volumes to what they were, crossfade/shuffle/repeat off,
+# ungrouped. It reads every room once (`--all vol`) and writes to no other.
+# The captured commands set fixed levels (9), so two runs compare; the
+# restore at the end is not captured, since it varies with the house. There is deliberately
 # no `party` here: that captures every room in the house, and did, three
 # times, before it was taken out. Nor `tv`: the only soundbars are someone's.
 #
@@ -20,9 +22,12 @@ set -u
 K=${K:-Kitchen}
 R=${R:-"Dining Room"}
 
+level() { x2rock -r "$1" vol --json 2>/dev/null | sed 's/.*"volume":\([0-9]*\).*/\1/'; }
+
 capture() {
     D=$1
     mkdir -p "$D"
+    was_k=$(level "$K"); was_r=$(level "$R")
     cap() { n=$1; shift; "$@" >"$D/$n.out" 2>"$D/$n.err"; echo $? >"$D/$n.rc"; }
     cap vol_read            x2rock -r "$K" vol
     cap vol_read_json       x2rock -r "$K" vol --json
@@ -55,9 +60,10 @@ capture() {
     cap player_member       x2rock -r "$R" vol --player
     cap ungroup             x2rock ungroup "$R"
     cap ungroup_json        x2rock ungroup "$R" --json
-    cap vol_restore_k       x2rock -r "$K" vol 9
-    cap vol_restore_r2      x2rock -r "$R" vol 9
-    echo "captured $(ls "$D" | wc -l) files in $D"
+    # Back to where the house had them - not captured, see above.
+    [ -n "$was_k" ] && x2rock -r "$K" vol "$was_k" >/dev/null
+    [ -n "$was_r" ] && x2rock -r "$R" vol "$was_r" >/dev/null
+    echo "captured $(ls "$D" | wc -l) files in $D; $K back to ${was_k:-?}, $R to ${was_r:-?}"
 }
 
 case ${1:-} in
