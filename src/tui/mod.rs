@@ -145,6 +145,7 @@ async fn drive(
     // down when the last of them is in and not the first.
     let (finished, mut finishes) = mpsc::unbounded_channel::<Result<Vec<String>>>();
     let mut in_flight: usize = 0;
+    let mut reread_pending = false;
 
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
@@ -176,7 +177,12 @@ async fn drive(
                         // rather than at the next heartbeat.
                         Err(e) => {
                             app.status = Some(Status::bad(format!("{e:#}")));
-                            reread(source, &heard);
+                            // One read covers a burst of failures; the flag
+                            // clears when it lands.
+                            if !reread_pending {
+                                reread_pending = true;
+                                reread(source, &heard);
+                            }
                         }
                         // An aside the command would have put on stderr:
                         // "Already in this group: Kitchen". Worth the line.
@@ -205,6 +211,7 @@ async fn drive(
                 continue;
             },
             refreshed = heartbeats.recv() => {
+                reread_pending = false;
                 if let Some(rooms) = refreshed {
                     app.apply(rooms);
                 }
@@ -572,6 +579,11 @@ pub struct App {
     /// changes this; a snapshot that lacks the room leaves it to be found
     /// again by the next one.
     following: Option<String>,
+    /// The followed room was missing from the last snapshot, so the cursor's
+    /// row is nobody's choice - the clamp's. Nothing is selected until the
+    /// room is back or a key picks a row: a `+` in that window must not go to
+    /// whatever landed under the index.
+    unresolved: bool,
 }
 
 impl App {
@@ -585,6 +597,7 @@ impl App {
             contacted: Instant::now(),
             emptied: None,
             following,
+            unresolved: false,
         }
     }
 
@@ -600,10 +613,6 @@ impl App {
         &self.rooms
     }
 
-    pub const fn cursor(&self) -> usize {
-        self.cursor
-    }
-
     pub const fn overlay(&self) -> &Overlay {
         &self.overlay
     }
@@ -613,7 +622,22 @@ impl App {
     }
 
     pub fn selected(&self) -> Option<&RoomSnapshot> {
+        if self.unresolved {
+            return None;
+        }
         self.rooms.get(self.cursor)
+    }
+
+    fn selected_mut(&mut self) -> Option<&mut RoomSnapshot> {
+        if self.unresolved {
+            return None;
+        }
+        self.rooms.get_mut(self.cursor)
+    }
+
+    /// The row to highlight, or none while the selection is unresolved.
+    pub fn selection(&self) -> Option<usize> {
+        (!self.unresolved && self.cursor < self.rooms.len()).then_some(self.cursor)
     }
 
     /// Fold a fresh snapshot in, keeping the cursor on the room it was on.
@@ -649,13 +673,24 @@ impl App {
             self.status.take_if(|status| status.kind == Kind::Busy);
         }
         self.rooms = rooms;
-        if let Some(at) = self.following.as_deref().and_then(|room| self.locate(room)) {
-            self.cursor = at;
+        match self.following.as_deref().and_then(|room| self.locate(room)) {
+            Some(at) => {
+                self.cursor = at;
+                self.unresolved = false;
+            }
+            // Still a republish in progress, until the room is back.
+            None => self.unresolved = self.following.is_some() && !self.rooms.is_empty(),
         }
         self.cursor = self.cursor.min(self.rooms.len().saturating_sub(1));
         // The overlay lists the rooms of a group that has just changed shape,
-        // so its cursor is measured against a list that no longer exists.
-        if let Overlay::Group { cursor } = self.overlay {
+        // so its cursor is measured against a list that no longer exists. Not
+        // while the selection is unresolved, though: the group it shows is
+        // the one whose regroup is being republished, and closing it on the
+        // partial snapshot would hand the next Esc to the room list, where
+        // Esc quits.
+        if let Overlay::Group { cursor } = self.overlay
+            && !self.unresolved
+        {
             let rows = self.group_row_count();
             self.overlay = match rows {
                 0 => Overlay::None,
@@ -667,8 +702,13 @@ impl App {
     }
 
     /// The cursor was moved by a key: this is the room to follow from now on.
+    /// An empty list is a republish in progress, and a key pressed while
+    /// waiting on it changes nothing about which room is followed.
     fn follow_selected(&mut self) {
-        self.following = self.selected().map(|room| room.room.clone());
+        self.unresolved = false;
+        if let Some(room) = self.rooms.get(self.cursor) {
+            self.following = Some(room.room.clone());
+        }
     }
 
     /// The row that is this room, or failing that the row it is now playing in.
@@ -860,7 +900,7 @@ impl App {
     /// still moves on the keypress, because the daemon's confirming event is a
     /// settling delay behind it and a bar that waited for it would stutter.
     fn nudge_volume(&mut self, by: i16) -> Intent {
-        let Some(room) = self.rooms.get_mut(self.cursor) else {
+        let Some(room) = self.selected_mut() else {
             return Intent::Nothing;
         };
         // Silent, as transport is on TV input: the row has already said "fixed
@@ -885,7 +925,7 @@ impl App {
     /// reason repeat and shuffle are: the second press has to see the first,
     /// or two quick presses both mute.
     fn mute(&mut self) -> Intent {
-        let Some(room) = self.rooms.get_mut(self.cursor) else {
+        let Some(room) = self.selected_mut() else {
             return Intent::Nothing;
         };
         // The CLI refuses mute on a fixed volume in the same breath as a step.
@@ -904,7 +944,7 @@ impl App {
     /// screen, and two quick presses that both read the old state would both
     /// send the same value.
     fn cycle_repeat(&mut self) -> Intent {
-        let Some(room) = self.rooms.get_mut(self.cursor) else {
+        let Some(room) = self.selected_mut() else {
             return Intent::Nothing;
         };
         if !room.can_repeat || !room.transport_available() {
@@ -928,7 +968,7 @@ impl App {
     /// alongside the other flags before it was trusted: a guard on a field the
     /// player leaves out would withdraw the key everywhere.
     fn toggle_crossfade(&mut self) -> Intent {
-        let Some(room) = self.rooms.get_mut(self.cursor) else {
+        let Some(room) = self.selected_mut() else {
             return Intent::Nothing;
         };
         if !room.can_crossfade || !room.transport_available() {
@@ -939,7 +979,7 @@ impl App {
     }
 
     fn toggle_shuffle(&mut self) -> Intent {
-        let Some(room) = self.rooms.get_mut(self.cursor) else {
+        let Some(room) = self.selected_mut() else {
             return Intent::Nothing;
         };
         if !room.can_shuffle || !room.transport_available() {
@@ -1036,7 +1076,7 @@ impl App {
             return Intent::Nothing;
         };
         let room = room.clone();
-        if let Some(selected) = self.rooms.get_mut(self.cursor)
+        if let Some(selected) = self.selected_mut()
             && let Some(at) = selected.members.iter().position(|member| *member == room)
             && let Some(slot) = selected.member_volumes.get_mut(at)
         {
@@ -1630,9 +1670,13 @@ mod tests {
             app.selected().map(|room| room.room.as_str()),
             Some("Office")
         );
-        // Midway through the republish: only Bedroom is back.
+        // Midway through the republish: only Bedroom is back. Nothing is
+        // selected - a `+` now must not go to Bedroom - and nothing is
+        // highlighted.
         app.apply(vec![room("Bedroom")]);
-        assert_eq!(app.cursor(), 0, "clamped, with nothing better to do");
+        assert_eq!(app.selection(), None);
+        assert_eq!(press(&mut app, '+'), Intent::Nothing);
+        assert_eq!(key(&mut app, KeyCode::Char('m')), Intent::Nothing);
         // Everyone is back, Office now in Kitchen's group.
         app.apply(vec![
             room("Bedroom"),
@@ -1654,6 +1698,25 @@ mod tests {
             app.selected().map(|room| room.room.as_str()),
             Some("Bedroom")
         );
+    }
+
+    /// The join was asked for from the overlay, and the republish it causes
+    /// arrives in pieces. The overlay stays open through the piece that lacks
+    /// its group - closing it there would hand the next Esc to the room list.
+    #[test]
+    fn the_overlay_survives_the_partial_republish_its_own_join_caused() {
+        let mut app = App::new(vec![room("Bedroom"), room("Kitchen"), room("Office")]);
+        key(&mut app, KeyCode::Down);
+        press(&mut app, 'g');
+        assert!(matches!(app.overlay, Overlay::Group { .. }));
+        app.apply(vec![room("Bedroom")]);
+        assert!(matches!(app.overlay, Overlay::Group { .. }), "still open");
+        assert_eq!(
+            key(&mut app, KeyCode::Esc),
+            Intent::Nothing,
+            "Esc closes it, not the TUI"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     /// The overlay is a view of a group that has just changed shape, so its

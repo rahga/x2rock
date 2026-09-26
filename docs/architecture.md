@@ -8789,6 +8789,24 @@ on every room here, TV audio included):
   after (`close` only notifies; the read loop tears down when it next wakes) and was gone before
   the reconnect - a delay, not a leak.
 
+**Reviewed, and reworked the same day.** A review of the TUI commits found the held session's
+rules right in outline and wrong in three details, each fixed: a failed write closed whichever
+session was *currently* held, not the one it ran on, so two writes in flight could close each
+other's sessions in turn (the held session now carries a generation, and a failure releases only
+its own); *any* error dropped the session, a player's refusal or an unresolvable room included,
+costing a full reconnect for nothing (only `sonos::local::Unreachable` - a socket that would not
+open, closed under a command, or never replied, now one typed error - or a socket found dead
+does); and the connect ran under the lock, so keys pressed during a slow one queued behind it
+and a key given up on could drop the connect mid-discovery, leaking the sockets it had opened
+(the connect is now a spawned single-flight task that stores its own result, shared by every
+write that arrives while it runs). The seven write methods became one `write()` carrying that
+policy. On the cursor side, the fix above still let a key pressed *during* the partial snapshot go
+to the clamped row; the selection is now unresolved while the followed room is missing (keys do
+nothing, nothing is highlighted), a key on an empty list no longer forgets the room, one re-read
+covers a burst of failures - and the overlay stays open through the republish its own join
+caused, which the first cut of the unresolved rule closed, handing the next Esc to the room list,
+where Esc quits.
+
 Seen in passing, and fixed: the volume bar moves on the keypress, before the write, and a failed
 write did not move it back - the screen said 14% while the speaker stayed at 9 until the next
 successful write. A failed write now asks the daemon for the household again at once (the same
