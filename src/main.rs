@@ -31,8 +31,8 @@ use commands::speaker::{
     apply_snooze,
 };
 use commands::{
-    admin, content, fan_out, fans_out, household, playback, raw, services, speaker, status, stream,
-    too_many_rooms, volume,
+    admin, content, emit, fan_out, fans_out, household, playback, raw, services, speaker, status,
+    stream, too_many_rooms, volume,
 };
 use state::State;
 
@@ -626,9 +626,15 @@ async fn run(cli: Cli) -> Result<()> {
             apply_eq(&session, &target, room, want, json).await?;
         }
         Command::Queue { action, json } => content::queue(&player, &target, action, json).await?,
-        Command::Repeat { mode, json } => apply_repeat(&session, &target, mode, json).await?,
-        Command::Shuffle { mode, json } => apply_shuffle(&session, &target, mode, json).await?,
-        Command::Crossfade { mode, json } => apply_crossfade(&session, &target, mode, json).await?,
+        Command::Repeat { mode, json } => {
+            emit(&apply_repeat(&session, &target, mode).await?, json)?
+        }
+        Command::Shuffle { mode, json } => {
+            emit(&apply_shuffle(&session, &target, mode).await?, json)?
+        }
+        Command::Crossfade { mode, json } => {
+            emit(&apply_crossfade(&session, &target, mode).await?, json)?
+        }
         Command::Remote {
             feedback,
             repeater,
@@ -657,7 +663,10 @@ async fn run(cli: Cli) -> Result<()> {
             ramp,
             json,
             ..
-        } => volume::apply_vol(&session, &target, room, change, one_room, ramp, json).await?,
+        } => emit(
+            &volume::apply_vol(&session, &target, room, change, one_room, ramp).await?,
+            json,
+        )?,
         Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
