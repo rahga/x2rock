@@ -8708,7 +8708,9 @@ widget and TUI parsed stderr for errors, and why a D-Bus interface on the daemon
 (`docs/dbus-interface.md`) would have needed the command layer rewritten first. It is also most of
 why a CLI call costs ~420 ms: 3 ms is process start; the rest is opening sockets to players that
 something else on the machine already holds open. Four commits, in order, each with the CLI's
-output diffed byte-for-byte against captures taken before it:
+output diffed byte-for-byte against captures taken before it (`scripts/output-baseline.sh`, which
+captures 33 commands against two idle rooms and restores them; it is what the next refactor of the
+command layer should diff against too):
 
 - **Outcomes** (`34656be`, `aec4f8f`). A command returns a typed outcome implementing
   `commands::Report` - a `Serialize` struct plus `text()` and `notes()` - and one `emit()` in the
