@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -196,6 +196,35 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// The player could not be reached, or stopped answering: a socket that would
+/// not open, one that closed under a command, a reply that never came. Typed
+/// so whoever holds the connection can tell "this socket is no good" from a
+/// refusal ([`ApiError`]) and from every other failure - the TUI drops and
+/// rebuilds its session on this and keeps it on anything else. Displays as
+/// the sentence each site always printed.
+#[derive(Debug)]
+pub struct Unreachable {
+    message: String,
+}
+
+impl Unreachable {
+    fn error(message: String) -> anyhow::Error {
+        Self { message }.into()
+    }
+
+    pub fn of(e: &anyhow::Error) -> Option<&Unreachable> {
+        e.downcast_ref()
+    }
+}
+
+impl fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
 impl ApiError {
     /// The refusal inside an error chain, if it is one. The Control API's
     /// counterpart to [`crate::sonos::upnp::Fault::of`], and asked for the same
@@ -222,8 +251,10 @@ impl Connection {
         let connect = connect_async_tls_with_config(request, None, false, Some(tls_connector()));
         let (socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect)
             .await
-            .map_err(|_| anyhow!("timed out connecting to player at {ip}:{PORT}"))?
-            .with_context(|| format!("connecting to player at {ip}:{PORT}"))?;
+            .map_err(|_| {
+                Unreachable::error(format!("timed out connecting to player at {ip}:{PORT}"))
+            })?
+            .map_err(|e| Unreachable::error(format!("connecting to player at {ip}:{PORT}: {e}")))?;
         let (sink, stream) = socket.split();
 
         let (events, _) = broadcast::channel(256);
@@ -268,7 +299,7 @@ impl Connection {
     /// the outcome. Most callers want [`Connection::call`].
     pub async fn command(&self, mut command: Value, options: Value) -> Result<Reply> {
         if !self.is_alive() {
-            bail!("connection to player at {} was lost", self.inner.ip);
+            return Err(self.lost());
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         command["cmdId"] = json!(id.to_string());
@@ -285,21 +316,30 @@ impl Connection {
             .await;
         if let Err(e) = sent {
             self.inner.pending.lock().unwrap().remove(id);
-            bail!("sending to player at {}: {e}", self.inner.ip);
+            return Err(Unreachable::error(format!(
+                "sending to player at {}: {e}",
+                self.inner.ip
+            )));
         }
 
         match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => bail!("connection to player at {} was lost", self.inner.ip),
+            Ok(Err(_)) => Err(self.lost()),
             Err(_) => {
                 self.inner.pending.lock().unwrap().remove(id);
-                bail!(
+                Err(Unreachable::error(format!(
                     "player at {} did not reply within {:?}",
-                    self.inner.ip,
-                    REPLY_TIMEOUT
-                )
+                    self.inner.ip, REPLY_TIMEOUT
+                )))
             }
         }
+    }
+
+    fn lost(&self) -> anyhow::Error {
+        Unreachable::error(format!(
+            "connection to player at {} was lost",
+            self.inner.ip
+        ))
     }
 
     /// Send a command and return its body, turning a player-side failure into an `Err`.

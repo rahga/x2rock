@@ -126,7 +126,7 @@ fn rooms(frame: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items)
         .highlight_symbol("▌ ")
         .highlight_style(Style::new().bold());
-    let mut state = ListState::default().with_selected(Some(app.cursor()));
+    let mut state = ListState::default().with_selected(app.selection());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
