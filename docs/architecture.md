@@ -8792,7 +8792,9 @@ on every room here, TV audio included):
 Seen in passing, and fixed: the volume bar moves on the keypress, before the write, and a failed
 write did not move it back - the screen said 14% while the speaker stayed at 9 until the next
 successful write. A failed write now asks the daemon for the household again at once (the same
-read the thirty-second heartbeat does), which puts the bar where the speaker is.
+read the thirty-second heartbeat does), which puts the bar where the speaker is. Checked the same
+way, the primary socket killed under the TUI: by 300 ms after the keypress the row already read 9%
+again under the red footer, and the next `+` reconnected and landed.
 
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
