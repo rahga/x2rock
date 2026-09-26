@@ -261,11 +261,12 @@ pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str
 
 /// The playback URI for a service item, for callers that have no [`Bookmark`].
 ///
-/// `account` is the `sn=` serial, and it is **optional because the player does
-/// not need it**: the cdudn names the account and the player resolves it from
-/// there. Verified against Mixcloud, where the real serial, a wrong one and no
-/// `sn=` at all were each accepted and each played. It is still sent when known,
-/// since that is what the player writes for itself.
+/// `account` is the `sn=` serial. It is **optional because a service with one
+/// account does not need it**: the player falls back to its default account
+/// when `sn=` is absent or names one it does not hold, which is why Mixcloud
+/// played with the real serial, a wrong one and none at all. With two accounts
+/// it is what picks between them, and it has to agree with the cdudn's
+/// selector - see `content::Naming`, which measured it.
 ///
 /// `flags=65544` is carried into every scheme, [`native_scheme`] included,
 /// rather than varied per service - not just assumed to travel, but

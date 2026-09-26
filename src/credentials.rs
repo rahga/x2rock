@@ -441,6 +441,16 @@ impl Credentials {
         self.accounts_for(household, service_id)?.chosen()
     }
 
+    /// The account this household knows as serial `sn_<serial>`, whichever key
+    /// it is filed under. For a bookmark, which remembers the serial it played
+    /// from and has to name that same account again, not the preferred one.
+    pub fn by_serial(&self, household: &str, service_id: &str, serial: u32) -> Option<&Account> {
+        self.accounts_for(household, service_id)?
+            .accounts
+            .values()
+            .find(|a| a.serial == Some(serial))
+    }
+
     /// The token held for a service in a household - what every play path hands
     /// SMAPI. The household is the one the caller is currently connected to, so
     /// a machine that moves between systems uses the right account for each, and
