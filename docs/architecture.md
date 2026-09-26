@@ -8785,9 +8785,11 @@ on every room here, TV audio included):
   192.168.86.24 was lost", the read loop having seen the reset rather than waiting out the 5 s
   reply timeout - and the session was dropped. The nudge after that reconnected and landed in
   423 ms; the one after that, 177 ms. One visible error, then recovery, which is also the
-  suspend/resume path. The pooled socket the drop closed lingered in `ESTAB` for some seconds
-  after (`close` only notifies; the read loop tears down when it next wakes) and was gone before
-  the reconnect - a delay, not a leak.
+  suspend/resume path. The pooled socket the drop closed lingered in `ESTAB` afterwards - still
+  there after the reconnect, on the second run. Not the read loop, which `close` wakes at once:
+  the *write* half of the socket lives in the connection's shared state, which the keepalive task
+  holds until its next tick, up to thirty seconds. The read loop now closes the sink on its way
+  out, so a closed or dead socket goes down when it is closed.
 
 **Reviewed, and reworked the same day.** A review of the TUI commits found the held session's
 rules right in outline and wrong in three details, each fixed: a failed write closed whichever
@@ -8805,7 +8807,9 @@ to the clamped row; the selection is now unresolved while the followed room is m
 nothing, nothing is highlighted), a key on an empty list no longer forgets the room, one re-read
 covers a burst of failures - and the overlay stays open through the republish its own join
 caused, which the first cut of the unresolved rule closed, handing the next Esc to the room list,
-where Esc quits.
+where Esc quits. Re-checked live after the rework, the primary socket killed again: the red
+footer within 254 ms with the bar already back at 9%, the next `+` reconnecting through the
+single-flight connect and landing, both sockets replaced.
 
 Seen in passing, and fixed: the volume bar moves on the keypress, before the write, and a failed
 write did not move it back - the screen said 14% while the speaker stayed at 9 until the next

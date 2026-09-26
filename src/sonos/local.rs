@@ -450,6 +450,12 @@ async fn read_loop(inner: Arc<Inner>, mut stream: SplitStream<Socket>) {
         }
     }
     inner.mark_dead();
+    // The read half went with this loop; the write half lives in `inner`,
+    // which the keepalive keeps until its next tick. Closed here, so the TCP
+    // connection goes down when the socket is closed or found dead, not up to
+    // thirty seconds later - a session's `close` used to leave its sockets
+    // `ESTAB` for that long.
+    let _ = inner.sink.lock().await.close().await;
 }
 
 async fn keepalive(inner: Arc<Inner>) {
