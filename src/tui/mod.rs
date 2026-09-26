@@ -171,7 +171,13 @@ async fn drive(
                     in_flight = in_flight.saturating_sub(1);
                     match outcome {
                         // The CLI's own sentence, which names the room and the fix.
-                        Err(e) => app.status = Some(Status::bad(format!("{e:#}"))),
+                        // The bar moved when the key went down; the daemon says
+                        // where the volume really is, so it is asked again now
+                        // rather than at the next heartbeat.
+                        Err(e) => {
+                            app.status = Some(Status::bad(format!("{e:#}")));
+                            reread(source, &heard);
+                        }
                         // An aside the command would have put on stderr:
                         // "Already in this group: Kitchen". Worth the line.
                         Ok(notes) if !notes.is_empty() => {
@@ -195,14 +201,7 @@ async fn drive(
                 // most wants to be able to quit. It answers on the heartbeat
                 // channel if it answers at all; a read that never comes back is
                 // left to show as age instead.
-                let source = source.clone();
-                let heard = heard.clone();
-                tokio::spawn(async move {
-                    if let Ok(Ok(rooms)) = tokio::time::timeout(HEARTBEAT, source.snapshot()).await
-                    {
-                        let _ = heard.send(rooms);
-                    }
-                });
+                reread(source, &heard);
                 continue;
             },
             refreshed = heartbeats.recv() => {
@@ -275,6 +274,20 @@ async fn drive(
         }
         launch(source, speakers, intent, &mut in_flight, &finished);
     }
+}
+
+/// Ask the daemon for the whole household again, off the event loop, answering
+/// on the heartbeat channel if it answers at all. The heartbeat's own read, and
+/// a failed write's: the bar moved on the keypress, and this is what puts it
+/// back where the speaker is.
+fn reread(source: &Source, heard: &mpsc::UnboundedSender<Vec<RoomSnapshot>>) {
+    let source = source.clone();
+    let heard = heard.clone();
+    tokio::spawn(async move {
+        if let Ok(Ok(rooms)) = tokio::time::timeout(HEARTBEAT, source.snapshot()).await {
+            let _ = heard.send(rooms);
+        }
+    });
 }
 
 /// Carry out an intent in a task of its own, and report how it went.
@@ -548,10 +561,22 @@ pub struct App {
     /// When the bus first came back empty while rooms were still showing - see
     /// [`REPUBLISH_GRACE`].
     emptied: Option<Instant>,
+    /// The room the person last put the cursor on, by name - what [`apply`]
+    /// follows, rather than whichever row the cursor happens to be on.
+    ///
+    /// The two differ during a republish. The daemon re-adds its players one
+    /// at a time and a snapshot taken midway can lack the followed room; the
+    /// cursor is then clamped onto some other row, and following *that* row on
+    /// the next snapshot is how a `+` pressed right after a regroup went to
+    /// the top of the list instead of the group just made. Only a keypress
+    /// changes this; a snapshot that lacks the room leaves it to be found
+    /// again by the next one.
+    following: Option<String>,
 }
 
 impl App {
     fn new(rooms: Vec<RoomSnapshot>) -> Self {
+        let following = rooms.first().map(|room| room.room.clone());
         Self {
             rooms,
             cursor: 0,
@@ -559,6 +584,7 @@ impl App {
             status: None,
             contacted: Instant::now(),
             emptied: None,
+            following,
         }
     }
 
@@ -596,7 +622,9 @@ impl App {
     /// the room someone was pointing at can stop being a row of its own and
     /// become a member of another group's row. Holding the index instead would
     /// move the selection to whatever landed there, with nobody having pressed
-    /// anything.
+    /// anything. The room followed is [`App::following`], the one a key last
+    /// chose - not the current row, which a partial snapshot can have put the
+    /// cursor on without anyone choosing it.
     pub fn apply(&mut self, rooms: Vec<RoomSnapshot>) {
         // Anything that arrives is proof the daemon answered, whether it was
         // pushed or asked for.
@@ -620,9 +648,8 @@ impl App {
         } else if self.emptied.take().is_some() {
             self.status.take_if(|status| status.kind == Kind::Busy);
         }
-        let was = self.selected().map(|room| room.room.clone());
         self.rooms = rooms;
-        if let Some(at) = was.and_then(|room| self.locate(&room)) {
+        if let Some(at) = self.following.as_deref().and_then(|room| self.locate(room)) {
             self.cursor = at;
         }
         self.cursor = self.cursor.min(self.rooms.len().saturating_sub(1));
@@ -637,6 +664,11 @@ impl App {
                 },
             };
         }
+    }
+
+    /// The cursor was moved by a key: this is the room to follow from now on.
+    fn follow_selected(&mut self) {
+        self.following = self.selected().map(|room| room.room.clone());
     }
 
     /// The row that is this room, or failing that the row it is now playing in.
@@ -765,10 +797,12 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
             KeyCode::Char('j') | KeyCode::Down => {
                 self.cursor = (self.cursor + 1).min(self.rooms.len().saturating_sub(1));
+                self.follow_selected();
                 Intent::Nothing
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.cursor = self.cursor.saturating_sub(1);
+                self.follow_selected();
                 Intent::Nothing
             }
             KeyCode::Char('?') => {
@@ -1560,7 +1594,9 @@ mod tests {
     #[test]
     fn the_cursor_follows_its_room_into_another_group() {
         let mut app = App::new(vec![room("Bedroom"), room("Kitchen"), room("Office")]);
-        app.cursor = 2;
+        // By key, as a person moves it: that is what records the room followed.
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
         assert_eq!(
             app.selected().map(|room| room.room.as_str()),
             Some("Office")
@@ -1578,6 +1614,45 @@ mod tests {
             app.selected().map(|room| room.room.as_str()),
             Some("Kitchen"),
             "Office is now playing in Kitchen's group, so that is where the cursor is"
+        );
+    }
+
+    /// The daemon republishes one player at a time, and a snapshot taken
+    /// midway lacks the room the cursor was on. That must not decide where the
+    /// cursor goes once the room is back - which it did: the clamp put the
+    /// cursor on the top row, and the next snapshot faithfully followed *that*.
+    #[test]
+    fn a_partial_republish_does_not_lose_the_room_being_followed() {
+        let mut app = App::new(vec![room("Bedroom"), room("Kitchen"), room("Office")]);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.selected().map(|room| room.room.as_str()),
+            Some("Office")
+        );
+        // Midway through the republish: only Bedroom is back.
+        app.apply(vec![room("Bedroom")]);
+        assert_eq!(app.cursor(), 0, "clamped, with nothing better to do");
+        // Everyone is back, Office now in Kitchen's group.
+        app.apply(vec![
+            room("Bedroom"),
+            RoomSnapshot {
+                members: vec!["Kitchen".into(), "Office".into()],
+                member_volumes: vec![40, 60],
+                ..room("Kitchen")
+            },
+        ]);
+        assert_eq!(
+            app.selected().map(|room| room.room.as_str()),
+            Some("Kitchen"),
+            "the cursor is on Office's group, not on the row the clamp chose"
+        );
+        // A key is what changes which room is followed.
+        key(&mut app, KeyCode::Up);
+        app.apply(vec![room("Kitchen"), room("Bedroom")]);
+        assert_eq!(
+            app.selected().map(|room| room.room.as_str()),
+            Some("Bedroom")
         );
     }
 

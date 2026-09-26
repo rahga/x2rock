@@ -8750,11 +8750,14 @@ event path): CLI `vol -5` 417 ms; the first TUI write 544 ms (it opens the sessi
 after that 181-191 ms. Installing a new build under the running TUI, then pressing a volume key,
 worked - the case the deleted code existed for.
 
-**Seen along the way, not fixed:** after a regroup the daemon republishes every MPRIS name and the
-TUI's cursor goes back to the first row. A `+` pressed right after joining a room therefore nudges
-whatever is at the top, not the group just made. Pre-existing, and exactly the "state keyed by a
-name that moves" cost the D-Bus note lists; the TUI should keep its cursor by room name across a
-republish.
+**Seen along the way, fixed the next day:** after a regroup the daemon republishes every MPRIS
+name and the TUI's cursor went back to the first row, so a `+` pressed right after joining a room
+nudged whatever was at the top. The TUI already followed the cursor's room by name; what it
+followed was the *current row's* name, and the daemon re-adds players one at a time, so a snapshot
+taken midway lacked the room, the clamp put the cursor on row 0, and the next snapshot faithfully
+followed Bedroom. `App::following` now records the room a key last chose and `apply` locates that,
+leaving it alone when a snapshot lacks it. Checked live: the overlay stayed on Kitchen through the
+republish and the next `+` went to `Kitchen + 1`.
 
 **Exercised live later the same night** (Guest TV as the party's coordinator): `tv` on two
 Beams, text and `--json`, both fine; `party off` and its idempotent "No rooms were grouped." fine.
@@ -8786,10 +8789,10 @@ on every room here, TV audio included):
   after (`close` only notifies; the read loop tears down when it next wakes) and was gone before
   the reconnect - a delay, not a leak.
 
-Seen in passing: the volume bar moves on the keypress, before the write, and a failed write does
-not move it back - the screen said 14% while the speaker stayed at 9 until the next successful
-write. Pre-existing; the thirty-second re-read corrects it, and a failed nudge could revert the bar
-on the spot.
+Seen in passing, and fixed: the volume bar moves on the keypress, before the write, and a failed
+write did not move it back - the screen said 14% while the speaker stayed at 9 until the next
+successful write. A failed write now asks the daemon for the household again at once (the same
+read the thirty-second heartbeat does), which puts the bar where the speaker is.
 
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
