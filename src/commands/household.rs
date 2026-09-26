@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::Report;
 use crate::session::{self, Session};
+use crate::sonos::local::Unreachable;
 use crate::sonos::proto::{Group, Groups, Player};
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
@@ -574,6 +575,83 @@ pub async fn battery(session: &Session, room: Option<&str>, json: bool) -> Resul
     Ok(())
 }
 
+/// What a group change left: the group as the player reports it, and a note
+/// when the player had to be asked twice.
+struct Changed {
+    group: Group,
+    note: Option<String>,
+}
+
+/// Ask a group's coordinator for a change, and say what the group is now.
+///
+/// **A coordinator that does not answer in time may have made the change.**
+/// A Beam on its TV input, told to take four rooms (2026-09-25), gave no
+/// reply for about twenty seconds and made the group anyway - and "did not
+/// reply within 5s" over a change that landed was reported as a failure,
+/// which an agent reads as "retry". The reply timeout is answered by reading
+/// the topology again, from the session's own player, and checking: every
+/// room to add is in the coordinator's group and none to remove is, or the
+/// error stands. A refusal is not re-read; the player said no.
+async fn change_group(
+    session: &Session,
+    group: &Group,
+    add: &[String],
+    remove: &[String],
+) -> Result<Changed> {
+    let target = session::target_for(&session.groups, group);
+    let coordinator = session::coordinator(session, &target).await?;
+    let unanswered = match coordinator
+        .modify_group_members(&group.id, add, remove)
+        .await
+    {
+        Ok(info) => {
+            return Ok(Changed {
+                group: info.group,
+                note: None,
+            });
+        }
+        Err(e) if Unreachable::of(&e).is_some() => e,
+        Err(e) => return Err(e),
+    };
+    let Ok(now) = session.connection.groups().await else {
+        return Err(unanswered);
+    };
+    match confirmed(&now, &group.coordinator_id, add, remove) {
+        Some(group) => {
+            let who = session
+                .groups
+                .player(&group.coordinator_id)
+                .map_or(group.name.clone(), |p| p.name.clone());
+            Ok(Changed {
+                group,
+                note: Some(format!(
+                    "note: {who} did not answer in time, but the change is there"
+                )),
+            })
+        }
+        None => Err(unanswered),
+    }
+}
+
+/// The coordinator's group as `groups` now has it, when it shows the change:
+/// everyone in `add` is a member and nobody in `remove` is.
+fn confirmed(
+    groups: &Groups,
+    coordinator_id: &str,
+    add: &[String],
+    remove: &[String],
+) -> Option<Group> {
+    groups
+        .groups
+        .iter()
+        .find(|g| g.coordinator_id == coordinator_id)
+        .filter(|g| {
+            add.iter().all(|id| g.player_ids.contains(id))
+                && remove.iter().all(|id| !g.player_ids.contains(id))
+        })
+        .cloned()
+}
+
 /// `x2rock group`: pull `rooms` into the group `room` coordinates.
 pub async fn group(
     session: &Session,
@@ -600,14 +678,10 @@ pub async fn group(
         outcome.notes = notes;
         return Ok(outcome);
     }
-    let host_id = host.id.clone();
     let ids: Vec<String> = joining.iter().map(|(id, _)| id.clone()).collect();
-    let target = session::target_for(&session.groups, host);
-    let coordinator = session::coordinator(session, &target).await?;
-    let info = coordinator
-        .modify_group_members(&host_id, &ids, &[])
-        .await?;
-    let mut outcome = GroupOutcome::of(&info.group, &session.groups);
+    let changed = change_group(session, host, &ids, &[]).await?;
+    let mut outcome = GroupOutcome::of(&changed.group, &session.groups);
+    notes.extend(changed.note);
     outcome.notes = notes;
     Ok(outcome)
 }
@@ -622,7 +696,6 @@ pub async fn party(
     match mode {
         None => {
             let host = session.groups.resolve(room)?;
-            let host_id = host.id.clone();
             let joining: Vec<String> = session
                 .groups
                 .players
@@ -636,15 +709,10 @@ pub async fn party(
                     &session.groups,
                 )));
             }
-            let target = session::target_for(&session.groups, host);
-            let coordinator = session::coordinator(session, &target).await?;
-            let info = coordinator
-                .modify_group_members(&host_id, &joining, &[])
-                .await?;
-            Ok(PartyOutcome::Joined(GroupOutcome::of(
-                &info.group,
-                &session.groups,
-            )))
+            let changed = change_group(session, host, &joining, &[]).await?;
+            let mut outcome = GroupOutcome::of(&changed.group, &session.groups);
+            outcome.notes.extend(changed.note);
+            Ok(PartyOutcome::Joined(outcome))
         }
         Some("off") => {
             // Each group keeps its coordinator and loses everyone else, so
@@ -678,11 +746,8 @@ pub async fn party(
                     continue;
                 }
                 let ids: Vec<String> = leaving.iter().map(|p| p.id.clone()).collect();
-                let target = session::target_for(&session.groups, group);
-                let coordinator = session::coordinator(session, &target).await?;
-                coordinator
-                    .modify_group_members(&group.id, &[], &ids)
-                    .await?;
+                let changed = change_group(session, group, &[], &ids).await?;
+                outcome.notes.extend(changed.note);
                 outcome.broken += 1;
                 outcome.left.extend(leaving.iter().map(|p| p.name.clone()));
             }
@@ -714,18 +779,14 @@ pub async fn ungroup(session: &Session, room: &str) -> Result<GroupOutcome> {
         leaving.name,
         group.name
     );
-    let group_id = group.id.clone();
     let leaving_id = leaving.id.clone();
     let leaving_name = leaving.name.clone();
     // The group being changed is the one the room is leaving, whatever
     // --room might otherwise have selected.
-    let target = session::target_for(&session.groups, group);
-    let coordinator = session::coordinator(session, &target).await?;
-    let info = coordinator
-        .modify_group_members(&group_id, &[], &[leaving_id])
-        .await?;
-    let mut outcome = GroupOutcome::of(&info.group, &session.groups);
+    let changed = change_group(session, group, &[], &[leaving_id]).await?;
+    let mut outcome = GroupOutcome::of(&changed.group, &session.groups);
     outcome.left = Some(leaving_name);
+    outcome.notes.extend(changed.note);
     Ok(outcome)
 }
 
@@ -779,6 +840,38 @@ mod tests {
             .notes
             .push("Already in this group: Dining Room".into());
         assert_eq!(noted.notes().len(), 1);
+    }
+
+    /// A change the coordinator never confirmed is confirmed by the topology
+    /// itself, or not: everyone added is in, everyone removed is out, and the
+    /// group is found by its coordinator, since a group's id can move.
+    #[test]
+    fn a_group_change_is_confirmed_by_the_topology_it_left() {
+        let group = |coordinator: &str, members: &[&str]| Group {
+            id: format!("{coordinator}:7"),
+            name: coordinator.into(),
+            coordinator_id: coordinator.into(),
+            playback_state: String::new(),
+            player_ids: members.iter().map(|m| m.to_string()).collect(),
+        };
+        let now = Groups {
+            groups: vec![
+                group("bar", &["bar", "kitchen", "dining"]),
+                group("bedroom", &["bedroom"]),
+            ],
+            players: Vec::new(),
+        };
+        let ids = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        // The party landed: both joined.
+        assert!(confirmed(&now, "bar", &ids(&["kitchen", "dining"]), &[]).is_some());
+        // Bedroom did not join, so a party for all three is not confirmed.
+        assert!(confirmed(&now, "bar", &ids(&["kitchen", "dining", "bedroom"]), &[]).is_none());
+        // A leave that did not happen.
+        assert!(confirmed(&now, "bar", &[], &ids(&["kitchen"])).is_none());
+        // One that did.
+        assert!(confirmed(&now, "bedroom", &[], &ids(&["kitchen"])).is_some());
+        // No such coordinator.
+        assert!(confirmed(&now, "office", &[], &[]).is_none());
     }
 
     #[test]

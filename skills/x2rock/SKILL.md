@@ -341,12 +341,15 @@ which answers `{broken, left}`: how many groups were broken up and every room th
 --json` is `{room}`, the soundbar that switched. A failure is the usual `{error, code, fix}` on
 stderr.
 
-`group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
-topology takes a second or two to settle — re-read `status` rather than assuming. These are
-**idempotent**: `party` on an already-partied house, `party off` when nothing is grouped, `ungroup`
-a lone room, and `tv` on a room already on TV are all safe no-ops, not errors. Idempotent is not
-consequence-free when the state *does* change — `party` and `ungroup` reach other people's rooms;
-see "Ask before you act".
+`group`/`ungroup`/`party` change the topology (see the command table). A change the coordinator does
+not answer in time is checked against the topology before it is called a failure - a soundbar on its
+TV input took twenty seconds to confirm a party - so an error from these three means the change is
+not there, and a slow confirmation is a `note:` on stderr over a normal result. After a group
+change, the topology takes a second or two to settle — re-read `status` rather than assuming. These
+are **idempotent**: `party` on an already-partied house, `party off` when nothing is grouped,
+`ungroup` a lone room, and `tv` on a room already on TV are all safe no-ops, not errors. Idempotent
+is not consequence-free when the state *does* change — `party` and `ungroup` reach other people's
+rooms; see "Ask before you act".
 
 ## Commands, by intent
 
