@@ -5,10 +5,9 @@
 //! its own average, or to one level on every member.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use serde_json::json;
+use serde::Serialize;
 
-use super::transition;
-use crate::cli::Command;
+use super::{PerRoom, Report, fan_out_as, transition};
 use crate::session::{self, Session};
 use crate::sonos;
 use crate::sonos::local::Connection;
@@ -43,10 +42,129 @@ fn parse_volume(text: &str) -> Result<VolumeChange> {
     }
 }
 
-/// Set or read a room's volume, printing the outcome (JSON of it under `json`).
-/// The one place volume is applied, so the single-room arm and the multi-room
-/// fan-out share it - `--player` scoping, the fixed-volume refusal, mute, and
-/// the report-what-was-asked rule all live here once.
+/// A volume read or set on a group or one speaker.
+///
+/// `previous_volume` is present only when there was a previous - a set, even
+/// to the same value - which is what tells a set from a read where nothing
+/// moved, and makes a clamp (+5 at 100) or a fixed-volume refusal visible.
+/// `audible` folds volume and mute into one answer. `balanced` is only on a
+/// group read: after a set the members' levels are not yet readable, and one
+/// speaker has no balance to report.
+#[derive(Debug, Serialize)]
+pub struct VolumeOutcome {
+    pub room: String,
+    pub volume: u8,
+    pub previous_volume: Option<u8>,
+    pub muted: bool,
+    pub audible: bool,
+    pub fixed: bool,
+    pub ramp_seconds: Option<u64>,
+    pub balanced: Option<bool>,
+    /// A ramp was asked for; the text says "(ramping)" when the player did not
+    /// say for how long. Not part of the documented shape.
+    #[serde(skip)]
+    ramped: bool,
+    #[serde(skip)]
+    notes: Vec<String>,
+}
+
+impl Report for VolumeOutcome {
+    fn text(&self) -> String {
+        let before = self.previous_volume.unwrap_or(self.volume);
+        let from = transition(&before.to_string(), &self.volume.to_string());
+        let muted = if self.muted { "  (muted)" } else { "" };
+        let over = match self.ramp_seconds {
+            Some(s) => format!("  (over ~{s}s)"),
+            // Ramping, but the player did not say for how long.
+            None if self.ramped => "  (ramping)".to_string(),
+            None => String::new(),
+        };
+        let uneven = if self.balanced == Some(false) {
+            "  (members differ; `vol normalize` evens them)"
+        } else {
+            ""
+        };
+        format!(
+            "{:<24} {from}{}{muted}{over}{uneven}",
+            self.room, self.volume
+        )
+    }
+    fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+
+/// One member of a normalized group: where it was, where it is now.
+#[derive(Debug, Serialize)]
+pub struct MemberVolume {
+    pub room: String,
+    pub volume: u8,
+    pub previous_volume: u8,
+}
+
+/// `vol normalize`: the group's level, and every member brought to it.
+#[derive(Debug, Serialize)]
+pub struct NormalizeOutcome {
+    pub room: String,
+    pub volume: u8,
+    /// Always true once normalized; kept so the shape matches a group read's.
+    pub balanced: bool,
+    pub members: Vec<MemberVolume>,
+}
+
+impl Report for NormalizeOutcome {
+    fn text(&self) -> String {
+        let (label, level) = (&self.room, self.volume);
+        if self.members.len() == 1 {
+            format!("{label:<24} {level}  (not grouped; nothing to normalize)")
+        } else if self.members.iter().all(|m| m.previous_volume == m.volume) {
+            format!("{label:<24} {level}  (already even)")
+        } else {
+            let each: Vec<String> = self
+                .members
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{} {}{}",
+                        m.room,
+                        transition(&m.previous_volume.to_string(), &m.volume.to_string()),
+                        m.volume
+                    )
+                })
+                .collect();
+            format!("{label:<24} {level}  normalized: {}", each.join(", "))
+        }
+    }
+}
+
+/// What `vol` did: the word `normalize` is one of the volume words, so the one
+/// entry point answers with either shape.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum VolOutcome {
+    Level(VolumeOutcome),
+    Normalized(NormalizeOutcome),
+}
+
+impl Report for VolOutcome {
+    fn text(&self) -> String {
+        match self {
+            VolOutcome::Level(o) => o.text(),
+            VolOutcome::Normalized(o) => o.text(),
+        }
+    }
+    fn notes(&self) -> &[String] {
+        match self {
+            VolOutcome::Level(o) => o.notes(),
+            VolOutcome::Normalized(o) => o.notes(),
+        }
+    }
+}
+
+/// Set or read a room's volume. The one place volume is applied, so the
+/// single-room arm and the multi-room fan-out share it - `--player` scoping,
+/// the fixed-volume refusal, mute, and the report-what-was-asked rule all live
+/// here once.
 pub async fn apply_vol(
     session: &session::Session,
     target: &session::Target,
@@ -54,8 +172,7 @@ pub async fn apply_vol(
     change: Option<String>,
     one_room: bool,
     ramp: bool,
-    json: bool,
-) -> Result<()> {
+) -> Result<VolOutcome> {
     let group = target.group_id.as_str();
     // A ramp is a RenderingControl action, which is per speaker and has no
     // group counterpart, so asking for one *is* asking for --player. Implied
@@ -125,7 +242,9 @@ pub async fn apply_vol(
             this.is_none(),
             "normalize sets a whole group to its level; it takes no --player or --ramp"
         );
-        return normalize_group(session, target, &speaker, &label, before.volume, json).await;
+        return normalize_group(session, target, &speaker, &label, before.volume)
+            .await
+            .map(VolOutcome::Normalized);
     }
     // One pass that both validates the ramp and produces the level it slides
     // to, so there is a single thing to branch on below rather than a flag, an
@@ -145,6 +264,7 @@ pub async fn apply_vol(
         (true, Some(VolumeChange::Normalize)) => unreachable!("normalize returned above"),
     };
     let mut ramp_secs = None;
+    let mut notes = Vec::new();
     let (level, muted) = match change {
         _ if ramp_to.is_some() => {
             let level = ramp_to.expect("matched just above");
@@ -160,9 +280,9 @@ pub async fn apply_vol(
             // set does, so a muted speaker would slide silently. Say so instead
             // of letting the level look like it took effect.
             if before.muted {
-                eprintln!(
+                notes.push(format!(
                     "note: {label} is muted, so the ramp will not be heard until it is unmuted"
-                );
+                ));
             }
             (level, before.muted)
         }
@@ -206,40 +326,18 @@ pub async fn apply_vol(
             Some(all_at(before.volume, members.iter().map(|(_, _, v)| v)))
         }
     };
-    if json {
-        // previous_volume makes a set distinguishable from a read, and a clamp
-        // (+5 at 100) or a fixed-volume refusal visible: the value did not move.
-        // audible folds volume+muted into the one outcome.
-        println!(
-            "{}",
-            json!({
-                "room": label,
-                "volume": level,
-                "previous_volume": was_set.then_some(before.volume),
-                "muted": muted,
-                "audible": !muted && level > 0,
-                "fixed": before.fixed,
-                "ramp_seconds": ramp_secs,
-                "balanced": balanced,
-            })
-        );
-    } else {
-        let from = transition(&before.volume.to_string(), &level.to_string());
-        let muted = if muted { "  (muted)" } else { "" };
-        let over = match ramp_secs {
-            Some(s) => format!("  (over ~{s}s)"),
-            // Ramping, but the player did not say for how long.
-            None if ramp => "  (ramping)".to_string(),
-            None => String::new(),
-        };
-        let uneven = if balanced == Some(false) {
-            "  (members differ; `vol normalize` evens them)"
-        } else {
-            ""
-        };
-        println!("{label:<24} {from}{level}{muted}{over}{uneven}");
-    }
-    Ok(())
+    Ok(VolOutcome::Level(VolumeOutcome {
+        room: label,
+        volume: level,
+        previous_volume: was_set.then_some(before.volume),
+        muted,
+        audible: !muted && level > 0,
+        fixed: before.fixed,
+        ramp_seconds: ramp_secs,
+        balanced,
+        ramped: ramp,
+        notes,
+    }))
 }
 
 /// Each speaker in the target's group with its own volume, read in parallel.
@@ -297,45 +395,24 @@ async fn normalize_group(
     coordinator: &Connection,
     label: &str,
     level: u8,
-    json: bool,
-) -> Result<()> {
-    let members = member_volumes(session, target, coordinator).await?;
-    let mut report = Vec::new();
-    for (player, connection, volume) in &members {
+) -> Result<NormalizeOutcome> {
+    let mut members = Vec::new();
+    for (player, connection, volume) in member_volumes(session, target, coordinator).await? {
         if !volume.fixed && volume.volume != level {
             connection.set_player_volume(&player.id, level).await?;
         }
-        let after = if volume.fixed { volume.volume } else { level };
-        report.push((player.name.as_str(), volume.volume, after));
+        members.push(MemberVolume {
+            room: player.name.clone(),
+            volume: if volume.fixed { volume.volume } else { level },
+            previous_volume: volume.volume,
+        });
     }
-    if json {
-        let members: Vec<_> = report
-            .iter()
-            .map(|(room, before, after)| {
-                json!({ "room": room, "volume": after, "previous_volume": before })
-            })
-            .collect();
-        println!(
-            "{}",
-            json!({ "room": label, "volume": level, "balanced": true, "members": members })
-        );
-    } else if members.len() == 1 {
-        println!("{label:<24} {level}  (not grouped; nothing to normalize)");
-    } else if report.iter().all(|(_, before, after)| before == after) {
-        println!("{label:<24} {level}  (already even)");
-    } else {
-        let each: Vec<String> = report
-            .iter()
-            .map(|(room, before, after)| {
-                format!(
-                    "{room} {}{after}",
-                    transition(&before.to_string(), &after.to_string())
-                )
-            })
-            .collect();
-        println!("{label:<24} {level}  normalized: {}", each.join(", "));
-    }
-    Ok(())
+    Ok(NormalizeOutcome {
+        room: label.to_string(),
+        volume: level,
+        balanced: true,
+        members,
+    })
 }
 
 /// `vol --each`: every member of `room`'s group to one level, as `--player`
@@ -378,17 +455,16 @@ pub async fn each(
         .map(|p| p.name.clone())
         .collect();
     // Each member addressed as its own speaker: `--player`, not the group.
-    let per_member = Command::Vol {
-        change: change.clone(),
-        player: true,
-        each: false,
-        // Carried through: `--each` fans over member names as `--player`,
-        // which is exactly the shape a ramp needs, so `--ramp --each`
-        // slides every member rather than being refused.
+    // Carried through: `--each` fans over member names as `--player`, which
+    // is exactly the shape a ramp needs, so `--ramp --each` slides every
+    // member rather than being refused.
+    let per_member = PerRoom::Vol {
+        change: &change,
+        one_room: true,
         ramp,
         json,
     };
-    super::fan_out(session, &members, &per_member).await
+    fan_out_as(session, &members, per_member).await
 }
 
 #[cfg(test)]
@@ -415,5 +491,91 @@ mod tests {
         assert!(!all_at(4, uneven.iter()));
         let even = [at(4, false), at(4, false), at(100, true)];
         assert!(all_at(4, even.iter()));
+    }
+
+    fn level(volume: u8, previous: Option<u8>) -> VolumeOutcome {
+        VolumeOutcome {
+            room: "Kitchen".into(),
+            volume,
+            previous_volume: previous,
+            muted: false,
+            audible: volume > 0,
+            fixed: false,
+            ramp_seconds: None,
+            balanced: None,
+            ramped: false,
+            notes: Vec::new(),
+        }
+    }
+
+    /// The JSON is a documented shape (the skill's `vol --json`), and a read
+    /// and a set print exactly the lines they always have.
+    #[test]
+    fn a_volume_outcome_keeps_the_documented_keys_and_lines() {
+        let read = serde_json::to_value(VolOutcome::Level(level(9, None))).unwrap();
+        let keys: Vec<_> = read.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            [
+                "audible",
+                "balanced",
+                "fixed",
+                "muted",
+                "previous_volume",
+                "ramp_seconds",
+                "room",
+                "volume"
+            ]
+        );
+        assert_eq!(read["previous_volume"], serde_json::Value::Null);
+        assert_eq!(level(9, None).text(), "Kitchen                  9");
+        assert_eq!(level(14, Some(9)).text(), "Kitchen                  9 → 14");
+
+        let mut ramp = level(12, Some(9));
+        ramp.muted = true;
+        ramp.ramp_seconds = Some(2);
+        ramp.ramped = true;
+        ramp.notes.push("note: Kitchen is muted".into());
+        assert_eq!(
+            ramp.text(),
+            "Kitchen                  9 → 12  (muted)  (over ~2s)"
+        );
+        assert_eq!(ramp.notes().len(), 1);
+        ramp.ramp_seconds = None;
+        assert!(ramp.text().ends_with("(ramping)"));
+
+        let mut uneven = level(9, None);
+        uneven.balanced = Some(false);
+        assert!(uneven.text().contains("`vol normalize` evens them"));
+    }
+
+    #[test]
+    fn a_normalize_outcome_says_which_of_its_three_things_happened() {
+        let member = |room: &str, previous, volume| MemberVolume {
+            room: room.into(),
+            volume,
+            previous_volume: previous,
+        };
+        let mut out = NormalizeOutcome {
+            room: "Kitchen + 1".into(),
+            volume: 9,
+            balanced: true,
+            members: vec![member("Kitchen", 9, 9)],
+        };
+        assert_eq!(
+            out.text(),
+            "Kitchen + 1              9  (not grouped; nothing to normalize)"
+        );
+        out.members.push(member("Dining Room", 9, 9));
+        assert_eq!(out.text(), "Kitchen + 1              9  (already even)");
+        out.members[1].previous_volume = 4;
+        assert_eq!(
+            out.text(),
+            "Kitchen + 1              9  normalized: Kitchen 9, Dining Room 4 → 9"
+        );
+        let json = serde_json::to_value(VolOutcome::Normalized(out)).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["balanced", "members", "room", "volume"]);
+        assert_eq!(json["members"][1]["previous_volume"], 4);
     }
 }

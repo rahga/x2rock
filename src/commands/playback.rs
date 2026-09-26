@@ -5,23 +5,58 @@
 //! `apply_*` functions once per group; `run` calls them for a single room.
 
 use anyhow::{Result, anyhow, bail, ensure};
-use serde_json::json;
+use serde::Serialize;
 
 use super::stream::{STREAM_START, StreamStart, stream_item};
-use super::{on_off, on_word, refreshed_catalogue, transition, upnp_ip};
+use super::{Report, on_off, on_word, refreshed_catalogue, transition, upnp_ip};
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{MetadataStatus, Repeat};
 use crate::sonos::upnp::Upnp;
 use crate::{credentials, hint, sonos, streams};
 
-/// Set or read repeat, printing the outcome. Shared by the single arm and fan-out.
+/// A play mode read or set: repeat, shuffle or crossfade on a group.
+///
+/// `previous` is what the text line needs for its "off → on" and the JSON never
+/// carried, so it is kept off the wire rather than added to a documented shape.
+#[derive(Debug, Serialize)]
+pub struct ModeOutcome {
+    pub room: String,
+    #[serde(flatten)]
+    pub mode: Mode,
+    #[serde(skip)]
+    previous: String,
+}
+
+/// Which play mode, carrying its own JSON key.
+#[derive(Debug, Serialize)]
+pub enum Mode {
+    #[serde(rename = "repeat")]
+    Repeat(String),
+    #[serde(rename = "shuffle")]
+    Shuffle(bool),
+    #[serde(rename = "crossfade")]
+    Crossfade(bool),
+}
+
+impl Report for ModeOutcome {
+    fn text(&self) -> String {
+        let (word, after) = match &self.mode {
+            Mode::Repeat(r) => ("repeat", r.clone()),
+            Mode::Shuffle(on) => ("shuffle", on_word(*on).to_string()),
+            Mode::Crossfade(on) => ("crossfade", on_word(*on).to_string()),
+        };
+        let from = transition(&self.previous, &after);
+        format!("{:<24} {word} {from}{after}", self.room)
+    }
+}
+
+/// Set or read repeat. Shared by the single arm and fan-out.
 pub async fn apply_repeat(
     session: &session::Session,
     target: &session::Target,
     mode: Option<String>,
-    json: bool,
-) -> Result<()> {
+) -> Result<ModeOutcome> {
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let status = player.playback_status(group).await?;
@@ -42,25 +77,19 @@ pub async fn apply_repeat(
             repeat
         }
     };
-    if json {
-        println!(
-            "{}",
-            json!({ "room": target.name, "repeat": after.as_str() })
-        );
-    } else {
-        let from = transition(before.as_str(), after.as_str());
-        println!("{:<24} repeat {from}{}", target.name, after.as_str());
-    }
-    Ok(())
+    Ok(ModeOutcome {
+        room: target.name.clone(),
+        mode: Mode::Repeat(after.as_str().to_string()),
+        previous: before.as_str().to_string(),
+    })
 }
 
-/// Set or read shuffle, printing the outcome. Shared by the single arm and fan-out.
+/// Set or read shuffle. Shared by the single arm and fan-out.
 pub async fn apply_shuffle(
     session: &session::Session,
     target: &session::Target,
     mode: Option<String>,
-    json: bool,
-) -> Result<()> {
+) -> Result<ModeOutcome> {
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let status = player.playback_status(group).await?;
@@ -77,13 +106,11 @@ pub async fn apply_shuffle(
             shuffle
         }
     };
-    if json {
-        println!("{}", json!({ "room": target.name, "shuffle": after }));
-    } else {
-        let from = transition(on_word(before), on_word(after));
-        println!("{:<24} shuffle {from}{}", target.name, on_word(after));
-    }
-    Ok(())
+    Ok(ModeOutcome {
+        room: target.name.clone(),
+        mode: Mode::Shuffle(after),
+        previous: on_word(before).to_string(),
+    })
 }
 
 /// Crossfade, which is a play mode like shuffle and set the same way.
@@ -91,8 +118,7 @@ pub async fn apply_crossfade(
     session: &session::Session,
     target: &session::Target,
     mode: Option<String>,
-    json: bool,
-) -> Result<()> {
+) -> Result<ModeOutcome> {
     let group = target.group_id.as_str();
     let player = session::coordinator(session, target).await?;
     let before = player.playback_status(group).await?.modes().crossfade;
@@ -103,13 +129,11 @@ pub async fn apply_crossfade(
             crossfade
         }
     };
-    if json {
-        println!("{}", json!({ "room": target.name, "crossfade": after }));
-    } else {
-        let from = transition(on_word(before), on_word(after));
-        println!("{:<24} crossfade {from}{}", target.name, on_word(after));
-    }
-    Ok(())
+    Ok(ModeOutcome {
+        room: target.name.clone(),
+        mode: Mode::Crossfade(after),
+        previous: on_word(before).to_string(),
+    })
 }
 
 /// Apply one transport verb to a group, through its coordinator.
@@ -413,6 +437,38 @@ pub async fn play_track(player: &Connection, target: &Target, n: u32) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Each mode carries its own JSON key (the skill documents `repeat`,
+    /// `shuffle`, `crossfade` beside `room`) and prints the "from → to" line
+    /// it always has, with the arrow only when something changed.
+    #[test]
+    fn a_mode_outcome_keeps_its_key_and_its_line() {
+        let out = ModeOutcome {
+            room: "Kitchen".into(),
+            mode: Mode::Crossfade(true),
+            previous: "off".into(),
+        };
+        let json = serde_json::to_value(&out).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["crossfade", "room"]);
+        assert_eq!(json["crossfade"], true);
+        assert_eq!(out.text(), "Kitchen                  crossfade off → on");
+
+        let same = ModeOutcome {
+            room: "Kitchen".into(),
+            mode: Mode::Repeat("all".into()),
+            previous: "all".into(),
+        };
+        assert_eq!(serde_json::to_value(&same).unwrap()["repeat"], "all");
+        assert_eq!(same.text(), "Kitchen                  repeat all");
+        let shuffle = ModeOutcome {
+            room: "Kitchen".into(),
+            mode: Mode::Shuffle(false),
+            previous: "on".into(),
+        };
+        assert_eq!(shuffle.text(), "Kitchen                  shuffle on → off");
+    }
 
     #[test]
     fn a_refused_play_is_a_playback_failure_and_a_lost_socket_is_not() {

@@ -102,6 +102,42 @@ pub fn find_named<'a, T>(
     }
 }
 
+/// What a command did, separated from how the CLI says it.
+///
+/// A command returns one of these instead of printing, so the same outcome can
+/// be printed by `main.rs`, shown on the TUI's status line, or handed to
+/// anything else that holds a session - the seam that the TUI's subprocess
+/// route and a daemon interface both wanted. The JSON is the struct's own
+/// `Serialize`, and its keys are a documented contract (the skill); the text is
+/// the line the command has always printed, verbatim.
+pub trait Report: serde::Serialize {
+    /// What the CLI prints without `--json`.
+    fn text(&self) -> String;
+    /// Asides that go to stderr: "note: … is muted". Nothing, for most.
+    fn notes(&self) -> &[String] {
+        &[]
+    }
+}
+
+/// Print an outcome the way the CLI always has: the text or one JSON line on
+/// stdout, each note on stderr.
+///
+/// The JSON goes through a `Value` on purpose. `serde_json` here is built
+/// without `preserve_order`, so a `Value` prints its keys sorted - which is
+/// what every `json!` literal did before outcomes existed - while a struct
+/// would stream them in field order and change every documented line.
+pub fn emit(report: &impl Report, json: bool) -> Result<()> {
+    for note in report.notes() {
+        eprintln!("{note}");
+    }
+    if json {
+        println!("{}", serde_json::to_value(report)?);
+    } else {
+        println!("{}", report.text());
+    }
+    Ok(())
+}
+
 /// "old → " when a command changed something, nothing when it only reported.
 pub fn transition(before: &str, after: &str) -> String {
     if before == after {
@@ -213,6 +249,20 @@ pub async fn fan_out(
     let Some(action) = per_room(command) else {
         return Err(too_many_rooms());
     };
+    fan_out_as(session, rooms, action).await
+}
+
+/// [`fan_out`] once the per-room reading is in hand - the entry `vol --each`
+/// uses, having built its own `PerRoom` rather than a `Command` to be re-read.
+///
+/// Each room is printed as soon as it is done, not collected and printed at the
+/// end: a failure on the third of five rooms leaves the first two applied *and*
+/// reported, which is what makes the stop-on-failure rule honest.
+pub(crate) async fn fan_out_as(
+    session: &session::Session,
+    rooms: &[String],
+    action: PerRoom<'_>,
+) -> Result<()> {
     for name in rooms {
         let target = session::target(&session.groups, Some(name))?;
         let outcome = match action {
@@ -221,27 +271,18 @@ pub async fn fan_out(
                 one_room,
                 ramp,
                 json,
-            } => {
-                apply_vol(
-                    session,
-                    &target,
-                    Some(name),
-                    change.clone(),
-                    one_room,
-                    ramp,
-                    json,
-                )
+            } => apply_vol(session, &target, Some(name), change.clone(), one_room, ramp)
                 .await
-            }
-            PerRoom::Repeat { mode, json } => {
-                apply_repeat(session, &target, mode.clone(), json).await
-            }
-            PerRoom::Shuffle { mode, json } => {
-                apply_shuffle(session, &target, mode.clone(), json).await
-            }
-            PerRoom::Crossfade { mode, json } => {
-                apply_crossfade(session, &target, mode.clone(), json).await
-            }
+                .and_then(|o| emit(&o, json)),
+            PerRoom::Repeat { mode, json } => apply_repeat(session, &target, mode.clone())
+                .await
+                .and_then(|o| emit(&o, json)),
+            PerRoom::Shuffle { mode, json } => apply_shuffle(session, &target, mode.clone())
+                .await
+                .and_then(|o| emit(&o, json)),
+            PerRoom::Crossfade { mode, json } => apply_crossfade(session, &target, mode.clone())
+                .await
+                .and_then(|o| emit(&o, json)),
             // `play` alone confirms and resumes; the other verbs have nothing
             // to confirm against, and `pause` on an idle room is a no-op that
             // must not spend the failure budget.
@@ -275,7 +316,7 @@ pub fn too_many_rooms() -> anyhow::Error {
 /// What a per-room command does to one room. Borrowed from the `Command`, so
 /// [`fan_out`] can apply it to each room in turn without re-matching.
 #[derive(Clone, Copy)]
-enum PerRoom<'a> {
+pub(crate) enum PerRoom<'a> {
     Vol {
         change: &'a Option<String>,
         one_room: bool,
