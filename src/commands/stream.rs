@@ -15,7 +15,6 @@ use super::services::save_refreshed_token;
 use super::speaker::named_speaker;
 use super::upnp_ip;
 use crate::session::{self, Target};
-use crate::sonos::local::Connection;
 use crate::sonos::upnp::Upnp;
 use crate::state::State;
 use crate::{credentials, hint, sonos, stations, streams};
@@ -668,11 +667,7 @@ pub async fn play_audio_clip(
     let ip = upnp.ip();
     // Player-scoped, so it must ride the player's own socket, not a
     // coordinator's - the same rule the per-player volume path follows.
-    let speaker = if ip == session.connection.ip() {
-        session.connection.clone()
-    } else {
-        Connection::open(ip).await?
-    };
+    let speaker = session.player(Some(ip)).await?;
     let name = if stream_url.is_some() {
         "x2rock notify"
     } else {

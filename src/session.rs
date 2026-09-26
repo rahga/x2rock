@@ -2,8 +2,9 @@
 //!
 //! Shared by the CLI and the daemon, so both find players the same way.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
@@ -13,10 +14,119 @@ use crate::sonos::local::Connection;
 use crate::sonos::proto::{Group, Groups, Player};
 use crate::state::{KnownPlayer, State};
 
-/// A live connection together with the household topology it reported.
+/// A live connection together with the household topology it reported, and
+/// the connections to every other player it has since had to reach.
+///
+/// `Clone` is a handle to the same sockets: the TUI runs each write as its own
+/// task and hands each a clone, and they share the pool.
+#[derive(Clone)]
 pub struct Session {
+    /// The player the session was opened on: household id, `getGroups`, and
+    /// every group-scoped command whose coordinator this happens to be.
     pub connection: Connection,
     pub groups: Groups,
+    pub pool: Pool,
+}
+
+impl Session {
+    pub fn new(connection: Connection, groups: Groups) -> Self {
+        Self {
+            connection,
+            groups,
+            pool: Pool::default(),
+        }
+    }
+
+    /// The connection to the player at `ip` - the session's own when that is
+    /// where it points (or `ip` is unknown), else one the pool holds or opens.
+    /// A player-scoped command is refused by anyone but that player, so this is
+    /// how every per-speaker path reaches its speaker.
+    pub async fn player(&self, ip: Option<IpAddr>) -> Result<Connection> {
+        Ok(self.pool.reach(&self.connection, ip).await?.0)
+    }
+
+    /// Re-read the topology. A session that outlives one command - the TUI's -
+    /// resolves rooms against what it last read, and a regroup makes that
+    /// wrong: one `getGroups` on the held socket, before each write, is the
+    /// whole answer.
+    #[allow(dead_code)] // The TUI's, once it holds a session across writes.
+    pub async fn refresh_groups(&mut self) -> Result<()> {
+        self.groups = self.connection.groups().await?;
+        Ok(())
+    }
+
+    /// Close every socket. Nothing closes itself: `Connection` has no `Drop`
+    /// (its read loop and keepalive hold the `Arc`), so a session that is
+    /// merely dropped keeps pinging for the rest of the process.
+    pub async fn close(self) {
+        self.pool.close_all().await;
+        self.connection.close();
+    }
+}
+
+/// Connections to the players a session reaches beyond the one it was opened
+/// on, keyed by address, opened once and shared.
+///
+/// Before this every command that needed another player's socket opened one -
+/// the coordinator of a group, each member for `--player` - and let the process
+/// exit close it, which was fine for a CLI call and a leak for anything that
+/// held a session across commands. The lock is never held across the `open`
+/// await: two callers that race for one address both open, and the loser
+/// closes its socket and takes the winner's.
+///
+/// The daemon keeps the same map by hand (`connection_to`), plus a forwarder
+/// per socket; the `bool` [`reach`](Pool::reach) returns is what would let it
+/// hang that forwarder on a newly opened one.
+#[derive(Clone, Default)]
+pub struct Pool(Arc<tokio::sync::Mutex<HashMap<IpAddr, Connection>>>);
+
+impl Pool {
+    /// The connection to `ip`, and whether this call opened it. `primary` is
+    /// returned for its own address and for no address at all - the fallback
+    /// every caller had before there was a pool.
+    pub async fn reach(
+        &self,
+        primary: &Connection,
+        ip: Option<IpAddr>,
+    ) -> Result<(Connection, bool)> {
+        let Some(ip) = ip.filter(|ip| *ip != primary.ip()) else {
+            return Ok((primary.clone(), false));
+        };
+        {
+            let mut held = self.0.lock().await;
+            match held.get(&ip) {
+                Some(live) if live.is_alive() => return Ok((live.clone(), false)),
+                // A socket the keepalive gave up on. Out of the map before it
+                // is closed, so nobody takes it in the meantime.
+                Some(_) => {
+                    if let Some(dead) = held.remove(&ip) {
+                        dead.close();
+                    }
+                }
+                None => {}
+            }
+        }
+        let opened = Connection::open(ip).await?;
+        let mut held = self.0.lock().await;
+        match held.get(&ip) {
+            Some(winner) if winner.is_alive() => {
+                opened.close();
+                Ok((winner.clone(), false))
+            }
+            _ => {
+                if let Some(dead) = held.insert(ip, opened.clone()) {
+                    dead.close();
+                }
+                Ok((opened, true))
+            }
+        }
+    }
+
+    pub async fn close_all(&self) {
+        for (_, connection) in self.0.lock().await.drain() {
+            connection.close();
+        }
+    }
 }
 
 /// One household found during a scan: its id and a ready-to-use session.
@@ -35,7 +145,7 @@ pub async fn attach(ip: IpAddr, state: &mut State, fingerprint: Option<&str>) ->
             state.save()?;
         }
     }
-    Ok(Session { connection, groups })
+    Ok(Session::new(connection, groups))
 }
 
 /// Progress lines - "rescanning", a player that did not answer - are for a
@@ -240,7 +350,7 @@ pub async fn discover_households(
                 Ok(groups) => {
                     discovered.push(Discovered {
                         household_id,
-                        session: Session { connection, groups },
+                        session: Session::new(connection, groups),
                     });
                     break;
                 }
@@ -398,10 +508,7 @@ pub fn target_for(groups: &Groups, group: &Group) -> Target {
 
 /// Group commands go to the coordinator, which may not be the player we reached.
 pub async fn coordinator(session: &Session, target: &Target) -> Result<Connection> {
-    match target.coordinator_ip {
-        Some(ip) if ip != session.connection.ip() => Connection::open(ip).await,
-        _ => Ok(session.connection.clone()),
-    }
+    session.player(target.coordinator_ip).await
 }
 
 #[cfg(test)]

@@ -427,11 +427,7 @@ pub async fn apply_eq(
     // imply a control it does not have. Best-effort: a tone read must not fail
     // because this secondary read did.
     let home_theater = if is_soundbar {
-        let control = if upnp.ip() == session.connection.ip() {
-            Some(session.connection.clone())
-        } else {
-            Connection::open(upnp.ip()).await.ok()
-        };
+        let control = session.player(Some(upnp.ip())).await.ok();
         match control {
             Some(c) => c
                 .player_settings(&speaker.id)

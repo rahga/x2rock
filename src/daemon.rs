@@ -378,7 +378,9 @@ async fn follow(
     established: Instant,
     restarts: &mut broadcast::Receiver<Restart>,
 ) -> Result<()> {
-    let Session { connection, groups } = session;
+    let Session {
+        connection, groups, ..
+    } = session;
     let household = connection.household_id().await?;
 
     let (mut tx, mut events) = mpsc::unbounded_channel();

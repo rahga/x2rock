@@ -211,8 +211,7 @@ pub async fn apply_vol(
     // full WSS handshake, and `--player`/`--ramp` never need it - opening it
     // unconditionally spent one per call on nothing.
     let speaker = match speaker_ip {
-        Some(ip) if ip == session.connection.ip() => session.connection.clone(),
-        Some(ip) => Connection::open(ip).await?,
+        Some(ip) => session.player(Some(ip)).await?,
         None => session::coordinator(session, target).await?,
     };
     // Name the speaker, not the group: "Dining Room + 1  22" is a confusing way
@@ -242,7 +241,7 @@ pub async fn apply_vol(
             this.is_none(),
             "normalize sets a whole group to its level; it takes no --player or --ramp"
         );
-        return normalize_group(session, target, &speaker, &label, before.volume)
+        return normalize_group(session, target, &label, before.volume)
             .await
             .map(VolOutcome::Normalized);
     }
@@ -322,7 +321,7 @@ pub async fn apply_vol(
         (false, _) => None,
         (true, false) => Some(true),
         (true, true) => {
-            let members = member_volumes(session, target, &speaker).await?;
+            let members = member_volumes(session, target).await?;
             Some(all_at(before.volume, members.iter().map(|(_, _, v)| v)))
         }
     };
@@ -343,12 +342,10 @@ pub async fn apply_vol(
 /// Each speaker in the target's group with its own volume, read in parallel.
 ///
 /// A player-scoped read is refused by any other player, so each member is
-/// asked over its own connection - the session's or the coordinator's where
-/// one already reaches it.
+/// asked over its own connection, which the session's pool holds or opens.
 async fn member_volumes<'a>(
     session: &'a session::Session,
     target: &session::Target,
-    coordinator: &Connection,
 ) -> Result<Vec<(&'a Player, Connection, sonos::proto::Volume)>> {
     let group = session
         .groups
@@ -362,13 +359,7 @@ async fn member_volumes<'a>(
             let ip = p
                 .ip()
                 .with_context(|| format!("{} did not report an address to reach it on", p.name))?;
-            let connection = if ip == coordinator.ip() {
-                coordinator.clone()
-            } else if ip == session.connection.ip() {
-                session.connection.clone()
-            } else {
-                Connection::open(ip).await?
-            };
+            let connection = session.player(Some(ip)).await?;
             let volume = connection.player_volume(&p.id).await?;
             anyhow::Ok((p, connection, volume))
         });
@@ -392,12 +383,11 @@ fn all_at<'a>(level: u8, mut volumes: impl Iterator<Item = &'a sonos::proto::Vol
 async fn normalize_group(
     session: &session::Session,
     target: &session::Target,
-    coordinator: &Connection,
     label: &str,
     level: u8,
 ) -> Result<NormalizeOutcome> {
     let mut members = Vec::new();
-    for (player, connection, volume) in member_volumes(session, target, coordinator).await? {
+    for (player, connection, volume) in member_volumes(session, target).await? {
         if !volume.fixed && volume.volume != level {
             connection.set_player_volume(&player.id, level).await?;
         }
