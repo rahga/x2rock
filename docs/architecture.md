@@ -191,8 +191,15 @@ lines below record the reversals rather than warn about text that still says oth
   back into use after higher accounts are removed. See "Household registration is per *account*".
 - **The account harvest is not a lower bound** on a household's accounts; it can show dead ones and
   miss live ones. See "The harvest showed a deleted account and hid a live one".
-- **A stored bookmark serial cannot go stale in a way that matters**: the enqueue path sends none,
-  and the player resolves the household's current registration. See "Re-added the same day".
+- **The cdudn does not pick the account; `sn=` does.** Early sections and code comments said the
+  player ignores `sn=` and resolves the account from the cdudn - true only because every test ran
+  against a service with one account. With two, `sn=` picks, the cdudn's selector is ignored for
+  that choice, and a mismatched pair leaves the queued row disagreeing with what plays. See "Which
+  account an enqueue plays from".
+- **A stored bookmark serial cannot go stale in a way that matters**: a serial the household no
+  longer holds falls back to its default account, which for a one-account service is the current
+  registration. See "Re-added the same day", and "Which account an enqueue plays from" for the
+  fallback measured.
 - **`play-url` and `stations --play` verify playback.** Early notes say they report what was asked
   for; they now wait for `PLAYING` and fail with `stream_did_not_play`.
 - **Browse reaches more services than search** — twelve anonymous services publish no search
@@ -267,32 +274,13 @@ lines below record the reversals rather than warn about text that still says oth
 
 ## Open questions
 
-1. **Which account does x2rock's own cdudn resolve to, when a household holds two for one service?**
-   (sharpened 2026-09-23 from the 2026-09-17 question, whose other half is resolved.)
-
-   The coexistence is confirmed - see "Two accounts for one service, one per person" (09-18) - and
-   the store now holds them, one preferred: see "A household can hold two accounts for one service"
-   (09-22). What stays open is the cdudn `bookmarks::service_uri` builds for an enqueue,
-   `SA_RINCON<type>_X_#Svc<type>-0-Token`, which names the **service**. The household's own records
-   show that a real account's cdudn carries its account key - `X_#Svc1543-885ebbcc-Token` - and its
-   favorites carry that in plaintext. So with two accounts, x2rock's `-0-` cdudn resolves either to
-   whichever account the player treats as default, or to the account whose `Username0` is literally
-   `-0-` if one exists, or to neither; none of the three has been observed, and every verification of
-   "the player ignores `sn=` and resolves from the cdudn" (Mixcloud) ran against a service with one.
-
-   **The test**, home household, two iHeartRadio accounts: `play-item` an iHeartRadio item through
-   x2rock, then read `accountId` from `raw api --scope group playback:1 getMetadataStatus` - `sn_24`
-   or `sn_25` says which account the `-0-` cdudn landed on. Then build the cdudn from the *preferred*
-   account's key instead of `-0-`, play again, and see whether the serial follows the key. If it
-   does, `--prefer` can drive playback as well as search. Deferred until the laptop is home.
-
-2. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
+1. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
    room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
    mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
    not confirmed is whether it behaves with several rooms on the bus, since only one room was
    reachable when it was written up. **Pick this up from the home household.**
 
-3. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
+2. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
    committing to only the three integration patterns Omarchy's plugin README documents. Much less
    pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
    cost time are written up above rather than left to be rediscovered.
@@ -8645,6 +8633,63 @@ apparently-first account, which looks like a counterexample to "the first accoun
 read, so it is a poor case to judge that rule by; the rule stands until a *complete* first-account
 registration contradicts it.
 
+## Which account an enqueue plays from: `sn=` picks, the cdudn has to agree (home, 2026-09-25)
+
+The last open piece of multi-account support. The store has held several accounts per service with
+one preferred since 2026-09-22, but only search followed the preference: every enqueue built the
+`-0-` cdudn, which names the service, and sent no `sn=`. The question was which account that lands
+on when a household holds two, and whether naming one explicitly moves it.
+
+**Setup.** Home household, two iHeartRadio accounts: `sn_24` (selector `81dee58d`, nickname
+`iHeartRadio`) and `sn_25` (`885ebbcc`, `iHeartRadio 885ebbcc`), the second preferred in x2rock.
+The Sonos app's own play in another room fixed the pairing: `x-sonosapi-stream:…&sn=24` with
+cdudn `SA_RINCON1543_X_#Svc1543-81dee58d-Token` - the app always sends a matched pair. The account
+actually in use is `accountId` from `playbackMetadata:1 getMetadataStatus` at group scope (not
+`playback:1`, which answers `ERROR_UNSUPPORTED_COMMAND`). Everything was sent by hand through
+`raw upnp`, one variable at a time, in an idle room.
+
+**Radio path** (`SetAVTransportURI`, a live station):
+
+| cdudn selector | `sn=` | `accountId` |
+|---|---|---|
+| `0` | - | `sn_24` |
+| `885ebbcc` | - | `sn_24` |
+| `0` | 25 | `sn_25` |
+| `81dee58d` | 25 | `sn_25` |
+| `885ebbcc` | 24 | `sn_24` |
+| `0` | 99 | `sn_24` |
+| `bogus` | - | `sn_24` |
+
+`sn=` alone picks. The selector is ignored for that choice, even a made-up one, and no `sn=` or one
+the household does not hold falls back to `sn_24`. The fallback is not sticky: an `sn=25` play
+followed by one with no `sn=` goes back to `sn_24`. The player stores what it was sent, filling in
+`sn=24` where none came.
+
+**Queue path** (`AddURIToQueue`, a podcast episode - the path `play-item` uses for on-demand
+items). `accountId` still follows `sn=`, with the same fallback, but the queued row's own `sn` is
+**rewritten from the cdudn's selector**: `885ebbcc` makes the row say `sn=25` whatever was sent, and
+`0`, `81dee58d` or a bogus selector make it say `sn=24`. A mismatched pair - `885ebbcc` with
+`sn=24` - reports playing from `sn_24` while its row says `sn=25`. Which of the two actually fetched
+the audio is not observable here; a free podcast plays from either account. A **matched** pair
+(`885ebbcc` with `sn=25`) came back `sn_25` everywhere.
+
+**Why `sn_24` is the default** is not settled: it is both the lowest live serial and the one
+registered first here, so the two rules cannot be told apart in this household.
+
+**What changed.** An enqueue now names the store's chosen account with both halves - its selector in
+the cdudn and its serial in `sn=` (`content::Naming`) - and a bookmark names the account behind the
+serial it already carries, by looking that serial up in the store. Verified end to end: with
+`885ebbcc` preferred, `play-item` played from `sn_25` and the row said `sn=25`; with the preference
+moved to the other account, `sn_24` both ways. Before this, both plays landed on `sn_24` - the
+account x2rock did **not** prefer.
+
+**What still falls back.** An account with no selector sends `-0-` - correct for a primary, which
+really is `-0-` - and one with no serial sends no `sn=`. Both are only imported fields: a browser
+link knows neither and still plays from the household's default. Accounts imported before this
+build carry a serial but no selector (the selector was not stored until the 2026-09-24 guard work);
+a re-run of `link --from-household` fills it in place, since the import matches on the token.
+For a service with one account none of this matters - the default is that account.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
@@ -8740,8 +8785,9 @@ device-grant token with `auth/youtube` scope hit the same `SERVICE_DISABLED`). A
   a client pin. Playback through the household's registration is untouched. See "TASK: the OAuth
   identity probe".
 - ~~Does a service with two accounts break the one-account assumption?~~ - **the store half closed
-  2026-09-22**: it holds several per service with one preferred (schema 3). The cdudn half is
-  sharper and still open - see open question 1.
+  2026-09-22**: it holds several per service with one preferred (schema 3). The cdudn half closed
+  2026-09-25: `sn=` picks the account and the cdudn has to agree, and the enqueue now sends both for
+  the preferred account - see "Which account an enqueue plays from".
 - ~~Cloud Control API is the only integration path~~ — false; the LAN WebSocket API is better.
 - ~~Build WebSocket from day one, or ship polling v1 first?~~ — settled: push from day one, and it
   costs *less* than polling, not more.

@@ -252,8 +252,8 @@ pub async fn play_item(
             kind.unwrap_or_default()
         );
     }
-    if let (false, Some(cdudn)) = (streamish, service.cdudn()) {
-        match enqueue_item(session, room, service, &cdudn, id, title, kind, true).await {
+    if !streamish && let Some(naming) = Naming::chosen(session, service).await? {
+        match enqueue_item(session, room, service, &naming, id, title, kind, true).await {
             Ok(()) => return Ok(()),
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
@@ -281,13 +281,14 @@ async fn enqueue_item(
     session: &session::Session,
     room: Option<&str>,
     service: &sonos::smapi::Service,
-    cdudn: &str,
+    naming: &Naming,
     id: &str,
     title: &str,
     kind: Option<&str>,
     play: bool,
 ) -> Result<()> {
     let target = session::target(&session.groups, room)?;
+    let (cdudn, sn) = (naming.cdudn.as_str(), naming.serial.as_deref());
     let upnp = Upnp::new(upnp_ip(&target, session.connection.ip()));
     // **A container is enqueued by a different scheme from a track.** A track is
     // fetched; a container is expanded by the player, which walks it and adds
@@ -295,16 +296,15 @@ async fn enqueue_item(
     // error 804 - the player calling the URI malformed, rather than the 800 it
     // gives for something it cannot play.
     //
-    // No `sn=` either way: nothing here has ever played, so there is no serial
-    // to harvest, and the player does not need one. See `bookmarks::service_uri`.
+    // The `sn=` and the cdudn name the same account either way - see `Naming`.
     let container = kind.is_some_and(bookmarks::container_holds_tracks);
     let (uri, didl) = match container {
         true => (
-            bookmarks::container_uri(id, &service.id, None),
+            bookmarks::container_uri(id, &service.id, sn),
             bookmarks::container_didl(id, title, kind.unwrap_or_default(), cdudn),
         ),
         false => (
-            bookmarks::service_uri(id, &service.id, None),
+            bookmarks::service_uri(id, &service.id, sn),
             bookmarks::service_didl(id, title, cdudn),
         ),
     };
@@ -505,14 +505,55 @@ pub async fn run_queue_item(
     }
     // Without a service type there is no cdudn, and `SA_RINCONNone` is not an
     // account - the enqueue would be refused by the player with less to say.
-    let Some(cdudn) = chosen.cdudn() else {
+    let Some(naming) = Naming::chosen(&session, &chosen).await? else {
         bail!(
             "{} is not in the player's service-type list, so nothing can be \
              built to name the account that owns {title:?}.",
             chosen.name
         );
     };
-    enqueue_item(&session, room, &chosen, &cdudn, id, title, kind, false).await
+    enqueue_item(&session, room, &chosen, &naming, id, title, kind, false).await
+}
+
+/// How an enqueue names the account that owns the item: the cdudn in its DIDL
+/// and the `sn=` in its URI, both taken from one stored account.
+///
+/// **The two have to agree, and neither alone picks the account.** Measured
+/// 2026-09-25 against a household holding two iHeartRadio accounts (`sn_24`,
+/// `sn_25`): the account the player reports playing from follows `sn=`, while
+/// the queued row's own `sn` is rewritten from the cdudn's selector, so a
+/// mismatched pair leaves the two saying different things. A `-0-` cdudn, a
+/// made-up selector, no `sn=` and one the household does not hold all land on
+/// the household's default account. A matched pair is what the Sonos app sends,
+/// and it came back consistent everywhere. See docs/architecture.md, "Which
+/// account an enqueue plays from".
+#[derive(Debug, PartialEq)]
+struct Naming {
+    cdudn: String,
+    serial: Option<String>,
+}
+
+impl Naming {
+    /// Whatever `account` can say for itself. With no selector (a primary,
+    /// whose own is `-0-`, or a browser link) or no serial (a link `match`
+    /// never saw) it sends what it has, and for a service with one account the
+    /// all-absent case is the old `-0-`-and-no-`sn=` form, which the player
+    /// resolves to that one account. `None` when the service has no type in
+    /// the player's list, so no cdudn can be built at all.
+    fn of(service: &sonos::smapi::Service, account: Option<&credentials::Account>) -> Option<Self> {
+        Some(Self {
+            cdudn: service.cdudn_for(account.and_then(|a| a.account_key.as_deref()))?,
+            serial: account.and_then(|a| a.serial).map(|n| n.to_string()),
+        })
+    }
+
+    /// For the account the store resolves to in this household - the
+    /// preferred one, the same account search and browse use.
+    async fn chosen(session: &Session, service: &sonos::smapi::Service) -> Result<Option<Self>> {
+        let household = session.connection.household_id().await?;
+        let linked = credentials::Credentials::load()?;
+        Ok(Self::of(service, linked.get(&household, &service.id)))
+    }
 }
 
 /// Whether a row can be put in a queue, which is not the same as playable.
@@ -810,7 +851,19 @@ pub async fn bookmark(
             )
         })?
         .clone();
-    let cdudn = service.cdudn().ok_or_else(|| {
+    // The bookmark's URI already carries the serial it was kept from, so the
+    // cdudn has to name that same account - not the preferred one - or the two
+    // disagree (see `Naming`). A serial the store does not hold names no
+    // selector, which is the `-0-` form the player resolves itself.
+    let household = session.connection.household_id().await?;
+    let linked = credentials::Credentials::load()?;
+    let selector = bookmark
+        .account
+        .parse()
+        .ok()
+        .and_then(|sn| linked.by_serial(&household, &service.id, sn))
+        .and_then(|a| a.account_key.as_deref());
+    let cdudn = service.cdudn_for(selector).ok_or_else(|| {
         anyhow!(
             "{} has no service type in this player's list, so {:?} cannot name its account",
             service.name,
@@ -1033,6 +1086,45 @@ pub async fn queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_enqueue_names_one_account_by_selector_and_serial_together() {
+        let service = sonos::smapi::Service {
+            id: "6".into(),
+            name: "iHeartRadio".into(),
+            uri: String::new(),
+            auth: sonos::smapi::Auth::DeviceLink,
+            manifest_uri: None,
+            service_type: Some(1543),
+        };
+        let mut account: credentials::Account = serde_json::from_value(json!({
+            "service_name": "iHeartRadio", "auth_token": "t", "private_key": "k", "linked": 0,
+        }))
+        .unwrap();
+        // No account, or one with nothing to say for itself: the `-0-` form.
+        let bare = Naming {
+            cdudn: "SA_RINCON1543_X_#Svc1543-0-Token".into(),
+            serial: None,
+        };
+        assert_eq!(Naming::of(&service, None).as_ref(), Some(&bare));
+        assert_eq!(Naming::of(&service, Some(&account)).as_ref(), Some(&bare));
+        // An imported one: both halves name it, so they cannot disagree.
+        account.serial = Some(25);
+        account.account_key = Some("885ebbcc".into());
+        assert_eq!(
+            Naming::of(&service, Some(&account)),
+            Some(Naming {
+                cdudn: "SA_RINCON1543_X_#Svc1543-885ebbcc-Token".into(),
+                serial: Some("25".into()),
+            })
+        );
+        // No type in the player's list: nothing can be built.
+        let untyped = sonos::smapi::Service {
+            service_type: None,
+            ..service
+        };
+        assert_eq!(Naming::of(&untyped, Some(&account)), None);
+    }
 
     #[test]
     fn ranges_cover_one_track_or_many() {

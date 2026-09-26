@@ -938,7 +938,7 @@ async fn link_from_household(
                     .map(|key| held.label_for(key))
                     .collect();
                 println!(
-                    "Kept {n} {name} accounts ({}); searching with {chosen:?}. \
+                    "Kept {n} {name} accounts ({}); using {chosen:?}. \
                      Change that with: x2rock accounts --prefer {quoted} \"<nickname>\"",
                     all.join(", ")
                 );
@@ -2335,14 +2335,14 @@ async fn set_preference(
     linked.prefer(&hh, &id, &key)?;
     linked.save()?;
     if already {
-        println!("{name} already searches with {named:?}.");
+        println!("{name} already uses {named:?}.");
     } else if others == 0 {
         // The only account there is. Stated rather than refused: it is a
         // perfectly sensible thing to have typed, and it will still be the
         // preference when a second account arrives.
         println!("{name} will search with {named:?}, the only account held for it here.");
     } else {
-        println!("{name} now searches with {named:?}, not the other {others}.");
+        println!("{name} now uses {named:?}, not the other {others}.");
     }
     Ok(())
 }

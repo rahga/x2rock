@@ -197,8 +197,17 @@ impl Service {
     /// gives any confidence that it is right for services with no favorite to
     /// copy from.
     pub fn cdudn(&self) -> Option<String> {
+        self.cdudn_for(None)
+    }
+
+    /// As [`cdudn`](Self::cdudn), naming one account by its selector - the key
+    /// out of the household's `Username<i>`, `X_#Svc<type>-<key>-Token` - where
+    /// `-0-` names only the service. `None` or an empty selector is the `-0-`
+    /// form, which is also what a household's primary account really carries.
+    pub fn cdudn_for(&self, selector: Option<&str>) -> Option<String> {
         let t = self.service_type?;
-        Some(format!("SA_RINCON{t}_X_#Svc{t}-0-Token"))
+        let key = selector.filter(|k| !k.is_empty()).unwrap_or("0");
+        Some(format!("SA_RINCON{t}_X_#Svc{t}-{key}-Token"))
     }
 
     /// What to say when this service is asked for without a stored token.
@@ -1423,6 +1432,11 @@ mod tests {
             services[0].cdudn().as_deref(),
             Some("SA_RINCON77575_X_#Svc77575-0-Token")
         );
+        assert_eq!(
+            services[0].cdudn_for(Some("885ebbcc")).as_deref(),
+            Some("SA_RINCON77575_X_#Svc77575-885ebbcc-Token")
+        );
+        assert_eq!(services[0].cdudn_for(Some("")), services[0].cdudn());
         assert_eq!(services[1].service_type, Some(72711), "284 * 256 + 7");
         // A service the type list does not mention has no cdudn to offer, and
         // says so rather than inventing one.
