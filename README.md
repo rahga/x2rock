@@ -389,9 +389,11 @@ the modes, `g` grouping (each member with its own volume; `enter` joins or leave
 
 It needs the daemon — the only thing here that pushes — and re-reads the daemon every thirty
 seconds on top of the events, so a dropped signal repairs itself; if those reads stop, the header
-says how long it has been. Reads and most writes go over MPRIS; grouping, party, TV input and one
-speaker's volume run this same binary as a subprocess, and an error there is the CLI's own sentence.
-Favorites, the queue, alarms and tone stay CLI commands: MPRIS carries none of them.
+says how long it has been. Reads and most writes go over MPRIS; grouping, party, TV input, mute,
+crossfade and one speaker's volume run the CLI's own command code in this process, over a
+connection to the players the screen opens on the first such key and keeps, so each one costs a
+round trip rather than a reconnect. An error there is the CLI's own sentence. Favorites, the queue,
+alarms and tone stay CLI commands: MPRIS carries none of them.
 
 ### Omarchy bar widget
 
