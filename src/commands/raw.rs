@@ -11,7 +11,6 @@ use super::speaker::named_speaker;
 use crate::cli::{RawScope, UpnpScope};
 use crate::session::{self, Session};
 use crate::sonos;
-use crate::sonos::local::Connection;
 use crate::sonos::upnp::{self, Upnp};
 
 /// `raw upnp`: one SOAP action against one speaker.
@@ -182,9 +181,7 @@ pub async fn api(
             let target = session::target(&session.groups, room)?;
             let (player, upnp) = named_speaker(session, &target, room)?;
             envelope["playerId"] = json!(player.id);
-            if upnp.ip() != connection.ip() {
-                connection = Connection::open(upnp.ip()).await?;
-            }
+            connection = session.player(Some(upnp.ip())).await?;
         }
         RawScope::None => {}
     }

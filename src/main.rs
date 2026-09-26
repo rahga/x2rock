@@ -420,6 +420,18 @@ async fn run(cli: Cli) -> Result<()> {
 
     let mut state = State::load()?;
     let session = session::connect(cli.ip, &mut state, cli.household.as_deref(), room).await?;
+    let outcome = run_session(cli, &mut state, &session).await;
+    // Every socket the command opened, closed on the way out: the process
+    // exit would do it, but a session that is only ever closed by exit is one
+    // nobody can hold for longer than a command.
+    session.close().await;
+    outcome
+}
+
+/// The commands that need a live session - everything after `connect` -
+/// separated from `run` so the session is closed on each of their returns.
+async fn run_session(cli: Cli, state: &mut State, session: &session::Session) -> Result<()> {
+    let room = cli.room.first().map(String::as_str);
 
     if let Command::Rooms { json } = cli.command {
         status::print_rooms(&session.groups, json);
@@ -430,43 +442,43 @@ async fn run(cli: Cli) -> Result<()> {
     // single group; it queries every coordinator itself, so it runs here rather
     // than after the single-room resolution below.
     if let Command::Status { json, full } = cli.command {
-        return status::print_status(&session, json, full).await;
+        return status::print_status(session, json, full).await;
     }
 
     // Favorites belong to the household, not a group, so listing them needs no
     // room and works when several groups would otherwise force a choice.
     if let Command::Favorites { query, json } = &cli.command {
-        return content::favorites(&session, query.as_deref(), *json).await;
+        return content::favorites(session, query.as_deref(), *json).await;
     }
 
     // Every speaker has its own firmware, so this asks each rather than the
     // group's coordinator - and needs no target at all.
     if let Command::Update { json } = &cli.command {
-        return household::update(&session, *json).await;
+        return household::update(session, *json).await;
     }
 
     // Players, not rooms - so this reads the topology rather than `getGroups`,
     // which has no word for a Sub. One player answers for the whole household,
     // and each one is then asked to describe itself.
     if let Command::System { json, redact } = &cli.command {
-        return household::system(&session, *json, *redact).await;
+        return household::system(session, *json, *redact).await;
     }
 
     // Per-player too, and for the same reason: a battery belongs to a speaker,
     // not to whichever group it happens to be in.
     if let Command::Battery { room: one, json } = &cli.command {
-        return household::battery(&session, one.as_deref().or(room), *json).await;
+        return household::battery(session, one.as_deref().or(room), *json).await;
     }
 
     // Household-wide, and addressed by id rather than by room, so these run
     // before a target is resolved - `alarms` in a two-group house must not
     // demand a --room it has no use for.
     if let Command::Alarms { action, json } = &cli.command {
-        return speaker::alarms(&session, room, action.as_ref(), *json).await;
+        return speaker::alarms(session, room, action.as_ref(), *json).await;
     }
 
     if let Command::Alarm { id, action } = &cli.command {
-        return speaker::alarm(&session, *id, action).await;
+        return speaker::alarm(session, *id, action).await;
     }
 
     if let Command::Raw {
@@ -479,7 +491,7 @@ async fn run(cli: Cli) -> Result<()> {
             },
     } = &cli.command
     {
-        return raw::raw_upnp(&session, room, service, action, args, *scope).await;
+        return raw::raw_upnp(session, room, service, action, args, *scope).await;
     }
 
     if let Command::Raw {
@@ -495,7 +507,7 @@ async fn run(cli: Cli) -> Result<()> {
     } = &cli.command
     {
         return raw::api(
-            &session,
+            session,
             room,
             namespace,
             command,
@@ -511,15 +523,15 @@ async fn run(cli: Cli) -> Result<()> {
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
     if let Command::Group { rooms } = &cli.command {
-        return household::group(&session, room, rooms).await;
+        return household::group(session, room, rooms).await;
     }
 
     if let Command::Party { mode } = &cli.command {
-        return household::party(&session, room, mode.as_deref()).await;
+        return household::party(session, room, mode.as_deref()).await;
     }
 
     if let Command::Ungroup { room } = &cli.command {
-        return household::ungroup(&session, room).await;
+        return household::ungroup(session, room).await;
     }
 
     // `vol --each` sets every speaker in one group individually - the flatten
@@ -537,7 +549,7 @@ async fn run(cli: Cli) -> Result<()> {
     } = &cli.command
     {
         return volume::each(
-            &session,
+            session,
             room,
             cli.all,
             cli.room.len(),
@@ -559,7 +571,7 @@ async fn run(cli: Cli) -> Result<()> {
             .filter_map(|g| session.groups.player(&g.coordinator_id))
             .map(|p| p.name.clone())
             .collect();
-        return fan_out(&session, &every, &cli.command).await;
+        return fan_out(session, &every, &cli.command).await;
     }
 
     // Several --room fan a per-room command across each, topology already in
@@ -570,11 +582,11 @@ async fn run(cli: Cli) -> Result<()> {
         if !fans_out(&cli.command) {
             return Err(too_many_rooms());
         }
-        return fan_out(&session, &cli.room, &cli.command).await;
+        return fan_out(session, &cli.room, &cli.command).await;
     }
 
     let target = session::target(&session.groups, room)?;
-    let player = session::coordinator(&session, &target).await?;
+    let player = session::coordinator(session, &target).await?;
     let group = target.group_id.as_str();
 
     match cli.command {
@@ -584,27 +596,27 @@ async fn run(cli: Cli) -> Result<()> {
             refresh,
             json,
         } => services::run_rate(&player, group, &target.name, direction, refresh, json).await?,
-        Command::Play { track: None } => play_or_resume(&session, &player, &target).await?,
+        Command::Play { track: None } => play_or_resume(session, &player, &target).await?,
         Command::Play { track: Some(n) } => playback::play_track(&player, &target, n).await?,
         Command::Keep { name, container } => {
-            content::keep(&session, &player, group, name, container).await?;
+            content::keep(session, &player, group, name, container).await?;
         }
         Command::Bookmark { query, next } => {
-            content::bookmark(&session, &player, &target, room, &query, next).await?;
+            content::bookmark(session, &player, &target, room, &query, next).await?;
         }
         Command::Favorite { query } => {
-            content::favorite(&session, &player, &target, &query).await?;
+            content::favorite(session, &player, &target, &query).await?;
         }
         Command::Playlist { query } => {
-            content::playlist(&session, &player, &target, &query).await?;
+            content::playlist(session, &player, &target, &query).await?;
         }
-        Command::Tv => speaker::tv(&session, &player, &target, room).await?,
+        Command::Tv => speaker::tv(session, &player, &target, room).await?,
         Command::Chime { volume } => {
-            stream::play_audio_clip(&session, &target, room, None, volume).await?;
+            stream::play_audio_clip(session, &target, room, None, volume).await?;
         }
         Command::Notify { url, volume } => {
             stream::require_http_url(&url)?;
-            stream::play_audio_clip(&session, &target, room, Some(&url), volume).await?;
+            stream::play_audio_clip(session, &target, room, Some(&url), volume).await?;
         }
         Command::Eq {
             bass,
@@ -623,29 +635,27 @@ async fn run(cli: Cli) -> Result<()> {
                 night,
                 dialog,
             };
-            apply_eq(&session, &target, room, want, json).await?;
+            apply_eq(session, &target, room, want, json).await?;
         }
         Command::Queue { action, json } => content::queue(&player, &target, action, json).await?,
-        Command::Repeat { mode, json } => {
-            emit(&apply_repeat(&session, &target, mode).await?, json)?
-        }
+        Command::Repeat { mode, json } => emit(&apply_repeat(session, &target, mode).await?, json)?,
         Command::Shuffle { mode, json } => {
-            emit(&apply_shuffle(&session, &target, mode).await?, json)?
+            emit(&apply_shuffle(session, &target, mode).await?, json)?
         }
         Command::Crossfade { mode, json } => {
-            emit(&apply_crossfade(&session, &target, mode).await?, json)?
+            emit(&apply_crossfade(session, &target, mode).await?, json)?
         }
         Command::Remote {
             feedback,
             repeater,
             json,
-        } => apply_remote(&session, &target, room, feedback, repeater, json).await?,
+        } => apply_remote(session, &target, room, feedback, repeater, json).await?,
         Command::Rename { name } => {
-            apply_rename(&session, &mut state, &target, room, &name).await?;
+            apply_rename(session, state, &target, room, &name).await?;
         }
-        Command::Led { mode, json } => apply_led(&session, &target, room, mode, json).await?,
+        Command::Led { mode, json } => apply_led(session, &target, room, mode, json).await?,
         Command::Buttons { mode, json } => {
-            apply_buttons(&session, &target, room, mode, json).await?;
+            apply_buttons(session, &target, room, mode, json).await?;
         }
         Command::Sleep { duration, json } => {
             apply_sleep(&target, player.ip(), duration, json).await?;
@@ -664,7 +674,7 @@ async fn run(cli: Cli) -> Result<()> {
             json,
             ..
         } => emit(
-            &volume::apply_vol(&session, &target, room, change, one_room, ramp).await?,
+            &volume::apply_vol(session, &target, room, change, one_room, ramp).await?,
             json,
         )?,
         Command::Rooms { .. }
