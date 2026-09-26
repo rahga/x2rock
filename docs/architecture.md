@@ -8769,12 +8769,27 @@ then broke them up, each within five seconds - the Beam did not stall that time 
 twenty-second timeout was not hit either. A second timed run gave 426 ms for the write that opens
 the session and 173-181 ms for the three after it.
 
-**Still not exercised live: a write that fails on a held session**, and so the rule that drops the
-session for the next write to rebuild - which is also the suspend/resume recovery. No safe way to
-provoke one was found: `t` on a room without a TV is refused by the TUI before anything is sent,
+**A write that fails on a held session, exercised by killing the TUI's sockets** (`ss -K`, as
+root, on each of the two TCP connections the TUI held to speakers on :1443; the TUI itself can
+provoke no command-level failure - `t` on a room without a TV is refused before anything is sent,
 the overlay offers only joins and leaves that succeed, and volume, mute and crossfade are accepted
-on every room here, TV audio included. The path is straight-line code in `Speakers::settle`, and
-that is the only evidence for it.
+on every room here, TV audio included):
+
+- *The pooled socket* (Kitchen's coordinator, opened by `Pool::reach`) killed: the next nudge
+  landed with no error - `reach` saw `!is_alive()`, evicted it and opened another, on a new port -
+  in 307 ms against ~180 on a held socket. The rule works silently, as designed.
+- *The primary* killed: the next nudge failed within a second - "connection to player at
+  192.168.86.24 was lost", the read loop having seen the reset rather than waiting out the 5 s
+  reply timeout - and the session was dropped. The nudge after that reconnected and landed in
+  423 ms; the one after that, 177 ms. One visible error, then recovery, which is also the
+  suspend/resume path. The pooled socket the drop closed lingered in `ESTAB` for some seconds
+  after (`close` only notifies; the read loop tears down when it next wakes) and was gone before
+  the reconnect - a delay, not a leak.
+
+Seen in passing: the volume bar moves on the keypress, before the write, and a failed write does
+not move it back - the screen said 14% while the speaker stayed at 9 until the next successful
+write. Pre-existing; the thirty-second re-read corrects it, and a failed nudge could revert the bar
+on the spot.
 
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
