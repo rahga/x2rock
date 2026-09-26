@@ -8788,8 +8788,11 @@ on every room here, TV audio included):
   suspend/resume path. The pooled socket the drop closed lingered in `ESTAB` afterwards - still
   there after the reconnect, on the second run. Not the read loop, which `close` wakes at once:
   the *write* half of the socket lives in the connection's shared state, which the keepalive task
-  holds until its next tick, up to thirty seconds. The read loop now closes the sink on its way
-  out, so a closed or dead socket goes down when it is closed.
+  holds until its next tick, up to thirty seconds. Sending a WebSocket Close frame from the read
+  loop's exit did not do it (checked live: still `ESTAB`), because a split socket closes only
+  when *both halves are dropped*; the sink is now an `Option` the read loop takes and drops on
+  its way out. Checked live the same way: the released pool socket was gone by the first sample,
+  255 ms after the failed write, and the reconnect opened exactly two.
 
 **Reviewed, and reworked the same day.** A review of the TUI commits found the held session's
 rules right in outline and wrong in three details, each fixed: a failed write closed whichever
