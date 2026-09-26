@@ -6,6 +6,52 @@
 > The protocol facts it leans on are in [`architecture.md`](architecture.md) and are cited rather
 > than restated; where this note and that file disagree, that file is the one that was tested.
 
+## Assessment and decision (2026-09-25)
+
+This note is taken as outside thoughts on letting other applications - GNOME and KDE front ends
+above all - use the x2rock core. Read against the code as it stands, two things came out of it.
+
+**The decision: separate command logic from printing first, before any interface.** Every command
+in `src/commands/*` today takes a session and a `json` flag and prints as it goes; the result of a
+command exists only as the text it wrote. That is the real reason the front ends parse stderr, the
+reason the TUI shells out to its own binary, and the reason a D-Bus method would need most of the
+command layer rewritten. Commands will return a typed result and a typed error (`hint::Code`
+already exists), with the CLI reduced to printing that result as text or JSON. A `Session` will be
+buildable from the connections the daemon already holds as well as from a fresh connection. That
+work pays for itself with no interface on top: every command gets `--json` and the
+`{error, code, fix}` shape for free, command logic becomes testable without capturing stdout, and
+the TUI - which already requires the daemon - can call commands in-process over held sockets.
+Volume, grouping and TV input go first, being the most self-contained; `services.rs` (internet
+bound, the largest) goes last. Note the "Cost, honestly" section below predates this: the command
+logic has already left `main.rs` (now 694 lines) for `src/commands/*`, which makes the separation
+smaller than that section estimates.
+
+**D-Bus is worth building, but second, and only for a consumer that exists.** What the desktops
+notice most is already done: the daemon's MPRIS reaches GNOME Shell's media controls and lock
+screen, Plasma's media applet, KDE Connect, `playerctl` and the bars. A custom interface adds
+nothing for those. What it adds is a route for front ends built *for* x2rock - a GNOME Shell
+extension (GJS speaks D-Bus natively), a Plasma applet, a sandboxed GTK or Qt app that cannot run a
+host binary - and speed, because a CLI call costs ~420 ms of which ~400 ms is connecting to the
+players (measured: process start is 3 ms, a session-bus round trip 26 ms), while the daemon
+already holds a connection to every coordinator and member. That speed exists only if the daemon
+runs commands over its held sockets; the open question below that suggests starting with the CLI's
+own session code inside the daemon would keep the 400 ms and deliver almost none of the value.
+Against that, a public interface is a contract with a name that is hard to change and a version to
+carry, and every new command would be designed twice. With x2rock's own widget and TUI the only
+consumers, that ceremony is not yet earned. When a Shell extension or Plasma applet is on the
+table, phase 1 gets built with that consumer as its test, and the test includes a latency number.
+A Rust front end has a third route once the separation is done: link the core as a library.
+
+**From the appended review, taken:** rooms as stable objects and groups as transient ones;
+connection state and volume availability as properties; acknowledge-then-signal with a relative
+step for wheels and keys; activation through `SystemdService=`; `aa{sv}` over fixed tuples;
+`chime` and `notify` as later methods (both exist and stay on the LAN). **Left for a deliberate
+decision, not folded in:** service calls through the daemon (rec 1 reverses the standing rule that
+talking to a service never enters the daemon - timeouts answer the blocking concern, not the
+rule); mirroring transport onto `Group1` (rec 2 is in tension with "not a replacement for MPRIS"
+and roughly doubles phase 1). **Wrong:** `Rate` on the interface, which is SMAPI `rateItem` and
+leaves the LAN; there is no line-in command to generalise.
+
 ## Why
 
 The daemon publishes MPRIS, and MPRIS is the right interface for what it covers: transport,
