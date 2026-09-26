@@ -117,7 +117,11 @@ fn tls_connector() -> Connector {
 
 struct Inner {
     ip: IpAddr,
-    sink: tokio::sync::Mutex<SplitSink<Socket, Message>>,
+    /// The write half. `None` once the read loop has exited: it takes and
+    /// drops the sink on its way out, because the socket closes only when both
+    /// halves are gone, and this one would otherwise live as long as the
+    /// keepalive's `Arc` - up to a tick after the connection was closed.
+    sink: tokio::sync::Mutex<Option<SplitSink<Socket, Message>>>,
     /// Replies waiting to be matched. Keyed by `cmdId`; the queue keeps arrival
     /// order for any reply that comes back without one.
     pending: Mutex<Pending>,
@@ -260,7 +264,7 @@ impl Connection {
         let (events, _) = broadcast::channel(256);
         let inner = Arc::new(Inner {
             ip,
-            sink: tokio::sync::Mutex::new(sink),
+            sink: tokio::sync::Mutex::new(Some(sink)),
             pending: Mutex::new(Pending::default()),
             events,
             next_id: AtomicU64::new(1),
@@ -307,13 +311,13 @@ impl Connection {
         self.inner.pending.lock().unwrap().insert(id, tx);
 
         let payload = Value::Array(vec![command, options]).to_string();
-        let sent = self
-            .inner
-            .sink
-            .lock()
-            .await
-            .send(Message::Text(payload.into()))
-            .await;
+        let sent = match self.inner.sink.lock().await.as_mut() {
+            Some(sink) => sink
+                .send(Message::Text(payload.into()))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("socket closed".to_string()),
+        };
         if let Err(e) = sent {
             self.inner.pending.lock().unwrap().remove(id);
             return Err(Unreachable::error(format!(
@@ -443,7 +447,9 @@ async fn read_loop(inner: Arc<Inner>, mut stream: SplitStream<Socket>) {
             // The library queues pongs but only flushes them on our next write,
             // which on a quiet daemon could be never. Answer explicitly.
             Some(Ok(Message::Ping(payload))) => {
-                let _ = inner.sink.lock().await.send(Message::Pong(payload)).await;
+                if let Some(sink) = inner.sink.lock().await.as_mut() {
+                    let _ = sink.send(Message::Pong(payload)).await;
+                }
             }
             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
             Some(Ok(_)) => {}
@@ -451,11 +457,15 @@ async fn read_loop(inner: Arc<Inner>, mut stream: SplitStream<Socket>) {
     }
     inner.mark_dead();
     // The read half went with this loop; the write half lives in `inner`,
-    // which the keepalive keeps until its next tick. Closed here, so the TCP
+    // which the keepalive keeps until its next tick, and a socket closes only
+    // when both halves are dropped. Taken out and dropped here - a Close
+    // frame first, for a player that is still listening - so the TCP
     // connection goes down when the socket is closed or found dead, not up to
-    // thirty seconds later - a session's `close` used to leave its sockets
+    // thirty seconds later. A session's `close` used to leave its sockets
     // `ESTAB` for that long.
-    let _ = inner.sink.lock().await.close().await;
+    if let Some(mut sink) = inner.sink.lock().await.take() {
+        let _ = sink.close().await;
+    }
 }
 
 async fn keepalive(inner: Arc<Inner>) {
@@ -472,14 +482,11 @@ async fn keepalive(inner: Arc<Inner>) {
             inner.shutdown.notify_one();
             return;
         }
-        if inner
-            .sink
-            .lock()
-            .await
-            .send(Message::Ping(Vec::new().into()))
-            .await
-            .is_err()
-        {
+        let pinged = match inner.sink.lock().await.as_mut() {
+            Some(sink) => sink.send(Message::Ping(Vec::new().into())).await.is_ok(),
+            None => false,
+        };
+        if !pinged {
             inner.shutdown.notify_one();
             return;
         }
