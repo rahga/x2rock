@@ -8756,8 +8756,15 @@ whatever is at the top, not the group just made. Pre-existing, and exactly the "
 name that moves" cost the D-Bus note lists; the TUI should keep its cursor by room name across a
 republish.
 
-**Not exercised live:** `party` (whole-household by nature; its outcome is unit-tested against
-today's lines), `tv` (the only idle soundbar was someone's), and suspend/resume recovery.
+**Exercised live later the same night** (Guest TV as the party's coordinator): `tv` on two
+Beams, text and `--json`, both fine; `party off` and its idempotent "No rooms were grouped." fine.
+The `party` call itself surfaced something new, not a regression: pulling four rooms onto the Guest
+TV Beam *while it sat on its TV input* stalled that Beam past the 5 s reply timeout - the
+grouping landed, the CLI reported the timeout - and for the next ~20 s it accepted no command and
+no new socket, then applied the `party off` it had been sent meanwhile. The fourteen-second figure
+`speaker.rs` gives for a TV-input switch is the same stall from the other side. The `party` text
+line therefore still has no live capture (the timeout ate it); its `--json` shape was seen only on
+the already-grouped no-op path. Still not exercised: suspend/resume recovery.
 
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
