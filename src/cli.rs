@@ -781,7 +781,10 @@ pub enum Command {
     /// one from what is queued now, and `queue sources` lists them.
     Playlist { query: String },
     /// Switch a soundbar to its TV input.
-    Tv,
+    Tv {
+        #[arg(long)]
+        json: bool,
+    },
     /// Play a short chime on a room, over whatever it is doing.
     ///
     /// The player's built-in notification sound, ducked over the current
@@ -814,12 +817,22 @@ pub enum Command {
     Group {
         #[arg(required = true)]
         rooms: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Take a room out of its group, leaving it playing on its own.
-    Ungroup { room: String },
+    Ungroup {
+        room: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Party mode: every room joins --room's group. `party off` breaks it up
     /// and leaves each room on its own.
-    Party { mode: Option<String> },
+    Party {
+        mode: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Send one command straight to a player and print what comes back.
     ///
     /// A probe, not a feature: both wires are far wider than this CLI covers,
@@ -1282,7 +1295,11 @@ impl Command {
             | Command::Households { json, .. }
             | Command::Rate { json, .. }
             | Command::Service { json, .. }
-            | Command::Queue { json, .. } => *json,
+            | Command::Queue { json, .. }
+            | Command::Group { json, .. }
+            | Command::Ungroup { json, .. }
+            | Command::Party { json, .. }
+            | Command::Tv { json } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),
                 ..

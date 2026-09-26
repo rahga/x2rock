@@ -7,27 +7,115 @@
 use std::net::IpAddr;
 
 use anyhow::{Result, anyhow, bail, ensure};
+use serde::Serialize;
 use serde_json::json;
 
+use super::Report;
 use crate::session::{self, Session};
-use crate::sonos::proto::{Group, Groups};
+use crate::sonos::proto::{Group, Groups, Player};
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
 use crate::{discover, netid};
 
-/// A group named by the rooms in it, so the result of a change is visible
-/// rather than merely reported as having happened.
-fn group_line(group: &Group, groups: &Groups) -> String {
-    let names: Vec<_> = group
-        .player_ids
-        .iter()
-        .filter_map(|id| groups.player(id))
-        .map(|p| p.name.as_str())
-        .collect();
-    if names.len() > 1 {
-        format!("{:<24} [{}]", group.name, names.join(" + "))
-    } else {
-        format!("{:<24} on its own", group.name)
+/// A group after `group`, `party` or `ungroup` touched it: named by the rooms
+/// in it, so the result of a change is visible rather than merely reported as
+/// having happened.
+#[derive(Debug, Serialize)]
+pub struct GroupOutcome {
+    /// The group's own name - "Kitchen + 1" - which is for display only.
+    pub group: String,
+    pub coordinator: String,
+    /// Every room in it, in the order the player lists them - which is not
+    /// coordinator first; `coordinator` says which one that is.
+    pub members: Vec<String>,
+    /// The room `ungroup` took out; null for the other two.
+    pub left: Option<String>,
+    /// `ungroup` on a room already alone: nothing was asked of the player.
+    #[serde(skip)]
+    already_alone: bool,
+    #[serde(skip)]
+    notes: Vec<String>,
+}
+
+impl GroupOutcome {
+    fn of(group: &Group, groups: &Groups) -> Self {
+        let name = |id: &String| groups.player(id).map(|p| p.name.clone());
+        Self {
+            group: group.name.clone(),
+            coordinator: name(&group.coordinator_id).unwrap_or_default(),
+            members: group.player_ids.iter().filter_map(name).collect(),
+            left: None,
+            already_alone: false,
+            notes: Vec::new(),
+        }
+    }
+
+    fn line(&self) -> String {
+        if self.members.len() > 1 {
+            format!("{:<24} [{}]", self.group, self.members.join(" + "))
+        } else {
+            format!("{:<24} on its own", self.group)
+        }
+    }
+}
+
+impl Report for GroupOutcome {
+    fn text(&self) -> String {
+        if self.already_alone {
+            return format!("{:<24} was already on its own", self.group);
+        }
+        match &self.left {
+            Some(room) => format!("{room:<24} left {}\n{}", self.group, self.line()),
+            None => self.line(),
+        }
+    }
+    fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+
+/// `party off`: how many groups were broken up, and which rooms left one.
+#[derive(Debug, Serialize)]
+pub struct PartyOffOutcome {
+    pub broken: usize,
+    pub left: Vec<String>,
+    #[serde(skip)]
+    notes: Vec<String>,
+}
+
+impl Report for PartyOffOutcome {
+    fn text(&self) -> String {
+        if self.broken == 0 {
+            "No rooms were grouped.".to_string()
+        } else {
+            "Every room is on its own.".to_string()
+        }
+    }
+    fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+
+/// What `party` did: joined every room into one group, or broke them all up.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum PartyOutcome {
+    Joined(GroupOutcome),
+    Off(PartyOffOutcome),
+}
+
+impl Report for PartyOutcome {
+    fn text(&self) -> String {
+        match self {
+            PartyOutcome::Joined(o) => o.text(),
+            PartyOutcome::Off(o) => o.text(),
+        }
+    }
+    fn notes(&self) -> &[String] {
+        match self {
+            PartyOutcome::Joined(o) => o.notes(),
+            PartyOutcome::Off(o) => o.notes(),
+        }
     }
 }
 
@@ -487,7 +575,11 @@ pub async fn battery(session: &Session, room: Option<&str>, json: bool) -> Resul
 }
 
 /// `x2rock group`: pull `rooms` into the group `room` coordinates.
-pub async fn group(session: &Session, room: Option<&str>, rooms: &[String]) -> Result<()> {
+pub async fn group(
+    session: &Session,
+    room: Option<&str>,
+    rooms: &[String],
+) -> Result<GroupOutcome> {
     let host = session.groups.resolve(room)?;
     let mut joining = Vec::new();
     let mut already = Vec::new();
@@ -499,12 +591,14 @@ pub async fn group(session: &Session, room: Option<&str>, rooms: &[String]) -> R
             joining.push((player.id.clone(), player.name.as_str()));
         }
     }
+    let mut notes = Vec::new();
     if !already.is_empty() {
-        eprintln!("Already in this group: {}", already.join(", "));
+        notes.push(format!("Already in this group: {}", already.join(", ")));
     }
     if joining.is_empty() {
-        println!("{}", group_line(host, &session.groups));
-        return Ok(());
+        let mut outcome = GroupOutcome::of(host, &session.groups);
+        outcome.notes = notes;
+        return Ok(outcome);
     }
     let host_id = host.id.clone();
     let ids: Vec<String> = joining.iter().map(|(id, _)| id.clone()).collect();
@@ -513,13 +607,18 @@ pub async fn group(session: &Session, room: Option<&str>, rooms: &[String]) -> R
     let info = coordinator
         .modify_group_members(&host_id, &ids, &[])
         .await?;
-    println!("{}", group_line(&info.group, &session.groups));
-    Ok(())
+    let mut outcome = GroupOutcome::of(&info.group, &session.groups);
+    outcome.notes = notes;
+    Ok(outcome)
 }
 
 /// `x2rock party`: every room into `room`'s group, or with `off` every room
 /// back on its own.
-pub async fn party(session: &Session, room: Option<&str>, mode: Option<&str>) -> Result<()> {
+pub async fn party(
+    session: &Session,
+    room: Option<&str>,
+    mode: Option<&str>,
+) -> Result<PartyOutcome> {
     match mode {
         None => {
             let host = session.groups.resolve(room)?;
@@ -532,28 +631,37 @@ pub async fn party(session: &Session, room: Option<&str>, mode: Option<&str>) ->
                 .map(|p| p.id.clone())
                 .collect();
             if joining.is_empty() {
-                println!("{}", group_line(host, &session.groups));
-                return Ok(());
+                return Ok(PartyOutcome::Joined(GroupOutcome::of(
+                    host,
+                    &session.groups,
+                )));
             }
             let target = session::target_for(&session.groups, host);
             let coordinator = session::coordinator(session, &target).await?;
             let info = coordinator
                 .modify_group_members(&host_id, &joining, &[])
                 .await?;
-            println!("{}", group_line(&info.group, &session.groups));
+            Ok(PartyOutcome::Joined(GroupOutcome::of(
+                &info.group,
+                &session.groups,
+            )))
         }
         Some("off") => {
             // Each group keeps its coordinator and loses everyone else, so
             // every player ends up a group of its own. Groups are
             // independent, so the snapshot taken at connect stays valid as
             // this walks it - only the group being changed changes.
-            let mut broken = 0;
+            let mut outcome = PartyOffOutcome {
+                broken: 0,
+                left: Vec::new(),
+                notes: Vec::new(),
+            };
             for group in &session.groups.groups {
-                let leaving: Vec<String> = group
+                let leaving: Vec<&Player> = group
                     .player_ids
                     .iter()
                     .filter(|id| **id != group.coordinator_id)
-                    .cloned()
+                    .filter_map(|id| session.groups.player(id))
                     .collect();
                 if leaving.is_empty() {
                     continue;
@@ -563,36 +671,40 @@ pub async fn party(session: &Session, room: Option<&str>, mode: Option<&str>) ->
                 // whose coordinator the topology does not list has nobody to
                 // ask, so it is named and left as it is.
                 if session.groups.player(&group.coordinator_id).is_none() {
-                    eprintln!("{}: coordinator unknown, left as it is", group.name);
+                    outcome.notes.push(format!(
+                        "{}: coordinator unknown, left as it is",
+                        group.name
+                    ));
                     continue;
                 }
+                let ids: Vec<String> = leaving.iter().map(|p| p.id.clone()).collect();
                 let target = session::target_for(&session.groups, group);
                 let coordinator = session::coordinator(session, &target).await?;
                 coordinator
-                    .modify_group_members(&group.id, &[], &leaving)
+                    .modify_group_members(&group.id, &[], &ids)
                     .await?;
-                broken += 1;
+                outcome.broken += 1;
+                outcome.left.extend(leaving.iter().map(|p| p.name.clone()));
             }
-            if broken == 0 {
-                println!("No rooms were grouped.");
-            } else {
-                println!("Every room is on its own.");
-            }
+            Ok(PartyOutcome::Off(outcome))
         }
         Some(other) => bail!("party takes no argument, or off (got {other:?})"),
     }
-    Ok(())
 }
 
 /// `x2rock ungroup`: take `room` out of its group. Positional, not `--room`.
-pub async fn ungroup(session: &Session, room: &str) -> Result<()> {
+pub async fn ungroup(session: &Session, room: &str) -> Result<GroupOutcome> {
     let leaving = session.groups.player_named(room)?;
     let Some(group) = session.groups.group_of(&leaving.id) else {
         bail!("{} is not in any group", leaving.name);
     };
     if group.player_ids.len() < 2 {
-        println!("{:<24} was already on its own", leaving.name);
-        return Ok(());
+        let mut outcome = GroupOutcome::of(group, &session.groups);
+        // The line names the room, as it always has; a lone room's group is
+        // named for it anyway.
+        outcome.group = leaving.name.clone();
+        outcome.already_alone = true;
+        return Ok(outcome);
     }
     // Removing the coordinator is not leaving; the group is the
     // coordinator. Everyone else leaves it instead.
@@ -612,14 +724,82 @@ pub async fn ungroup(session: &Session, room: &str) -> Result<()> {
     let info = coordinator
         .modify_group_members(&group_id, &[], &[leaving_id])
         .await?;
-    println!("{:<24} left {}", leaving_name, info.group.name);
-    println!("{}", group_line(&info.group, &session.groups));
-    Ok(())
+    let mut outcome = GroupOutcome::of(&info.group, &session.groups);
+    outcome.left = Some(leaving_name);
+    Ok(outcome)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome(group: &str, members: &[&str]) -> GroupOutcome {
+        GroupOutcome {
+            group: group.into(),
+            coordinator: members[0].into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            left: None,
+            already_alone: false,
+            notes: Vec::new(),
+        }
+    }
+
+    /// The lines `group`, `party` and `ungroup` have always printed, and the
+    /// keys `--json` now documents for them.
+    #[test]
+    fn a_group_outcome_prints_the_group_and_names_who_left() {
+        let joined = outcome("Kitchen + 1", &["Kitchen", "Dining Room"]);
+        assert_eq!(
+            joined.text(),
+            "Kitchen + 1              [Kitchen + Dining Room]"
+        );
+        let json = serde_json::to_value(&joined).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["coordinator", "group", "left", "members"]);
+        assert_eq!(json["left"], serde_json::Value::Null);
+
+        let mut alone = outcome("Dining Room", &["Dining Room"]);
+        assert_eq!(alone.text(), "Dining Room              on its own");
+        alone.already_alone = true;
+        assert_eq!(
+            alone.text(),
+            "Dining Room              was already on its own"
+        );
+
+        let mut left = outcome("Kitchen", &["Kitchen"]);
+        left.left = Some("Dining Room".into());
+        assert_eq!(
+            left.text(),
+            "Dining Room              left Kitchen\nKitchen                  on its own"
+        );
+        assert_eq!(serde_json::to_value(&left).unwrap()["left"], "Dining Room");
+
+        let mut noted = outcome("Kitchen + 1", &["Kitchen", "Dining Room"]);
+        noted
+            .notes
+            .push("Already in this group: Dining Room".into());
+        assert_eq!(noted.notes().len(), 1);
+    }
+
+    #[test]
+    fn party_off_says_whether_anything_was_grouped() {
+        let none = PartyOffOutcome {
+            broken: 0,
+            left: Vec::new(),
+            notes: Vec::new(),
+        };
+        assert_eq!(none.text(), "No rooms were grouped.");
+        let some = PartyOutcome::Off(PartyOffOutcome {
+            broken: 1,
+            left: vec!["Dining Room".into()],
+            notes: vec!["Attic: coordinator unknown, left as it is".into()],
+        });
+        assert_eq!(some.text(), "Every room is on its own.");
+        assert_eq!(some.notes().len(), 1);
+        let json = serde_json::to_value(&some).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["broken", "left"]);
+    }
 
     /// `--redact` has to leave the output still readable *as a household*: two
     /// lines for the same speaker must match and two speakers must not collide.

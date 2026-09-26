@@ -159,7 +159,7 @@ pub fn silence_progress() {
     QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn progress(line: &str) {
+pub(crate) fn progress(line: &str) {
     if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("{line}");
     }

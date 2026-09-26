@@ -334,6 +334,13 @@ Both are on/off here. They apply **only to a room with a TV input**: a non-sound
 the read and *refuses* `--night`/`--dialog` with a clear message rather than an opaque UPnP error.
 So `eq` both answers "is night mode on in the living room?" and turns it on.
 
+`group`, `ungroup`, `party` and `tv` take `--json`. The three grouping commands answer with the
+group as it now stands - `{group, coordinator, members, left}`, `members` in the player's own order
+(not coordinator-first) and `left` the room `ungroup` removed (null otherwise) - except `party off`,
+which answers `{broken, left}`: how many groups were broken up and every room that left one. `tv
+--json` is `{room}`, the soundbar that switched. A failure is the usual `{error, code, fix}` on
+stderr.
+
 `group`/`ungroup`/`party` change the topology (see the command table). After a group change, the
 topology takes a second or two to settle — re-read `status` rather than assuming. These are
 **idempotent**: `party` on an already-partied house, `party off` when nothing is grouped, `ungroup`
