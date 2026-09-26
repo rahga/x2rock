@@ -42,6 +42,13 @@ consumers, that ceremony is not yet earned. When a Shell extension or Plasma app
 table, phase 1 gets built with that consumer as its test, and the test includes a latency number.
 A Rust front end has a third route once the separation is done: link the core as a library.
 
+**Status, 2026-09-26: the separation is done for the phase-1 set.** Volume, repeat, shuffle,
+crossfade, group, party, ungroup and tv return typed outcomes (`commands::Report`), `Session`
+holds a connection pool, and the TUI runs its writes in-process over one held session - a volume
+key went from ~420 ms to ~185 ms key-to-event, and the subprocess route in `src/tui/action.rs` is
+gone. See architecture.md, "Doing and printing, separated". The daemon has not adopted the pool,
+and nothing below is built; the "Cost, honestly" section's estimate is now history.
+
 **From the appended review, taken:** rooms as stable objects and groups as transient ones;
 connection state and volume availability as properties; acknowledge-then-signal with a relative
 step for wheels and keys; activation through `SystemdService=`; `aa{sv}` over fixed tuples;

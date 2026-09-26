@@ -8699,6 +8699,71 @@ on using the preferred account's token while its cdudn named the bookmark's own.
 selector now ride on the `Token` itself - built only by `Account::token` - so the account a service
 is asked with and the account the player is told about come from the same lookup.
 
+## Doing and printing, separated: outcomes, a pooled session, the TUI in-process (2026-09-26)
+
+Until this, every command in `src/commands/*` took a `&Session` and a `json` flag and printed as it
+went; what a command did existed only as the text it wrote. That is why the TUI ran this binary as
+a subprocess for grouping, party, the TV input, mute, crossfade and every volume key, why the
+widget and TUI parsed stderr for errors, and why a D-Bus interface on the daemon
+(`docs/dbus-interface.md`) would have needed the command layer rewritten first. It is also most of
+why a CLI call costs ~420 ms: 3 ms is process start; the rest is opening sockets to players that
+something else on the machine already holds open. Four commits, in order, each with the CLI's
+output diffed byte-for-byte against captures taken before it:
+
+- **Outcomes** (`34656be`, `aec4f8f`). A command returns a typed outcome implementing
+  `commands::Report` - a `Serialize` struct plus `text()` and `notes()` - and one `emit()` in the
+  CLI layer prints it: the text or one JSON line on stdout, notes on stderr. `vol` answers with
+  `VolumeOutcome` or, for the `normalize` word, `NormalizeOutcome`; repeat, shuffle and crossfade
+  with a `ModeOutcome`; group and ungroup with a `GroupOutcome` (the group as it now stands, plus
+  who left); party with that or a `PartyOffOutcome`; tv with the soundbar that switched. `emit`
+  serialises through `serde_json::to_value`, because this crate's `serde_json` has no
+  `preserve_order`: a `Value` prints its keys sorted, as every `json!` literal did, where a struct
+  would stream them in field order and change every documented line. `fan_out` keeps printing each
+  room as it is done (a failure on the third of five leaves the first two applied *and* reported),
+  and `vol --each` hands it a `PerRoom` directly instead of building a `cli::Command` for it to
+  re-read. `tv`'s line before its fourteen-second call is not an outcome of anything yet, so it
+  goes through `session::progress`, the hook connect's rescan lines already used. The four
+  grouping/TV commands gained `--json`. The first live `group --json` showed `members` in the
+  player's own order, not coordinator-first as first written: `modifyGroupMembers` answers with a
+  different order from `getGroups`.
+- **A pool on the session** (`c27fa24`). `Session` holds a `Pool` of connections to the players it
+  reaches beyond the one it was opened on, keyed by address. `session::coordinator` and the five
+  places that opened a socket by hand (`--player` volume, the member reads behind `normalize` and
+  `balanced`, the soundbar's Control API read, chime/notify, `raw --scope player`) go through it.
+  The lock is never held across the `open`; a race opens twice and the loser closes its socket; a
+  socket the keepalive gave up on is evicted before it is closed; `Session::close` closes
+  everything, because `Connection` has no `Drop`, and `run()` is split so the CLI closes on every
+  return. The daemon keeps the same map by hand (`connection_to`, plus a forwarder per socket) and
+  has not adopted this yet - and it also drops the `Groups` it parses on a topology event, so when
+  it does it needs `refresh_groups` as much as the TUI did.
+- **The TUI in-process** (`31d1de6`). `tui::action::Speakers` opens a session on the first write
+  and keeps it, re-reads the topology before every write (one `getGroups` on the held socket,
+  which is the whole answer to a regroup making the last read wrong), and closes the session on
+  any failed write so the next starts from nothing - what recovers a socket a suspend left dead,
+  at the cost of one visible error. The subprocess code went, and with it the `current_exe` /
+  " (deleted)" resolution an upgrade under a running screen used to need. Notes reach the status
+  line; connect's progress lines are silenced, since they would draw over the alternate screen;
+  `--household` is passed through, where the child never got it.
+
+**Measured**, key sent to Kitchen's MPRIS `Volume` event arriving (so including the speaker's own
+event path): CLI `vol -5` 417 ms; the first TUI write 544 ms (it opens the session); every write
+after that 181-191 ms. Installing a new build under the running TUI, then pressing a volume key,
+worked - the case the deleted code existed for.
+
+**Seen along the way, not fixed:** after a regroup the daemon republishes every MPRIS name and the
+TUI's cursor goes back to the first row. A `+` pressed right after joining a room therefore nudges
+whatever is at the top, not the group just made. Pre-existing, and exactly the "state keyed by a
+name that moves" cost the D-Bus note lists; the TUI should keep its cursor by room name across a
+republish.
+
+**Not exercised live:** `party` (whole-household by nature; its outcome is unit-tested against
+today's lines), `tv` (the only idle soundbar was someone's), and suspend/resume recovery.
+
+**What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
+returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
+layer prints; and the D-Bus interface, whose phase-1 methods are each an outcome mapped onto
+properties. None of the three is started.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
