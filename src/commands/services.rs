@@ -103,7 +103,8 @@ fn use_refreshed_token(
     } else {
         new_token.private_key.clone()
     };
-    let (household, account) = token.map_or((None, None), |t| (t.household, t.account));
+    let token = token.unwrap_or_default();
+    let (household, account) = (token.household, token.account);
     // The refresh can only be persisted against the household the token names;
     // a token without one (there should be none from the store) is used for
     // this call and simply not written back.
@@ -115,6 +116,8 @@ fn use_refreshed_token(
         key,
         household,
         account,
+        serial: token.serial,
+        selector: token.selector,
     })
 }
 
@@ -2340,7 +2343,7 @@ async fn set_preference(
         // The only account there is. Stated rather than refused: it is a
         // perfectly sensible thing to have typed, and it will still be the
         // preference when a second account arrives.
-        println!("{name} will search with {named:?}, the only account held for it here.");
+        println!("{name} will use {named:?}, the only account held for it here.");
     } else {
         println!("{name} now uses {named:?}, not the other {others}.");
     }

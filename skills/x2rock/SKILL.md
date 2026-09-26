@@ -925,9 +925,11 @@ those two apart when telling a user what linking will do.
   can carry the same nickname** - a household that rotated a service's token leaves two records with
   the name the app gave the service - and then the nickname names neither: the listing shows each
   account's key instead (`YouTube Music (sn15)`), and that key is what to pass. The preference
-  survives a re-import. **Playback follows it only for an imported account that carries its
-  selector**, which accounts imported before 2026-09-25 do not: if `play-item` plays from the
-  wrong one, re-run `x2rock link --from-household <service>`, which fills it in place. This is the case that matters for a service whose
+  survives a re-import. Playback follows it too, for any account whose household serial is known
+  (imported, or browser-linked and matched). An account imported before 2026-09-25 also lacks
+  its selector, so its queued rows can name the default account while the player reports the
+  preferred one - which of the two fetches the audio is unmeasured. `x2rock link --from-household
+  <service>` fills the selector in place; a browser-linked account never has one. This is the case that matters for a service whose
   accounts hold different catalogues — two Audible libraries, say — where which account is in use
   decides what a search can even find.
 - **`link --from-household --dry-run` shows what a household holds and keeps none of it.** Every

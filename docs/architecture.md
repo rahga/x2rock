@@ -8684,11 +8684,20 @@ moved to the other account, `sn_24` both ways. Before this, both plays landed on
 account x2rock did **not** prefer.
 
 **What still falls back.** An account with no selector sends `-0-` - correct for a primary, which
-really is `-0-` - and one with no serial sends no `sn=`. Both are only imported fields: a browser
-link knows neither and still plays from the household's default. Accounts imported before this
-build carry a serial but no selector (the selector was not stored until the 2026-09-24 guard work);
-a re-run of `link --from-household` fills it in place, since the import matches on the token.
-For a service with one account none of this matters - the default is that account.
+really is `-0-` - and one with no serial sends no `sn=`. The serial comes from the import
+(`SerialNum`) or, for a browser link, from `match` (`account_id`, `sn_N`); a browser link that was
+never matched knows neither and plays from the household's default. A browser link never learns a
+selector, so a matched one sends its serial with `-0-`: `sn=` still picks the account, and only
+the queued row disagrees. Accounts imported before this build are in the same state (the selector
+was not stored until the 2026-09-24 guard work); a re-run of `link --from-household` fills it in
+place, since the import matches on the token, and a later browser re-link keeps it. For a service
+with one account none of this matters - the default is that account.
+
+**One resolution, not two.** The first cut read the credential store a second time to build the
+naming, beside the read that had already chosen the token, and a bookmark's stream fallback went
+on using the preferred account's token while its cdudn named the bookmark's own. The serial and
+selector now ride on the `Token` itself - built only by `Account::token` - so the account a service
+is asked with and the account the player is told about come from the same lookup.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
