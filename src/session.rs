@@ -49,7 +49,6 @@ impl Session {
     /// resolves rooms against what it last read, and a regroup makes that
     /// wrong: one `getGroups` on the held socket, before each write, is the
     /// whole answer.
-    #[allow(dead_code)] // The TUI's, once it holds a session across writes.
     pub async fn refresh_groups(&mut self) -> Result<()> {
         self.groups = self.connection.groups().await?;
         Ok(())

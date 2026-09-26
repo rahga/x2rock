@@ -11,8 +11,8 @@
 //! running. That is deliberate and it says so plainly rather than drawing an
 //! empty screen - see [`source`]. Reads come from MPRIS, and so do the writes
 //! MPRIS can express; grouping, party, TV input, mute, crossfade and every
-//! volume step shell out
-//! to this binary's CLI, for the reasons in [`action`].
+//! volume step call the CLI's own command functions over a session held here
+//! - see [`action`].
 //!
 //! The seam worth keeping is inside: a keypress becomes an [`Intent`] without
 //! touching the bus, so what every key does is a unit test rather than
@@ -53,7 +53,8 @@ const HOLD: Duration = Duration::from_secs(1);
 /// here takes against speakers that are answering - party across a household,
 /// which reconnects to each coordinator in turn, is a few seconds - and short
 /// enough that a speaker that has stopped answering is reported rather than
-/// waited on. The child is killed with the wait; see [`action::Cli`].
+/// waited on. The write's future is dropped with the wait, and the session it
+/// ran on is dropped by the next write's failure; see [`action::Speakers`].
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long an empty household is disbelieved.
 ///
@@ -80,13 +81,16 @@ const HEARTBEAT: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(90);
 
 /// Draw, wait, act, repeat - until `q`.
-pub async fn run(ip: Option<IpAddr>) -> Result<()> {
+pub async fn run(ip: Option<IpAddr>, household: Option<String>) -> Result<()> {
     // Connected before the screen is taken over, so "the daemon is not running"
     // prints into the terminal it was typed in. Behind the alternate screen it
     // would flash for as long as the teardown takes and then be gone.
     let source = Source::connect().await?;
     let rooms = source.snapshot().await?;
-    let cli = action::Cli::new(ip);
+    let speakers = action::Speakers::new(ip, household);
+    // Connecting to the players happens on the first write, behind the
+    // alternate screen: a rescan's progress lines would be drawn over it.
+    crate::session::silence_progress();
 
     let (tx, updates) = mpsc::unbounded_channel();
     let watcher = tokio::spawn(source.clone().watch(tx));
@@ -97,7 +101,7 @@ pub async fn run(ip: Option<IpAddr>) -> Result<()> {
     let outcome = drive(
         &mut terminal,
         &source,
-        &cli,
+        &speakers,
         App::new(rooms),
         updates,
         watcher,
@@ -110,7 +114,7 @@ pub async fn run(ip: Option<IpAddr>) -> Result<()> {
 async fn drive(
     terminal: &mut ratatui::DefaultTerminal,
     source: &Source,
-    cli: &action::Cli,
+    speakers: &action::Speakers,
     mut app: App,
     mut updates: mpsc::UnboundedReceiver<Vec<RoomSnapshot>>,
     watcher: JoinHandle<Result<()>>,
@@ -139,7 +143,7 @@ async fn drive(
     // what a resume from suspend can leave behind, and the one case where a
     // person most wants `q` to work. Counted, so that the "working" line comes
     // down when the last of them is in and not the first.
-    let (finished, mut finishes) = mpsc::unbounded_channel::<Result<()>>();
+    let (finished, mut finishes) = mpsc::unbounded_channel::<Result<Vec<String>>>();
     let mut in_flight: usize = 0;
 
     loop {
@@ -158,7 +162,7 @@ async fn drive(
             _ = &mut stop => Intent::Quit,
             _ = tokio::time::sleep_until(pending.as_ref().map_or_else(tokio::time::Instant::now, |p| p.1)), if pending.is_some() => {
                 if let Some((nudge, _)) = pending.take() {
-                    flush(source, cli, nudge, &mut in_flight, &finished);
+                    flush(source, speakers, nudge, &mut in_flight, &finished);
                 }
                 continue;
             },
@@ -168,13 +172,18 @@ async fn drive(
                     match outcome {
                         // The CLI's own sentence, which names the room and the fix.
                         Err(e) => app.status = Some(Status::bad(format!("{e:#}"))),
+                        // An aside the command would have put on stderr:
+                        // "Already in this group: Kitchen". Worth the line.
+                        Ok(notes) if !notes.is_empty() => {
+                            app.status = Some(Status::note(notes.join("; ")));
+                        }
                         // What it was waiting for has happened, and the daemon's
                         // event is what shows it - so once nothing else is still
                         // on its way, the line has nothing left to say.
-                        Ok(()) if in_flight == 0 => {
+                        Ok(_) if in_flight == 0 => {
                             app.status.take_if(|status| status.kind == Kind::Busy);
                         }
-                        Ok(()) => {}
+                        Ok(_) => {}
                     }
                 }
                 continue;
@@ -229,7 +238,7 @@ async fn drive(
                 if let Some((nudge, _)) = pending.take()
                     && nudge.by != 0
                 {
-                    let step = execute(source, cli, Intent::Nudge(nudge));
+                    let step = execute(source, speakers, Intent::Nudge(nudge));
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, step).await;
                 }
                 return Ok(());
@@ -245,7 +254,7 @@ async fn drive(
                         // the order the two were pressed in is the order the
                         // speakers should see them.
                         Some(other) => {
-                            flush(source, cli, held, &mut in_flight, &finished);
+                            flush(source, speakers, held, &mut in_flight, &finished);
                             (other, due)
                         }
                     },
@@ -264,22 +273,22 @@ async fn drive(
         if let Some(waiting) = intent.waiting() {
             app.status = Some(Status::busy(waiting));
         }
-        launch(source, cli, intent, &mut in_flight, &finished);
+        launch(source, speakers, intent, &mut in_flight, &finished);
     }
 }
 
 /// Carry out an intent in a task of its own, and report how it went.
 fn dispatch(
     source: &Source,
-    cli: &action::Cli,
+    speakers: &action::Speakers,
     intent: Intent,
-    finished: mpsc::UnboundedSender<Result<()>>,
+    finished: mpsc::UnboundedSender<Result<Vec<String>>>,
 ) {
     let source = source.clone();
-    let cli = cli.clone();
+    let speakers = speakers.clone();
     tokio::spawn(async move {
         let outcome =
-            match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &cli, intent)).await {
+            match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &speakers, intent)).await {
                 Ok(outcome) => outcome,
                 Err(_) => Err(anyhow::anyhow!(
                     "gave up after {}s; the speakers did not answer",
@@ -294,13 +303,13 @@ fn dispatch(
 /// line comes down when the last of them is in and not the first.
 fn launch(
     source: &Source,
-    cli: &action::Cli,
+    speakers: &action::Speakers,
     intent: Intent,
     in_flight: &mut usize,
-    finished: &mpsc::UnboundedSender<Result<()>>,
+    finished: &mpsc::UnboundedSender<Result<Vec<String>>>,
 ) {
     *in_flight += 1;
-    dispatch(source, cli, intent, finished.clone());
+    dispatch(source, speakers, intent, finished.clone());
 }
 
 /// Send one folded run of volume keys, unless it folded to nothing: `+5` then
@@ -308,15 +317,15 @@ fn launch(
 /// trip to the speaker.
 fn flush(
     source: &Source,
-    cli: &action::Cli,
+    speakers: &action::Speakers,
     nudge: Nudge,
     in_flight: &mut usize,
-    finished: &mpsc::UnboundedSender<Result<()>>,
+    finished: &mpsc::UnboundedSender<Result<Vec<String>>>,
 ) {
     if nudge.by == 0 {
         return;
     }
-    launch(source, cli, Intent::Nudge(nudge), in_flight, finished);
+    launch(source, speakers, Intent::Nudge(nudge), in_flight, finished);
 }
 
 /// So many points on one volume: a group's (by its coordinator's room name), or
@@ -376,9 +385,9 @@ pub enum Intent {
 
 impl Intent {
     /// What to say while this runs, for the ones that take long enough to need
-    /// saying. Only the slow CLI intents: each opens its own socket, resolves
-    /// the topology and waits for the speakers. The bus intents land in
-    /// milliseconds, where a "working" line would be a flicker, and a volume
+    /// saying. Only the slow command intents: a regroup waits on the speakers,
+    /// and the TV input stalls a whole group for seconds. The bus intents land
+    /// in milliseconds, where a "working" line would be a flicker, and a volume
     /// step already moved the bar when the key went down.
     fn waiting(&self) -> Option<&'static str> {
         match self {
@@ -393,51 +402,60 @@ impl Intent {
 }
 
 /// Carry out one intent, by whichever route can express it.
-async fn execute(source: &Source, cli: &action::Cli, intent: Intent) -> Result<()> {
+async fn execute(
+    source: &Source,
+    speakers: &action::Speakers,
+    intent: Intent,
+) -> Result<Vec<String>> {
     match intent {
-        Intent::Nothing | Intent::Quit => Ok(()),
+        Intent::Nothing | Intent::Quit => Ok(Vec::new()),
         // Folded by `drive` first: this is a run of keys, not one of them.
-        Intent::Nudge(nudge) => cli.nudge_volume(&nudge.room, nudge.by, nudge.player).await,
-        Intent::Mute(room, on) => cli.mute(&room, on).await,
-        Intent::Crossfade(room, on) => cli.crossfade(&room, on).await,
+        Intent::Nudge(nudge) => speakers.nudge(&nudge.room, nudge.by, nudge.player).await,
+        Intent::Mute(room, on) => speakers.mute(&room, on).await,
+        Intent::Crossfade(room, on) => speakers.crossfade(&room, on).await,
         Intent::PlayPause(bus) => source
             .player(&bus)
             .await?
             .play_pause()
             .await
-            .context("play/pause"),
+            .context("play/pause")
+            .map(|()| Vec::new()),
         Intent::Next(bus) => source
             .player(&bus)
             .await?
             .next()
             .await
-            .context("skipping forward"),
+            .context("skipping forward")
+            .map(|()| Vec::new()),
         Intent::Previous(bus) => source
             .player(&bus)
             .await?
             .previous()
             .await
-            .context("skipping back"),
+            .context("skipping back")
+            .map(|()| Vec::new()),
         Intent::SetLoop(bus, status) => source
             .player(&bus)
             .await?
             .set_loop_status(status)
             .await
-            .context("setting repeat"),
+            .context("setting repeat")
+            .map(|()| Vec::new()),
         Intent::SetShuffle(bus, on) => source
             .player(&bus)
             .await?
             .set_shuffle(on)
             .await
-            .context("setting shuffle"),
+            .context("setting shuffle")
+            .map(|()| Vec::new()),
         Intent::Group {
             coordinator,
             others,
-        } => cli.group(&coordinator, &others).await,
-        Intent::Ungroup(room) => cli.ungroup(&room).await,
-        Intent::Party(room) => cli.party(&room).await,
-        Intent::PartyOff => cli.party_off().await,
-        Intent::Tv(room) => cli.tv(&room).await,
+        } => speakers.group(&coordinator, &others).await,
+        Intent::Ungroup(room) => speakers.ungroup(&room).await,
+        Intent::Party(room) => speakers.party(&room).await,
+        Intent::PartyOff => speakers.party_off().await,
+        Intent::Tv(room) => speakers.tv(&room).await,
     }
 }
 
@@ -803,7 +821,7 @@ impl App {
 
     /// Step the group volume, and step it on screen too.
     ///
-    /// What is *sent* is the step, not the result - see [`action::Cli::nudge_volume`]
+    /// What is *sent* is the step, not the result - see [`action::Speakers::nudge`]
     /// for why an absolute level computed from the screen is wrong. The screen
     /// still moves on the keypress, because the daemon's confirming event is a
     /// settling delay behind it and a bar that waited for it would stutter.

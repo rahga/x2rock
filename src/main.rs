@@ -401,7 +401,7 @@ async fn run(cli: Cli) -> Result<()> {
         // Before the household session below: the TUI reads the daemon, which has
         // its own connection, and opening a second one here would be a
         // connection nothing in the TUI ever uses.
-        Command::Tui => return tui::run(cli.ip).await,
+        Command::Tui => return tui::run(cli.ip, cli.household.clone()).await,
         Command::Daemon {
             verbose,
             log_events,
