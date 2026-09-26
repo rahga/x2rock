@@ -7,10 +7,11 @@
 use std::net::IpAddr;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use serde::Serialize;
 use serde_json::json;
 
 use super::content::{find_content, queue_sources};
-use super::{on_off, on_word, transition, upnp_ip};
+use super::{Report, on_off, on_word, transition, upnp_ip};
 use crate::cli::{AlarmAction, AlarmsAction};
 use crate::session::{self, Session, Target};
 use crate::sonos;
@@ -688,12 +689,24 @@ pub async fn apply_snooze(
 
 /// `x2rock tv`: switch the soundbar in `room`'s group to its TV input. The
 /// soundbar is whichever member has one, not necessarily the coordinator.
+/// A soundbar switched to its TV input.
+#[derive(Debug, Serialize)]
+pub struct TvOutcome {
+    pub room: String,
+}
+
+impl Report for TvOutcome {
+    fn text(&self) -> String {
+        format!("{:<24} TV input", self.room)
+    }
+}
+
 pub async fn tv(
     session: &Session,
     player: &Connection,
     target: &Target,
     room: Option<&str>,
-) -> Result<()> {
+) -> Result<TvOutcome> {
     // The soundbar is the player with the HDMI socket, which is not
     // necessarily the one coordinating the group it is in. The room
     // named is asked first; otherwise (or when the widget names the
@@ -727,14 +740,19 @@ pub async fn tv(
         .ip()
         .ok_or_else(|| anyhow!("no address for {}", room.name))?;
     // Taking a group over stalls every player in it for about fourteen
-    // seconds. Said on stderr, so it stays out of anything reading the
-    // result, and only when there is a group to take.
+    // seconds. Said before the call rather than carried on the outcome, so a
+    // person sees it while they wait; through `progress`, so the TUI - which
+    // shows its own "switching" line - can silence it.
     if bar != coordinator_ip {
-        eprintln!("{:<24} taking its group to the TV input...", room.name);
+        session::progress(&format!(
+            "{:<24} taking its group to the TV input...",
+            room.name
+        ));
     }
     upnp.use_tv_input(&room.id, bar).await?;
-    println!("{:<24} TV input", room.name);
-    Ok(())
+    Ok(TvOutcome {
+        room: room.name.clone(),
+    })
 }
 
 /// `x2rock alarms`: list the household's alarms, or with `add` create one on
@@ -882,6 +900,16 @@ pub async fn alarm(session: &Session, id: u32, action: &AlarmAction) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tv_outcome_is_the_room_and_its_line() {
+        let out = TvOutcome {
+            room: "Living Room".into(),
+        };
+        assert_eq!(out.text(), "Living Room              TV input");
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json, serde_json::json!({"room": "Living Room"}));
+    }
 
     #[test]
     fn a_time_of_day_is_padded_to_what_the_player_takes() {

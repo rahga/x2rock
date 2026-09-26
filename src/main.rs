@@ -522,16 +522,19 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
     // Grouping resolves rooms itself: `ungroup` names its room positionally and
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
-    if let Command::Group { rooms } = &cli.command {
-        return household::group(session, room, rooms).await;
+    if let Command::Group { rooms, json } = &cli.command {
+        return emit(&household::group(session, room, rooms).await?, *json);
     }
 
-    if let Command::Party { mode } = &cli.command {
-        return household::party(session, room, mode.as_deref()).await;
+    if let Command::Party { mode, json } = &cli.command {
+        return emit(
+            &household::party(session, room, mode.as_deref()).await?,
+            *json,
+        );
     }
 
-    if let Command::Ungroup { room } = &cli.command {
-        return household::ungroup(session, room).await;
+    if let Command::Ungroup { room, json } = &cli.command {
+        return emit(&household::ungroup(session, room).await?, *json);
     }
 
     // `vol --each` sets every speaker in one group individually - the flatten
@@ -610,7 +613,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Playlist { query } => {
             content::playlist(session, &player, &target, &query).await?;
         }
-        Command::Tv => speaker::tv(session, &player, &target, room).await?,
+        Command::Tv { json } => emit(&speaker::tv(session, &player, &target, room).await?, json)?,
         Command::Chime { volume } => {
             stream::play_audio_clip(session, &target, room, None, volume).await?;
         }
