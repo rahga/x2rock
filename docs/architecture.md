@@ -8764,7 +8764,17 @@ grouping landed, the CLI reported the timeout - and for the next ~20 s it accept
 no new socket, then applied the `party off` it had been sent meanwhile. The fourteen-second figure
 `speaker.rs` gives for a TV-input switch is the same stall from the other side. The `party` text
 line therefore still has no live capture (the timeout ate it); its `--json` shape was seen only on
-the already-grouped no-op path. Still not exercised: suspend/resume recovery.
+the already-grouped no-op path. The TUI's `P` from Guest TV, run afterwards, joined all five and
+then broke them up, each within five seconds - the Beam did not stall that time - so its
+twenty-second timeout was not hit either. A second timed run gave 426 ms for the write that opens
+the session and 173-181 ms for the three after it.
+
+**Still not exercised live: a write that fails on a held session**, and so the rule that drops the
+session for the next write to rebuild - which is also the suspend/resume recovery. No safe way to
+provoke one was found: `t` on a room without a TV is refused by the TUI before anything is sent,
+the overlay offers only joins and leaves that succeed, and volume, mute and crossfade are accepted
+on every room here, TV audio included. The path is straight-line code in `Speakers::settle`, and
+that is the only evidence for it.
 
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
