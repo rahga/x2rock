@@ -252,7 +252,7 @@ pub async fn play_item(
             kind.unwrap_or_default()
         );
     }
-    if !streamish && let Some(naming) = Naming::chosen(session, service).await? {
+    if !streamish && let Some(naming) = Naming::of(service, token) {
         match enqueue_item(session, room, service, &naming, id, title, kind, true).await {
             Ok(()) => return Ok(()),
             // Only a refusal earns the fallback. An unreachable coordinator is
@@ -477,9 +477,9 @@ pub async fn run_queue_item(
     id: &str,
     title: Option<&String>,
 ) -> Result<()> {
-    // The token is not wanted: an enqueue hands the player a cdudn and lets
-    // it resolve the account, so nothing here talks to the service.
-    let (session, chosen, _) = connect_for_service(ip, household, room, service).await?;
+    // Nothing here talks to the service. The token is wanted only for which
+    // account it names, which the enqueue has to name to the player too.
+    let (session, chosen, token) = connect_for_service(ip, household, room, service).await?;
     let title = title.map(String::as_str).unwrap_or(id);
 
     // Refused rather than half-worked. `play-item` answers a stream by streaming
@@ -505,7 +505,7 @@ pub async fn run_queue_item(
     }
     // Without a service type there is no cdudn, and `SA_RINCONNone` is not an
     // account - the enqueue would be refused by the player with less to say.
-    let Some(naming) = Naming::chosen(&session, &chosen).await? else {
+    let Some(naming) = Naming::of(&chosen, token.as_ref()) else {
         bail!(
             "{} is not in the player's service-type list, so nothing can be \
              built to name the account that owns {title:?}.",
@@ -534,25 +534,22 @@ struct Naming {
 }
 
 impl Naming {
-    /// Whatever `account` can say for itself. With no selector (a primary,
-    /// whose own is `-0-`, or a browser link) or no serial (a link `match`
-    /// never saw) it sends what it has, and for a service with one account the
-    /// all-absent case is the old `-0-`-and-no-`sn=` form, which the player
-    /// resolves to that one account. `None` when the service has no type in
-    /// the player's list, so no cdudn can be built at all.
-    fn of(service: &sonos::smapi::Service, account: Option<&credentials::Account>) -> Option<Self> {
+    /// Whatever the token's account can say for itself - the token being the
+    /// one resolution of "which account" the caller already made, so the
+    /// service is asked and the player is told about the same one. With no
+    /// selector (a primary, whose own is `-0-`, or a browser link) or no serial
+    /// (a link `match` never answered) it sends what it has; no token at all is
+    /// the `-0-`-and-no-`sn=` form, which the player resolves to its default
+    /// account - the only one, for a service with one. A serial with no
+    /// selector is still sent: `sn=` is what picks the account, and only the
+    /// queued row is left disagreeing, until a `link --from-household` fills
+    /// the selector in. `None` when the service has no type in the player's
+    /// list, so no cdudn can be built at all.
+    fn of(service: &sonos::smapi::Service, token: Option<&sonos::smapi::Token>) -> Option<Self> {
         Some(Self {
-            cdudn: service.cdudn_for(account.and_then(|a| a.account_key.as_deref()))?,
-            serial: account.and_then(|a| a.serial).map(|n| n.to_string()),
+            cdudn: service.cdudn_for(token.and_then(|t| t.selector.as_deref()))?,
+            serial: token.and_then(|t| t.serial).map(|n| n.to_string()),
         })
-    }
-
-    /// For the account the store resolves to in this household - the
-    /// preferred one, the same account search and browse use.
-    async fn chosen(session: &Session, service: &sonos::smapi::Service) -> Result<Option<Self>> {
-        let household = session.connection.household_id().await?;
-        let linked = credentials::Credentials::load()?;
-        Ok(Self::of(service, linked.get(&household, &service.id)))
     }
 }
 
@@ -833,9 +830,9 @@ pub async fn bookmark(
     let list = bookmarks::Bookmarks::load()?;
     let bookmark = list.find(query)?.clone();
 
-    // The cdudn names the account the player resolves the content with,
-    // and it is derived from the service type list rather than copied
-    // from anything - see `Service::cdudn`.
+    // The cdudn is derived from the service type list rather than copied from
+    // anything - see `Service::cdudn` - and names the account alongside the
+    // URI's `sn=`, which is what actually picks it (see `Naming`).
     let catalogue = refreshed_catalogue(session).await?;
     // Two different failures, worth telling apart: a service the player
     // has never heard of, and one it lists but gives no type for.
@@ -852,17 +849,25 @@ pub async fn bookmark(
         })?
         .clone();
     // The bookmark's URI already carries the serial it was kept from, so the
-    // cdudn has to name that same account - not the preferred one - or the two
-    // disagree (see `Naming`). A serial the store does not hold names no
-    // selector, which is the `-0-` form the player resolves itself.
+    // cdudn names that same account - not the preferred one - and so does the
+    // token a stream fallback uses (see `Naming`). A serial the store does not
+    // hold names no selector, the `-0-` form, and streams with the preferred
+    // account. An unreadable store costs the naming, not the play: most
+    // bookmarks need no stored account at all.
     let household = session.connection.household_id().await?;
-    let linked = credentials::Credentials::load()?;
-    let selector = bookmark
+    let linked = credentials::Credentials::load().unwrap_or_else(|e| {
+        eprintln!("x2rock: stored accounts unreadable ({e:#}); playing without them");
+        credentials::Credentials::default()
+    });
+    let own = bookmark
         .account
         .parse()
         .ok()
-        .and_then(|sn| linked.by_serial(&household, &service.id, sn))
-        .and_then(|a| a.account_key.as_deref());
+        .and_then(|sn| linked.token_by_serial(&household, &service.id, sn));
+    let selector = own.as_ref().and_then(|t| t.selector.as_deref());
+    let token = own
+        .clone()
+        .or_else(|| linked.token_for(&household, &service.id));
     let cdudn = service.cdudn_for(selector).ok_or_else(|| {
         anyhow!(
             "{} has no service type in this player's list, so {:?} cannot name its account",
@@ -894,8 +899,6 @@ pub async fn bookmark(
                     bookmark.name,
                     refusal_was(&e)
                 );
-                let household = session.connection.household_id().await?;
-                let token = credentials::Credentials::load()?.token_for(&household, &service.id);
                 stream_item(
                     session,
                     room,
@@ -1101,18 +1104,32 @@ mod tests {
             "service_name": "iHeartRadio", "auth_token": "t", "private_key": "k", "linked": 0,
         }))
         .unwrap();
+        // The token is what every play path holds, so that is what is named.
+        let named = |a: &credentials::Account| Naming::of(&service, Some(&a.token("k")));
         // No account, or one with nothing to say for itself: the `-0-` form.
         let bare = Naming {
             cdudn: "SA_RINCON1543_X_#Svc1543-0-Token".into(),
             serial: None,
         };
         assert_eq!(Naming::of(&service, None).as_ref(), Some(&bare));
-        assert_eq!(Naming::of(&service, Some(&account)).as_ref(), Some(&bare));
-        // An imported one: both halves name it, so they cannot disagree.
+        assert_eq!(named(&account), Some(bare));
+        // A browser link `match` answered: the serial lives in `account_id`.
+        account.account_id = Some("sn_26".into());
+        assert_eq!(named(&account).unwrap().serial.as_deref(), Some("26"));
+        // Imported before selectors were stored: the serial still goes, since
+        // `sn=` is what picks the account; the cdudn has no selector to offer.
         account.serial = Some(25);
+        assert_eq!(
+            named(&account),
+            Some(Naming {
+                cdudn: "SA_RINCON1543_X_#Svc1543-0-Token".into(),
+                serial: Some("25".into()),
+            })
+        );
+        // Imported with its selector: both halves name the same account.
         account.account_key = Some("885ebbcc".into());
         assert_eq!(
-            Naming::of(&service, Some(&account)),
+            named(&account),
             Some(Naming {
                 cdudn: "SA_RINCON1543_X_#Svc1543-885ebbcc-Token".into(),
                 serial: Some("25".into()),
@@ -1123,7 +1140,7 @@ mod tests {
             service_type: None,
             ..service
         };
-        assert_eq!(Naming::of(&untyped, Some(&account)), None);
+        assert_eq!(Naming::of(&untyped, Some(&account.token("k"))), None);
     }
 
     #[test]

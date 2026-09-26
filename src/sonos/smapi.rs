@@ -89,7 +89,7 @@ pub enum Auth {
 /// A `loginToken` for the SMAPI credentials header: what a completed device link
 /// minted. Held in [`crate::credentials`], which is the only thing that persists
 /// it; this type is just the shape the envelope wants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Token {
     pub token: String,
     pub key: String,
@@ -106,6 +106,14 @@ pub struct Token {
     /// answer once a household could hold two. Absent for a token this build did
     /// not read out of the store.
     pub account: Option<String>,
+    /// The household's serial for the account the token came from (the `N` of
+    /// `sn_N`), and its selector out of `Username<i>`. Not SMAPI's business at
+    /// all: they ride here because the token is the one resolution of "which
+    /// account" every play path already makes, and an enqueue has to name that
+    /// same account to the player - see `content::Naming`. Resolving it a
+    /// second time is how the two drifted apart.
+    pub serial: Option<u32>,
+    pub selector: Option<String>,
 }
 
 /// What `getDeviceLinkCode` or `getAppLink` returns: where to send the person,
@@ -183,8 +191,9 @@ pub struct Service {
     /// presentation map are named.
     pub manifest_uri: Option<String>,
     /// `serviceId * 256 + type`, from `AvailableServiceTypeList`. The number a
-    /// cdudn is built from: `SA_RINCON<type>_X_#Svc<type>-0-Token`, which is how
-    /// enqueued content names the account the player should resolve it with.
+    /// cdudn is built from: `SA_RINCON<type>_X_#Svc<type>-<selector>-Token`,
+    /// `-0-` where no account is named. The cdudn does not pick the account on
+    /// its own - `sn=` does - but has to agree with it; see `content::Naming`.
     /// Absent for a service the type list does not mention.
     pub service_type: Option<u32>,
 }
@@ -908,7 +917,7 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
         household: Some(household.to_string()),
         // No account: there is no stored account yet, which is the point of
         // asking for the link in the first place.
-        account: None,
+        ..Default::default()
     };
     let body = match call_soap(
         service,
@@ -1292,6 +1301,8 @@ async fn call(
         // Carried through the retry so the caller can write the refreshed token
         // back to the account it belongs to and not merely to the service.
         account: token.and_then(|t| t.account.clone()),
+        serial: token.and_then(|t| t.serial),
+        selector: token.and_then(|t| t.selector.clone()),
     };
     match call_soap(service, Some(&retry_token), action, params).await? {
         Ok(body) => {
@@ -1777,7 +1788,7 @@ mod tests {
                 token: "a&b".into(),
                 key: "k<1".into(),
                 household: Some("Sonos_house".into()),
-                account: None,
+                ..Default::default()
             }),
         );
         assert!(
@@ -1803,7 +1814,7 @@ mod tests {
                 token: "t".into(),
                 key: "k".into(),
                 household: None,
-                account: None,
+                ..Default::default()
             }),
         );
         assert!(body.contains("<loginToken><token>t</token><key>k</key></loginToken>"));
@@ -1943,7 +1954,7 @@ mod tests {
                 token: "s3cret-token".into(),
                 key: "s3cret-key".into(),
                 household: Some("Sonos_house".into()),
-                account: None,
+                ..Default::default()
             }),
         );
         let dumped = without_credentials(&body);

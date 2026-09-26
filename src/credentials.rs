@@ -294,6 +294,20 @@ pub struct Account {
 }
 
 impl Account {
+    /// The `N` of the household's `sn_N` for this account, wherever it was
+    /// learned: read off the household's own record by an import (`serial`),
+    /// or handed back by `match` after a browser link (`account_id`, which is
+    /// the only place such a link ever records it).
+    pub fn household_serial(&self) -> Option<u32> {
+        self.serial.or_else(|| {
+            self.account_id
+                .as_deref()?
+                .strip_prefix("sn_")?
+                .parse()
+                .ok()
+        })
+    }
+
     /// What goes in the SMAPI credentials header.
     ///
     /// `account` is the key this record is filed under, carried along for the
@@ -306,6 +320,8 @@ impl Account {
             key: self.private_key.clone(),
             household: self.household.clone(),
             account: Some(account.to_string()),
+            serial: self.household_serial(),
+            selector: self.account_key.clone(),
         }
     }
 }
@@ -441,14 +457,19 @@ impl Credentials {
         self.accounts_for(household, service_id)?.chosen()
     }
 
-    /// The account this household knows as serial `sn_<serial>`, whichever key
-    /// it is filed under. For a bookmark, which remembers the serial it played
-    /// from and has to name that same account again, not the preferred one.
-    pub fn by_serial(&self, household: &str, service_id: &str, serial: u32) -> Option<&Account> {
-        self.accounts_for(household, service_id)?
+    /// The token for the account this household knows as `sn_<serial>`,
+    /// whichever key it is filed under. For a bookmark, which remembers the
+    /// serial it played from and has to name that same account again - to the
+    /// player and to the service - rather than the preferred one.
+    pub fn token_by_serial(&self, household: &str, service_id: &str, serial: u32) -> Option<Token> {
+        let (key, account) = self
+            .accounts_for(household, service_id)?
             .accounts
-            .values()
-            .find(|a| a.serial == Some(serial))
+            .iter()
+            .find(|(_, a)| a.household_serial() == Some(serial))?;
+        let mut tok = account.token(key);
+        tok.household.get_or_insert_with(|| household.to_string());
+        Some(tok)
     }
 
     /// The token held for a service in a household - what every play path hands
@@ -590,6 +611,10 @@ impl Credentials {
                 .or_else(|| old.user_id_hash_code.clone());
             account.account_id = account.account_id.or_else(|| old.account_id.clone());
             account.serial = account.serial.or(old.serial);
+            // A browser re-link never sees a selector, and dropping the one an
+            // import stored would leave every later enqueue naming the account
+            // by serial alone - half a name, which the player reads two ways.
+            account.account_key = account.account_key.or_else(|| old.account_key.clone());
         }
         held.accounts.insert(key.clone(), account);
         key
@@ -1121,6 +1146,48 @@ mod tests {
         let held = creds.accounts_for(HH, "9").unwrap();
         assert_eq!(held.accounts.len(), 1, "replaced, not forked");
         assert_eq!(held.accounts[&first].auth_token, "fresh");
+    }
+
+    #[test]
+    fn a_re_link_keeps_the_selector_an_import_stored() {
+        // A repair link sees no `Username`, and the enqueue names the account
+        // with the selector the import stored - losing it would leave the cdudn
+        // and `sn=` naming the account two different ways.
+        let mut creds = Credentials::default();
+        let mut first = imported("iHeartRadio", 25, "dead");
+        first.account_key = Some("885ebbcc".into());
+        let key = creds.remember(HH, "6", first);
+        let mut relink = imported("iHeartRadio", 25, "fresh");
+        relink.serial = None;
+        relink.account_key = None;
+        assert_eq!(creds.remember(HH, "6", relink), key);
+        let token = creds.token_for(HH, "6").unwrap();
+        assert_eq!(token.token, "fresh");
+        assert_eq!(token.serial, Some(25));
+        assert_eq!(
+            token.selector.as_deref(),
+            Some("885ebbcc"),
+            "survives the re-link"
+        );
+    }
+
+    #[test]
+    fn a_bookmark_serial_finds_its_account_however_the_serial_was_learned() {
+        let mut creds = Credentials::default();
+        creds.remember(HH, "6", imported("iHeartRadio", 24, "tok-a"));
+        // A browser link `match` answered records its serial only as `sn_N`.
+        let mut linked = account("iHeartRadio");
+        linked.auth_token = "tok-b".into();
+        linked.user_id_hash_code = Some("other".into());
+        linked.account_id = Some("sn_26".into());
+        creds.remember(HH, "6", linked);
+
+        assert_eq!(creds.token_by_serial(HH, "6", 24).unwrap().token, "tok-a");
+        let by_match = creds.token_by_serial(HH, "6", 26).unwrap();
+        assert_eq!(by_match.token, "tok-b");
+        assert_eq!(by_match.serial, Some(26));
+        assert_eq!(by_match.household.as_deref(), Some(HH));
+        assert!(creds.token_by_serial(HH, "6", 99).is_none());
     }
 
     #[test]
