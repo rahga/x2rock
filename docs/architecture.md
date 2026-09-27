@@ -290,8 +290,18 @@ lines below record the reversals rather than warn about text that still says oth
 
 ### The axiom, stated precisely (sharpened 2026-09-04)
 
-**x2rock never requires a Sonos account.** That is the whole of it, and the rest of this document
-should be read against that sentence rather than against a vaguer one.
+**x2rock never requires a Sonos account - unless the household has Authentication enabled.** That
+is the whole of it, and the rest of this document should be read against that sentence rather than
+against a vaguer one.
+
+**The amendment (2026-09-26).** The Sonos app's Privacy & Security > Connection security has an
+**Authentication** switch, and with it on the speakers refuse every unauthenticated Control API
+command (`ERROR_NO_PERMISSION`; see "Player-scoped finds"). For such a household there is no
+account-free way in: the household itself has decided that only an identified client may control
+it. So the exception is scoped to exactly that - an **opt-in, authenticated mode** for a household
+that has turned Authentication on, and nothing else. Every household with it off, which is the
+default, keeps the account-free behaviour unchanged: no login is asked for, stored or used. The mode
+is not built yet; what it must present is still to be probed (see there).
 
 It is *not* "never touches the internet" and it is *not* "never calls a cloud service". x2rock calls
 somebody's server in another country for every music-service search — SMAPI is a cloud API — and
@@ -322,7 +332,9 @@ mistaken for an argument on its own.
 - **Also in scope, and required**: UPnP queue navigation (see below). Playing a chosen track from
   the queue is a core requirement, and only UPnP can do it.
 - **Cut from v1**: cloud OAuth (Sonos Control API over `api.ws.sonos.com`). This is the axiom's
-  one hard exclusion rather than a preference about transports: it is the Sonos *login*. Off-LAN
+  one hard exclusion rather than a preference about transports: it is the Sonos *login*. (Amended
+  2026-09-26: a login becomes permissible for a household with Authentication on, as an opt-in mode
+  - see the amendment above. Control still stays on the LAN; the login only proves who is asking.) Off-LAN
   control is also not wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since off-LAN
   control is what would arrive through it, but build no OAuth, no token storage and no `login`
   command for v1. An earlier draft of this bullet also listed *music services* as an account-linked
