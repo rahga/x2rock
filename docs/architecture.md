@@ -8780,9 +8780,8 @@ command layer should diff against too):
   The lock is never held across the `open`; a race opens twice and the loser closes its socket; a
   socket the keepalive gave up on is evicted before it is closed; `Session::close` closes
   everything, because `Connection` has no `Drop`, and `run()` is split so the CLI closes on every
-  return. The daemon keeps the same map by hand (`connection_to`, plus a forwarder per socket) and
-  has not adopted this yet - and it also drops the `Groups` it parses on a topology event, so when
-  it does it needs `refresh_groups` as much as the TUI did.
+  return. The daemon kept the same map by hand until 2026-09-26 and now holds its sockets here as
+  well; see "The daemon on `Pool`" below.
 - **The TUI in-process** (`31d1de6`). `tui::action::Speakers` opens a session on the first write
   and keeps it, re-reads the topology before every write (one `getGroups` on the held socket,
   which is the whole answer to a regroup making the last read wrong), and closes the session on
@@ -8878,7 +8877,29 @@ again under the red footer, and the next `+` reconnected and landed.
 **What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
 returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
 layer prints; and the D-Bus interface, whose phase-1 methods are each an outcome mapped onto
-properties. None of the three is started.
+properties. The first is done (below); the other two are not started.
+
+### The daemon on `Pool` (home, 2026-09-26)
+
+The daemon's `HashMap<IpAddr, Connection>` is gone. `serve` owns the `Session` and ends with
+`Session::close`; `connection_to` is `pool.reach` plus a forwarder on a socket that call opened -
+the returned `bool` - and on nothing else. A republish empties the pool with `close_all` where it
+used to close every entry but the primary by hand: the pool never holds the primary, since `reach`
+answers its address with it directly. Two things come with it. A pooled socket the keepalive has
+given up on is now evicted and reopened rather than handed out dead, the rule the CLI and TUI
+already had. And **`session.groups` is kept current** from every `groups` event that parses, not
+only the ones that change the topology - a rename or a player's new address changes nothing
+`same_topology` compares. No `refresh_groups` is needed here, unlike the TUI: the household
+subscription already delivers the topology. Nothing in the loop reads `session.groups` back yet;
+it is what a D-Bus method asking about the household would read, instead of the connect-time
+snapshot.
+
+Checked live: restarted, five rooms and five sockets on :1443; Kitchen joined into Dining Room's
+group, a republish to four rooms, still five sockets (Kitchen keeps a member socket for its own
+volume); ungrouped, a republish back to five rooms, still five sockets. No socket leaked across
+two republishes, and the republished players answer `PlaybackStatus` over the bus. Not checked
+live: a pooled member socket found dead and reopened - the same `reach` the CLI and TUI use, whose
+eviction was verified under `ss -K` on 2026-09-25.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
