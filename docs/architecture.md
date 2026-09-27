@@ -8771,7 +8771,10 @@ no new socket, then applied the `party off` it had been sent meanwhile. The four
 is fixed (2026-09-26): a group change the coordinator does not answer in time is checked against a
 fresh `getGroups` from the session's own player - everyone added in, everyone removed out, the group
 found by its coordinator since a group's id can move - and reported as done with a `note:` when it
-is there (`household::change_group`); a refusal is not re-read. The `party` text
+is there (`household::change_group`); a refusal is not re-read. The stall itself could not be
+provoked again that night: a party onto the Beam on its TV input showing "No Signal" took 1.4 s
+both ways, twice (the night before it showed "TV Audio [Unavailable]", so a live HDMI/CEC state
+may be part of it). The confirmation branch is exercised by its unit test only. The `party` text
 line therefore still has no live capture (the timeout ate it); its `--json` shape was seen only on
 the already-grouped no-op path. The TUI's `P` from Guest TV, run afterwards, joined all five and
 then broke them up, each within five seconds - the Beam did not stall that time - so its
