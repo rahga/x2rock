@@ -1106,6 +1106,12 @@ pub async fn run_browse(
     let usable = catalogue.usable(&linked, &household);
 
     let Some(query) = service else {
+        // A service known to have nothing to walk is left out of the list, and
+        // only that one: an unasked service stays, since unasked is not no.
+        let usable: Vec<_> = usable
+            .iter()
+            .filter(|s| catalogue.browsable(&s.id) != Some(false))
+            .collect();
         let mut names: Vec<_> = usable.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable_by_key(|n| n.to_lowercase());
         if json {
@@ -1126,8 +1132,25 @@ pub async fn run_browse(
     // simply what the players ask for.
     let at = container.unwrap_or("root");
     let mut refreshed = None;
-    let (items, total) =
-        sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await?;
+    let answer =
+        sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await;
+    // What the first page of `root` came to is remembered, so the listings can
+    // leave out a service with nothing to walk. Only an answer counts - a
+    // refusal, or a root with nothing in it - never a timeout; see
+    // `Catalogue::browsable`.
+    if at == "root" && index == 0 {
+        let learned = match &answer {
+            Ok((items, _)) => Some(!items.is_empty()),
+            Err(e) if sonos::smapi::Refused::of(e).is_some() => Some(false),
+            Err(_) => None,
+        };
+        if let Some(browsable) = learned
+            && catalogue.remember_browsable(&chosen.id, browsable)
+        {
+            catalogue.save()?;
+        }
+    }
+    let (items, total) = answer?;
     // Feeds whatever comes next, below - not just persisted for later. A
     // token that just proved stale must not be handed straight to `play_item`.
     let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
@@ -2439,6 +2462,11 @@ pub async fn accounts(
         // names and skips one it has already seen, so the extra row costs it
         // nothing - but it does require the top level to stay an array, which
         // is why `--content` wraps and the default never does.
+        //
+        // `browsable` reads the catalogue cache, a second local file and still
+        // no network: `null` until the service has been browsed once, then what
+        // its `root` came to. The widget leaves a `false` out of its Services.
+        let catalogue = catalogue::Catalogue::load();
         let rows: Vec<_> = linked
             .all()
             .filter(|(hh, _, _, _)| scope.as_deref().is_none_or(|target| *hh == target))
@@ -2458,6 +2486,7 @@ pub async fn accounts(
                     "household": hh,
                     "account_id": a.account_id,
                     "linked": a.linked,
+                    "browsable": catalogue.browsable(id),
                 })
             })
             .collect();

@@ -77,6 +77,12 @@ pub struct Catalogue {
     /// knowledge - see [`ratings_cached`](Self::ratings_cached).
     #[serde(default)]
     ratings: BTreeMap<String, Vec<smapi::RatingsMatch>>,
+    /// Service id -> whether its `root` has anything to walk, learned the first
+    /// time it is browsed. See [`browsable`](Self::browsable). Added under schema
+    /// 2 without a bump, for the reason `ratings` needed none: a file without the
+    /// key reads as an empty map, which is "never asked" for every service.
+    #[serde(default)]
+    browse: BTreeMap<String, bool>,
 }
 
 fn path() -> Result<PathBuf> {
@@ -135,6 +141,7 @@ impl Catalogue {
         // service id, so they all go when the version moves.
         self.categories.clear();
         self.ratings.clear();
+        self.browse.clear();
         Ok(true)
     }
 
@@ -214,6 +221,31 @@ impl Catalogue {
     /// it from a hit that changed nothing.
     pub fn categories_cached(&self, service_id: &str) -> bool {
         crate::itunes::serves(service_id) || self.categories.contains_key(service_id)
+    }
+
+    /// Whether a service can be walked from `root`: `Some(false)` once it has
+    /// refused `getMetadata` or answered it with nothing, `Some(true)` once it
+    /// answered with something, `None` until it is browsed.
+    ///
+    /// **Only an answer is remembered.** A refusal is the service's policy and
+    /// will be the same tomorrow - Apple's invalid token, Google's project gate -
+    /// and so is Sonos Radio's `xsi:nil` root. A timeout is not an answer, and
+    /// nothing is recorded for one. Apple Music is known without asking: its
+    /// token is refused by every SMAPI call, and only its search goes elsewhere.
+    ///
+    /// Cleared with the categories when the catalogue version moves, so a
+    /// service that changes its mind is asked again.
+    pub fn browsable(&self, service_id: &str) -> Option<bool> {
+        if crate::itunes::serves(service_id) {
+            return Some(false);
+        }
+        self.browse.get(service_id).copied()
+    }
+
+    /// Record what browsing a service's `root` came to. Returns whether that
+    /// changed anything, so the caller can skip writing.
+    pub fn remember_browsable(&mut self, service_id: &str, browsable: bool) -> bool {
+        self.browse.insert(service_id.to_string(), browsable) != Some(browsable)
     }
 
     /// The services `x2rock link` can *reliably* get a credential for, whether
@@ -426,7 +458,33 @@ mod tests {
             ],
             categories: BTreeMap::new(),
             ratings: BTreeMap::new(),
+            browse: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn browsability_is_unknown_until_answered_and_apple_music_is_known() {
+        let mut catalogue = three_tiers();
+        assert_eq!(catalogue.browsable("2"), None, "unasked is not no");
+        assert!(catalogue.remember_browsable("2", false));
+        assert!(
+            !catalogue.remember_browsable("2", false),
+            "no change, no write"
+        );
+        assert_eq!(catalogue.browsable("2"), Some(false));
+        assert!(
+            catalogue.remember_browsable("2", true),
+            "an answer can change"
+        );
+        assert_eq!(catalogue.browsable("2"), Some(true));
+        assert_eq!(catalogue.browsable(crate::itunes::SERVICE_ID), Some(false));
+    }
+
+    #[test]
+    fn a_file_from_before_browsability_reads_as_never_asked() {
+        let old = r#"{"schema":2,"version":"v1","services":[],"categories":{},"ratings":{}}"#;
+        let catalogue: Catalogue = serde_json::from_str(old).unwrap();
+        assert_eq!(catalogue.browsable("174"), None);
     }
 
     const HH: &str = "Sonos_test";

@@ -993,14 +993,17 @@ those two apart when telling a user what linking will do.
   re-running a browser login. An auto-refresh on one network never touches the other's token.
   `x2rock accounts` lists every household it holds, under a header only when there is more than one.
 - **`accounts --json`**: `{service, service_id, account_key, serial, preferred, account_id,
-  nickname, linked, household}` per token this machine holds — **one row per account**, so a service
+  nickname, linked, household, browsable}` per token this machine holds — **one row per account**, so a service
   with two accounts is two rows with the same `service`. `preferred` marks the one in use and
   `account_key` is what `--prefer` and `--account` accept. `account_id` is the household serial when the account was matched, otherwise
   `null` (prose: `no registration from this machine`), and `null` is not an error. `linked` is a
   Unix timestamp. `household` is the household the token was minted against, and it **is** the key
   it is filed under — a token is used on that household's network and not on another's. None of
   this is the household's own account list, which no command can read (see the `accounts --content`
-  note above).
+  note above). `browsable` is `null` until the service has been browsed once, then whether its
+  `root` had anything to walk: `false` after a refusal (Apple Music always, YouTube Music's 403) or
+  an empty root (Sonos Radio), never after a timeout. Bare `browse` leaves the `false` ones out of
+  its list; `browse -s <service>` still tries one when named.
 - **`unlink` is scoped by what you give it, and never revokes anything.** A service alone forgets it
   in *every* household that holds it ("stop using this service" rather than "on this network");
   `--household` narrows that to one; `--all` wipes every stored token; `--all --household <id>`
