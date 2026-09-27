@@ -526,6 +526,12 @@ change it), so a host firewall needs that one inbound rule; and it does not get 
 Music, whose token imports cleanly and still answers 403 — that block is a key Sonos seals inside
 its own apps, not the account.
 
+**Apple Music is searched through Apple's public catalogue.** Its imported token cannot search, but
+the iTunes Search API needs no account and names the same ids the player plays, so `x2rock search
+-s "Apple Music"` finds tracks and albums there and the household's own Apple Music account plays
+them. It needs the import all the same, which is how x2rock knows the household has Apple Music and
+which account plays. Your library and Apple's playlists are out of its reach.
+
 Tokens are kept **per household**, so a laptop that moves between two Sonos systems holds a
 separate account for each and uses the right one wherever it is. A household can also hold two
 accounts for one service; both are kept, `x2rock accounts` marks the one search uses with `*`, and
@@ -552,7 +558,7 @@ cannot delay play, pause or volume.
 
 ### Keeping things you cannot search for
 
-For a service you cannot search — YouTube Music, Apple Music — *replaying* something needs no
+For what you cannot search — YouTube Music, or your Apple Music library — *replaying* something needs no
 credential at all: the id is enough, and the player resolves the account it already holds.
 
 ```sh

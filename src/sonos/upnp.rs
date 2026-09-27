@@ -1783,7 +1783,7 @@ impl Upnp {
     ///
     /// `metadata` is the source item's `r:resMD` verbatim; empty is fine for a
     /// saved queue, which needs no service credential.
-    pub async fn add_to_queue(&self, uri: &str, metadata: &str, next: bool) -> Result<u32> {
+    pub async fn add_to_queue(&self, uri: &str, metadata: &str, next: bool) -> Result<Enqueued> {
         // "Next" is a position, not a flag: EnqueueAsNext on its own still
         // appends (verified), so the position has to be named outright. With
         // nothing playing the current track reads 0, which puts it at the
@@ -1811,10 +1811,7 @@ impl Upnp {
                 ],
             )
             .await?;
-        let doc = Document::parse(&text).context("parsing AddURIToQueue response")?;
-        Ok(text_of(&doc, "NewQueueLength")
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0))
+        Enqueued::parse(&text)
     }
 
     /// How many tracks the queue holds, without fetching them.
@@ -2316,6 +2313,41 @@ fn loudness_in(text: &str) -> Result<bool> {
     Ok(raw.trim() == "1")
 }
 
+/// Where an `AddURIToQueue` put what it was given.
+///
+/// **`first` is where to seek, not `length`.** One track lands at the end, so
+/// the two agree and the length served for years. A container does not: an
+/// album of ten appended to an empty queue answers `FirstTrackNumberEnqueued` 1
+/// and `NewQueueLength` 10, and seeking to the length started the album on its
+/// last track (found 2026-09-26, queueing an Apple Music album).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Enqueued {
+    /// The queue position of the first track added, counting from 1.
+    pub first: u32,
+    pub added: u32,
+    pub length: u32,
+}
+
+impl Enqueued {
+    fn parse(text: &str) -> Result<Self> {
+        let doc = Document::parse(text).context("parsing AddURIToQueue response")?;
+        let number = |tag| text_of(&doc, tag).and_then(|n| n.parse::<u32>().ok());
+        let length = number("NewQueueLength").unwrap_or(0);
+        let added = number("NumTracksAdded").unwrap_or(1);
+        // Derived only when the player leaves the field out, which none here
+        // has been seen to do: whatever was added was appended, so it ends at
+        // the length.
+        let first = number("FirstTrackNumberEnqueued")
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| length.saturating_sub(added).saturating_add(1));
+        Ok(Self {
+            first,
+            added,
+            length,
+        })
+    }
+}
+
 fn text_of<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
     doc.descendants()
         .find(|n| n.tag_name().name() == tag)
@@ -2418,6 +2450,36 @@ pub fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_album_is_sought_from_its_first_track_not_the_queues_end() {
+        let reply = |body: &str| {
+            format!(
+                "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+                 <u:AddURIToQueueResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">{body}\
+                 </u:AddURIToQueueResponse></s:Body></s:Envelope>"
+            )
+        };
+        let album = Enqueued::parse(&reply(
+            "<FirstTrackNumberEnqueued>2</FirstTrackNumberEnqueued>\
+             <NumTracksAdded>10</NumTracksAdded><NewQueueLength>11</NewQueueLength>",
+        ))
+        .unwrap();
+        assert_eq!(
+            album,
+            Enqueued {
+                first: 2,
+                added: 10,
+                length: 11
+            }
+        );
+        // With the position left out, what was added ends at the length.
+        let bare = Enqueued::parse(&reply(
+            "<NumTracksAdded>10</NumTracksAdded><NewQueueLength>11</NewQueueLength>",
+        ))
+        .unwrap();
+        assert_eq!(bare.first, 2);
+    }
 
     #[test]
     fn a_mains_speaker_reports_no_battery_rather_than_an_error() {

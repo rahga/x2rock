@@ -242,6 +242,19 @@ impl Service {
     /// arm exists to keep the match total; a caller that reaches it has
     /// already asked the wrong question.
     pub fn needs_link(&self) -> String {
+        // Apple's own link flow refuses, and its search needs no account at all;
+        // what is missing is the household's record, which is what names the
+        // account a found id plays from.
+        if crate::itunes::serves(&self.id) {
+            return format!(
+                "{0} is searched through Apple's public catalogue, but what it finds \
+                 plays through the household's own {0} account, which this machine \
+                 has not read yet. Add {0} in the Sonos app if the household does not \
+                 have it, then run `{1}` once.",
+                self.name,
+                self.link_command()
+            );
+        }
         match self.auth {
             Auth::Anonymous => format!("{} needs no account.", self.name),
             Auth::DeviceLink => format!(
@@ -260,6 +273,16 @@ impl Service {
         }
     }
 
+    /// The command that gets this machine a record for the service. The
+    /// household import for Apple Music, whose own flow refuses to start.
+    fn link_command(&self) -> String {
+        let name = crate::hint::shell_arg(&self.name);
+        match crate::itunes::serves(&self.id) {
+            true => format!("x2rock link --from-household {name}"),
+            false => format!("x2rock link {name}"),
+        }
+    }
+
     /// The same advice as [`needs_link`](Self::needs_link), machine-actionable:
     /// code `needs_link`, with the link command as its fix for a service that
     /// can be linked (anonymous ones carry none, and should never be asked).
@@ -275,10 +298,7 @@ impl Service {
         );
         let fix = match self.auth {
             Auth::Anonymous => None,
-            _ => Some(format!(
-                "x2rock link {}",
-                crate::hint::shell_arg(&self.name)
-            )),
+            _ => Some(self.link_command()),
         };
         crate::hint::Hint::new(self.needs_link(), crate::hint::Code::NeedsLink, fix)
     }
@@ -435,6 +455,9 @@ async fn presentation_map(service: &Service) -> Result<Option<String>> {
 /// be searched, and says so by returning an empty list rather than by failing -
 /// that is a fact about the service, not an error.
 pub async fn categories(service: &Service) -> Result<Vec<Category>> {
+    if crate::itunes::serves(&service.id) {
+        return Ok(crate::itunes::categories().to_vec());
+    }
     let Some(body) = presentation_map(service).await? else {
         return Ok(Vec::new());
     };
@@ -525,6 +548,12 @@ pub async fn search(
     count: u32,
     refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
+    // The one service whose search is not SMAPI's: Apple refuses every
+    // credential a household holds for it, and its public catalogue names the
+    // same ids. See `itunes`.
+    if crate::itunes::serves(&service.id) {
+        return crate::itunes::search(category, term, index, count).await;
+    }
     let body = call(
         service,
         token,

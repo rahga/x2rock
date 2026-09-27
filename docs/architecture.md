@@ -107,8 +107,8 @@ tokens - a plain status page - now returns nothing. This scrambled announcement 
 left. It is what lets x2rock search Qobuz and Amazon Music - services whose normal sign-in x2rock
 cannot complete on its own - because the working token was never truly out of reach. (Not everything
 it reaches becomes searchable: Apple Music imports too, but the credential the speaker holds for it
-is incomplete, and its search stays locked - see the Apple Music entry below, and the public-catalogue
-route round it that follows the entry.)
+is incomplete, and its SMAPI search stays locked - see the Apple Music entry below. Its catalogue is
+searched through Apple's public API instead; see the entry that follows it.)
 It was sitting on the speaker the whole time, behind a lock that opens with a key the design hands
 you.
 
@@ -139,7 +139,7 @@ local token buys search and browse, and nothing of playback.
 | **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
-| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home |
+| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token. **Catalogue search ✓ through Apple's public iTunes API instead** (tracks, albums; `src/itunes.rs`) | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home |
 | **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
 | **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
@@ -8653,18 +8653,30 @@ Search through Sonos is closed, but the catalogue is not. Apple's public iTunes 
   service matching") without reaching the player: resolving the service needs the household's
   record even though its token is useless for search.
 
-**What it would give.** Apple Music catalogue search as a backend: search iTunes, then enqueue
-through the existing path, with `Naming` supplying the household's serial. That covers "play X".
-It does not cover the person's library or Apple's `pl.…` playlists; neither is in the public API,
+**Built the same day** (`src/itunes.rs`). `smapi::search` hands Apple Music to it, and the catalogue
+answers Apple Music's categories with a fixed `tracks`→`song`, `albums`→`album` rather than its
+presentation map, whose other entries (artists, playlists, the library half) this search cannot
+take. Enqueue is the existing path, with `Naming` supplying the household's serial. The API
+ignores `offset`, so a page is sliced from one answer of up to 200 rows, one more than the page
+needs, which is what tells a caller whether there is more. The storefront is the locale's region,
+else the US. It does not cover the person's library or Apple's `pl.…` playlists; neither is in the public API,
 and the Apple Music API that has them wants a paid developer token. The API also answers per
 storefront (`country=`, US by default), so an id can exist there and be unavailable in the household's
 own country. The first playback-yes, search-no service with a way round the search half. YouTube
 Music has no equivalent: its public Data API is keyed and returns videos, not the music catalogue.
 
-**Three messages this showed wrong.** `play-item`'s refusal says "searchable" when it means "has a
-record"; the `link --from-household` success line promises that search and browse work, which is false
-for Apple Music; and `queue-item` of the album said "queued ... at 11" - the last of its ten tracks -
-when the album began at 2.
+**Three messages this showed wrong, all fixed with it.** `play-item`'s refusal said "searchable" when
+it meant "has a record" (now `find_usable`, which gives a real service's link advice - for Apple Music
+the household import); the `link --from-household` success line promised that search and browse work,
+false for Apple Music; and `queue-item` of the album said "queued ... at 11" - the last of its ten
+tracks - when the album began at 2.
+
+**The third was a bug, not a wording.** `add_to_queue` returned `NewQueueLength`, and `play-item`
+seeks to what it returns: right for one track, which lands at the end, and wrong for a container,
+so every album or playlist `play-item` started played its *last* track first. It now returns
+`FirstTrackNumberEnqueued` and `NumTracksAdded` beside the length; the album starts at its first
+track (verified on Dining Room), and a refusal after enqueue takes the whole added range back out
+instead of one row.
 
 ## Which account an enqueue plays from: `sn=` picks, the cdudn has to agree (home, 2026-09-25)
 

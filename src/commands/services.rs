@@ -927,6 +927,12 @@ async fn link_from_household(
         };
         match held.accounts.len() {
             0 => continue,
+            // Its token imports and refuses every SMAPI call; what the import
+            // buys is the account a found id plays from. See `itunes`.
+            1 if crate::itunes::serves(id) => println!(
+                "Kept the household's {name} account. Its token cannot search or browse; \
+                 search goes through Apple's public catalogue instead: x2rock search -s {quoted}"
+            ),
             1 => println!(
                 "Kept the household's {name} token. Search it with: x2rock search -s {quoted}"
             ),
@@ -950,8 +956,8 @@ async fn link_from_household(
     }
     println!(
         "\nNo household match was needed: playback rides the registration the Sonos app \
-         already made. Search and browse work now; on-demand tracks play for any service \
-         whose account the household still holds."
+         already made, so on-demand tracks play for any service whose account the household \
+         still holds."
     );
     Ok(())
 }
@@ -1114,7 +1120,7 @@ pub async fn run_browse(
         return Ok(());
     };
 
-    let chosen = catalogue::Catalogue::find(&usable, query)?.clone();
+    let chosen = catalogue.find_usable(&usable, query)?.clone();
     let token = linked.token_for(&household, &chosen.id);
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
