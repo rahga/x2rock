@@ -279,8 +279,8 @@ fn volume(volume: f64, muted: bool, fixed: bool) -> Vec<Span<'static>> {
 fn grouping(frame: &mut Frame, app: &App, area: Rect) {
     let rows = app.group_rows();
     let title = app
-        .selected()
-        .map(|room| format!(" Grouping — {} ", room.room))
+        .group_title()
+        .map(|room| format!(" Grouping — {room} "))
         .unwrap_or_else(|| " Grouping ".to_owned());
     let height = (rows.len() as u16 + 2).min(area.height);
     let area = centered(area, 52, height);
