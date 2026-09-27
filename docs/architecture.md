@@ -107,7 +107,8 @@ tokens - a plain status page - now returns nothing. This scrambled announcement 
 left. It is what lets x2rock search Qobuz and Amazon Music - services whose normal sign-in x2rock
 cannot complete on its own - because the working token was never truly out of reach. (Not everything
 it reaches becomes searchable: Apple Music imports too, but the credential the speaker holds for it
-is incomplete, and its search stays locked - see the Apple Music entry below.)
+is incomplete, and its search stays locked - see the Apple Music entry below, and the public-catalogue
+route round it that follows the entry.)
 It was sitting on the speaker the whole time, behind a lock that opens with a key the design hands
 you.
 
@@ -138,7 +139,7 @@ local token buys search and browse, and nothing of playback.
 | **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
-| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token | enqueue ✓ for ids the registration plays; the app plays it fine | 2026-09-24, office |
+| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home |
 | **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
 | **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
 | **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
@@ -8632,6 +8633,38 @@ apparently-first account, which looks like a counterexample to "the first accoun
 `-0-`" recorded above. Its registration is incomplete (the empty key) and its auth was flapping when
 read, so it is a poor case to judge that rule by; the rule stands until a *complete* first-account
 registration contradicts it.
+
+### Apple's public catalogue search names the same ids the player plays (home, 2026-09-26)
+
+Search through Sonos is closed, but the catalogue is not. Apple's public iTunes Search API
+(`itunes.apple.com/search`, `/lookup`: no key, no account, only the term leaves the machine) returns
+`trackId` and `collectionId` numbers, and those are the Sonos item ids with a prefix:
+
+- **Tracks: `song:<trackId>`.** A lookup of 1850810467 returns The xx, "Heart Skipped A Beat" - the
+  office household's own bookmark `song:1850810467`.
+- **A never-seen id plays.** Apple Music was added to the home household in the app and imported with
+  `link --from-household` (its token is as unusable for search here as at the office). Then
+  `play-item --service "Apple Music" song:1299241646`, taken straight from a search for "khruangbin"
+  and never played in this household, played on Dining Room at once, and the player filled in the
+  real artist and album ("August 10 - Khruangbin (Con Todo El Mundo)").
+- **Albums: `album:<collectionId>`.** `queue-item --kind album album:1299241642` expanded into all
+  ten tracks of *Con Todo El Mundo*.
+- **The control run.** Before the import, the same `play-item` stopped inside x2rock ("no searchable
+  service matching") without reaching the player: resolving the service needs the household's
+  record even though its token is useless for search.
+
+**What it would give.** Apple Music catalogue search as a backend: search iTunes, then enqueue
+through the existing path, with `Naming` supplying the household's serial. That covers "play X".
+It does not cover the person's library or Apple's `pl.…` playlists; neither is in the public API,
+and the Apple Music API that has them wants a paid developer token. The API also answers per
+storefront (`country=`, US by default), so an id can exist there and be unavailable in the household's
+own country. The first playback-yes, search-no service with a way round the search half. YouTube
+Music has no equivalent: its public Data API is keyed and returns videos, not the music catalogue.
+
+**Three messages this showed wrong.** `play-item`'s refusal says "searchable" when it means "has a
+record"; the `link --from-household` success line promises that search and browse work, which is false
+for Apple Music; and `queue-item` of the album said "queued ... at 11" - the last of its ten tracks -
+when the album began at 2.
 
 ## Which account an enqueue plays from: `sn=` picks, the cdudn has to agree (home, 2026-09-25)
 
