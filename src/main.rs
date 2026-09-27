@@ -506,6 +506,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
                 scope,
                 watch,
                 session: session_id,
+                headers,
             },
     } = &cli.command
     {
@@ -518,6 +519,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             *scope,
             *watch,
             session_id.as_deref(),
+            headers,
         )
         .await;
     }

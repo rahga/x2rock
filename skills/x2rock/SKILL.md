@@ -1031,7 +1031,10 @@ when the user explicitly asks for raw access, or when no first-class command cov
 
 - `x2rock raw api <namespace> <command> [JSON]` — the Control API over the player's WebSocket.
   `--scope household|group|player|none` (default `household`), plus `--watch <seconds>` to read what
-  a `subscribe` delivers afterwards and `--session <id>` for `playbackSession:1`.
+  a `subscribe` delivers afterwards, `--session <id>` for `playbackSession:1`, and repeatable
+  `--header KEY=VALUE` for a target `--scope` cannot derive (`settings:1` wants a `userId`: the
+  `sonosId` from `entitlements:1 getEntitlements`). A namespace prefix resolves to the first real
+  namespace (`room:1` answers as `roomDetection:1`), so read the echoed `namespace` in the header.
 - `x2rock raw upnp <Service> <Action> [Name=Value ...]` — UPnP/SOAP on port 1400, the older and much
   wider surface: line-in, the physical speaker, soundbar IR, the local music library. Arguments are
   flat `Name=Value` pairs, not JSON, and most actions need `InstanceID=0`. `--scope player|group`
