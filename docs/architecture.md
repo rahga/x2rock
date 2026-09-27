@@ -8901,6 +8901,69 @@ two republishes, and the republished players answer `PlaybackStatus` over the bu
 live: a pooled member socket found dead and reopened - the same `reach` the CLI and TUI use, whose
 eviction was verified under `ss -K` on 2026-09-25.
 
+## The Control API, enumerated; Preferred Service is not on the household (home, 2026-09-26)
+
+### Namespaces resolve by prefix, so they can be listed
+
+The player **canonicalises a namespace by prefix**, not only by alias: `home:1` answers as
+`homeTheater:1`, `room:1` as `roomDetection:1`, `system:1` as `systemReporting:1`, `network:1` as
+`networkTest:1`. A real namespace rejects an unknown *command* (`ERROR_UNSUPPORTED_COMMAND`, with
+the canonical name echoed in the header) and a nonsense one rejects the *namespace*
+(`ERROR_UNSUPPORTED_NAMESPACE`). Walking prefixes `a`..`z` and extending each one that matched, to
+four letters, listed 41:
+
+`alarms` `areas` `audioClip` `authorization` `catalog` `devices` `diagnostics` `effectiveSettings`
+`entitlements` `favorites` `global` `groups` `hardwareStatus` `hdmi` `history` `homeTheater`
+`households` `info` `ircontrol` `localContentLibrary` `management` `musicServiceAccounts`
+`networkTest` `pinewood` `platformInternal` `playback` `positioning` `power` `roomDetection`
+`settings` `sleepTimer` `smartplay` `soundSwap` `svc` `systemReporting` `time` `topology`
+`trueplay` `virtualLineIn` `voice` `zones`
+
+A lower bound: a prefix answers with one namespace only, and four letters did not reach the ones
+that share a long prefix with another (`playbackMetadata`, `playbackSession`, `playbackExtended`,
+`playerVolume`, `groupVolume`, `playlists` are all known and all missing from the walk).
+
+### What answers
+
+Probed with generic verbs (`get`, `getInfo`, `getSettings`, `getStatus`, `list`, `subscribe`, and
+`get<Name>`); a command that exists answers with something other than `ERROR_UNSUPPORTED_COMMAND`,
+often the target it is missing.
+
+| namespace | answers | notes |
+|---|---|---|
+| `history:1` | `getHistory` (household) | **the household's recently played**, 40 items, each `{name, type, playable, explicit, id: {serviceId, accountId, objectId}, metadata.metadataBlob}` - the app's "Recently played" |
+| `devices:1` | `subscribe` | an event with every device: model, display name, hw/api versions, 9 capabilities, 22 `deviceFeatures`, serial |
+| `zones:1` | `subscribe` | bonded setups: stereo pairs and home theater, with `channelMap`, a `disconnected` flag per member and `gainTrimDB` |
+| `areas:1` | `getAreas`, `subscribe` | areas with `playerIds`; one area holding all five here |
+| `entitlements:1` | `getEntitlements`, `subscribe` | an empty list and a `sonosId` - the Sonos account's id |
+| `alarms:1` | `getAlarms`, `subscribe` | the Control API's own alarm list (empty here) |
+| `localContentLibrary:1` | `subscribe` | share list status |
+| `settings:1` | `getSettings` wants a **`userId`** | with the `sonosId` as `userId`: household permissions - `allowAirplay`, `allowLineIn`, `allowDirectControl`, `enableContentAccess` - and nothing about services |
+| `effectiveSettings:1` | `subscribe` wants `playerId`, `locationId`, `userId` | not reached; nothing here knows a `locationId` |
+| `info`, `hdmi`, `hardwareStatus`, `diagnostics`, `trueplay`, `voice` | want a `playerId` | not followed up |
+| `positioning:1` | `ERROR_UNSUPPORTED_NAMESPACE ... has no actor` | declared, not implemented on this firmware |
+
+`history`, `areas` and `entitlements` events carry a `version` only - the same cache-invalidation
+role `musicServiceAccounts:1` has. `raw api --header KEY=VALUE` was added for this: `--scope` cannot
+derive a `userId`.
+
+**Worth building on:** `history:1 getHistory` is a recently played list the widget could show, with
+ids already in the form `play-item` takes; `zones:1` would let `system` show pairs and surrounds
+with their channels; `devices:1` is a richer `system` than UPnP gives.
+
+### Preferred Service lives in the cloud or the app
+
+The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
+results) was flipped Deezer -> TIDAL -> Deezer with a snapshot between each step: every UPnP
+service's initial event from Kitchen (`SystemProperties` `UpdateID`, `ContentDirectory` counters,
+`DeviceProperties`, the topology), the Control API's groups, favorites and playlists, `settings:1`,
+and the household's decrypted account store. The only thing that moved was
+`ThirdPartyMediaServersX`, the encrypted account blob, and decrypted it was identical in both
+states - same records, flags and token lengths - so that was re-encryption, not content. TIDAL's
+`Flags0` reads `0` against the others' `4`, and it stayed `0` with Deezer preferred, so it is not
+the preference either. **Preferred Service is not stored on the household**; it belongs to the
+Sonos account or the app, and x2rock cannot read it. Merged search keeps its own order.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

@@ -1052,6 +1052,11 @@ pub enum RawTransport {
         /// which is not a target `--scope` can derive from the household.
         #[arg(long, value_name = "ID")]
         session: Option<String>,
+        /// Put `KEY=VALUE` in the message header, after --scope has put its own
+        /// key there. Repeatable. For targets --scope cannot derive: `settings:1`
+        /// asks for a `userId`, `effectiveSettings:1` for a `locationId`.
+        #[arg(long = "header", value_name = "KEY=VALUE")]
+        headers: Vec<String>,
     },
     /// UPnP/SOAP on port 1400. The older surface, and much the wider one.
     ///

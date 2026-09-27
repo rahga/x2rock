@@ -137,6 +137,7 @@ pub async fn api(
     scope: RawScope,
     watch: Option<u64>,
     session_id: Option<&str>,
+    headers: &[String],
 ) -> Result<()> {
     let options: serde_json::Value = match options {
         None => json!({}),
@@ -184,6 +185,13 @@ pub async fn api(
             connection = session.player(Some(upnp.ip())).await?;
         }
         RawScope::None => {}
+    }
+    // Last, so a key named here overrides what --scope put there.
+    for pair in headers {
+        let (key, value) = pair
+            .split_once('=')
+            .with_context(|| format!("--header wants KEY=VALUE, not {pair:?}"))?;
+        envelope[key] = json!(value);
     }
 
     // Attached before the command is sent: a subscribe can be answered by an
