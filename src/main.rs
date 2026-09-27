@@ -356,6 +356,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Accounts {
             content,
             ref prefer,
+            here,
             json,
         } => {
             return services::accounts(
@@ -364,6 +365,7 @@ async fn run(cli: Cli) -> Result<()> {
                 room,
                 content,
                 prefer.as_deref(),
+                here,
                 json,
             )
             .await;
