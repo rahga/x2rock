@@ -764,6 +764,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household" | `x2rock households` (and see `data.households`) |
 | `unknown_household` | the `-r` room or the `--household` selector matched no household — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
 | `household_unreachable` | a rescan found **other** households but not this one — it is off, or has moved networks. Not `no_player`: the network is fine | `x2rock households` (and see `data.households` for what did answer) |
+| `authentication_required` | the speakers answered and refused (`ERROR_NO_PERMISSION`): the household's Connection security has **Authentication** on, which forbids the unauthenticated local control x2rock is. Every command fails the same way until it is off | **null** — tell the user: Sonos app > Settings > Privacy & Security > Connection security > Authentication, off. Do not rescan or retry |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry** — except `needs_link`, whose fix opens a login page for

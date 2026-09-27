@@ -65,6 +65,7 @@ codes! {
     HouseholdUnreachable => "household_unreachable",
     LinkRefused => "link_refused",
     NotQueueMaterial => "not_queue_material",
+    AuthenticationRequired => "authentication_required",
     Unknown => "unknown",
 }
 
@@ -223,6 +224,36 @@ pub fn unregistered_network(fingerprint: &str) -> Error {
         None,
     )
     .into()
+}
+
+/// The speakers answered and refused: the household's Connection security has
+/// **Authentication** turned on, and every Control API command from an
+/// unauthenticated client gets `ERROR_NO_PERMISSION` (seen on every player,
+/// 2026-09-26, with the switch on; UPnP on :1400 kept answering). x2rock talks
+/// to the speakers locally without signing in to anything, which is exactly
+/// what that switch forbids - so the only remedy is the switch, and it is named
+/// rather than a rescan that cannot help. No `fix`: it is a setting in the Sonos
+/// app, not a command.
+pub fn authentication_required(inner: &Error) -> Error {
+    Hint::new(
+        format!(
+            "the speakers refused x2rock ({inner:#}): this household's Connection security \
+             has Authentication turned on, and x2rock controls the speakers locally without \
+             signing in. Turn it off in the Sonos app: Settings > Privacy & Security > \
+             Connection security > Authentication. \
+             https://support.sonos.com/en-us/article/adjust-connection-security-settings"
+        ),
+        Code::AuthenticationRequired,
+        None,
+    )
+    .into()
+}
+
+/// Whether a speaker answered with the refusal [`authentication_required`]
+/// explains - as against not answering, or answering something else.
+pub fn is_permission_refusal(error: &Error) -> bool {
+    crate::sonos::local::ApiError::of(error).and_then(|e| e.code.as_deref())
+        == Some("ERROR_NO_PERMISSION")
 }
 
 /// A rescan found devices on the Sonos port, but none would complete a session:

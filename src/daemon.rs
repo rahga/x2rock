@@ -187,6 +187,11 @@ fn connect_failure_line(code: crate::hint::Code, e: &anyhow::Error) -> String {
         // simply not here. Retrying is the correct behaviour, so this only has
         // to say what is happening.
         crate::hint::Code::HouseholdUnreachable => format!("{e:#} -- retrying until it comes back"),
+        // The speakers are right there and refusing; the switch is the remedy,
+        // and once it is off the next retry connects on its own.
+        crate::hint::Code::AuthenticationRequired => {
+            format!("{e:#} -- retrying, and it connects once that is off")
+        }
         _ => format!("no player: {e:#}"),
     }
 }
