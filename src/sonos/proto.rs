@@ -683,6 +683,74 @@ pub struct Named {
     pub name: Option<String>,
 }
 
+/// A `zones:1` event: the household's bonded setups - stereo pairs and home
+/// theatre - each with its members. It arrives in two kinds, one carrying each
+/// member's `state` and one its `settings`; a member's other half is absent.
+#[derive(Debug, Deserialize)]
+pub struct Zones {
+    #[serde(default)]
+    pub zones: Vec<Zone>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Zone {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<ZoneMember>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoneMember {
+    /// The player's `RINCON_…` id, the topology's uuid.
+    pub id: String,
+    #[serde(default)]
+    pub channel_map: Vec<String>,
+    pub state: Option<ZoneMemberState>,
+    pub settings: Option<ZoneMemberSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZoneMemberState {
+    pub disconnected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZoneMemberSettings {
+    #[serde(rename = "gainTrimDB")]
+    pub gain_trim_db: Option<f64>,
+}
+
+/// What `zones:1` says about one bonded player, both halves merged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Bond {
+    pub zone: String,
+    pub channels: Vec<String>,
+    pub disconnected: Option<bool>,
+    pub gain_trim_db: Option<f64>,
+}
+
+impl Bond {
+    /// Fold one event's members into the bonds already read, by player id.
+    pub fn merge(bonds: &mut std::collections::BTreeMap<String, Bond>, event: Zones) {
+        for zone in event.zones {
+            for member in zone.members {
+                let bond = bonds.entry(member.id).or_default();
+                bond.zone.clone_from(&zone.name);
+                if !member.channel_map.is_empty() {
+                    bond.channels = member.channel_map;
+                }
+                if let Some(state) = member.state {
+                    bond.disconnected = Some(state.disconnected);
+                }
+                if let Some(settings) = member.settings {
+                    bond.gain_trim_db = settings.gain_trim_db.or(bond.gain_trim_db);
+                }
+            }
+        }
+    }
+}
+
 /// `history:1 getHistory`: what the household has played lately, newest first -
 /// the Sonos app's "Recently played". Household-scoped, and forty items here.
 #[derive(Debug, Deserialize)]
@@ -841,6 +909,41 @@ pub struct PlayerSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `zones:1` sends each member's state and its settings in separate events;
+    /// the bond is both halves, and a half that is absent changes nothing.
+    #[test]
+    fn a_bond_is_both_zones_events_merged() {
+        let state: Zones = serde_json::from_value(serde_json::json!({"zones": [{
+        "name": "Living Room", "zoneId": "z",
+        "members": [
+            {"id": "RINCON_SUB", "channelMap": ["SW"], "state": {"disconnected": true}},
+            {"id": "RINCON_BAR", "channelMap": ["LF", "RF"], "state": {"disconnected": false}}
+        ]}]}))
+        .unwrap();
+        let settings: Zones = serde_json::from_value(serde_json::json!({"zones": [{
+            "name": "Living Room", "zoneId": "z", "primaryId": "RINCON_BAR",
+            "members": [{"id": "RINCON_SUB", "channelMap": ["SW"],
+                         "settings": {"gainTrimDB": -3.5}}]}]}))
+        .unwrap();
+        let mut bonds = std::collections::BTreeMap::new();
+        Bond::merge(&mut bonds, state);
+        Bond::merge(&mut bonds, settings);
+        assert_eq!(
+            bonds["RINCON_SUB"],
+            Bond {
+                zone: "Living Room".into(),
+                channels: vec!["SW".into()],
+                disconnected: Some(true),
+                gain_trim_db: Some(-3.5),
+            }
+        );
+        assert_eq!(bonds["RINCON_BAR"].disconnected, Some(false));
+        assert_eq!(
+            bonds["RINCON_BAR"].gain_trim_db, None,
+            "no settings sent for it"
+        );
+    }
 
     #[test]
     fn near_matches_catches_a_typo_and_ignores_the_unrelated() {

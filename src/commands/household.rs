@@ -13,7 +13,7 @@ use serde_json::json;
 use super::Report;
 use crate::session::{self, Session};
 use crate::sonos::local::Unreachable;
-use crate::sonos::proto::{Group, Groups, Player};
+use crate::sonos::proto::{Bond, Group, Groups, Player};
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
 use crate::{discover, netid};
@@ -167,9 +167,11 @@ fn masked_uuid(uuid: &str) -> String {
 /// The household by player, grouped under the room each one belongs to.
 fn print_system(
     rows: &[(&upnp::SystemPlayer, Result<upnp::DeviceInfo>)],
+    bonds: &std::collections::BTreeMap<String, Bond>,
     json: bool,
     redact: bool,
 ) {
+    let missing = missing_bonds(rows, bonds);
     // The one policy `--redact` enforces, written once. Every identifier goes
     // through here, so a new field cannot forget the flag - which is exactly
     // how the raw uuid once slipped into output the flag promised was safe.
@@ -208,6 +210,10 @@ fn print_system(
                     // "unknown" here and is still legible there.
                     "connection_type": player.connection_type,
                     "eth_link": player.eth_link,
+                    // From `zones:1`, for a bonded player only; `null` when it
+                    // is not bonded or the household did not say.
+                    "disconnected": bonds.get(&player.uuid).and_then(|b| b.disconnected),
+                    "gain_trim_db": bonds.get(&player.uuid).and_then(|b| b.gain_trim_db),
                 });
                 match found {
                     Ok(info) => {
@@ -228,6 +234,19 @@ fn print_system(
                 entry
             })
             .collect();
+        let mut items = items;
+        // A bonded speaker the topology has lost, said rather than left out.
+        items.extend(missing.iter().map(|(uuid, bond)| {
+            json!({
+                "room": bond.zone,
+                "uuid": show_uuid(uuid),
+                "channels": bond.channels,
+                "bonded": true,
+                "disconnected": true,
+                "gain_trim_db": bond.gain_trim_db,
+                "error": "disconnected, and absent from the topology",
+            })
+        }));
         println!("{}", serde_json::to_string(&items).expect("serializable"));
         return;
     }
@@ -251,7 +270,7 @@ fn print_system(
             Ok(info) => {
                 let addr = show_ip(player.ip).unwrap_or_else(|| "no address".to_owned());
                 println!(
-                    "  {:<22} {:<5} {:<9} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}",
+                    "  {:<22} {:<5} {:<9} {:<8} build {:<10} hw {:<16} {:<5} {:<15} {}{}",
                     info.model_name,
                     label,
                     player.connection(),
@@ -261,10 +280,23 @@ fn print_system(
                     info.model_number,
                     addr,
                     show(&info.serial),
+                    bond_note(bonds.get(&player.uuid)),
                 );
             }
-            Err(e) => println!("  {:<22} {label:<5} unreachable ({e:#})", "?"),
+            Err(e) => println!(
+                "  {:<22} {label:<5} unreachable ({e:#}){}",
+                "?",
+                bond_note(bonds.get(&player.uuid))
+            ),
         }
+    }
+    for (uuid, bond) in &missing {
+        println!(
+            "  {:<22} ({})  disconnected - {} is bonded to it, and the topology has lost it",
+            show_uuid(uuid),
+            bond.channels.join(","),
+            bond.zone
+        );
     }
 }
 
@@ -471,15 +503,23 @@ pub async fn system(session: &Session, json: bool, redact: bool) -> Result<()> {
     // sequentially each unreachable player would stack its whole 8s timeout
     // onto a read-only command - three dark satellites made it half a
     // minute. Together they cost one timeout at worst.
-    let mut rows: Vec<_> =
+    //
+    // The bonds ride alongside: `zones:1` says whether each bonded speaker is
+    // connected and what its gain trim is, which the topology does not. Best
+    // effort - a household that will not answer it gets the listing it always
+    // got, with nothing claimed either way.
+    let household = session.connection.household_id().await?;
+    let (mut rows, bonds) = tokio::join!(
         futures_util::future::join_all(players.iter().map(|player| async move {
             let found = match player.ip {
                 Some(ip) => Upnp::new(ip).device_info().await,
                 None => Err(anyhow!("no address to reach it on")),
             };
             (player, found)
-        }))
-        .await;
+        })),
+        session.connection.zone_bonds(&household),
+    );
+    let bonds = bonds.unwrap_or_default();
     // By room, and within a room the primary before its satellites, which is
     // the order the apps print and the order the bonding is legible in.
     rows.sort_by(|(a, _), (b, _)| {
@@ -489,8 +529,46 @@ pub async fn system(session: &Session, json: bool, redact: bool) -> Result<()> {
             .then(a.invisible.cmp(&b.invisible))
             .then(a.role().unwrap_or("").cmp(b.role().unwrap_or("")))
     });
-    print_system(&rows, json, redact);
+    print_system(&rows, &bonds, json, redact);
     Ok(())
+}
+
+/// The bonded players `zones:1` reports disconnected that the topology no
+/// longer lists at all - a surround with its power cable out drops out of
+/// `ZoneGroupState`, and a listing built only from that would say nothing about
+/// it. `(uuid, bond)`, in room order.
+fn missing_bonds<'a>(
+    rows: &[(&upnp::SystemPlayer, Result<upnp::DeviceInfo>)],
+    bonds: &'a std::collections::BTreeMap<String, Bond>,
+) -> Vec<(&'a str, &'a Bond)> {
+    let mut missing: Vec<_> = bonds
+        .iter()
+        .filter(|(uuid, bond)| {
+            bond.disconnected == Some(true) && !rows.iter().any(|(p, _)| &p.uuid == *uuid)
+        })
+        .map(|(uuid, bond)| (uuid.as_str(), bond))
+        .collect();
+    missing.sort_by(|a, b| a.1.zone.cmp(&b.1.zone));
+    missing
+}
+
+/// The bond's note for the end of a text row: `disconnected`, and a gain trim
+/// that is not zero. Empty for a speaker with nothing to say.
+fn bond_note(bond: Option<&Bond>) -> String {
+    let Some(bond) = bond else {
+        return String::new();
+    };
+    let mut notes = Vec::new();
+    if bond.disconnected == Some(true) {
+        notes.push("disconnected".to_owned());
+    }
+    if let Some(trim) = bond.gain_trim_db.filter(|t| *t != 0.0) {
+        notes.push(format!("trim {trim:+.1} dB"));
+    }
+    match notes.is_empty() {
+        true => String::new(),
+        false => format!("  [{}]", notes.join(", ")),
+    }
 }
 
 /// `x2rock battery`: what the household's portables say about their packs.
@@ -793,6 +871,62 @@ pub async fn ungroup(session: &Session, room: &str) -> Result<GroupOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bond_says_something_only_when_there_is_something_to_say() {
+        let bond = |disconnected, gain_trim_db| Bond {
+            disconnected,
+            gain_trim_db,
+            ..Bond::default()
+        };
+        assert_eq!(bond_note(None), "");
+        assert_eq!(bond_note(Some(&bond(Some(false), Some(0.0)))), "");
+        assert_eq!(bond_note(Some(&bond(Some(true), None))), "  [disconnected]");
+        assert_eq!(
+            bond_note(Some(&bond(Some(true), Some(-3.5)))),
+            "  [disconnected, trim -3.5 dB]"
+        );
+        assert_eq!(
+            bond_note(Some(&bond(Some(false), Some(2.0)))),
+            "  [trim +2.0 dB]"
+        );
+    }
+
+    /// A surround whose power is out can drop out of the topology entirely, and
+    /// `zones:1` is then the only thing that still knows it is missing.
+    #[test]
+    fn a_disconnected_bond_the_topology_has_lost_is_still_listed() {
+        let present = upnp::SystemPlayer {
+            uuid: "RINCON_BAR".into(),
+            room: "Living Room".into(),
+            ip: None,
+            channels: vec!["LF".into(), "RF".into()],
+            invisible: false,
+            satellite: false,
+            software_version: String::new(),
+            eth_link: false,
+            connection_type: None,
+        };
+        let rows = vec![(&present, Err(anyhow!("unused")))];
+        let mut bonds = std::collections::BTreeMap::new();
+        let bond = |disconnected| Bond {
+            zone: "Living Room".into(),
+            disconnected: Some(disconnected),
+            ..Bond::default()
+        };
+        bonds.insert("RINCON_BAR".into(), bond(true));
+        bonds.insert("RINCON_LS".into(), bond(true));
+        bonds.insert("RINCON_RS".into(), bond(false));
+        let missing: Vec<_> = missing_bonds(&rows, &bonds)
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect();
+        assert_eq!(
+            missing,
+            ["RINCON_LS"],
+            "listed rows are marked in place; connected ones are not missing"
+        );
+    }
 
     fn outcome(group: &str, members: &[&str]) -> GroupOutcome {
         GroupOutcome {
