@@ -96,6 +96,14 @@ impl Speakers {
         Ok((generation, session))
     }
 
+    /// Whether a session is held - false while the first connect, or the one
+    /// after a severed socket, is still under way. What the write timeout asks
+    /// to word itself: a key queued behind a connect that never finished was
+    /// not refused by the speakers, it never reached them.
+    pub async fn connected(&self) -> bool {
+        self.held.lock().await.session.is_some()
+    }
+
     async fn current(&self) -> Option<(u64, Session)> {
         let held = self.held.lock().await;
         held.session

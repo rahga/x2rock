@@ -310,13 +310,23 @@ fn dispatch(
         let outcome =
             match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &speakers, intent)).await {
                 Ok(outcome) => outcome,
-                Err(_) => Err(anyhow::anyhow!(
-                    "gave up after {}s; the speakers did not answer",
-                    WRITE_TIMEOUT.as_secs()
-                )),
+                Err(_) => Err(anyhow::anyhow!(gave_up(speakers.connected().await))),
             };
         let _ = finished.send(outcome);
     });
+}
+
+/// What a write given up on says. The wait covers the connect as well as the
+/// command, and a key pressed while the connect is still going waits on it -
+/// so "the speakers did not answer" was said of keys that never reached a
+/// speaker at all. Whether a session is held by the time the wait runs out
+/// tells the two apart.
+fn gave_up(connected: bool) -> String {
+    let secs = WRITE_TIMEOUT.as_secs();
+    match connected {
+        true => format!("gave up after {secs}s; the speakers did not answer"),
+        false => format!("gave up after {secs}s; could not connect to the speakers"),
+    }
 }
 
 /// Start one intent's work off the event loop and count it, so the "working"
@@ -542,6 +552,7 @@ impl Status {
 }
 
 /// A row in the grouping overlay.
+#[derive(Clone, Debug, PartialEq)]
 pub enum GroupRow {
     /// A room already playing with the selected group, and its own volume
     /// beneath the group mix.
@@ -584,6 +595,13 @@ pub struct App {
     /// room is back or a key picks a row: a `+` in that window must not go to
     /// whatever landed under the index.
     unresolved: bool,
+    /// What the grouping overlay last showed, and for whom - drawn again while
+    /// the selection is unresolved. That window is the republish the overlay's
+    /// own join or leave set off, and with nothing selected the overlay had no
+    /// rows to draw: an empty box for the ~150 ms until the room came back.
+    /// Taken on each snapshot that finds the selection resolved and the overlay
+    /// open; read only while [`unresolved`](Self::unresolved).
+    shown_group: Option<(String, Vec<GroupRow>)>,
 }
 
 impl App {
@@ -598,6 +616,7 @@ impl App {
             emptied: None,
             following,
             unresolved: false,
+            shown_group: None,
         }
     }
 
@@ -672,6 +691,14 @@ impl App {
         } else if self.emptied.take().is_some() {
             self.status.take_if(|status| status.kind == Kind::Busy);
         }
+        // What the overlay shows now, before this snapshot can take it away.
+        // Only from a resolved selection: a second partial snapshot in a row
+        // keeps what the last resolved one showed.
+        if matches!(self.overlay, Overlay::Group { .. })
+            && let Some(room) = self.selected()
+        {
+            self.shown_group = Some((room.room.clone(), self.group_rows()));
+        }
         self.rooms = rooms;
         match self.following.as_deref().and_then(|room| self.locate(room)) {
             Some(at) => {
@@ -734,7 +761,10 @@ impl App {
     /// called the wrong room by that name whenever it was not.
     pub fn group_rows(&self) -> Vec<GroupRow> {
         let Some(selected) = self.selected() else {
-            return Vec::new();
+            return self
+                .held_group()
+                .map(|(_, rows)| rows.to_vec())
+                .unwrap_or_default();
         };
         let member = |room: &String| {
             let at = selected
@@ -781,6 +811,23 @@ impl App {
 
     /// How many rows [`Self::group_rows`] would have, without building them:
     /// every member of the selected group, then every room outside it.
+    /// What the overlay last showed, while the selection is unresolved - see
+    /// [`App::shown_group`]. `None` once the room is back, and whenever the
+    /// selection is simply empty rather than waiting on a republish.
+    fn held_group(&self) -> Option<(&str, &[GroupRow])> {
+        self.unresolved
+            .then_some(self.shown_group.as_ref())
+            .flatten()
+            .map(|(room, rows)| (room.as_str(), rows.as_slice()))
+    }
+
+    /// Whose group the overlay is showing, for its title.
+    pub fn group_title(&self) -> Option<&str> {
+        self.selected()
+            .map(|room| room.room.as_str())
+            .or_else(|| self.held_group().map(|(room, _)| room))
+    }
+
     fn group_row_count(&self) -> usize {
         let Some(selected) = self.selected() else {
             return 0;
@@ -1717,6 +1764,35 @@ mod tests {
             "Esc closes it, not the TUI"
         );
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn a_write_that_never_connected_is_not_blamed_on_the_speakers() {
+        assert!(gave_up(true).ends_with("the speakers did not answer"));
+        assert!(gave_up(false).ends_with("could not connect to the speakers"));
+    }
+
+    /// Through that same partial republish the overlay keeps drawing what it
+    /// showed, rather than an empty box, and lets go of it once the room is
+    /// back.
+    #[test]
+    fn the_overlay_keeps_its_rows_while_the_republish_is_partial() {
+        let mut app = App::new(vec![room("Bedroom"), room("Kitchen"), room("Office")]);
+        key(&mut app, KeyCode::Down);
+        press(&mut app, 'g');
+        let before = app.group_rows();
+        assert!(!before.is_empty());
+        app.apply(app.rooms().to_vec());
+
+        app.apply(vec![room("Bedroom")]);
+        assert_eq!(app.group_rows(), before, "the rows it showed");
+        assert_eq!(app.group_title(), Some("Kitchen"));
+        app.apply(vec![room("Bedroom")]);
+        assert_eq!(app.group_rows(), before, "and again, on a second partial");
+
+        app.apply(vec![room("Bedroom"), room("Kitchen")]);
+        assert_eq!(app.group_title(), Some("Kitchen"));
+        assert_ne!(app.group_rows(), before, "the live rows once it is back");
     }
 
     /// The overlay is a view of a group that has just changed shape, so its
