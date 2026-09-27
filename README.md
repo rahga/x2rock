@@ -51,10 +51,12 @@ Sonos speakers expose the same JSON Control API on the LAN that Sonos's cloud ex
 over a WebSocket on port 1443, with no OAuth and no internet round-trip. It is the transport the
 official Sonos mobile app has used since 2024. x2rock is built on it directly:
 
-- **No Sonos account, ever.** That is the line, and it is narrower than "no cloud": searching a
-  music service talks to that service, and `x2rock stations` talks to a radio directory, because
-  neither wants a Sonos login. What x2rock will not do is depend on signing in to Sonos — a speaker
-  on the LAN answers to whoever is on the LAN.
+- **No Sonos account — unless your household has Authentication on.** That is the line, and it is
+  narrower than "no cloud": searching a music service talks to that service, and `x2rock stations`
+  talks to a radio directory, because neither wants a Sonos login. What x2rock will not do is
+  depend on signing in to Sonos — a speaker on the LAN answers to whoever is on the LAN. The one
+  exception is a household that has switched Authentication on, where the speakers answer only to
+  a signed-in client; see [Households with Authentication on](#households-with-authentication-on).
 - **Push events, not polling.** The LAN API supports real subscriptions; the daemon never polls.
 - **Outbound connections only**, which matters on a Linux box with a default-deny firewall and on
   a locked-down office network. That is also why discovery does not use SSDP or mDNS, whose
@@ -672,6 +674,34 @@ loginctl enable-linger $USER      # the line that gets missed; sudo it if polkit
 ```
 
 Then `x2rock tui` over ssh is the every-room view and `x2rock status --json` the same for scripts.
+
+### Households with Authentication on
+
+The Sonos app's **Settings > Privacy & Security > Connection security** has an **Authentication**
+switch, off by default. Switched on, the speakers refuse every command from a client that cannot say
+who it is, and x2rock stops with `authentication_required`, naming the switch. Either turn it back
+off, or sign x2rock in to your Sonos account:
+
+1. At [developer.sonos.com](https://developer.sonos.com), create a **Control Integration** and a
+   key, with the redirect URI `https://rahga.github.io/x2rock/callback.html`. x2rock ships no
+   credentials of its own: a client secret cannot stay secret inside an open-source binary, so the
+   integration is yours.
+2. Save its key and secret where only you can read them:
+
+   ```sh
+   install -d -m 700 ~/.config/x2rock
+   umask 077
+   printf '{"key":"%s","secret":"%s","redirect_uri":"https://rahga.github.io/x2rock/callback.html"}\n' \
+     'YOUR_KEY' 'YOUR_SECRET' > ~/.config/x2rock/sonos-integration.json
+   ```
+3. `x2rock login` opens the Sonos sign-in. Allow access, and the page it lands on shows an address
+   to paste back into the terminal. The page sends that address nowhere.
+
+That is all: every command, and the daemon, then present the sign-in to the speakers — on the LAN,
+as before; the sign-in only proves who is asking — and x2rock refreshes it itself, once a day, which
+is the one call to Sonos's cloud the daemon ever makes. `x2rock logout` forgets it on this machine;
+revoke it for good in your Sonos account. A household with Authentication off never needs any of
+this, and x2rock never asks.
 
 ### More than one Sonos household
 

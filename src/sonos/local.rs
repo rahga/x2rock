@@ -307,6 +307,13 @@ impl Connection {
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         command["cmdId"] = json!(id.to_string());
+        // Signed in, for a household with Authentication on: the token rides in
+        // each command's own header - the handshake's `Authorization` is ignored
+        // - as `Bearer <token>`; a bare token is refused. Nobody signed in, no
+        // field, which is every household with Authentication off.
+        if let Some(bearer) = super::login::bearer().await {
+            command["authorization"] = json!(format!("Bearer {bearer}"));
+        }
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
 

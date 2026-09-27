@@ -231,22 +231,27 @@ pub fn unregistered_network(fingerprint: &str) -> Error {
 /// unauthenticated client gets `ERROR_NO_PERMISSION` (seen on every player,
 /// 2026-09-26, with the switch on; UPnP on :1400 kept answering). x2rock talks
 /// to the speakers locally without signing in to anything, which is exactly
-/// what that switch forbids - so the only remedy is the switch, and it is named
-/// rather than a rescan that cannot help. No `fix`: it is a setting in the Sonos
-/// app, not a command.
+/// what that switch forbids - so there are two remedies, and both are named
+/// rather than a rescan that cannot help: the switch, or `x2rock login`, the
+/// one place x2rock will use a Sonos account (the amended axiom). Signed in and
+/// still refused means the sign-in itself is no good any more. No `fix`: one
+/// remedy is a setting in the Sonos app, the other a browser sign-in a person
+/// has to finish.
 pub fn authentication_required(inner: &Error) -> Error {
-    Hint::new(
-        format!(
+    let message = match crate::sonos::login::signed_in() {
+        true => format!(
+            "the speakers refused x2rock's Sonos sign-in ({inner:#}): it has been revoked or \
+             has lapsed. Sign in again with `x2rock login`."
+        ),
+        false => format!(
             "the speakers refused x2rock ({inner:#}): this household's Connection security \
-             has Authentication turned on, and x2rock controls the speakers locally without \
-             signing in. Turn it off in the Sonos app: Settings > Privacy & Security > \
-             Connection security > Authentication. \
+             has Authentication turned on. Either turn it off in the Sonos app (Settings > \
+             Privacy & Security > Connection security > Authentication), or sign x2rock in \
+             with `x2rock login`, which needs a Sonos integration of your own. \
              https://support.sonos.com/en-us/article/adjust-connection-security-settings"
         ),
-        Code::AuthenticationRequired,
-        None,
-    )
-    .into()
+    };
+    Hint::new(message, Code::AuthenticationRequired, None).into()
 }
 
 /// Whether a speaker answered with the refusal [`authentication_required`]

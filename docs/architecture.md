@@ -9092,6 +9092,28 @@ developer integration (a client id and secret registered at developer.sonos.com)
 kept and refreshed, and presented as `Authorization: Bearer` on the local REST API - with the
 WebSocket's form still to be found. Untested with a real token: nothing here holds one.
 
+**Built and verified the same day, with a real token** (Authentication on, `GUEST_TOKEN` in
+discovery). An integration registered at developer.sonos.com, the OAuth code flow through
+`api.sonos.com/login/v3/oauth` with the redirect caught by a static page
+(`rahga.github.io/x2rock/callback.html`, which shows the address and sends it nowhere), and the
+token exchanged at `/oauth/access` with the integration's Basic credentials: `playback-control-all`,
+24 hours, a refresh token. Against the speakers:
+
+- **REST**: `Authorization: Bearer <token>` -> **200**, all five groups - with x2rock's sample API
+  key or the integration's own, alike.
+- **WebSocket**: the token is **not** read from the handshake's `Authorization`; it goes in **each
+  command's header as `"authorization": "Bearer <token>"`** -> `ok: true`. A bare token there is
+  `ERROR_NOT_AUTHORIZED`.
+
+So `Connection::command` adds that one field when a sign-in is held, and nothing else changed:
+`status`, `vol` (read and write), `recent`, `system`, and the daemon's whole publish all worked with
+Authentication on. `src/sonos/login.rs` holds the rest - `x2rock login` (the link, the paste, a
+`state` check), the token at mode 600 in the state directory, and a refresh ten minutes before
+expiry, cached per process. The daemon's refresh is a call to Sonos's cloud from inside it, the one
+exception to "talking to a service never enters the daemon", and for the same reason as the axiom's:
+a daemon that cannot refresh loses the household a day after sign-in. Not signed in, nothing is
+sent and nothing read but a missing file, once.
+
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are
 settings, now visible, with names that read like switches Sonos could default off. A check that
