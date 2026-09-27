@@ -868,9 +868,17 @@ room (code `unknown`); `next`/`prev` advance each call.
 services plus whatever has been linked here with `x2rock link`. It is not the household's list of
 services**, and a service the household uses in the Sonos app is not searchable from here until it
 is linked (search fails with `needs_link`). Many can be linked; YouTube Music cannot (see "Linking a
-music service"). Whether or not a service is linked, three routes reach what the household plays:
+music service"). Whether or not a service is linked, four routes reach what the household plays:
 
 - **`favorites`** — what the household saved in the Sonos app; `favorite "<name-or-id>"` plays one.
+- **`recent`** — what the household played lately, newest first, from any controller (the Sonos
+  app's "Recently played"); `replay "<name-or-id>" -r <room>` plays one again, replacing what the
+  room plays. The answer to "put that thing from yesterday back on", including YouTube Music and
+  Apple Music, which cannot be searched. `recent --json` is a bare array in the favorites shape,
+  `[{id, name, type, service, service_id, description, art_url, playable}]`; `id` is what `replay`
+  takes, and two items can share a name (pass the id then). `playable: false` is an item from a
+  service this machine holds no account for — do not offer it. An item played from an account the
+  household has since replaced plays from the current one.
 - **`keep`** — snapshots the **currently-playing track** (or `--container` for its album/playlist/
   station) into a *local* list, so it can be replayed later without a favorite. It is x2rock's own
   record, not a Sonos favorite.

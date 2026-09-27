@@ -683,6 +683,50 @@ pub struct Named {
     pub name: Option<String>,
 }
 
+/// `history:1 getHistory`: what the household has played lately, newest first -
+/// the Sonos app's "Recently played". Household-scoped, and forty items here.
+#[derive(Debug, Deserialize)]
+pub struct History {
+    #[serde(default)]
+    pub resources: Vec<HistoryItem>,
+}
+
+/// One thing played: an album, a playlist, a station or a program, rarely a
+/// track. Named by the triple `playback:1 loadContent` takes back, so an item
+/// can be played again without knowing anything about its service.
+#[derive(Debug, Deserialize)]
+pub struct HistoryItem {
+    pub name: String,
+    /// `album`, `playlist`, `stream`, `program`, `container`, `track`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: ContentId,
+    #[serde(default)]
+    pub images: Vec<ImageUrl>,
+}
+
+impl HistoryItem {
+    pub fn art_url(&self) -> Option<&str> {
+        self.images.first().map(|i| i.url.as_str())
+    }
+}
+
+/// A `universalMusicObjectId`: which service, which of the household's accounts
+/// on it (`sn_<serial>`), and the service's own id. The account is the one the
+/// item was played *from*, which can be one the household no longer holds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentId {
+    pub service_id: Option<String>,
+    pub account_id: Option<String>,
+    pub object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
 /// `groups:1 modifyGroupMembers`, which answers with the group as it ended up.
 #[derive(Debug, Deserialize)]
 pub struct GroupInfo {

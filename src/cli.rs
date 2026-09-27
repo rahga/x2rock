@@ -416,6 +416,21 @@ pub enum Command {
     /// Play a favorite, by name or id. One way to start a room that has
     /// nothing queued, which `play` cannot do.
     Favorite { query: String },
+    /// What the household played lately, newest first - the Sonos app's
+    /// "Recently played", from whichever controller played it.
+    ///
+    /// Items from a service this machine holds no account for are marked; the
+    /// rest play again with `x2rock replay`.
+    Recent {
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Play something from `x2rock recent` again, by name or by the id
+    /// `recent --json` gives. Replaces what the room is playing, like a
+    /// favorite, and plays it from the account the household uses for that
+    /// service now, whichever one it was first played from.
+    Replay { query: String },
     /// Search music services. A term with no `--service` asks every service
     /// that can answer, at once, and merges the results; `--service` asks one.
     /// Neither, and it lists what can be searched.
@@ -1296,6 +1311,7 @@ impl Command {
             | Command::Buttons { json, .. }
             | Command::Eq { json, .. }
             | Command::Favorites { json, .. }
+            | Command::Recent { json, .. }
             | Command::Search { json, .. }
             | Command::Browse { json, .. }
             | Command::Stations { json, .. }
