@@ -602,7 +602,8 @@ pub async fn metadata(
 /// something to descend into, `mediaMetadata` for something to play, and the
 /// services mix them freely in either call.
 fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
-    let doc = Document::parse(body).with_context(|| format!("parsing {what} response"))?;
+    let body = declare_xsi(body);
+    let doc = Document::parse(&body).with_context(|| format!("parsing {what} response"))?;
     let total = element_text(&doc, "total")
         .and_then(|t| t.parse().ok())
         .unwrap_or(0);
@@ -871,6 +872,41 @@ pub async fn rate_item(
 
 /// One element's text, by tag - the lookup every reply parser in this file
 /// does. Written out longhand six times before it had a name.
+/// A reply that uses the `xsi:` prefix without declaring it, made parseable.
+///
+/// Sonos Radio's `getMetadata` does exactly that - `xsi:type` on an element,
+/// and no `xmlns:xsi` anywhere - and a strict parser is right to refuse an
+/// unbound prefix: "an unknown namespace prefix 'xsi' at 1:230", which read as
+/// the service being unbrowsable when the answer had arrived intact. The prefix
+/// has only ever meant one namespace, so it is declared on the root element and
+/// nothing else changes. A reply that declares it, or never uses it, is left
+/// exactly as it came.
+fn declare_xsi(body: &str) -> std::borrow::Cow<'_, str> {
+    const DECLARATION: &str = r#" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#;
+    if !body.contains("xsi:") || body.contains("xmlns:xsi") {
+        return body.into();
+    }
+    // The root is the first tag that is not a declaration, a comment or a
+    // doctype; the attribute goes straight after its name.
+    let root = body.match_indices('<').map(|(i, _)| i).find(|&i| {
+        body[i + 1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c != '?' && c != '!')
+    });
+    let Some(start) = root else {
+        return body.into();
+    };
+    let name_end = body[start + 1..]
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .map_or(body.len(), |n| start + 1 + n);
+    let mut fixed = String::with_capacity(body.len() + DECLARATION.len());
+    fixed.push_str(&body[..name_end]);
+    fixed.push_str(DECLARATION);
+    fixed.push_str(&body[name_end..]);
+    fixed.into()
+}
+
 fn element_text<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
     doc.descendants()
         .find(|n| n.has_tag_name(tag))
@@ -1306,6 +1342,36 @@ fn parse_fault(text: &str, status: u16) -> Fault {
 /// (or just failing) would be making them pay for a problem the service
 /// already solved. `refreshed` carries the new token out to the caller, which
 /// owns persisting it; this function only spends it once, on the retry.
+/// A music service answering "no" - a SOAP fault or an HTTP refusal - as
+/// against not answering at all.
+///
+/// The two must not be treated alike by anything that *remembers*: a service
+/// that refused `getMetadata` will refuse it tomorrow (Apple's invalid token,
+/// Google's project gate), while one that timed out may answer the next time.
+/// Displays as the sentence every refusal always printed.
+#[derive(Debug)]
+pub struct Refused {
+    message: String,
+}
+
+impl Refused {
+    fn error(message: String) -> anyhow::Error {
+        Self { message }.into()
+    }
+
+    pub fn of(e: &anyhow::Error) -> Option<&Refused> {
+        e.downcast_ref()
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 async fn call(
     service: &Service,
     token: Option<&Token>,
@@ -1321,7 +1387,10 @@ async fn call(
         Err(fault) => fault,
     };
     let Some(new) = fault.refresh else {
-        bail!("{} refused {action}: {}", service.name, fault.message);
+        return Err(Refused::error(format!(
+            "{} refused {action}: {}",
+            service.name, fault.message
+        )));
     };
     let retry_token = Token {
         token: new.auth_token.clone(),
@@ -1341,18 +1410,31 @@ async fn call(
         // Both messages, not just the retry's - the first is what actually
         // explains why a refresh was tried at all, and losing it would make
         // this strictly less informative than the plain refusal above.
-        Err(retry_fault) => bail!(
+        Err(retry_fault) => Err(Refused::error(format!(
             "{} refused {action} even after refreshing its token ({}): {}",
-            service.name,
-            fault.message,
-            retry_fault.message
-        ),
+            service.name, fault.message, retry_fault.message
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_undeclared_xsi_prefix_is_declared_and_nothing_else_moves() {
+        // Sonos Radio's `getMetadata` root, verbatim in shape (2026-09-26).
+        let nil = r#"<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><getMetadataResponse xmlns="http://www.sonos.com/Services/1.1" xsi:nil="true"></getMetadataResponse></soap:Body></soap:Envelope>"#;
+        assert!(Document::parse(nil).is_err(), "the reply as sent");
+        let (items, total) = parse_items(nil, "getMetadata").unwrap();
+        assert!(items.is_empty());
+        assert_eq!(total, 0);
+
+        let declared =
+            r#"<a xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>"#;
+        assert_eq!(declare_xsi(declared), declared);
+        assert_eq!(declare_xsi("<a><b/></a>"), "<a><b/></a>");
+    }
 
     const DESCRIPTORS: &str = r#"<Services SchemaVersion="1">
         <Service Id="254" Name="TuneIn" Uri="http://legato/x" SecureUri="https://legato/x"
