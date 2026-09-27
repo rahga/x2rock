@@ -266,7 +266,33 @@ pub async fn play_item(
             Err(e) => return Err(e),
         }
     }
-    stream_item(session, room, service, token, id, title, StreamStart::Fresh).await
+    let streamed = stream_item(session, room, service, token, id, title, StreamStart::Fresh).await;
+    // **The last resort, after both of the above said no.** `loadContent` hands
+    // the player the service, account and id and lets it resolve the rest, and
+    // it plays what neither path can: an iHeartRadio `artist_radio` is refused
+    // by `AddURIToQueue` (800) and by the service's own `getMediaURI`, and
+    // loads (verified 2026-09-26). Not the first choice: it replaces the queue
+    // rather than adding to it, refuses every service the household holds no
+    // account for, and takes a pause and a wait to start - see `replay`.
+    match streamed {
+        Err(e) if sonos::smapi::Refused::of(&e).is_some() => {
+            let (Some(kind), Some(serial)) = (kind, token.and_then(|t| t.serial)) else {
+                return Err(e);
+            };
+            eprintln!("x2rock: {title:?} would not stream either ({e:#}); loading it");
+            let target = session::target(&session.groups, room)?;
+            let player = session::coordinator(session, &target).await?;
+            let id = ContentId {
+                service_id: Some(service.id.clone()),
+                account_id: Some(format!("sn_{serial}")),
+                object_id: id.to_string(),
+            };
+            load_and_start(&player, &target, &id, kind, title).await?;
+            println!("{} — {title} on {}", target.name, service.name);
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 /// Put a service item in the room's queue, and optionally jump to it.
@@ -940,9 +966,28 @@ pub async fn replay(
             .as_deref()
             .unwrap_or("a service x2rock does not know")
     );
-    player
-        .load_content(&target.group_id, &r.id, &item.kind)
-        .await?;
+    load_and_start(player, target, &r.id, &item.kind, &item.name).await?;
+    println!("{:<24} {}", target.name, item.name);
+    Ok(())
+}
+
+/// Replace what `target` plays with one piece of content and see it start: the
+/// shared tail of `replay` and of `play_item`'s last resort.
+async fn load_and_start(
+    player: &Connection,
+    target: &Target,
+    id: &ContentId,
+    kind: &str,
+    name: &str,
+) -> Result<()> {
+    // **Stopped first, so PLAYING can only mean the new content.** Loaded over a
+    // playing room, the old item goes on reading PLAYING for a moment, and a
+    // check that saw that declared success while the new load then settled at
+    // IDLE, its play lost (2026-09-26). Paused, nothing reads PLAYING until the
+    // load has been started. Best effort: a room already stopped, or stuck
+    // mid-load from an earlier one, refuses the pause, and that is fine.
+    let _ = player.playback(&target.group_id, "pause").await;
+    player.load_content(&target.group_id, id, kind).await?;
     // Loaded, not started - and a room that was playing sits at BUFFERING
     // until told to play, so a play is what finishes the job either way. It is
     // pressed until the room is seen playing: once is not enough, because one
@@ -978,13 +1023,11 @@ pub async fn replay(
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
-            "{:?} loaded in {} but did not start playing. The service may have \
-             withdrawn it; `x2rock recent` lists what else there is.",
-            item.name,
+            "{name:?} loaded in {} but did not start playing. The service may \
+             have withdrawn it.",
             target.name
         );
     }
-    println!("{:<24} {}", target.name, item.name);
     Ok(())
 }
 
