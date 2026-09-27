@@ -234,18 +234,44 @@ fn open_in_browser(url: &str) -> Result<()> {
 
 /// `x2rock login`: sign in to a Sonos account, for a household with
 /// Authentication on. See `sonos::login`.
-pub async fn login(no_open: bool) -> Result<()> {
+pub async fn login(address: Option<&str>, no_open: bool) -> Result<()> {
     use crate::sonos::login;
+    use std::io::IsTerminal;
     let integration = login::integration()?;
-    let (url, state) = login::authorize_url(&integration)?;
-    announce_link_page("your Sonos account", &url, no_open);
-    eprintln!("Sign in, allow access, then paste the address the page shows here and press Enter:");
-    let mut pasted = String::new();
-    std::io::stdin()
-        .read_line(&mut pasted)
-        .context("reading the pasted address")?;
+    // The second step: finish a sign-in a bare `x2rock login` started.
+    let (pasted, state) = match address {
+        Some(address) => {
+            let state = login::pending().ok_or_else(|| {
+                anyhow!("no sign-in is waiting to be finished; start one with `x2rock login`")
+            })?;
+            (address.to_string(), state)
+        }
+        None => {
+            let (url, state) = login::authorize_url(&integration)?;
+            login::remember_pending(&state)?;
+            announce_link_page("your Sonos account", &url, no_open);
+            // Nothing to type into - an agent, a `!` line, a pipe: say how to
+            // finish rather than read an empty line and call it a bad address.
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "Sign in and allow access, then finish with the address the page shows:\n  \
+                     x2rock login '<address>'"
+                );
+                return Ok(());
+            }
+            eprintln!(
+                "Sign in, allow access, then paste the address the page shows here and press Enter:"
+            );
+            let mut pasted = String::new();
+            std::io::stdin()
+                .read_line(&mut pasted)
+                .context("reading the pasted address")?;
+            (pasted, state)
+        }
+    };
     let code = login::code_from(&pasted, &state)?;
     login::exchange(&integration, &code).await?;
+    login::forget_pending();
     println!(
         "Signed in. x2rock now tells the speakers who is asking, which a household with \
          Authentication on requires; it refreshes the sign-in itself. Undo with: x2rock logout"

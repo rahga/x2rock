@@ -108,6 +108,29 @@ fn load() -> Option<Token> {
     serde_json::from_str(&text).ok()
 }
 
+/// The `state` of a sign-in that has been started and not finished, so that a
+/// second `x2rock login '<address>'` can finish it - the only way through where
+/// nothing can be pasted into a prompt (a command run from an agent, a `!` line).
+/// Mode 600: it is what makes a pasted code this machine's to redeem.
+fn pending_path() -> Result<PathBuf> {
+    store::path("sonos-login-pending")
+}
+
+pub fn remember_pending(state: &str) -> Result<()> {
+    store::write_atomically(&pending_path()?, state, store::SECRET)
+}
+
+pub fn pending() -> Option<String> {
+    let state = std::fs::read_to_string(pending_path().ok()?).ok()?;
+    Some(state.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub fn forget_pending() {
+    if let Ok(path) = pending_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Whether a sign-in is held on this machine.
 pub fn signed_in() -> bool {
     load().is_some()
