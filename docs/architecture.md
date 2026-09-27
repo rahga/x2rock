@@ -8980,6 +8980,36 @@ not. Learned playing forty items back on Dining Room:
   this household does not hold, and two with no service at all. `recent` marks them and the widget
   leaves them out.
 
+### `loadContent` for `play-item` and `bookmark`: evaluated, kept as a last resort (home, 2026-09-26)
+
+The question was whether `loadContent` could replace the hand-built UPnP enqueue - DIDL, cdudn,
+`sn=`, `AddURIToQueue`, seek - behind `play-item` and `bookmark`. Tested on Dining Room:
+
+| | `loadContent` | the UPnP path |
+|---|---|---|
+| tracks: Deezer, YouTube Music, Apple Music, an iHeartRadio podcast episode | ✓, playing in ~2 s | ✓ |
+| albums, playlists, iHeartRadio live stations, Sonos Radio, Sonos playlists | ✓ | ✓ (playlists by their own command) |
+| iHeartRadio `artist_radio` | ✓ | ✗ 800 from the queue, and iHeartRadio's `getMediaURI` refuses the id |
+| an **anonymous** service (Audacy `station:5234`) | ✗ `ERROR_ACCOUNT_INVALID_ID` "Could not find default account for serviceId", however no account is written (absent, `""`, `sn_0`, `0`) | ✓, streamed |
+| a service the household holds no account for | ✗ the same | the stream fallback, where the service allows it |
+| **appending** (`queue-item`, `bookmark --next`) | ✗ replace only: `action` `APPEND`/`INSERT_NEXT`, `enqueue`, `queueMode` are all ignored | ✓ |
+| what `play-item` leaves of the queue | replaced | kept; the item is appended and played |
+| a dead account in the id | accepted, then plays nothing | the serial is chosen from the store up front |
+| starting | pause first, load, press play until PLAYING | seek and play |
+| time to playing | 1.7-2.9 s (3-6.5 s with the pause) | 1.3-2.8 s |
+
+**Not a replacement.** It cannot append, so `queue-item` and `bookmark --next` stay where they are;
+it cannot reach an anonymous service or one the household does not hold, which the stream path
+does; and moving `play-item` onto it would change what "play" does to the queue. The UPnP path
+also stays the one that works on a household where x2rock holds a token the household does not.
+
+**Kept for what only it can do.** `replay` uses it, because the history names items by the triple
+it takes. And `play-item` now tries it **last**, when the queue and the stream have both refused
+and the household holds an account for the service: that is exactly the iHeartRadio artist radio
+case, which played. `load_and_start` is the shared tail - pause, load, press play until PLAYING -
+and the pause is itself a fix: loaded over a playing room, the previous item reads PLAYING for a
+moment, and `replay` had declared success on it while the new load settled at IDLE.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
