@@ -9040,6 +9040,11 @@ Followed up with `--scope player` on Living Room's Beam, reads and `subscribe` o
 | `ircontrol:1` | `getIRControl` | `enabled` |
 | `effectiveSettings:1` | `subscribe` with `locationId` + `userId`, then `getSettingsGroup {groupName}` | five groups: `global` and `playback` empty; `playerUI` (`statusLight`, `buttonLockState`); `playerBasic` (`zoneName`, `icon`, `configuration`); and **`security`: `allowUnauthenticatedControl: true`, `allowInsecureUPnP: true`, `allowGuestAccess: true`** |
 
+**These are the Sonos app's own switches.** Privacy & Security -> Connection security lists them for
+the person: **Authentication: Off** is `allowUnauthenticatedControl: true`, **UPnP: On** is
+`allowInsecureUPnP: true`, **Guest Access: On** is `allowGuestAccess: true` (read off both sides,
+2026-09-26). Anyone in the household can flip them.
+
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are
 settings, now visible, with names that read like switches Sonos could default off. A check that
