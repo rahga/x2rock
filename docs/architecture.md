@@ -9010,6 +9010,22 @@ case, which played. `load_and_start` is the shared tail - pause, load, press pla
 and the pause is itself a fix: loaded over a playing room, the previous item reads PLAYING for a
 moment, and `replay` had declared success on it while the new load settled at IDLE.
 
+### `zones:1` in `system` (home, 2026-09-26)
+
+`system` already showed bonding - `L`/`R`, `LS`/`RS`, the Sub - from the UPnP topology, so
+`zones:1` was read for what the topology lacks: **whether each bonded speaker is connected**, and
+its **gain trim**. The namespace has no `get`; a `subscribe` is answered by two events, one carrying
+each member's `state.disconnected` and one its `settings.gainTrimDB` (the second omitted Living
+Room here - its trim reads `null`, not `0`). `Connection::zone_bonds` subscribes, merges the two for
+up to two seconds, and unsubscribes; it runs beside the per-speaker `device_info` fetches, so
+`system` took the same ~330 ms as before. Best effort: no answer leaves the listing as it was.
+
+Shown as `[disconnected]` and `[trim ±N dB]` at the end of a text row, only when there is something
+to say, and as `disconnected` / `gain_trim_db` in the JSON. A bonded speaker `zones:1` calls
+disconnected that the topology no longer lists gets a line of its own - the case worth the whole
+change, and the one not seen live: nothing here was unplugged to provoke it, so the merge, the note
+and the lost-speaker line are unit-tested against event bodies in the shape observed.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search

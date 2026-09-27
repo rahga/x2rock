@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use super::local::Connection;
 use super::proto::{
-    ContentId, FavoritesList, GroupInfo, History, MetadataStatus, PlaybackStatus, PlayerSettings,
-    PlaylistsList, Repeat, Volume,
+    Bond, ContentId, FavoritesList, GroupInfo, History, MetadataStatus, PlaybackStatus,
+    PlayerSettings, PlaylistsList, Repeat, Volume, Zones,
 };
 
 fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
@@ -268,6 +268,45 @@ impl Connection {
             )
             .await?;
         Ok(account_id(&body))
+    }
+
+    /// The household's bonded players as `zones:1` reports them: whether each
+    /// is connected, and its gain trim - two things the UPnP topology does not
+    /// carry. The namespace has no `get`, only `subscribe`, so this subscribes,
+    /// reads the two events that follow (one with each member's state, one with
+    /// its settings) for at most two seconds, and unsubscribes. Keyed by player
+    /// id; a household with nothing bonded answers empty.
+    pub async fn zone_bonds(
+        &self,
+        household_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, Bond>> {
+        let mut events = self.events();
+        self.subscribe_household("zones:1", household_id).await?;
+        let mut bonds = std::collections::BTreeMap::new();
+        let (mut stated, mut set) = (false, false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !(stated && set) {
+            let Ok(Ok(event)) = tokio::time::timeout_at(deadline, events.recv()).await else {
+                break;
+            };
+            if event.namespace != "zones:1" {
+                continue;
+            }
+            let Ok(zones) = serde_json::from_value::<Zones>(event.body.clone()) else {
+                continue;
+            };
+            let members = zones.zones.iter().flat_map(|z| &z.members);
+            stated |= members.clone().any(|m| m.state.is_some());
+            set |= members.clone().any(|m| m.settings.is_some());
+            Bond::merge(&mut bonds, zones);
+        }
+        let _ = self
+            .call(
+                on_household("zones:1", "unsubscribe", household_id),
+                json!({}),
+            )
+            .await;
+        Ok(bonds)
     }
 
     /// What the household played lately, newest first. Household-scoped.

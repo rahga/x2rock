@@ -203,7 +203,7 @@ readout the Sonos apps call **About My System**, and it is read-only and local.
 Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`, `bonded`,
 `satellite`, `hidden`, `serial`, `uuid`, `sonos_os`, `display_version`, `build`,
 `software_version`, `hardware_version`, `series_id`, `ip`, `connection`, `connection_type`,
-`eth_link`. Four of those need care:
+`eth_link`, `disconnected`, `gain_trim_db`. Five of those need care:
 
 - **`connection` is how that speaker reaches the household**, and it is the first thing to read when
   several rooms drop out at once: `wired`, `sonosnet`, `satellite`, or `unknown`. As soon as one
@@ -226,6 +226,12 @@ Each entry is one *player*: `room`, `model`, `model_number`, `role`, `channels`,
 - **`serial`, `ip` and `uuid` identify hardware** - a RINCON uuid embeds the speaker's MAC
   verbatim. Before putting this output anywhere public - a bug report, an issue, a paste site -
   use `--redact`, which masks all three. The household id is never printed either way.
+- **`disconnected` is the answer to "why is the surround/Sub silent"**: `true` for a bonded speaker
+  the household says has dropped off its bond, `false` for one that is there, `null` for a speaker
+  bonded to nothing (or when the household did not answer). The text output marks it
+  `[disconnected]`. A bonded speaker so far gone the topology has lost it still gets an entry, with
+  `error` saying so. `gain_trim_db` is a bonded speaker's level offset; the text shows it only when
+  it is not zero.
 
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
