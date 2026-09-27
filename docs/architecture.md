@@ -9026,6 +9026,31 @@ disconnected that the topology no longer lists gets a line of its own - the case
 change, and the one not seen live: nothing here was unplugged to provoke it, so the merge, the note
 and the lost-speaker line are unit-tested against event bodies in the shape observed.
 
+### Player-scoped finds (home, 2026-09-26)
+
+Followed up with `--scope player` on Living Room's Beam, reads and `subscribe` only:
+
+| namespace | how | what it gives |
+|---|---|---|
+| `info:1` | `getInfo` | the speaker's `discoveryInfo`: **`locationId`** (what `effectiveSettings` wants), `restUrl` (`https://<ip>:1443/api` - a REST form of the same API), `credentialTypeAllowed: API_KEY`, `allowGuestAccess`, Control API **1.54.1** (min 1.1.0), 9 capabilities (`HT_POWER_STATE`, `HDMI`, `IR_CONTROL`, `VOICE`, ...) and 22 `deviceFeatures` (`HDMI_ARC`, `HP_SWAP_TARGET`, `ROOM_DETECTION_CHIRP`, `SUPPORTS_HEADPHONE_LAN_PLAYBACK`, ...) |
+| `hdmi:1` | `subscribe` | **TV power** (`tvPowerStatus`), `connection`, ARC/eARC/CEC/SAM state and their errors. Live here: Living Room's TV on with ARC `TERMINATING`; Bedroom's on, ARC `INITIATING`; **Guest TV `NO_CONNECTION`** - which is what "TV Audio [Unavailable]" and the Beam stall were standing on |
+| `homeTheater:1` | `subscribe` | `signalDetected` (is the TV sending audio), and headphone-swap state (`accessorySwapState`, `accessoryList`) beside the night/dialog settings x2rock already reads |
+| `hardwareStatus:1` | `subscribe` | radio `channel`, `frequency`, `rssi`, `mode`, `netmode`. On SonosNet every speaker reads channel 1 and **RSSI 0**, wired or not, so it says nothing here; it may on a household joined to WiFi |
+| `trueplay:1` | `getTrueplayStatus` | `orientation`, `sonarState` (`ENABLED_AVAILABLE`) |
+| `ircontrol:1` | `getIRControl` | `enabled` |
+| `effectiveSettings:1` | `subscribe` with `locationId` + `userId`, then `getSettingsGroup {groupName}` | five groups: `global` and `playback` empty; `playerUI` (`statusLight`, `buttonLockState`); `playerBasic` (`zoneName`, `icon`, `configuration`); and **`security`: `allowUnauthenticatedControl: true`, `allowInsecureUPnP: true`, `allowGuestAccess: true`** |
+
+**The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
+Control API answering without authentication and on UPnP being open on :1400 - and those are
+settings, now visible, with names that read like switches Sonos could default off. A check that
+names them when control is refused would turn a mysterious failure into a sentence.
+
+Left alone: `authorization`, `catalog`, `management`, `smartplay`, `soundSwap`, `svc`, `pinewood`,
+`platformInternal`, `power`, `time`, `global`, `topology`, `households`, `systemReporting`,
+`roomDetection`, `networkTest` answer neither `subscribe` nor any plausible read name, household or
+player scoped; without a way to list their commands, guessing further is low-yield. None of this
+probe sent anything but reads and subscribes.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
