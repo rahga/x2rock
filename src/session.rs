@@ -73,9 +73,9 @@ impl Session {
 /// await: two callers that race for one address both open, and the loser
 /// closes its socket and takes the winner's.
 ///
-/// The daemon keeps the same map by hand (`connection_to`), plus a forwarder
-/// per socket; the `bool` [`reach`](Pool::reach) returns is what would let it
-/// hang that forwarder on a newly opened one.
+/// The daemon holds its sockets here too, and hangs an event forwarder on each
+/// one it opens: the `bool` [`reach`](Pool::reach) returns is how it knows a
+/// socket is new, so a reused one is never forwarded twice.
 #[derive(Clone, Default)]
 pub struct Pool(Arc<tokio::sync::Mutex<HashMap<IpAddr, Connection>>>);
 

@@ -4,7 +4,7 @@
 //! The speaker being unreachable is a normal state for a laptop that moves between
 //! networks, not an error: back off, stay quiet, try again.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use crate::mpris::{RoomPlayer, bus_suffix_among};
 use crate::netid;
 use crate::restart::{Restart, Restarts};
-use crate::session::{self, Session};
+use crate::session::{self, Pool, Session};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{self, Event, Groups, Player};
 use crate::state::State;
@@ -350,37 +350,40 @@ fn spawn_forwarder(
 /// Serve one connection until it dies, closing every socket opened for it on
 /// the way out.
 async fn serve(
-    session: Session,
+    mut session: Session,
     established: Instant,
     restarts: &mut broadcast::Receiver<Restart>,
 ) -> Result<()> {
     // Group-targeted commands and subscriptions go to that group's own
     // coordinator, which is not necessarily the player reached first - so a
-    // connection is opened per distinct coordinator and kept here, keyed by IP.
-    let mut pool: HashMap<IpAddr, Connection> =
-        HashMap::from([(session.connection.ip(), session.connection.clone())]);
-    let result = follow(&session, &mut pool, established, restarts).await;
+    // connection is opened per distinct coordinator, in the session's pool.
+    let result = follow(&mut session, established, restarts).await;
 
     // However this ended, close the sockets rather than leaving their reader
     // tasks parked on one - after a suspend they would otherwise sit on a dead
     // socket until the keepalive's silence limit, which is the delay this is
     // all here to avoid. Closing also releases the forwarders feeding on them.
-    for open in pool.values() {
-        open.close();
-    }
+    session.close().await;
     result
 }
 
 /// Publish the household and keep it current until something interrupts.
+///
+/// `session.groups` is kept current from the household's own `groups` events -
+/// every one that parses, not only those that change the topology, since a
+/// rename or a player's new address changes nothing `same_topology` compares.
+/// Nothing in the loop reads it back yet; it is there for whatever asks the
+/// daemon about the household next, which should not be the snapshot it
+/// connected with.
 async fn follow(
-    session: &Session,
-    pool: &mut HashMap<IpAddr, Connection>,
+    session: &mut Session,
     established: Instant,
     restarts: &mut broadcast::Receiver<Restart>,
 ) -> Result<()> {
-    let Session {
-        connection, groups, ..
-    } = session;
+    // Handles, not borrows of `session`: both are cheap clones of an `Arc`, and
+    // holding them leaves `session.groups` free to be replaced below.
+    let connection = &session.connection.clone();
+    let pool = session.pool.clone();
     let household = connection.household_id().await?;
 
     let (mut tx, mut events) = mpsc::unbounded_channel();
@@ -393,11 +396,11 @@ async fn follow(
     let mut rooms = publish(
         &mut Wiring {
             primary: connection,
-            pool,
+            pool: &pool,
             tx: &tx,
             forwarders: &mut forwarders,
         },
-        groups,
+        &session.groups,
     )
     .await?;
 
@@ -453,7 +456,9 @@ async fn follow(
                         continue;
                     }
                 };
-                if same_topology(&rooms, &groups) {
+                let unchanged = same_topology(&rooms, &groups);
+                session.groups = groups;
+                if unchanged {
                     continue;
                 }
                 log("group topology changed; republishing");
@@ -461,13 +466,10 @@ async fn follow(
                     handle.abort();
                 }
                 // The primary carries the household subscription and is still in
-                // use; the rest are about to be replaced.
-                for (ip, open) in std::mem::take(pool) {
-                    if ip != connection.ip() {
-                        open.close();
-                    }
-                }
-                pool.insert(connection.ip(), connection.clone());
+                // use; the rest are about to be replaced. The pool never holds
+                // the primary - `reach` answers its address with it directly -
+                // so emptying the pool closes exactly the rest.
+                pool.close_all().await;
                 // A fresh bus, not a drained one. Aborting a forwarder is not
                 // synchronous: one mid-poll on another worker can still push
                 // the LOST that `close` just provoked, and on the old channel
@@ -481,11 +483,11 @@ async fn follow(
                 rooms = publish(
                     &mut Wiring {
                         primary: connection,
-                        pool,
+                        pool: &pool,
                         tx: &tx,
                         forwarders: &mut forwarders,
                     },
-                    &groups,
+                    &session.groups,
                 )
                 .await?;
             }
@@ -617,7 +619,7 @@ fn room_of(groups: &Groups, group: &proto::Group) -> String {
 /// that open connections all need all four.
 struct Wiring<'a> {
     primary: &'a Connection,
-    pool: &'a mut HashMap<IpAddr, Connection>,
+    pool: &'a Pool,
     tx: &'a mpsc::UnboundedSender<Arc<Event>>,
     forwarders: &'a mut Vec<JoinHandle<()>>,
 }
@@ -718,27 +720,25 @@ async fn publish_group(
     Ok(server)
 }
 
-/// A connection to one player, reusing the pool and opening only what is new.
-/// Falls back to the connection already in hand when the address is unknown.
-/// `loss` applies to a socket opened here; a pooled one keeps the terms it was
-/// opened on, which is safe because coordinators are reached before members.
+/// A connection to one player, through the session's pool: reused when it is
+/// held and alive, opened when it is not, and the primary for its own address
+/// or an unknown one. A forwarder is hung on a socket this call opened - the
+/// `bool` `reach` returns - and on nothing else, so a reused socket is never
+/// forwarded twice. `loss` applies to a socket opened here; a pooled one keeps
+/// the terms it was opened on, which is safe because coordinators are reached
+/// before members.
 async fn connection_to(
     wiring: &mut Wiring<'_>,
     ip: Option<IpAddr>,
     loss: Loss,
 ) -> Result<Connection> {
-    let Some(ip) = ip.filter(|ip| *ip != wiring.primary.ip()) else {
-        return Ok(wiring.primary.clone());
-    };
-    if let Some(existing) = wiring.pool.get(&ip) {
-        return Ok(existing.clone());
+    let (connection, opened) = wiring.pool.reach(wiring.primary, ip).await?;
+    if opened {
+        wiring
+            .forwarders
+            .push(spawn_forwarder(&connection, wiring.tx.clone(), loss));
     }
-    let opened = Connection::open(ip).await?;
-    wiring
-        .forwarders
-        .push(spawn_forwarder(&opened, wiring.tx.clone(), loss));
-    wiring.pool.insert(ip, opened.clone());
-    Ok(opened)
+    Ok(connection)
 }
 
 /// The initial `groups` snapshot describes what we just published; republishing
