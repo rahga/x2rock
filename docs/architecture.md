@@ -9067,6 +9067,31 @@ at once rather than trying the next address or rescanning (151 ms), discovery re
 "none completed a session", and the message names the switch and the support page. The daemon logs
 it and keeps retrying, which is right: the switch going off is the fix, and the next retry connects.
 
+**What Authentication-on asks for (probed 2026-09-27).** Everything but discovery is refused, and the
+refusals name the scheme:
+
+- `GET /api/v1/players/local/info` (REST, the sample API key, no token) still answers - discovery is
+  the one open read - and its **`credentialTypeAllowed` changes from `API_KEY` to `GUEST_TOKEN`**
+  (`allowGuestAccess` true). `AIRPLAY` drops out of the capability list; Sonos's support page says
+  the switch covers AirPlay too.
+- **REST with `Authorization: Bearer <dummy>`** answers **401** with `WWW-Authenticate: Bearer
+  realm="service",error="invalid_token",error_description="Access token is invalid"` - the header is
+  read and the token validated.
+- **The WebSocket**, with a dummy token in `Authorization` (Bearer or Basic) or any `X-Sonos-*-Token`
+  header, answers `ERROR_NO_PERMISSION` carrying `wwwAuthenticate: Bearer realm="service",
+  error="insufficient_scope"` whatever is sent, so it takes its token some other way or wants a
+  scope the dummy could not have.
+- `authorization:1` is reachable before authenticating (unknown commands answer
+  `ERROR_UNSUPPORTED_COMMAND`, not `ERROR_NO_PERMISSION`), but none of fourteen token-shaped names
+  exists, and command names, unlike namespaces, do not resolve by prefix.
+
+So the credential is an **OAuth 2 bearer access token** in the Sonos cloud's realm - a Sonos account
+token, with `GUEST_TOKEN` most likely a restricted kind the cloud issues for guests. The authenticated
+mode the amended axiom allows would therefore be: an OAuth authorization-code login against Sonos's
+developer integration (a client id and secret registered at developer.sonos.com), the access token
+kept and refreshed, and presented as `Authorization: Bearer` on the local REST API - with the
+WebSocket's form still to be found. Untested with a real token: nothing here holds one.
+
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are
 settings, now visible, with names that read like switches Sonos could default off. A check that
