@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use super::local::Connection;
 use super::proto::{
-    FavoritesList, GroupInfo, MetadataStatus, PlaybackStatus, PlayerSettings, PlaylistsList,
-    Repeat, Volume,
+    ContentId, FavoritesList, GroupInfo, History, MetadataStatus, PlaybackStatus, PlayerSettings,
+    PlaylistsList, Repeat, Volume,
 };
 
 fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
@@ -268,6 +268,39 @@ impl Connection {
             )
             .await?;
         Ok(account_id(&body))
+    }
+
+    /// What the household played lately, newest first. Household-scoped.
+    pub async fn history(&self, household_id: &str) -> Result<History> {
+        let body = self
+            .call(
+                on_household("history:1", "getHistory", household_id),
+                json!({}),
+            )
+            .await?;
+        Ok(serde_json::from_value(body)?)
+    }
+
+    /// Replace what a group is playing with one piece of content, named the way
+    /// `getHistory` names it. Loads and does **not** start it:
+    /// `playOnCompletion` is accepted and does nothing, and a `play` sent at
+    /// once is refused with `ERROR_PLAYBACK_NO_CONTENT` while the load is still
+    /// under way - see `content::replay`, which waits it out.
+    pub async fn load_content(&self, group_id: &str, id: &ContentId, kind: &str) -> Result<()> {
+        self.call(
+            on_group("playback:1", "loadContent", group_id),
+            json!({
+                "id": {
+                    "_objectType": "universalMusicObjectId",
+                    "serviceId": id.service_id,
+                    "accountId": id.account_id,
+                    "objectId": id.object_id,
+                },
+                "type": kind,
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Every saved queue in the household. Household-scoped, like favorites.

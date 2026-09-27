@@ -454,6 +454,10 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         return content::favorites(session, query.as_deref(), *json).await;
     }
 
+    if let Command::Recent { query, json } = &cli.command {
+        return content::recent(session, query.as_deref(), *json).await;
+    }
+
     // Every speaker has its own firmware, so this asks each rather than the
     // group's coordinator - and needs no target at all.
     if let Command::Update { json } = &cli.command {
@@ -615,6 +619,9 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Favorite { query } => {
             content::favorite(session, &player, &target, &query).await?;
         }
+        Command::Replay { query } => {
+            content::replay(session, &player, &target, &query).await?;
+        }
         Command::Playlist { query } => {
             content::playlist(session, &player, &target, &query).await?;
         }
@@ -688,6 +695,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
+        | Command::Recent { .. }
         | Command::Alarms { .. }
         | Command::Alarm { .. }
         | Command::Update { .. }

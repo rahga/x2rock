@@ -15,7 +15,7 @@ use crate::cli::{BookmarksAction, QueueAction};
 use crate::hint;
 use crate::session::{self, Session, Target};
 use crate::sonos::local::{ApiError, Connection};
-use crate::sonos::proto::Favorite;
+use crate::sonos::proto::{ContentId, Favorite, HistoryItem};
 use crate::sonos::upnp::{self, Upnp};
 use crate::{bookmarks, catalogue, credentials, sonos};
 
@@ -767,6 +767,227 @@ pub async fn favorites(session: &Session, query: Option<&str>, json: bool) -> Re
     Ok(())
 }
 
+/// The service id `getHistory` gives a saved Sonos playlist, which is no music
+/// service and has no account: its `objectId` is the playlist's bare id.
+const SONOS_PLAYLISTS: &str = "65435";
+
+/// A recently played item as it can be played *now*.
+struct Replayable<'a> {
+    item: &'a HistoryItem,
+    /// The id to load: the item's own, with its account swapped for the one the
+    /// household uses for that service today.
+    id: ContentId,
+    service: Option<String>,
+    playable: bool,
+}
+
+/// Decide whether an item can be played again, and from which account.
+///
+/// **The account an item names is the one it was played from**, and a
+/// household re-registers services: forty items here named eleven YouTube
+/// Music serials, of which one is live. `loadContent` accepts a dead one and
+/// then silently plays nothing, and swapping in the live serial - the preferred
+/// account's, the one search and play-item use - made the same item play
+/// (verified 2026-09-26). **Only a dead one is swapped.** An account the
+/// household still holds is kept even when it is not the preferred one: an
+/// iHeartRadio custom station belongs to the listener who made it, and loaded
+/// under the household's other iHeartRadio account it played nothing. An item on a service this machine holds no account
+/// for is kept only when the service needs none; a Sonos playlist needs none
+/// either. Anything else is marked unplayable rather than offered.
+fn replayable<'a>(
+    item: &'a HistoryItem,
+    household: &str,
+    linked: &credentials::Credentials,
+    catalogue: &catalogue::Catalogue,
+) -> Replayable<'a> {
+    let mut id = item.id.clone();
+    let Some(service_id) = item.id.service_id.as_deref() else {
+        return Replayable {
+            item,
+            id,
+            service: None,
+            playable: false,
+        };
+    };
+    if service_id == SONOS_PLAYLISTS {
+        return Replayable {
+            item,
+            id,
+            service: Some("Sonos playlist".into()),
+            playable: true,
+        };
+    }
+    let service = catalogue.name_of(service_id).map(str::to_string);
+    let still_held = |account: &str| {
+        let serial = account
+            .strip_prefix("sn_")
+            .and_then(|n| n.parse::<u32>().ok());
+        linked
+            .accounts_for(household, service_id)
+            .is_some_and(|held| {
+                held.accounts
+                    .values()
+                    .any(|a| a.serial.is_some() && a.serial == serial)
+            })
+    };
+    let playable = match linked.token_for(household, service_id) {
+        Some(token) => {
+            let kept = item.id.account_id.as_deref().is_some_and(still_held);
+            if !kept && let Some(serial) = token.serial {
+                id.account_id = Some(format!("sn_{serial}"));
+            }
+            true
+        }
+        None => catalogue
+            .by_id(service_id)
+            .is_some_and(|s| s.auth == sonos::smapi::Auth::Anonymous),
+    };
+    Replayable {
+        item,
+        id,
+        service,
+        playable,
+    }
+}
+
+/// `x2rock recent`: what the household played lately, newest first.
+pub async fn recent(session: &Session, query: Option<&str>, json: bool) -> Result<()> {
+    let household = session.connection.household_id().await?;
+    let history = session.connection.history(&household).await?;
+    let linked = credentials::Credentials::load()?;
+    let catalogue = catalogue::Catalogue::load();
+    let needle = query.map(str::to_lowercase);
+    let rows: Vec<_> = history
+        .resources
+        .iter()
+        .filter(|i| {
+            needle
+                .as_deref()
+                .is_none_or(|n| i.name.to_lowercase().contains(n))
+        })
+        .map(|i| replayable(i, &household, &linked, &catalogue))
+        .collect();
+    if json {
+        // The favorites shape, so the widget can list the two alike; `id` is
+        // the object id, which is what `replay` takes back.
+        let items: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.item.id.object_id,
+                    "name": r.item.name,
+                    "type": r.item.kind,
+                    "service": r.service,
+                    "service_id": r.item.id.service_id,
+                    // The favorites field for an artist; history carries none,
+                    // and the service already has its own key.
+                    "description": null,
+                    "art_url": r.item.art_url(),
+                    "playable": r.playable,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&items)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("Nothing played lately.");
+        return Ok(());
+    }
+    for r in &rows {
+        let service = r.service.as_deref().unwrap_or("unknown service");
+        let mark = if r.playable { "" } else { "  (not held here)" };
+        println!("{:<44} {:<9} {service}{mark}", r.item.name, r.item.kind);
+    }
+    Ok(())
+}
+
+/// How long `replay` keeps pressing play after `loadContent`. The load is
+/// asynchronous, and a `play` that overtakes it goes one of two ways: refused
+/// as `ERROR_PLAYBACK_NO_CONTENT`, or - worse - accepted and then lost, the
+/// room settling at IDLE once the load lands (a YouTube Music album, twice,
+/// 2026-09-26). A play sent two seconds after the load started every item
+/// tried, so the play is repeated until the room is seen playing.
+const LOAD_SETTLE: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// `x2rock replay`: play something from the household's recently played, by
+/// name or by the id `recent --json` gives.
+pub async fn replay(
+    session: &Session,
+    player: &Connection,
+    target: &Target,
+    query: &str,
+) -> Result<()> {
+    let household = session.connection.household_id().await?;
+    let history = session.connection.history(&household).await?;
+    let item = find_named(
+        &history.resources,
+        query,
+        |i| &i.id.object_id,
+        |i| &i.name,
+        "recently played item",
+        "x2rock recent",
+    )?;
+    let linked = credentials::Credentials::load()?;
+    let catalogue = catalogue::Catalogue::load();
+    let r = replayable(item, &household, &linked, &catalogue);
+    ensure!(
+        r.playable,
+        "{:?} was played from {}, which this machine holds no account for. \
+         Import the household's with: x2rock link --from-household",
+        item.name,
+        r.service
+            .as_deref()
+            .unwrap_or("a service x2rock does not know")
+    );
+    player
+        .load_content(&target.group_id, &r.id, &item.kind)
+        .await?;
+    // Loaded, not started - and a room that was playing sits at BUFFERING
+    // until told to play, so a play is what finishes the job either way. It is
+    // pressed until the room is seen playing: once is not enough, because one
+    // that lands mid-load can be accepted and still come to nothing.
+    let deadline = tokio::time::Instant::now() + LOAD_SETTLE;
+    loop {
+        match player.playback(&target.group_id, "play").await {
+            Ok(()) => {}
+            Err(e)
+                if ApiError::of(&e).and_then(|a| a.code.as_deref())
+                    == Some("ERROR_PLAYBACK_NO_CONTENT") => {}
+            Err(e) => return Err(e),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let state = player
+            .playback_status(&target.group_id)
+            .await?
+            .playback_state;
+        match state.as_deref() {
+            Some("PLAYBACK_STATE_PLAYING") => break,
+            // Already asked to play and on its way; give it the time.
+            Some("PLAYBACK_STATE_BUFFERING") => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let again = player
+                    .playback_status(&target.group_id)
+                    .await?
+                    .playback_state;
+                if again.as_deref() == Some("PLAYBACK_STATE_PLAYING") {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "{:?} loaded in {} but did not start playing. The service may have \
+             withdrawn it; `x2rock recent` lists what else there is.",
+            item.name,
+            target.name
+        );
+    }
+    println!("{:<24} {}", target.name, item.name);
+    Ok(())
+}
+
 /// `x2rock keep`: remember what `group` is playing - the track, or with
 /// `container` the album, playlist or station it came from.
 pub async fn keep(
@@ -1097,6 +1318,60 @@ pub async fn queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dead account is swapped for the live preferred one; an account the
+    /// household still holds is kept even when it is not the preferred one; a
+    /// service with no account here is not offered; a Sonos playlist needs none.
+    #[test]
+    fn an_item_plays_from_its_own_account_while_it_lives_and_the_preferred_one_after() {
+        const HH: &str = "Sonos_test";
+        let mut linked = credentials::Credentials::default();
+        let account = |serial: u32| -> credentials::Account {
+            serde_json::from_value(json!({
+                "service_name": "iHeartRadio", "auth_token": format!("t{serial}"),
+                "private_key": "k", "linked": 0, "serial": serial, "household": HH,
+                "account_id": format!("sn_{serial}"),
+            }))
+            .unwrap()
+        };
+        linked.remember(HH, "6", account(24));
+        let preferred = linked.remember(HH, "6", account(25));
+        linked.prefer(HH, "6", &preferred).unwrap();
+        let catalogue = catalogue::Catalogue::default();
+
+        let item = |service: Option<&str>, account: Option<&str>| -> HistoryItem {
+            serde_json::from_value(json!({
+                "name": "x", "type": "program", "images": [],
+                "id": {"serviceId": service, "accountId": account, "objectId": "o"},
+            }))
+            .unwrap()
+        };
+        let account_of = |i: &HistoryItem| {
+            let r = replayable(i, HH, &linked, &catalogue);
+            (r.playable, r.id.account_id)
+        };
+
+        assert_eq!(
+            account_of(&item(Some("6"), Some("sn_24"))),
+            (true, Some("sn_24".into())),
+            "still held, so kept: a custom station is its listener's"
+        );
+        assert_eq!(
+            account_of(&item(Some("6"), Some("sn_15"))),
+            (true, Some("sn_25".into())),
+            "gone, so the preferred account plays it"
+        );
+        assert!(
+            !account_of(&item(Some("12"), Some("sn_22"))).0,
+            "not held here"
+        );
+        assert!(!account_of(&item(None, None)).0, "no service at all");
+        assert_eq!(
+            account_of(&item(Some(SONOS_PLAYLISTS), None)),
+            (true, None),
+            "a Sonos playlist names no account and needs none"
+        );
+    }
 
     #[test]
     fn an_enqueue_names_one_account_by_selector_and_serial_together() {

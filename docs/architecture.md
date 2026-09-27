@@ -8951,6 +8951,35 @@ derive a `userId`.
 ids already in the form `play-item` takes; `zones:1` would let `system` show pairs and surrounds
 with their channels; `devices:1` is a richer `system` than UPnP gives.
 
+### Recently played, and `loadContent` (home, 2026-09-26)
+
+`history:1 getHistory` became `x2rock recent`, `x2rock replay`, and a **Recently played** door in
+the widget. Playing an item back goes through **`playback:1 loadContent`** (group-scoped), which
+takes the item's own `{serviceId, accountId, objectId}` and its `type` - no DIDL, no cdudn, no
+queue arithmetic; the player resolves it. Found by the same probe: `loadContent` exists and wanted
+`id` (`Parsing terminated:[1].id`), where `loadItem`, `playContent` and every `history:1` verb do
+not. Learned playing forty items back on Dining Room:
+
+- **It loads and does not start.** `playOnCompletion` is accepted and ignored. A `play` sent at
+  once is either refused as `ERROR_PLAYBACK_NO_CONTENT` or - worse - accepted and lost, the room
+  settling at IDLE when the load lands (a YouTube Music album, twice). A play two seconds later
+  started everything tried, so `replay` presses play once a second until the room reads PLAYING,
+  for up to twelve seconds.
+- **Loaded over a playing room, it sits at BUFFERING** until a play arrives; a `pause` in that
+  state is refused with `ERROR_PLAYBACK_NO_CONTENT`, which looks like a hang and is not one.
+- **It plays every kind the history holds**: albums and playlists (Apple Music, Deezer, YouTube
+  Music, TIDAL), iHeartRadio live stations and custom and artist radio, Deezer mixes, Sonos
+  playlists (service `65435`, the playlist's bare id, no account).
+- **The account an item names is the one it was played from**, and forty items here named eleven
+  YouTube Music serials, one live. `loadContent` accepts a dead one and plays nothing; swapped for
+  the household's preferred account the same item played. **But only a dead one may be swapped**:
+  an iHeartRadio custom station loaded under the household's *other* live iHeartRadio account
+  played nothing, because it belongs to the listener who made it. So `replay` keeps an account the
+  household still holds and swaps only one it does not.
+- Six of forty were unplayable here: Spotify, Plex, TuneIn (New) and Mixcloud items from accounts
+  this household does not hold, and two with no service at all. `recent` marks them and the widget
+  leaves them out.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
