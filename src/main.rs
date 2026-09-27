@@ -185,6 +185,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Households { json, redact } => {
             return household::run_households(json, redact).await;
         }
+        Command::Login { no_open } => return services::login(no_open).await,
+        Command::Logout => return services::logout(),
         Command::Skill {
             agent,
             ref dir,
@@ -718,6 +720,8 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Discover
         | Command::Households { .. }
         | Command::Skill { .. }
+        | Command::Login { .. }
+        | Command::Logout
         | Command::Desktop { .. }
         | Command::Service { .. }
         | Command::Completions { .. }

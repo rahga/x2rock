@@ -907,6 +907,21 @@ pub enum Command {
     },
     /// Every room on one screen, in the terminal. Needs the daemon running.
     Tui,
+    /// Sign in to a Sonos account, for a household that has Authentication on.
+    ///
+    /// Only needed then: with Connection security's Authentication switched on,
+    /// the speakers refuse every command from a client that cannot say who it
+    /// is, and this is how x2rock says. A household with it off - the default -
+    /// needs no sign-in, and x2rock never asks for one. Uses your own Sonos
+    /// integration (see `sonos-integration.json` in the README); prints a link,
+    /// and takes back the address the sign-in page shows.
+    Login {
+        /// Print the link rather than opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Forget the Sonos sign-in on this machine. Revoke it in the Sonos account.
+    Logout,
     /// Install the x2rock agent skill so an AI assistant on this machine knows
     /// how to drive the CLI. Auto-detects installed assistant directories
     /// (Claude, Antigravity / Gemini) by default; the skill is embedded in the

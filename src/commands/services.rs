@@ -232,6 +232,39 @@ fn open_in_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// `x2rock login`: sign in to a Sonos account, for a household with
+/// Authentication on. See `sonos::login`.
+pub async fn login(no_open: bool) -> Result<()> {
+    use crate::sonos::login;
+    let integration = login::integration()?;
+    let (url, state) = login::authorize_url(&integration)?;
+    announce_link_page("your Sonos account", &url, no_open);
+    eprintln!("Sign in, allow access, then paste the address the page shows here and press Enter:");
+    let mut pasted = String::new();
+    std::io::stdin()
+        .read_line(&mut pasted)
+        .context("reading the pasted address")?;
+    let code = login::code_from(&pasted, &state)?;
+    login::exchange(&integration, &code).await?;
+    println!(
+        "Signed in. x2rock now tells the speakers who is asking, which a household with \
+         Authentication on requires; it refreshes the sign-in itself. Undo with: x2rock logout"
+    );
+    Ok(())
+}
+
+/// `x2rock logout`: forget the Sonos sign-in on this machine.
+pub fn logout() -> Result<()> {
+    match crate::sonos::login::sign_out()? {
+        true => println!(
+            "Signed out on this machine. To revoke x2rock's access entirely, remove it from \
+             your Sonos account."
+        ),
+        false => println!("Not signed in."),
+    }
+    Ok(())
+}
+
 /// Put a link page in front of the person, or print it when asked to.
 ///
 /// A failure to open is not a failure to link: the URL is right there, and
