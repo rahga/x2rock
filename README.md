@@ -694,10 +694,11 @@ off, or sign x2rock in to your Sonos account:
    printf '{"key":"%s","secret":"%s","redirect_uri":"https://rahga.github.io/x2rock/callback.html"}\n' \
      'YOUR_KEY' 'YOUR_SECRET' > ~/.config/x2rock/sonos-integration.json
    ```
-3. `x2rock login` opens the Sonos sign-in. Allow access, and the page it lands on shows an address
-   to paste back into the terminal. The page sends that address nowhere. Where there is nothing to
-   paste into — a script, an agent — `x2rock login` stops after opening the page, and
-   `x2rock login '<address>'` finishes the sign-in with what the page showed.
+3. `x2rock login` opens the Sonos sign-in. Allow access, and it finishes by itself: Sonos will only
+   send the browser to a public HTTPS page, so that page hands the sign-in on to x2rock listening on
+   `127.0.0.1`, and never anywhere else. Signing in with a browser on another machine, whose
+   `127.0.0.1` is not this one, the page shows an address instead: paste it into the waiting
+   `x2rock login`, or finish with `x2rock login '<address>'`.
 
 That is all: every command, and the daemon, then present the sign-in to the speakers — on the LAN,
 as before; the sign-in only proves who is asking — and x2rock refreshes it itself, once a day, which

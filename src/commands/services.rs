@@ -247,37 +247,79 @@ pub async fn login(address: Option<&str>, no_open: bool) -> Result<()> {
             (address.to_string(), state)
         }
         None => {
-            let (url, state) = login::authorize_url(&integration)?;
+            // The browser comes back here, by way of the callback page; see
+            // `login::authorize_url`. Without a listener - no loopback to bind -
+            // the page just shows the address to paste, as it always could.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok();
+            let port = listener
+                .as_ref()
+                .and_then(|l| l.local_addr().ok())
+                .map(|a| a.port());
+            let (url, state) = login::authorize_url(&integration, port)?;
             login::remember_pending(&state)?;
             announce_link_page("your Sonos account", &url, no_open);
-            // Nothing to type into - an agent, a `!` line, a pipe: say how to
-            // finish rather than read an empty line and call it a bad address.
-            if !std::io::stdin().is_terminal() {
-                eprintln!(
-                    "Sign in and allow access, then finish with the address the page shows:\n  \
-                     x2rock login '<address>'"
-                );
-                return Ok(());
-            }
+            let terminal = std::io::stdin().is_terminal();
             eprintln!(
-                "Sign in, allow access, then paste the address the page shows here and press Enter:"
+                "Sign in and allow access; this finishes by itself when the browser comes back."
             );
-            let mut pasted = String::new();
-            std::io::stdin()
-                .read_line(&mut pasted)
-                .context("reading the pasted address")?;
-            (pasted, state)
+            eprintln!(
+                "Signing in on another machine? {} the address the page shows{}.",
+                if terminal { "Paste" } else { "Finish with" },
+                if terminal {
+                    " here and press Enter"
+                } else {
+                    ": x2rock login '<address>'"
+                }
+            );
+            let caught = async {
+                match listener {
+                    Some(listener) => login::catch_redirect(listener, &integration, &state).await,
+                    None => std::future::pending().await,
+                }
+            };
+            // A paste still works in a terminal, for a browser on another
+            // machine whose 127.0.0.1 is not this one.
+            let pasted = async {
+                if !terminal {
+                    return std::future::pending().await;
+                }
+                let line = tokio::task::spawn_blocking(|| {
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).map(|_| line)
+                })
+                .await;
+                match line {
+                    Ok(Ok(line)) => line,
+                    _ => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                token = caught => {
+                    token?;
+                    login::forget_pending();
+                    println!("{SIGNED_IN}");
+                    return Ok(());
+                }
+                line = pasted => (line, state),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(600)) => {
+                    bail!(
+                        "gave up waiting for the browser after ten minutes. Finish with the \
+                         address it shows: x2rock login '<address>'"
+                    );
+                }
+            }
         }
     };
     let code = login::code_from(&pasted, &state)?;
     login::exchange(&integration, &code).await?;
     login::forget_pending();
-    println!(
-        "Signed in. x2rock now tells the speakers who is asking, which a household with \
-         Authentication on requires; it refreshes the sign-in itself. Undo with: x2rock logout"
-    );
+    println!("{SIGNED_IN}");
     Ok(())
 }
+
+const SIGNED_IN: &str = "Signed in. x2rock now tells the speakers who is asking, which a \
+                         household with Authentication on requires; it refreshes the sign-in \
+                         itself. Undo with: x2rock logout";
 
 /// `x2rock logout`: forget the Sonos sign-in on this machine.
 pub fn logout() -> Result<()> {

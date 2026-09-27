@@ -148,12 +148,23 @@ pub fn sign_out() -> Result<bool> {
 }
 
 /// The page to send the person to, and the `state` it must come back with.
-pub fn authorize_url(integration: &Integration) -> Result<(String, String)> {
+///
+/// **`port` rides in the state**, as `<port>.<random>`, when x2rock is listening
+/// for the browser on `127.0.0.1`. Sonos will only redirect to a public HTTPS
+/// page, so the callback page reads the port back out and sends the browser on
+/// to `http://127.0.0.1:<port>/callback` - the usual loopback sign-in, one hop
+/// later. The state is echoed by Sonos untouched, which is what makes it the
+/// one channel to the page that needs no configuration.
+pub fn authorize_url(integration: &Integration, port: Option<u16>) -> Result<(String, String)> {
     let mut bytes = [0u8; 12];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
         .context("reading /dev/urandom for the sign-in state")?;
-    let state: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let random: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let state = match port {
+        Some(port) => format!("{port}.{random}"),
+        None => random,
+    };
     let url = format!(
         "{AUTHORIZE}?client_id={}&response_type=code&state={state}&scope={SCOPE}&redirect_uri={}",
         http::urlencode(&integration.key),
@@ -188,6 +199,76 @@ pub fn code_from(pasted: &str, state: &str) -> Result<String> {
         None => bail!("that address carries no state; paste the whole address the page shows"),
     }
     param("code").ok_or_else(|| anyhow!("that address carries no code"))
+}
+
+/// Wait for the browser to come back to `listener`, and finish the sign-in with
+/// what it brings: the callback page forwards Sonos's redirect here. The tab
+/// gets a page saying how it went, so it can be closed.
+///
+/// Anything but `/callback` - a favicon, a stray prefetch - is answered 404 and
+/// waited past. The first request to `/callback` decides it: a code that fails
+/// its `state` check, or that Sonos will not exchange, is the answer, not a
+/// reason to keep listening for another.
+pub async fn catch_redirect(
+    listener: tokio::net::TcpListener,
+    integration: &Integration,
+    state: &str,
+) -> Result<Token> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut socket, _) = listener.accept().await.context("waiting for the browser")?;
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 2048];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&head);
+        let target = text
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("");
+        if !target.starts_with("/callback") {
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let outcome = match code_from(target, state) {
+            Ok(code) => exchange(integration, &code).await,
+            Err(e) => Err(e),
+        };
+        let (title, line) = match &outcome {
+            Ok(_) => (
+                "Signed in",
+                "x2rock is signed in. You can close this tab.".to_string(),
+            ),
+            Err(e) => ("Not signed in", format!("x2rock could not sign in: {e:#}")),
+        };
+        let page = format!(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <title>x2rock: {title}</title></head><body style=\"font:16px system-ui;\
+             max-width:40em;margin:4em auto;padding:0 1em\"><h1>{title}</h1><p>{}</p>\
+             </body></html>",
+            line.replace('&', "&amp;").replace('<', "&lt;")
+        );
+        let _ = socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                    page.len()
+                )
+                .as_bytes(),
+            )
+            .await;
+        return outcome;
+    }
 }
 
 /// POST to the token endpoint with the integration's credentials.
@@ -335,6 +416,26 @@ mod tests {
             code_from("https://x/callback.html?code=1AcY", "abc").is_err(),
             "no state"
         );
+    }
+
+    /// The callback page reads the port back out of the state, so the format
+    /// is a contract with a file that lives in another repository.
+    #[test]
+    fn the_listening_port_leads_the_state_and_survives_the_round_trip() {
+        let integration = Integration {
+            key: "k".into(),
+            secret: "s".into(),
+            redirect_uri: "https://example/callback.html".into(),
+        };
+        let (url, state) = authorize_url(&integration, Some(38431)).unwrap();
+        let (port, random) = state.split_once('.').unwrap();
+        assert_eq!(port, "38431");
+        assert_eq!(random.len(), 24);
+        assert!(url.contains(&format!("state={state}")));
+        let (_, bare) = authorize_url(&integration, None).unwrap();
+        assert!(!bare.contains('.'), "no listener, no port");
+        let back = format!("/callback?state={state}&code=abc");
+        assert_eq!(code_from(&back, &state).unwrap(), "abc");
     }
 
     #[test]
