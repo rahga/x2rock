@@ -925,6 +925,14 @@ those two apart when telling a user what linking will do.
   (the failure names it, `--callback-port N` moves it, and `0` takes an ephemeral one where there
   is nothing to open); and it does **not** get past YouTube Music, whose block is the caller key
   rather than the account — the token imports and search still 403s.
+- **Apple Music searches Apple's public catalogue, not the household's account.** Its imported
+  token cannot search or browse (Apple never provisions a usable one), so `search -s "Apple Music"`
+  and the merged search ask the public iTunes catalogue instead, and the ids it returns
+  (`song:<n>`, `album:<n>`) play through the household's own Apple Music registration. Two
+  categories only, `-c tracks` and `-c albums`: no artists, no playlists, and **not the person's
+  library** — say so if asked for "my Apple Music playlist", and offer `favorites`/`bookmarks`
+  instead. `browse -s "Apple Music"` still fails. The import is still required: without it search
+  fails `needs_link`, whose fix is `x2rock link --from-household "Apple Music"`.
 - **A household can hold two accounts for one service, and both are kept.** The Sonos app numbers
   the second in its nickname — `iHeartRadio 885ebbcc` beside plain `iHeartRadio`, observed in a real
   household 2026-09-22 — and the import keeps each one. **One of them is what search and playback

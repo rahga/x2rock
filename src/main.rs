@@ -7,6 +7,7 @@ mod credentials;
 mod daemon;
 mod discover;
 mod hint;
+mod itunes;
 mod mpris;
 mod netid;
 mod restart;

@@ -309,8 +309,14 @@ async fn enqueue_item(
         ),
     };
     if !play {
-        let length = upnp.add_to_queue(&uri, &didl, false).await?;
-        println!("{} — queued {title} at {length}", target.name);
+        let queued = upnp.add_to_queue(&uri, &didl, false).await?;
+        match queued.added {
+            1 => println!("{} — queued {title} at {}", target.name, queued.first),
+            n => println!(
+                "{} — queued {title} at {}, {n} tracks",
+                target.name, queued.first
+            ),
+        }
         return Ok(());
     }
     enqueue_and_play(session, &target, &upnp, &uri, &didl).await?;
@@ -330,8 +336,8 @@ async fn enqueue_and_play(
     uri: &str,
     didl: &str,
 ) -> Result<()> {
-    let length = upnp.add_to_queue(uri, didl, false).await?;
-    match start_queued(session, target, upnp, length).await {
+    let queued = upnp.add_to_queue(uri, didl, false).await?;
+    match start_queued(session, target, upnp, queued.first).await {
         Ok(()) => Ok(()),
         // **The queue took it and then would not play it.** `AddURIToQueue` is
         // not the only way the player says "this is not queue material" - a
@@ -355,11 +361,13 @@ async fn enqueue_and_play(
         // that function warns about. A UPnP fault or an `ApiError` means the
         // player replied; anything else means it did not.
         Err(e) if upnp::Fault::of(&e).is_some() || ApiError::of(&e).is_some() => {
-            if let Err(cleanup) = upnp.remove_track(length).await {
+            // Everything that went in comes back out: a container expands to
+            // many rows, and taking only the last one left the rest behind.
+            if let Err(cleanup) = upnp.remove_range(queued.first, queued.added).await {
                 eprintln!(
-                    "x2rock: could not take the unplayable row back out of {}'s queue \
-                     ({cleanup:#}); it is at position {length}",
-                    target.name
+                    "x2rock: could not take the unplayable rows back out of {}'s queue \
+                     ({cleanup:#}); they start at position {}",
+                    target.name, queued.first
                 );
             }
             // An *internal* code, and deliberately absent from the skill's error
@@ -378,8 +386,8 @@ async fn enqueue_and_play(
         // edit its queue either. The error travels as itself, so `is_refusal`
         // says no and no stream fallback is attempted.
         Err(e) => Err(e.context(format!(
-            "{} was queued at {length} but the player could not be told to play it",
-            target.name
+            "{} was queued at {} but the player could not be told to play it",
+            target.name, queued.first
         ))),
     }
 }
@@ -1058,7 +1066,7 @@ pub async fn queue(
                 item.title
             );
             let before = upnp.queue_len().await?;
-            let after = upnp.add_to_queue(uri, &item.metadata, next).await?;
+            let after = upnp.add_to_queue(uri, &item.metadata, next).await?.length;
             let added = after.saturating_sub(before);
             if json {
                 println!(

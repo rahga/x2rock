@@ -200,9 +200,11 @@ impl Catalogue {
     /// false for a service nobody has looked up yet - unasked is not the same
     /// as answered-no, and only one of them is worth acting on.
     pub fn publishes_no_categories(&self, service_id: &str) -> bool {
-        self.categories
-            .get(service_id)
-            .is_some_and(|c| c.is_empty())
+        !crate::itunes::serves(service_id)
+            && self
+                .categories
+                .get(service_id)
+                .is_some_and(|c| c.is_empty())
     }
 
     /// Whether [`categories_for`](Self::categories_for) would be a cache hit.
@@ -211,7 +213,7 @@ impl Catalogue {
     /// worth writing to disk, and testing `is_empty()` afterwards cannot tell
     /// it from a hit that changed nothing.
     pub fn categories_cached(&self, service_id: &str) -> bool {
-        self.categories.contains_key(service_id)
+        crate::itunes::serves(service_id) || self.categories.contains_key(service_id)
     }
 
     /// The services `x2rock link` can *reliably* get a credential for, whether
@@ -241,6 +243,27 @@ impl Catalogue {
     /// first would be worse than saying so.
     pub fn find<'a>(candidates: &[&'a Service], query: &str) -> Result<&'a Service> {
         Self::find_in(candidates, query, "searchable service", "search")
+    }
+
+    /// A service this machine can *use* by name - out of [`usable`](Self::usable),
+    /// for `browse`, `play-item` and `queue-item`, which call a service without
+    /// searching it.
+    ///
+    /// Not [`find`](Self::find): that one says "no searchable service", which
+    /// was wrong twice over for Apple Music - it is never searchable over SMAPI,
+    /// and what `play-item` lacked was the household's record for it. A real
+    /// service that needs an account gets the advice for getting one instead.
+    pub fn find_usable<'a>(&self, usable: &[&'a Service], query: &str) -> Result<&'a Service> {
+        Self::find_in(usable, query, "usable service", "browse").map_err(|e| {
+            match self
+                .services
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(query))
+            {
+                Some(s) if s.auth != smapi::Auth::Anonymous => s.needs_link_hint().into(),
+                _ => e,
+            }
+        })
     }
 
     /// [`find`] over any candidate set, naming what was searched and the
@@ -283,6 +306,12 @@ impl Catalogue {
     /// fetches once and remembers the answer. A miss during an outage fails -
     /// by definition there is nothing cached to fall back to.
     pub async fn categories_for(&mut self, service: &Service) -> Result<Vec<Category>> {
+        // Fixed rather than cached: Apple Music's presentation map lists what its
+        // SMAPI search would take, and that search is not the one asked. See
+        // `itunes`. A list cached from the map before it existed is passed over.
+        if crate::itunes::serves(&service.id) {
+            return Ok(crate::itunes::categories().to_vec());
+        }
         if let Some(hit) = self.categories.get(&service.id) {
             return Ok(hit.clone());
         }
@@ -298,6 +327,9 @@ impl Catalogue {
     /// to read many services in one pass, including telling "warmed to nothing"
     /// from "the warm failed and this is still unasked". `None` is the second.
     pub fn cached_categories(&self, service_id: &str) -> Option<&[Category]> {
+        if crate::itunes::serves(service_id) {
+            return Some(crate::itunes::categories());
+        }
         self.categories.get(service_id).map(Vec::as_slice)
     }
 
