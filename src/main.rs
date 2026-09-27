@@ -185,7 +185,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Households { json, redact } => {
             return household::run_households(json, redact).await;
         }
-        Command::Login { no_open } => return services::login(no_open).await,
+        Command::Login {
+            ref address,
+            no_open,
+        } => return services::login(address.as_deref(), no_open).await,
         Command::Logout => return services::logout(),
         Command::Skill {
             agent,

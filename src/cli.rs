@@ -915,7 +915,13 @@ pub enum Command {
     /// needs no sign-in, and x2rock never asks for one. Uses your own Sonos
     /// integration (see `sonos-integration.json` in the README); prints a link,
     /// and takes back the address the sign-in page shows.
+    ///
+    /// Two steps where there is no terminal to paste into: `x2rock login` opens
+    /// the page, and `x2rock login '<address>'` finishes with what it showed.
     Login {
+        /// The address the sign-in page showed, to finish a sign-in started by a
+        /// bare `x2rock login`.
+        address: Option<String>,
         /// Print the link rather than opening a browser.
         #[arg(long)]
         no_open: bool,
