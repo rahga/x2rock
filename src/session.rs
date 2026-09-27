@@ -137,7 +137,18 @@ pub struct Discovered {
 /// Connect to a player, learn the household from it, and remember what it said.
 pub async fn attach(ip: IpAddr, state: &mut State, fingerprint: Option<&str>) -> Result<Session> {
     let connection = Connection::open(ip).await?;
-    let groups = connection.groups().await?;
+    // Closed on the way out when the first read fails, not dropped: a dropped
+    // `Connection` keeps pinging for the rest of the process.
+    let groups = match connection.groups().await {
+        Ok(groups) => groups,
+        Err(e) => {
+            connection.close();
+            return Err(match crate::hint::is_permission_refusal(&e) {
+                true => crate::hint::authentication_required(&e),
+                false => e,
+            });
+        }
+    };
     if let Some(fingerprint) = fingerprint {
         let household = connection.household_id().await?;
         if state.remember(fingerprint, &household, &groups) {
@@ -206,8 +217,15 @@ pub async fn connect(
     let (household_id, players) = resolve_household(&households, household.or(room))?;
 
     for player in players {
-        let Ok(session) = attach(player.ip, state, Some(fingerprint)).await else {
-            continue;
+        let session = match attach(player.ip, state, Some(fingerprint)).await {
+            Ok(session) => session,
+            // The player answered, and said no. Every other one will say the
+            // same, and a rescan finds the same players - so this is the
+            // answer, not a reason to try the next address.
+            Err(e) if crate::hint::of(&e).0 == crate::hint::Code::AuthenticationRequired => {
+                return Err(e);
+            }
+            Err(_) => continue,
         };
         // A remembered address can now belong to a different household - DHCP
         // handed it to someone else's speaker, or the household itself moved -
@@ -328,6 +346,7 @@ pub async fn discover_households(
     });
 
     let mut last_error = None;
+    let mut refused = None;
     let mut by_household: BTreeMap<String, Vec<Connection>> = BTreeMap::new();
     for result in futures_util::future::join_all(probes).await {
         match result {
@@ -355,6 +374,9 @@ pub async fn discover_households(
                 }
                 Err(e) => {
                     progress(&format!("{}: {e:#}", connection.ip()));
+                    if crate::hint::is_permission_refusal(&e) {
+                        refused = Some(crate::hint::authentication_required(&e));
+                    }
                     last_error = Some(e);
                     connection.close();
                 }
@@ -370,6 +392,11 @@ pub async fn discover_households(
     }
 
     if discovered.is_empty() {
+        // Players that answered and refused are not "mid-reboot, or not
+        // players at all" - they are telling us why.
+        if let Some(refused) = refused {
+            return Err(refused);
+        }
         let last = last_error.unwrap_or_else(|| anyhow::anyhow!("no address reported a household"));
         return Err(crate::hint::none_completed_a_session(found.len(), &last));
     }

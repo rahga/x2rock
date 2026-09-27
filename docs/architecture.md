@@ -9045,6 +9045,16 @@ the person: **Authentication: Off** is `allowUnauthenticatedControl: true`, **UP
 `allowInsecureUPnP: true`, **Guest Access: On** is `allowGuestAccess: true` (read off both sides,
 2026-09-26). Anyone in the household can flip them.
 
+**With Authentication on** (flipped in the app for the test, 2026-09-26): every Control API command
+from x2rock is refused with **`ERROR_NO_PERMISSION`** - the first one, `groups:1 getGroups`, on every
+player - while **UPnP on :1400 keeps answering**. Sockets opened before the switch were left alone:
+the running daemon went on publishing, and only its next connect was refused. x2rock read the refusal
+as "did not answer", rescanned the subnet, and five seconds later blamed players "mid-reboot, or not
+players at all". Now `attach` maps it to **`authentication_required`**, the connect loop returns it
+at once rather than trying the next address or rescanning (151 ms), discovery reports it rather than
+"none completed a session", and the message names the switch and the support page. The daemon logs
+it and keeps retrying, which is right: the switch going off is the fix, and the next retry connects.
+
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are
 settings, now visible, with names that read like switches Sonos could default off. A check that
