@@ -739,6 +739,12 @@ pub enum Command {
         /// exactly one household, to know which household is meant.
         #[arg(long, num_args = 2, value_names = ["SERVICE", "ACCOUNT"])]
         prefer: Option<Vec<String>>,
+        /// Only the households x2rock has seen on the network this machine is
+        /// on now - what the bar widget lists at home is home's, not the
+        /// office's. Read from what is remembered, so no player is asked; on a
+        /// network it has never seen, every account is listed, as without it.
+        #[arg(long)]
+        here: bool,
         #[arg(long)]
         json: bool,
     },

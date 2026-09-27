@@ -991,7 +991,9 @@ those two apart when telling a user what linking will do.
   linked at the office reads as **unlinked at home** until it is linked or imported there too, and
   that is correct rather than a fault: say so and offer `link --from-household` instead of
   re-running a browser login. An auto-refresh on one network never touches the other's token.
-  `x2rock accounts` lists every household it holds, under a header only when there is more than one.
+  `x2rock accounts` lists every household it holds, under a header only when there is more than one;
+  `accounts --here` only those remembered on the current network (no player asked; on an unseen
+  network it lists everything, as without it).
 - **`accounts --json`**: `{service, service_id, account_key, serial, preferred, account_id,
   nickname, linked, household, browsable}` per token this machine holds — **one row per account**, so a service
   with two accounts is two rows with the same `service`. `preferred` marks the one in use and

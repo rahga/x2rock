@@ -2388,6 +2388,7 @@ pub async fn accounts(
     room: Option<&str>,
     content: bool,
     prefer: Option<&[String]>,
+    here: bool,
     json: bool,
 ) -> Result<()> {
     let mut linked = credentials::Credentials::load()?;
@@ -2412,6 +2413,28 @@ pub async fn accounts(
             Err(_) => None,
         },
     };
+
+    // `--here`: the households remembered on this network, by its fingerprint.
+    // Still local - the gateway's MAC out of /proc and the player list on disk -
+    // which is what lets the widget ask it on every open. `None` is "no
+    // narrowing": asked for nothing, on an unidentifiable network, or on one
+    // no household has been seen on, where hiding every account would answer
+    // "nothing is linked" and be wrong.
+    let nearby: Option<std::collections::BTreeSet<String>> = here
+        .then(crate::netid::network_fingerprint)
+        .flatten()
+        .map(|fingerprint| {
+            State::load()
+                .map(|state| {
+                    state
+                        .households_on(&fingerprint)
+                        .into_iter()
+                        .map(|(hh, _)| hh)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .filter(|seen: &std::collections::BTreeSet<String>| !seen.is_empty());
 
     // Only `--content` reaches the network, so the default keeps the
     // promise made above: this command reads a file on this machine.
@@ -2456,6 +2479,11 @@ pub async fn accounts(
     } else {
         None
     };
+    // After `--content`, which can settle the scope from the player it reached.
+    let in_view = |hh: &str| {
+        scope.as_deref().is_none_or(|target| hh == target)
+            && nearby.as_ref().is_none_or(|seen| seen.contains(hh))
+    };
     if json {
         // Still a bare array, and still one row per *account*: a service with
         // two accounts is two rows. The bar widget reduces this to service
@@ -2469,7 +2497,7 @@ pub async fn accounts(
         let catalogue = catalogue::Catalogue::load();
         let rows: Vec<_> = linked
             .all()
-            .filter(|(hh, _, _, _)| scope.as_deref().is_none_or(|target| *hh == target))
+            .filter(|(hh, _, _, _)| in_view(hh))
             .map(|(hh, id, key, a)| {
                 // Never the token or the key: this is printed to a
                 // terminal, into a widget's stdout, and into whatever
@@ -2509,14 +2537,11 @@ pub async fn accounts(
             println!("No accounts linked. Run `x2rock link` to see what can be.");
             return Ok(());
         }
-        let households: Vec<_> = match &scope {
-            Some(target) => linked
-                .households
-                .get_key_value(target)
-                .into_iter()
-                .collect(),
-            None => linked.households.iter().collect(),
-        };
+        let households: Vec<_> = linked
+            .households
+            .iter()
+            .filter(|(hh, _)| in_view(hh))
+            .collect();
         // Scoped to a household this store holds nothing for. Reachable through
         // `--content`, where the scope comes from the player that answered
         // rather than from the store - standing in front of speakers whose
@@ -2533,7 +2558,7 @@ pub async fn accounts(
         // Grouped by household, with a header only when there is more than
         // one - the roaming case - so the ordinary single-household listing
         // reads exactly as it did.
-        let multi = scope.is_none() && linked.households.len() > 1;
+        let multi = households.len() > 1;
         for (hh, services) in households {
             if multi {
                 println!("Household {hh}:");
