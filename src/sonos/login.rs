@@ -18,8 +18,9 @@
 //! open-source binary, so x2rock ships none: the key, secret and redirect URI are
 //! read from `$XDG_CONFIG_HOME/x2rock/sonos-integration.json`, which the person
 //! creates at developer.sonos.com. The redirect has to be a public HTTPS URL, so
-//! the code comes back by copy and paste: rahga.github.io/x2rock/callback.html
-//! shows the address it was opened with and sends it nowhere.
+//! rahga.github.io/x2rock/callback.html hands the browser on to x2rock listening
+//! on `127.0.0.1` (see [`authorize_url`]), and shows the address for a paste when
+//! the browser is on another machine.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
