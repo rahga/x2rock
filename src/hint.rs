@@ -66,6 +66,7 @@ codes! {
     LinkRefused => "link_refused",
     NotQueueMaterial => "not_queue_material",
     AuthenticationRequired => "authentication_required",
+    UpnpDisabled => "upnp_disabled",
     Unknown => "unknown",
 }
 
@@ -160,11 +161,21 @@ pub fn shell_arg(value: &str) -> String {
 
 /// The `(code, fix)` an error carries, reading the first [`Hint`] in its chain.
 /// A plain error - most of them - is `(Code::Unknown, None)`.
+///
+/// One code is read off something other than a `Hint`: a UPnP fault saying
+/// the household has UPnP switched off is `upnp_disabled`. It is raised as a
+/// [`crate::sonos::upnp::Fault`] because the enqueue fallbacks have to
+/// recognise it as the player declining (`commands::is_refusal`), and one
+/// check here names it wherever it surfaces rather than a hint at every SOAP
+/// call site.
 pub fn of(error: &Error) -> (Code, Option<String>) {
-    error
-        .downcast_ref::<Hint>()
-        .map(|h| (h.code, h.fix.clone()))
-        .unwrap_or((Code::Unknown, None))
+    if let Some(h) = error.downcast_ref::<Hint>() {
+        return (h.code, h.fix.clone());
+    }
+    if crate::sonos::upnp::Fault::of(error).is_some_and(|f| !f.is_per_action()) {
+        return (Code::UpnpDisabled, None);
+    }
+    (Code::Unknown, None)
 }
 
 /// The `--json` error object for a failure: `{error, code, fix}`, plus any
@@ -172,13 +183,11 @@ pub fn of(error: &Error) -> (Code, Option<String>) {
 /// standard keys). One place, so the CLI's error shape stays consistent.
 pub fn error_json(error: &Error) -> Value {
     let hint = error.downcast_ref::<Hint>();
+    let (code, fix) = of(error);
     let mut obj = serde_json::Map::new();
     obj.insert("error".into(), json!(format!("{error:#}")));
-    obj.insert(
-        "code".into(),
-        json!(hint.map_or(Code::Unknown, |h| h.code).as_str()),
-    );
-    obj.insert("fix".into(), json!(hint.and_then(|h| h.fix.clone())));
+    obj.insert("code".into(), json!(code.as_str()));
+    obj.insert("fix".into(), json!(fix));
     if let Some(Value::Object(extra)) = hint.and_then(|h| h.data.as_ref()) {
         for (key, value) in extra {
             obj.entry(key.clone()).or_insert_with(|| value.clone());
@@ -416,6 +425,33 @@ pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -
 mod tests {
     use super::*;
     use anyhow::{Context, anyhow};
+
+    /// UPnP switched off is a transport fault, not a `Hint`, and still has to
+    /// reach `--json` as its own code - under added context too. One action
+    /// declined is not it.
+    #[test]
+    fn a_household_with_upnp_off_is_upnp_disabled() {
+        use crate::sonos::upnp::{Fault, FaultKind};
+        let off = anyhow!(Fault {
+            action: "Browse".into(),
+            kind: FaultKind::UpnpDisabled,
+            detail: "UPnP is turned off".into(),
+        })
+        .context("reading the queue");
+        assert_eq!(of(&off), (Code::UpnpDisabled, None));
+        assert_eq!(error_json(&off)["code"], "upnp_disabled");
+
+        let declined = anyhow!(Fault {
+            action: "AddURIToQueue".into(),
+            kind: FaultKind::Action("800".into()),
+            detail: String::new(),
+        });
+        assert_eq!(of(&declined).0, Code::Unknown);
+
+        // A hint in the chain still wins: it was raised where more was known.
+        let hinted = off.context(Hint::new("no", Code::NoPlayer, None));
+        assert_eq!(of(&hinted).0, Code::NoPlayer);
+    }
 
     #[test]
     fn a_shell_argument_is_quoted_only_when_it_has_to_be() {
