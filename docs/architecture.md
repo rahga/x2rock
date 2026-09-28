@@ -9152,6 +9152,36 @@ Left alone: `authorization`, `catalog`, `management`, `smartplay`, `soundSwap`, 
 player scoped; without a way to list their commands, guessing further is low-yield. None of this
 probe sent anything but reads and subscribes.
 
+### The UPnP switch, followed live (office, 2026-09-28)
+
+With UPnP off, everything x2rock does over SOAP answers 403 - `queue`, `alarms`, `eq`, `sleep`
+and the TV input, each refused at once and naming the switch - while the Control API carries on:
+`status`, `vol`, `recent`, `favorites` and the daemon's whole publish, and cover art, which is
+served from :1400 but is not SOAP (200). The front ends offered the refused set anyway, and the
+widget swallowed most of the refusals: an empty-looking queue, a TV glyph that did nothing.
+
+**The switch is readable and evented on the Control API.** `effectiveSettings:1 getSettingsGroup
+{"groupName": "security"}`, **player-scoped with no other parameter** - no `userId`, no
+`locationId`; household-scoped it is refused for want of one - answers `allowInsecureUPnP` beside
+the other two switches, and a `timestamp` for the group. `subscribe`, player-scoped and also
+parameterless, sends a `settingsChanged` listing every settings group and its `timestamp`, no
+values, first on subscribing and then on each change: UPnP on moved `security` 4 -> 5, off again
+5 -> 6, each within a second, and the group's own read carries the same number. So the daemon reads
+the group, subscribes on the primary, and re-reads only when `security`'s number moves - no
+polling - and publishes **`x2rock:upnpOff`** on every room. False means on *or* unknown, so an
+unread switch and an older daemon both leave clients offering everything, as before. Verified by
+flipping it both ways under the running daemon: the log line and the key followed with no restart.
+
+What the front ends do with it: the widget holds the queue glyph blank and ignores `Q`, drops the
+add-to-queue button from search and browse, keeps the TV glyph only where the room is already on
+TV (lit, not pressable), leaves night/dialog showing their state but not pressable - the daemon
+reads them over the Control API, only the write is UPnP - and skips their `eq` re-read. The TUI's
+`t` says why rather than switching. The daemon also stops sending the queue-version browse, which
+could only be a 403. `play-item` keeps its fallbacks - a refused enqueue still streams, and
+`loadContent` is Control API - and, if every route fails, now ends on UPnP being off rather than on
+the last route's failure. Seen on the office One SL: the key, both directions, and the queue glyph.
+The TV and night/dialog gating need a soundbar, so they are exercised only in the widget's code.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search

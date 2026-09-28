@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::local::Connection;
 use super::proto::{
     Bond, ContentId, FavoritesList, GroupInfo, History, MetadataStatus, PlaybackStatus,
-    PlayerSettings, PlaylistsList, Repeat, Volume, Zones,
+    PlayerSettings, PlaylistsList, Repeat, SecuritySettings, Volume, Zones,
 };
 
 fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
@@ -485,6 +485,19 @@ impl Connection {
             .call(
                 on_player("settings:1", "getPlayerSettings", player_id),
                 json!({}),
+            )
+            .await?;
+        Ok(serde_json::from_value(body)?)
+    }
+
+    /// The household's Connection security switches, as this player applies
+    /// them - see [`SecuritySettings`]. Player-scoped; the household-scoped form
+    /// is refused for want of a `playerId`, `locationId` or `userId`.
+    pub async fn security_settings(&self, player_id: &str) -> Result<SecuritySettings> {
+        let body = self
+            .call(
+                on_player("effectiveSettings:1", "getSettingsGroup", player_id),
+                json!({ "groupName": "security" }),
             )
             .await?;
         Ok(serde_json::from_value(body)?)

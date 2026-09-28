@@ -369,6 +369,7 @@ render, and any other consumer can read them the same way:
 | `x2rock:isLiveStream` · `stationName` · `streamInfo` | a radio stream, its station, and its own now-playing text |
 | `x2rock:hasTrackId` | the current item has a real service track id — the gate for rating |
 | `x2rock:queueVersion` | changes whenever the queue changes, including from the Sonos app — read from UPnP, since the Control API has no such field |
+| `x2rock:upnpOff` | the household has UPnP switched off, so the queue, the TV input switch, tone and adding to the queue are refused; false when on *or* unknown. Followed live, as the Sonos app changes it |
 
 ## Front ends
 
@@ -649,6 +650,8 @@ systemctl --user daemon-reload && systemctl --user restart x2rock.service
   **on by default**; if it has been switched off, it is in the Sonos mobile app under
   *Account → Privacy and Security → Connection Security → UPnP*. The same switch
   disables the macOS and Windows Sonos apps. Playback, volume, grouping and favorites need nothing.
+  With it off, the daemon says so (`x2rock:upnpOff`), and the widget and the TUI withdraw what
+  would be refused.
 - **logind and NetworkManager are optional** — they are how the daemon learns it woke or moved
   networks. Without them it says so once at startup and recovers a little more slowly.
 - **No inbound connections.** Everything is outbound TCP, so a default-deny firewall needs no rule.
