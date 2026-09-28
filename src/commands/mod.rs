@@ -8,6 +8,7 @@ pub mod content;
 pub mod household;
 pub mod playback;
 pub mod raw;
+pub mod scene;
 pub mod services;
 pub mod speaker;
 pub mod status;

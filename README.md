@@ -146,6 +146,7 @@ and with `--each`, but not with `--all`.
 | `x2rock -r "Living Room" group Kitchen Bedroom` | rooms join Living Room's group and play what it plays |
 | `x2rock ungroup Kitchen` | Kitchen leaves; positional, no `-r` — a room is only ever in one group |
 | `x2rock -r Kitchen party` · `x2rock party off` | party mode hosted by that room; everyone joins |
+| `x2rock scene save Beach [--play "Ocean Waves"]` · `scene apply Beach` · `scene` · `scene delete Beach` | keep the household's groups, each room's volume and each group's mute under a name, optionally with a favorite or bookmark to start; applying regroups only what differs, then sets levels, then plays |
 
 Both print the group as it ended up. A room that leaves a group keeps its own queue but comes back
 stopped at its first track rather than where it was. `party` reaches every room in the house.

@@ -977,6 +977,20 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Save how the household is arranged, and put it back later.
+    ///
+    /// A scene is the groups (which rooms play together, and which coordinates),
+    /// each room's volume, each group's mute, and optionally something for a
+    /// group to play once it is in place: `scene save Beach --play "Ocean Waves"`
+    /// keeps the rooms as they are now with that favorite or bookmark as the
+    /// soundtrack. Bare, it lists this household's scenes.
+    Scene {
+        #[command(subcommand)]
+        action: Option<SceneAction>,
+        /// Output as JSON.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Fetch cover art into a bounded local cache and print where each landed.
     ///
     /// One line per URL, in order: the cached file's path, or an empty line for
@@ -1255,6 +1269,24 @@ pub enum BookmarksAction {
 }
 
 #[derive(Subcommand)]
+pub enum SceneAction {
+    /// The scenes saved for this household.
+    List,
+    /// Keep the household as it is now under `name`, replacing one of that name.
+    Save {
+        name: String,
+        /// A Sonos favorite or kept bookmark to start when the scene is applied,
+        /// by name. It plays in the group of --room (or the only group).
+        #[arg(long)]
+        play: Option<String>,
+    },
+    /// Regroup the rooms, set their volumes and mute, then start the soundtrack.
+    Apply { name: String },
+    /// Forget a scene.
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
 pub enum AlarmsAction {
     /// Create an alarm. It is armed unless --off is given.
     Add {
@@ -1370,6 +1402,7 @@ impl Command {
             | Command::Ungroup { json, .. }
             | Command::Party { json, .. }
             | Command::Art { json, .. }
+            | Command::Scene { json, .. }
             | Command::Tv { json } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),
