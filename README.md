@@ -408,8 +408,10 @@ the queue (click to jump, move or drop), party mode, thumbs up/down where the da
 track is rateable, and a music picker: a **Services** door first, then favorites and kept items,
 with a search that runs itself once typing pauses — across every service, or only the linked
 accounts, when `searchService` is `"all"` or `"linked"` in `shell.json`. Favorites the household
-can no longer play (the ones the Sonos app greys out) are left out. Cover art comes from the
-speaker itself and falls back to a glyph. It is entirely event-driven off the daemon and hides
+can no longer play (the ones the Sonos app greys out) are left out. Cover art falls back to a
+glyph, and the widget never fetches it itself: `x2rock art` does, taking only https or a
+speaker's own port 1400, at most 2 MB and 8 seconds an image and only a real image, into a
+cache under `~/.cache/x2rock/art` that it keeps below 50 MB and 30 days, least recently used first. It is entirely event-driven off the daemon and hides
 itself when there is no daemon; the widget's own [README](quickshell/x2rock.sonos/README.md) has
 every setting.
 

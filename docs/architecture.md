@@ -9182,6 +9182,30 @@ could only be a 403. `play-item` keeps its fallbacks - a refused enqueue still s
 the last route's failure. Seen on the office One SL: the key, both directions, and the queue glyph.
 The TV and night/dialog gating need a soundbar, so they are exercised only in the widget's code.
 
+### Cover art, fetched by x2rock rather than by Qt (2026-09-28)
+
+Raised in the widget's marketplace review (omacom/omarchy-plugin-marketplace#7284): every art URL
+went straight into a QML `Image`, which fetches anything from anywhere with no byte limit -
+`sourceSize` bounds the decode, not the download. On this household the URLs split two ways: the
+speaker's own `http://<ip>:1400/getaa` for now-playing and the queue, and service CDNs over https
+for favorites, recently played and search (`dzcdn.net`, `saavncdn.com`, `qobuz.com`,
+`mzstatic.com`). QML has no way to cap bytes, so the fetch left QML.
+
+`x2rock art <url>...` (`src/art.rs`) fetches only `https://`, or `http://` from a private IPv4
+address on port 1400; redirects are followed at most three times and each hop is held to the same
+rule. `http::get_bytes` stops reading once the raw response passes **2 MB** (a real 9 MB image was
+refused in 0.4 s) within **8 s**, a `Content-Encoding` is refused rather than inflated past the
+cap, and the body must start like a JPEG, PNG, GIF or WebP. Kept in `$XDG_CACHE_HOME/x2rock/art`,
+mode 700, one file per URL named for its MD5, written by rename. A hit bumps the file's mtime - atime
+is unreliable under `relatime` - and each run prunes at most hourly (a `.pruned` marker): past
+**30 days** goes, then the least recently used until under **50 MB**. A cache hit answers in
+~2 ms. The widget shows only a `file://` path matching that cache's naming; `CoverArt.qml` refuses
+anything else. It asks in batches of up to 40 URLs, up to four processes at once, with `--each`,
+which prints a row per image as it lands: the first version printed one array at the end, from a
+single process, and every cover in a list waited on the slowest CDN in it - visibly slower than
+Qt's own fetch, on the office household. With `--each` it was not. In the CLI, not the daemon: a CDN is a
+service, and the daemon does not talk to services.
+
 ### Preferred Service lives in the cloud or the app
 
 The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
