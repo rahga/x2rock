@@ -8992,6 +8992,12 @@ not. Learned playing forty items back on Dining Room:
   this household does not hold, and two with no service at all. `recent` marks them and the widget
   leaves them out.
 
+**History is a household setting (office, 2026-09-28).** With **Personalization Services** off in
+the Sonos app (Settings > Privacy & Security), `getHistory` is refused with
+**`ERROR_DISALLOWED_BY_POLICY` ("History is disabled")** - not `ERROR_NO_PERMISSION`, and the same
+whichever service is playing (Apple Music and Amazon Music alike). Switched on, the same call with
+the same sign-in answered at once with an empty history: nothing is recorded retroactively.
+
 ### `loadContent` for `play-item` and `bookmark`: evaluated, kept as a last resort (home, 2026-09-26)
 
 The question was whether `loadContent` could replace the hand-built UPnP enqueue - DIDL, cdudn,
@@ -9124,6 +9130,14 @@ own (its CSP is `default-src 'none'`); a navigation to 127.0.0.1 never leaves th
 still shows the address, so a browser on another machine - whose 127.0.0.1 is not this one - can
 paste it into the waiting `x2rock login`, or finish with `x2rock login '<address>'`. The state
 round-trip is unit-tested (`the_listening_port_leads_the_state_and_survives_the_round_trip`).
+
+**Verified end to end on the office One SL (2026-09-28)**, Authentication switched on for the test
+(`credentialTypeAllowed: GUEST_TOKEN`). `x2rock login` opened the browser and listened on
+`127.0.0.1:43321`; after Allow it finished by itself, exit 0, with no terminal to paste into - so
+the callback hop was the only way it could have. A new token was written at mode 600 and the
+listener closed. With it, `status`, `vol` (read, and a write of the same value), `recent`, and a
+restarted daemon's publish (MPRIS `PlaybackStatus` and title read over D-Bus) all worked; with the
+token moved aside, the same `status` was refused as `authentication_required`.
 
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are
