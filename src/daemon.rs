@@ -23,7 +23,7 @@ use crate::netid;
 use crate::restart::{Restart, Restarts};
 use crate::session::{self, Pool, Session};
 use crate::sonos::local::Connection;
-use crate::sonos::proto::{self, Event, Groups, Player};
+use crate::sonos::proto::{self, Event, Groups, Player, SettingsChanged};
 use crate::state::State;
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
@@ -409,6 +409,26 @@ async fn follow(
     )
     .await?;
 
+    // The household's UPnP switch, read off the primary and followed there:
+    // a `settingsChanged` names the version each settings group is at, so a
+    // change to `security` is heard without polling (both directions verified
+    // on the office One SL, 2026-09-28). The primary survives a republish, so
+    // one subscription serves the whole run.
+    let primary_id = session
+        .groups
+        .players
+        .iter()
+        .find(|p| p.ip() == Some(connection.ip()))
+        .map(|p| p.id.clone());
+    let mut upnp = UpnpSwitch::default();
+    if let Some(id) = &primary_id {
+        upnp.read(connection, id).await;
+        if let Err(e) = connection.subscribe_player("effectiveSettings:1", id).await {
+            log(&format!("UPnP switch will not follow changes ({e:#})"));
+        }
+    }
+    upnp.publish(&rooms).await;
+
     // Queue-version fetches run off this loop and answer here. A UPnP browse
     // has an 8s timeout; awaited inline, one wedged coordinator stalled every
     // room's events for that long. One fetch per group in flight at a time - a
@@ -495,6 +515,22 @@ async fn follow(
                     &session.groups,
                 )
                 .await?;
+                upnp.publish(&rooms).await;
+            }
+            ("effectiveSettings:1", _) => {
+                let Some(id) = primary_id.as_deref() else {
+                    continue;
+                };
+                if event.player_id.as_deref() != Some(id) {
+                    continue;
+                }
+                let Ok(changed) = SettingsChanged::deserialize(&event.body) else {
+                    continue;
+                };
+                if changed.security().is_some_and(|v| upnp.is_news(v)) {
+                    upnp.read(connection, id).await;
+                    upnp.publish(&rooms).await;
+                }
             }
             // Player-scoped, so it is matched by player rather than by group.
             ("playerVolume:1", _) => {
@@ -530,6 +566,55 @@ async fn follow(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// The household's UPnP switch as last read, and the `security` version that
+/// read was at.
+#[derive(Default)]
+struct UpnpSwitch {
+    allowed: Option<bool>,
+    version: Option<String>,
+}
+
+impl UpnpSwitch {
+    /// Whether a `settingsChanged` naming `security` at `version` says
+    /// something the last read did not.
+    fn is_news(&self, version: &str) -> bool {
+        self.version.as_deref() != Some(version)
+    }
+
+    /// Read the switch. A failure is logged and keeps what was known: an
+    /// unread switch publishes nothing, which a client takes as "on".
+    async fn read(&mut self, connection: &Connection, player_id: &str) {
+        match connection.security_settings(player_id).await {
+            Ok(settings) => {
+                let allowed = settings.attributes.allow_insecure_upnp;
+                if self.allowed != Some(allowed) {
+                    log(if allowed {
+                        "UPnP is on for this household"
+                    } else {
+                        "UPnP is off for this household; the queue, the TV input, \
+                         tone and night/dialog writes are withdrawn"
+                    });
+                }
+                self.allowed = Some(allowed);
+                self.version = Some(settings.timestamp);
+            }
+            Err(e) => log(&format!("could not read the UPnP switch ({e:#})")),
+        }
+    }
+
+    async fn publish(&self, rooms: &[Server<RoomPlayer>]) {
+        let Some(allowed) = self.allowed else {
+            return;
+        };
+        for server in rooms {
+            let properties = server.imp().apply_upnp(allowed);
+            if !properties.is_empty() {
+                announce(server, properties).await;
+            }
         }
     }
 }

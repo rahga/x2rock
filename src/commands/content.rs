@@ -252,12 +252,17 @@ pub async fn play_item(
             kind.unwrap_or_default()
         );
     }
+    // Whether the queue was refused because the household has UPnP off, rather
+    // than because of the item: if nothing below plays it either, that is the
+    // reason worth ending on, and the one the person can do something about.
+    let mut upnp_off = false;
     if !streamish && let Some(naming) = Naming::of(service, token) {
         match enqueue_item(session, room, service, &naming, id, title, kind, true).await {
             Ok(()) => return Ok(()),
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
             Err(e) if is_refusal(&e) => {
+                upnp_off = upnp::Fault::of(&e).is_some_and(|f| !f.is_per_action());
                 eprintln!(
                     "x2rock: {title:?} {} ({e:#}); streaming it",
                     refusal_was(&e)
@@ -266,6 +271,27 @@ pub async fn play_item(
             Err(e) => return Err(e),
         }
     }
+    let played = play_unqueued(session, room, service, token, kind, id, title).await;
+    match played {
+        Err(e) if upnp_off => Err(e.context(
+            "UPnP is off for this household, so it could not go in the queue - turn it \
+             back on in the Sonos app under Account > Privacy and Security > Connection \
+             Security > UPnP",
+        )),
+        other => other,
+    }
+}
+
+/// `play_item`'s routes that need no queue: a direct stream, then `loadContent`.
+async fn play_unqueued(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    kind: Option<&str>,
+    id: &str,
+    title: &str,
+) -> Result<()> {
     let streamed = stream_item(session, room, service, token, id, title, StreamStart::Fresh).await;
     // **The last resort, after both of the above said no.** `loadContent` hands
     // the player the service, account and id and lets it resolve the rest, and

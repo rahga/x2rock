@@ -16,7 +16,7 @@ use zbus::zvariant::OwnedValue;
 use crate::mpris::{
     CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT,
     INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUME_LEVELS,
-    MEMBER_VOLUMES, MEMBERS, MUTED, NO_SOURCE, ON_TV_INPUT, STATION_NAME, STREAM_INFO,
+    MEMBER_VOLUMES, MEMBERS, MUTED, NO_SOURCE, ON_TV_INPUT, STATION_NAME, STREAM_INFO, UPNP_OFF,
     VOLUME_LEVEL,
 };
 
@@ -100,6 +100,9 @@ pub struct RoomSnapshot {
     pub crossfade: bool,
     pub on_tv: bool,
     pub has_tv: bool,
+    /// The household has UPnP off, which the TV input switch goes over - see
+    /// `mpris::UPNP_OFF`.
+    pub upnp_off: bool,
     /// Nothing loaded at all - the Sonos app's "No Content". Transport and the
     /// modes are withdrawn; volume and mute stay.
     pub no_source: bool,
@@ -185,6 +188,7 @@ impl RoomSnapshot {
         self.no_source = flag(get(NO_SOURCE));
         self.on_tv = flag(get(ON_TV_INPUT));
         self.has_tv = flag(get(HAS_TV_INPUT));
+        self.upnp_off = flag(get(UPNP_OFF));
         self.input_format = first_string(get(INPUT_FORMAT));
         self.is_live_stream = flag(get(LIVE_STREAM));
         self.station_name = first_string(get(STATION_NAME));

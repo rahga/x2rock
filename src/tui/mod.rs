@@ -1050,6 +1050,14 @@ impl App {
             self.status = Some(Status::note("already on its TV input"));
             return Intent::Nothing;
         }
+        if room.upnp_off {
+            // The switch goes over UPnP, so it could only be refused - and the
+            // refusal would take a round trip to say what this already knows.
+            self.status = Some(Status::note(
+                "UPnP is off for this household, and the TV input switches over it",
+            ));
+            return Intent::Nothing;
+        }
         Intent::Tv(room.room.clone())
     }
 
@@ -1560,6 +1568,17 @@ mod tests {
             Some(Kind::Note),
             "a key offered on this row that does nothing needs to say why"
         );
+    }
+
+    #[test]
+    fn tv_says_why_instead_of_switching_with_upnp_off() {
+        let mut app = App::new(vec![RoomSnapshot {
+            has_tv: true,
+            upnp_off: true,
+            ..room("Living Room")
+        }]);
+        assert_eq!(press(&mut app, 't'), Intent::Nothing);
+        assert_eq!(app.status().map(|status| status.kind), Some(Kind::Note));
     }
 
     /// A household with Kitchen coordinating Office, and Bedroom on its own.

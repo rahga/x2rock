@@ -111,6 +111,8 @@ struct RoomState {
     /// means do not draw the control.
     night_mode: Option<bool>,
     enhance_dialog: Option<bool>,
+    /// The household's UPnP switch is known to be off - see [`UPNP_OFF`].
+    upnp_off: bool,
     /// What was last announced, so a change can be noticed rather than
     /// predicted - see [`RoomState::announce`].
     announced: Metadata,
@@ -208,6 +210,19 @@ pub(crate) const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
 /// for either, and `x2rock eq --night/--dialog` is the write path.
 const NIGHT_MODE: &str = "x2rock:nightMode";
 const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
+/// The household has UPnP switched off (Account > Privacy and Security >
+/// Connection Security in the Sonos app), so everything x2rock does over SOAP
+/// on :1400 is refused: the queue, the TV input, night sound and speech
+/// enhancement as writes, tone, alarms, the sleep timer, and adding to the
+/// queue from search. A client should withdraw those controls rather than
+/// offer ones that can only fail. Transport, volume, grouping, favorites and
+/// recently played are the Control API and carry on.
+///
+/// True only when the player has *said* so: false covers both "on" and "not
+/// known", so a client that has never heard of the key, or a daemon that
+/// could not read the switch, offers everything exactly as before. The
+/// household's switch, so every room carries the same value.
+pub(crate) const UPNP_OFF: &str = "x2rock:upnpOff";
 /// Whether what is playing is a live stream rather than something on demand.
 ///
 /// MPRIS has no way to say it. `mpris:length` being absent is the closest
@@ -437,6 +452,7 @@ impl RoomState {
         // `Option` on the fields.
         metadata.set(NIGHT_MODE, self.night_mode);
         metadata.set(ENHANCE_DIALOG, self.enhance_dialog);
+        metadata.set(UPNP_OFF, Some(self.upnp_off));
         metadata
     }
 }
@@ -556,6 +572,17 @@ impl RoomPlayer {
         state.announce().into_iter().collect()
     }
 
+    /// Fold the household's UPnP switch in - `allowed` as the player last read
+    /// it - announcing only when it moved.
+    pub fn apply_upnp(&self, allowed: bool) -> Vec<Property> {
+        let mut state = self.state.lock().unwrap();
+        if state.upnp_off == !allowed {
+            return Vec::new();
+        }
+        state.upnp_off = !allowed;
+        state.announce().into_iter().collect()
+    }
+
     /// Fold a `playbackStatus` event in; returns the MPRIS properties to announce.
     pub fn apply_playback(&self, status: &proto::PlaybackStatus) -> Vec<Property> {
         self.state.lock().unwrap().apply_playback(status)
@@ -584,12 +611,19 @@ impl RoomPlayer {
     /// allow - the same wall the cloud-queue note runs into.
     ///
     /// Never fails a caller: a browse that does not answer means the version is
-    /// simply not updated this time round.
+    /// simply not updated this time round. Not even sent with UPnP known to be
+    /// off, where every one would be a 403.
     pub fn queue_version_fetch(
         &self,
     ) -> impl std::future::Future<Output = Option<String>> + Send + 'static {
         let ip = self.connection.ip();
-        async move { Upnp::new(ip).update_id().await.ok() }
+        let off = self.state.lock().unwrap().upnp_off;
+        async move {
+            if off {
+                return None;
+            }
+            Upnp::new(ip).update_id().await.ok()
+        }
     }
 
     /// The other half of [`queue_version_fetch`]: fold a fetched version in,
@@ -958,6 +992,19 @@ impl PlayerInterface for RoomPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Always sent, and true only once the player has said UPnP is off: a
+    /// client reading false offers everything, as it did before the key.
+    #[test]
+    fn upnp_off_goes_out_as_a_flag_that_defaults_to_on() {
+        let mut state = RoomState::default();
+        let get = |m: &Metadata| m.get_value(UPNP_OFF).map(|v| v.clone().try_into().ok());
+        assert_eq!(get(&state.with_hints()), Some(Some(false)));
+        state.upnp_off = true;
+        let announced = state.announce();
+        assert!(announced.is_some(), "the switch moving is news");
+        assert_eq!(get(&state.with_hints()), Some(Some(true)));
+    }
 
     /// The bug the raw-event capture of 2026-09-03/04 turned up. A body that
     /// carries no `availablePlaybackActions` and no `playModes` used to be read

@@ -906,9 +906,91 @@ pub struct PlayerSettings {
     pub home_theater: Option<HomeTheaterOptions>,
 }
 
+/// The household's Connection security switches, as a player applies them:
+/// `effectiveSettings:1 getSettingsGroup {"groupName": "security"}`,
+/// player-scoped and answered with no `userId` or `locationId` (verified on the
+/// office One SL, 2026-09-28). Account > Privacy and Security > Connection
+/// Security in the Sonos app; see docs/architecture.md for which switch is
+/// which. Only UPnP is read: Authentication already announces itself as a
+/// refusal, and Guest Access touches nothing x2rock does.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecuritySettings {
+    pub attributes: SecurityAttributes,
+    /// Moves on every change to the group, and matches the `timestamp` a
+    /// `settingsChanged` event lists for `security`.
+    #[serde(default)]
+    pub timestamp: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecurityAttributes {
+    /// The UPnP switch. Off, every SOAP action on :1400 answers 403 - the
+    /// queue, alarms, tone, the sleep timer and the TV input with it.
+    #[serde(rename = "allowInsecureUPnP")]
+    pub allow_insecure_upnp: bool,
+}
+
+/// An `effectiveSettings:1` `settingsChanged` event: which settings groups
+/// exist, each with the version it is at. No values - a group whose version
+/// moved has to be read again. The first one arrives on subscribing.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChanged {
+    #[serde(default)]
+    pub settings_group_metadata: Vec<SettingsGroupVersion>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsGroupVersion {
+    pub name: String,
+    #[serde(default)]
+    pub timestamp: String,
+}
+
+impl SettingsChanged {
+    /// The version the `security` group is at, if the event lists it.
+    pub fn security(&self) -> Option<&str> {
+        self.settings_group_metadata
+            .iter()
+            .find(|g| g.name == "security")
+            .map(|g| g.timestamp.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both shapes as the office One SL sent them, 2026-09-28.
+    #[test]
+    fn the_upnp_switch_and_its_version_are_read_off_the_security_group() {
+        let read: SecuritySettings = serde_json::from_value(serde_json::json!({
+            "attributes": {
+                "allowGuestAccess": true,
+                "allowInsecureUPnP": false,
+                "allowUnauthenticatedControl": true,
+                "authPin": ""
+            },
+            "eTag": "\"x\"",
+            "schemaVersion": 9,
+            "timestamp": "6"
+        }))
+        .unwrap();
+        assert!(!read.attributes.allow_insecure_upnp);
+        assert_eq!(read.timestamp, "6");
+
+        let changed: SettingsChanged = serde_json::from_value(serde_json::json!({
+            "_objectType": "settingsChanged",
+            "settingsGroupMetadata": [
+                {"_objectType": "settingsGroupMetadata", "name": "global", "timestamp": "1"},
+                {"_objectType": "settingsGroupMetadata", "name": "security", "timestamp": "5"},
+                {"_objectType": "settingsGroupMetadata", "name": "playerBasic", "timestamp": "5"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(changed.security(), Some("5"));
+    }
 
     /// `zones:1` sends each member's state and its settings in separate events;
     /// the bond is both halves, and a half that is absent changes nothing.
