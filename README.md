@@ -647,7 +647,7 @@ systemctl --user daemon-reload && systemctl --user restart x2rock.service
   edition-2024, and lowering `rust-version` trades one clear refusal for a page of syntax errors.
 - **The Sonos UPnP setting**, for the queue, alarms, tone, and the other speaker settings. It is
   **on by default**; if it has been switched off, it is in the Sonos mobile app under
-  *Account → Legal and Privacy → Privacy & Security → Connection Security → UPnP*. The same switch
+  *Account → Privacy and Security → Connection Security → UPnP*. The same switch
   disables the macOS and Windows Sonos apps. Playback, volume, grouping and favorites need nothing.
 - **logind and NetworkManager are optional** — they are how the daemon learns it woke or moved
   networks. Without them it says so once at startup and recovers a little more slowly.
@@ -677,7 +677,7 @@ Then `x2rock tui` over ssh is the every-room view and `x2rock status --json` the
 
 ### Households with Authentication on
 
-The Sonos app's **Settings > Privacy & Security > Connection security** has an **Authentication**
+The Sonos app's **Account > Privacy and Security > Connection Security** has an **Authentication**
 switch, off by default. Switched on, the speakers refuse every command from a client that cannot say
 who it is, and x2rock stops with `authentication_required`, naming the switch. Either turn it back
 off, or sign x2rock in to your Sonos account:

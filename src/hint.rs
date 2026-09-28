@@ -245,8 +245,8 @@ pub fn authentication_required(inner: &Error) -> Error {
         ),
         false => format!(
             "the speakers refused x2rock ({inner:#}): this household's Connection security \
-             has Authentication turned on. Either turn it off in the Sonos app (Settings > \
-             Privacy & Security > Connection security > Authentication), or sign x2rock in \
+             has Authentication turned on. Either turn it off in the Sonos app (Account > \
+             Privacy and Security > Connection Security > Authentication), or sign x2rock in \
              with `x2rock login`, which needs a Sonos integration of your own. \
              https://support.sonos.com/en-us/article/adjust-connection-security-settings"
         ),

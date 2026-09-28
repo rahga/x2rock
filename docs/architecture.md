@@ -294,7 +294,7 @@ lines below record the reversals rather than warn about text that still says oth
 is the whole of it, and the rest of this document should be read against that sentence rather than
 against a vaguer one.
 
-**The amendment (2026-09-26).** The Sonos app's Privacy & Security > Connection security has an
+**The amendment (2026-09-26).** The Sonos app's Account > Privacy and Security > Connection Security has an
 **Authentication** switch, and with it on the speakers refuse every unauthenticated Control API
 command (`ERROR_NO_PERMISSION`; see "Player-scoped finds"). For such a household there is no
 account-free way in: the household itself has decided that only an identified client may control
@@ -6904,7 +6904,9 @@ and `x2rock favorite` will play it** - rather than only offering to descend into
 
 Prompted by finding that the UPnP guidance string had named the wrong Sonos menu since the initial
 commit - `Settings > Privacy & Security`, where it is actually under **Account** - which is the kind
-of error nothing in the build can catch. So the testable claims here were re-run against the real
+of error nothing in the build can catch. (The fix still had it one level too deep: there is no
+`Legal and Privacy` step. It is **Account > Privacy and Security > Connection Security** on iPhone
+and Android alike, per the person, 2026-09-28; `Settings` beside `Account` is for the speakers.) So the testable claims here were re-run against the real
 system rather than re-read.
 
 **Held, re-measured:**
@@ -8993,7 +8995,7 @@ not. Learned playing forty items back on Dining Room:
   leaves them out.
 
 **History is a household setting (office, 2026-09-28).** With **Personalization Services** off in
-the Sonos app (Settings > Privacy & Security), `getHistory` is refused with
+the Sonos app (under Account > Privacy and Security), `getHistory` is refused with
 **`ERROR_DISALLOWED_BY_POLICY` ("History is disabled")** - not `ERROR_NO_PERMISSION`, and the same
 whichever service is playing (Apple Music and Amazon Music alike). Switched on, the same call with
 the same sign-in answered at once with an empty history: nothing is recorded retroactively.
@@ -9058,7 +9060,7 @@ Followed up with `--scope player` on Living Room's Beam, reads and `subscribe` o
 | `ircontrol:1` | `getIRControl` | `enabled` |
 | `effectiveSettings:1` | `subscribe` with `locationId` + `userId`, then `getSettingsGroup {groupName}` | five groups: `global` and `playback` empty; `playerUI` (`statusLight`, `buttonLockState`); `playerBasic` (`zoneName`, `icon`, `configuration`); and **`security`: `allowUnauthenticatedControl: true`, `allowInsecureUPnP: true`, `allowGuestAccess: true`** |
 
-**These are the Sonos app's own switches.** Privacy & Security -> Connection security lists them for
+**These are the Sonos app's own switches.** Account > Privacy and Security > Connection Security lists them for
 the person: **Authentication: Off** is `allowUnauthenticatedControl: true`, **UPnP: On** is
 `allowInsecureUPnP: true`, **Guest Access: On** is `allowGuestAccess: true` (read off both sides,
 2026-09-26). Anyone in the household can flip them.
