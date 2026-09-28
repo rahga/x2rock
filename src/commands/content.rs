@@ -273,11 +273,15 @@ pub async fn play_item(
     }
     let played = play_unqueued(session, room, service, token, kind, id, title).await;
     match played {
-        Err(e) if upnp_off => Err(e.context(
+        // A hint, not a plain context, so the code an agent branches on is
+        // this one rather than whichever fallback failed last.
+        Err(e) if upnp_off => Err(e.context(hint::Hint::new(
             "UPnP is off for this household, so it could not go in the queue - turn it \
              back on in the Sonos app under Account > Privacy and Security > Connection \
              Security > UPnP",
-        )),
+            hint::Code::UpnpDisabled,
+            None,
+        ))),
         other => other,
     }
 }

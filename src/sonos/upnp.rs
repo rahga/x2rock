@@ -1491,8 +1491,9 @@ impl Upnp {
                 // it off deliberately; note what else that switched off.
                 detail: "UPnP is turned off for this household - turn it back \
                          on in the Sonos mobile app under Account > Privacy \
-                         and Security > Connection Security > UPnP. It also switches off the macOS and Windows Sonos \
-                         apps, which use the same protocol"
+                         and Security > Connection Security > UPnP. It also \
+                         switches off the macOS and Windows Sonos apps, which \
+                         use the same protocol"
                     .to_owned(),
             }
             .into());
