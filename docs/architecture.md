@@ -9219,6 +9219,33 @@ states - same records, flags and token lengths - so that was re-encryption, not 
 the preference either. **Preferred Service is not stored on the household**; it belongs to the
 Sonos account or the app, and x2rock cannot read it. Merged search keeps its own order.
 
+## Scenes (2026-09-28)
+
+Prompted by comparing with SonosCLI, whose `scene save/apply` keeps grouping and per-room
+volume/mute. x2rock's (`src/commands/scene.rs`) keeps the groups, each room's volume and each
+group's mute, and adds an optional **soundtrack** per group - a Sonos favorite or a kept bookmark,
+resolved at save time, started last on apply. Stored in `$XDG_STATE_HOME/x2rock/scenes.json` per
+household id, rooms by player id with the name beside it, so a renamed room still matches.
+
+**Applying never removes a coordinator from its own group** - that hands its queue to whoever stays
+(see "Grouping over the local API"). `next_step` plans one `modifyGroupMembers` at a time against a
+fresh `getGroups`: if the wanted coordinator is a member of someone else's group it is detached
+(a member leaving is harmless), and then its group gains and loses members to match. Only what
+differs is changed, since a regroup stalls playback in every room it touches. Unit-tested against a
+model of the player's own semantics, including the case that forces a detach.
+
+Mute stays group-wide, as `vol mute` has it, and is set after the levels because a level being set
+unmutes. A bookmark soundtrack uses the queue path only: `bookmark`'s stream fallback prints its own
+lines, which cannot sit under a `--json` report, so a refusal becomes a note suggesting a favorite.
+
+Verified on the office One SL: save, list, apply with nothing to change (`regrouped: 0`), the
+soundtrack lookup and both refusals, and a favorite soundtrack starting on apply - Media Room went
+from Apple Music to the Deezer favorite in 0.8 s, reported under `playing`. A bookmark soundtrack
+too: a YouTube Music bookmark started in 1.6 s (`"kind": "bookmark"`), and a Sonos Radio one was
+refused by the queue (UPnP 800) and came back as the stderr note, with stdout's JSON clean,
+`playing` empty and exit 0 - the rest of the scene applied and the room kept playing. **Multi-room regrouping has not met real speakers yet** - the
+office has one room - and needs the home household.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

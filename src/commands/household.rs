@@ -655,9 +655,9 @@ pub async fn battery(session: &Session, room: Option<&str>, json: bool) -> Resul
 
 /// What a group change left: the group as the player reports it, and a note
 /// when the player had to be asked twice.
-struct Changed {
-    group: Group,
-    note: Option<String>,
+pub(crate) struct Changed {
+    pub(crate) group: Group,
+    pub(crate) note: Option<String>,
 }
 
 /// Ask a group's coordinator for a change, and say what the group is now.
@@ -670,7 +670,7 @@ struct Changed {
 /// the topology again, from the session's own player, and checking: every
 /// room to add is in the coordinator's group and none to remove is, or the
 /// error stands. A refusal is not re-read; the player said no.
-async fn change_group(
+pub(crate) async fn change_group(
     session: &Session,
     group: &Group,
     add: &[String],

@@ -135,7 +135,7 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
     }
 }
 
-fn find_favorite<'a>(favorites: &'a [Favorite], query: &str) -> Result<&'a Favorite> {
+pub(crate) fn find_favorite<'a>(favorites: &'a [Favorite], query: &str) -> Result<&'a Favorite> {
     find_named(
         favorites,
         query,
@@ -1119,16 +1119,18 @@ pub async fn keep(
     Ok(())
 }
 
-/// `x2rock bookmark`: play something kept earlier on `target`, or with `next`
-/// queue it after the current track.
-pub async fn bookmark(
+/// A kept bookmark by name, with what playing it needs: its service as the
+/// player lists it, the token a stream fallback would use, and the cdudn that
+/// names its account. Shared by `bookmark` and scenes.
+async fn resolve_bookmark(
     session: &Session,
-    player: &Connection,
-    target: &Target,
-    room: Option<&str>,
     query: &str,
-    next: bool,
-) -> Result<()> {
+) -> Result<(
+    bookmarks::Bookmark,
+    sonos::smapi::Service,
+    Option<sonos::smapi::Token>,
+    String,
+)> {
     let list = bookmarks::Bookmarks::load()?;
     let bookmark = list.find(query)?.clone();
 
@@ -1177,6 +1179,46 @@ pub async fn bookmark(
             bookmark.name
         )
     })?;
+    Ok((bookmark, service, token, cdudn))
+}
+
+/// Start a kept bookmark on `target` by the queue route alone, printing
+/// nothing, and answer with its name. For scenes: `bookmark` would fall back
+/// to a direct stream on a refusal, which prints its own lines and so cannot
+/// sit under a `--json` report - here a refusal is the answer.
+pub async fn start_bookmark(
+    session: &Session,
+    player: &Connection,
+    target: &Target,
+    query: &str,
+) -> Result<String> {
+    let (bookmark, _, _, cdudn) = resolve_bookmark(session, query).await?;
+    play_bookmark(session, player, target, &bookmark, &cdudn)
+        .await
+        .map_err(|e| {
+            if is_refusal(&e) {
+                anyhow!(
+                    "it would not go in the queue ({e:#}); a scene can play it only as a \
+                     Sonos favorite - save it as one in the Sonos app"
+                )
+            } else {
+                e
+            }
+        })?;
+    Ok(bookmark.name)
+}
+
+/// `x2rock bookmark`: play something kept earlier on `target`, or with `next`
+/// queue it after the current track.
+pub async fn bookmark(
+    session: &Session,
+    player: &Connection,
+    target: &Target,
+    room: Option<&str>,
+    query: &str,
+    next: bool,
+) -> Result<()> {
+    let (bookmark, service, token, cdudn) = resolve_bookmark(session, query).await?;
 
     if next {
         // Queuing for later, not playing now - streaming would start it

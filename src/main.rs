@@ -26,15 +26,15 @@ mod tui;
 use anyhow::{Result, ensure};
 use clap::{CommandFactory, FromArgMatches};
 
-use cli::{Cli, Command, RawTransport};
+use cli::{Cli, Command, RawTransport, SceneAction};
 use commands::playback::{apply_crossfade, apply_repeat, apply_shuffle, play_or_resume};
 use commands::speaker::{
     ToneRequest, apply_buttons, apply_eq, apply_led, apply_remote, apply_rename, apply_sleep,
     apply_snooze,
 };
 use commands::{
-    admin, content, emit, fan_out, fans_out, household, playback, raw, services, speaker, status,
-    stream, too_many_rooms, volume,
+    admin, content, emit, fan_out, fans_out, household, playback, raw, scene, services, speaker,
+    status, stream, too_many_rooms, volume,
 };
 use state::State;
 
@@ -543,6 +543,17 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
     // Grouping resolves rooms itself: `ungroup` names its room positionally and
     // must work without --room, which the shared target resolution below would
     // refuse while the household has several groups.
+    if let Command::Scene { action, json } = &cli.command {
+        return match action {
+            None | Some(SceneAction::List) => scene::list(session, *json).await,
+            Some(SceneAction::Save { name, play }) => {
+                scene::save(session, room, name, play.as_deref(), *json).await
+            }
+            Some(SceneAction::Apply { name }) => scene::apply(session, name, *json).await,
+            Some(SceneAction::Delete { name }) => scene::delete(session, name, *json).await,
+        };
+    }
+
     if let Command::Group { rooms, json } = &cli.command {
         return emit(&household::group(session, room, rooms).await?, *json);
     }
@@ -714,6 +725,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::System { .. }
         | Command::Battery { .. }
         | Command::Group { .. }
+        | Command::Scene { .. }
         | Command::Ungroup { .. }
         | Command::Party { .. }
         | Command::Raw { .. }

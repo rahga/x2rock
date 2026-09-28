@@ -401,6 +401,7 @@ rooms; see "Ask before you act".
 | Queue a whole album or playlist | the same commands with `--kind album` or `--kind playlist` — the player expands it into the queue. An `artist` is refused: it holds albums and playlists rather than tracks, so browse it and queue what is inside |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
+| Scenes: a saved arrangement | `x2rock scene --json` (list) / `x2rock scene apply "<Name>" --json` / `x2rock [-r "<Room>"] scene save "<Name>" [--play "<favorite or bookmark>"]` / `x2rock scene delete "<Name>"` - see "Scenes" |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
@@ -820,6 +821,31 @@ or the user is surprised nothing responds.
 - **Favorite drift**: a live service can silently reuse an id (iHeartRadio's holiday stations),
   undetectable. After a favorite, `now --json` and compare the title to the favorite name; flag a
   surprising mismatch, don't warn routinely.
+
+## Scenes: `scene save`, `scene apply`
+
+A scene is the household's arrangement kept under a name: the groups (coordinator first), each
+room's volume, each group's mute, and optionally a **soundtrack** - a Sonos favorite or a kept
+bookmark, by name, that a group starts once it is in place. "Beach" might be the patio and kitchen
+together at 30 and 25 playing an ocean-waves favorite.
+
+- **Save captures the house as it is right now.** To make one, arrange the rooms first (`group`,
+  `vol`), then `x2rock scene save "<Name>"`. `--play "<name>"` adds the soundtrack to the group of
+  `-r <Room>` (or the only group); it is looked up among favorites first, then bookmarks, and
+  refused if neither has it. Saving under an existing name replaces that scene (stderr says so).
+- **Apply regroups only what differs**, then sets each room's level, then each group's mute, then
+  starts the soundtracks - so the music comes in at the right level in the right rooms. The
+  `--json` answer is `{scene, action: "applied", groups: [[rooms…]…], regrouped, playing:
+  [{room, title, kind}]}`; `regrouped` is how many group changes it took (0 when already in place).
+  Rooms not in the household any more, a volume that would not set and a soundtrack that would not
+  start are **stderr notes, not failures** - read them. A bookmark that will not go in the queue
+  does not fall back to streaming here; the note says to save it as a Sonos favorite.
+- **Rooms the scene does not name are left alone** unless they sit in a group it reshapes; then
+  they leave that group and play on their own.
+- **Applying reaches every room the scene names** - regrouping stalls playback in them for a moment
+  and a soundtrack replaces what they were playing. Asked for by name ("put on the beach scene"),
+  just apply it. As your own reading of something vaguer, ask first, like `party`.
+- Scenes belong to the household they were saved in; `scene` lists only this household's.
 
 ## Ask before you act — it is a shared house
 
