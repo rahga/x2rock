@@ -137,9 +137,18 @@ pub async fn post(
     body: &str,
     timeout: Duration,
 ) -> Result<(u16, String)> {
-    let (status, _, body) = tokio::time::timeout(
+    let (status, head, body) = tokio::time::timeout(
         timeout,
-        exchange(endpoint, tls, "POST", path, headers, Some(body), false),
+        exchange(
+            endpoint,
+            tls,
+            "POST",
+            path,
+            headers,
+            Some(body),
+            false,
+            None,
+        ),
     )
     .await
     .map_err(|_| {
@@ -148,7 +157,7 @@ pub async fn post(
             endpoint.authority()
         )
     })??;
-    Ok((status, body))
+    Ok((status, text(&head, body, &endpoint.authority())?))
 }
 
 /// One HTTP/1.1 GET. Service manifests and presentation maps are plain
@@ -166,13 +175,37 @@ pub async fn get_with(
     headers: &[(&str, &str)],
 ) -> Result<(u16, String)> {
     let (endpoint, path, tls) = parse_url(url)?;
-    let (status, _, body) = tokio::time::timeout(
+    let (status, head, body) = tokio::time::timeout(
         timeout,
-        exchange(&endpoint, tls, "GET", &path, headers, None, false),
+        exchange(&endpoint, tls, "GET", &path, headers, None, false, None),
     )
     .await
     .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))??;
-    Ok((status, body))
+    Ok((status, text(&head, body, &endpoint.authority())?))
+}
+
+/// A GET for a binary body, read to at most `limit` bytes: `(status, head,
+/// body)`, the body with any chunked framing removed and nothing else done to
+/// it - no gunzip, which would undo the cap, so a caller that cannot use a
+/// compressed body checks `Content-Encoding` in the head and refuses it.
+///
+/// **Over `limit` is an error, not a truncated body.** The read stops as soon
+/// as the raw response passes the cap and the socket is dropped, so a server
+/// that sends more - or never stops - costs at most `limit` plus one read of
+/// memory. Written for cover art, which the bar widget used to hand straight
+/// to Qt with no bound at all.
+pub async fn get_bytes(
+    url: &str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<(u16, String, Vec<u8>)> {
+    let (endpoint, path, tls) = parse_url(url)?;
+    tokio::time::timeout(
+        timeout,
+        exchange(&endpoint, tls, "GET", &path, &[], None, false, Some(limit)),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
 }
 
 /// Ask a URL what it is, reading its headers and nothing else.
@@ -206,6 +239,7 @@ pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
             &[("Range", "bytes=0-0")],
             None,
             true,
+            None,
         ),
     )
     .await
@@ -241,7 +275,11 @@ pub fn urlencode(value: &str) -> String {
 /// leaving the body unread and the socket to be dropped. Only [`probe`] wants
 /// it, and it is not an optimisation: without it a server that ignores `Range`
 /// streams its whole body into memory, which for a live radio station never
-/// ends at all.
+/// ends at all. `limit` caps the raw response in bytes - see [`get_bytes`].
+///
+/// Returns the status, the head, and the body with chunked framing removed;
+/// [`text`] makes a document of it.
+#[allow(clippy::too_many_arguments)]
 async fn exchange(
     endpoint: &Endpoint,
     tls: bool,
@@ -250,7 +288,8 @@ async fn exchange(
     headers: &[(&str, &str)],
     body: Option<&str>,
     head_only: bool,
-) -> Result<(u16, String, String)> {
+    limit: Option<usize>,
+) -> Result<(u16, String, Vec<u8>)> {
     let authority = endpoint.authority();
     let stream = TcpStream::connect(&authority)
         .await
@@ -287,9 +326,9 @@ async fn exchange(
             .connect(name, stream)
             .await
             .with_context(|| format!("TLS handshake with {host}"))?;
-        round_trip(stream, &request, &authority, head_only).await
+        round_trip(stream, &request, &authority, head_only, limit).await
     } else {
-        round_trip(stream, &request, &authority, head_only).await
+        round_trip(stream, &request, &authority, head_only, limit).await
     }
 }
 
@@ -298,7 +337,8 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     request: &str,
     authority: &str,
     head_only: bool,
-) -> Result<(u16, String, String)> {
+    limit: Option<usize>,
+) -> Result<(u16, String, Vec<u8>)> {
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
 
@@ -319,6 +359,11 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
             Ok(0) => break,
             Ok(n) => {
                 raw.extend_from_slice(&chunk[..n]);
+                if let Some(limit) = limit
+                    && raw.len() > limit
+                {
+                    bail!("{authority} sent more than {limit} bytes");
+                }
                 if head_only {
                     if raw[scanned..].windows(4).any(|w| w == b"\r\n\r\n") {
                         break;
@@ -352,6 +397,11 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         body.to_vec()
     };
+    Ok((status, head.into_owned(), body))
+}
+
+/// A response body as a document: gunzipped if it says so, then UTF-8.
+fn text(head: &str, body: Vec<u8>, authority: &str) -> Result<String> {
     // Transfer-Encoding is unwrapped before Content-Encoding, which is the order
     // they were applied in.
     //
@@ -372,11 +422,7 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // Services answer UTF-8 and some of them lead with a BOM, which every XML
     // parser then refuses as content before the declaration.
     let text = String::from_utf8_lossy(&body).into_owned();
-    Ok((
-        status,
-        head.into_owned(),
-        text.trim_start_matches('\u{feff}').to_string(),
-    ))
+    Ok(text.trim_start_matches('\u{feff}').to_string())
 }
 
 /// Unwrap one gzip member (RFC 1952) into the deflate stream inside it.
@@ -525,9 +571,10 @@ mod tests {
             read: std::sync::Arc::clone(&read),
         };
 
-        let (status, got_head, body) = round_trip(tap, "GET / HTTP/1.1\r\n\r\n", "test", true)
-            .await
-            .expect("a complete head is a complete response");
+        let (status, got_head, body) =
+            round_trip(tap, "GET / HTTP/1.1\r\n\r\n", "test", true, None)
+                .await
+                .expect("a complete head is a complete response");
 
         assert_eq!(status, 200);
         assert!(got_head.contains("Content-Length: 40000"));
@@ -553,11 +600,36 @@ mod tests {
             "GET / HTTP/1.1\r\n\r\n",
             "test",
             false,
+            None,
         )
         .await
         .expect("a well-formed response");
         assert_eq!(status, 200);
-        assert_eq!(body, "hello");
+        assert_eq!(body, b"hello");
+    }
+
+    /// A capped read gives up as soon as it is past the cap, rather than
+    /// taking the rest and then refusing it - which is the point of a cap on a
+    /// server that may never stop sending.
+    #[tokio::test]
+    async fn a_capped_read_stops_once_past_its_limit() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\r\n";
+        let mut data = head.as_bytes().to_vec();
+        data.extend(std::iter::repeat_n(b'A', 100_000));
+        let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tap = Tap {
+            data,
+            read: std::sync::Arc::clone(&read),
+        };
+        let refused = round_trip(tap, "GET / HTTP/1.1\r\n\r\n", "test", false, Some(10_000))
+            .await
+            .expect_err("over the cap");
+        assert!(format!("{refused:#}").contains("more than 10000 bytes"));
+        let consumed = read.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            consumed < 20_000,
+            "read {consumed} bytes of a 10000-byte cap"
+        );
     }
 
     #[test]

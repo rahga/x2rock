@@ -1,3 +1,4 @@
+mod art;
 mod bookmarks;
 mod catalogue;
 mod cli;
@@ -207,6 +208,12 @@ async fn run(cli: Cli) -> Result<()> {
             install,
             uninstall,
         } => return admin::completions(shell, install, uninstall),
+        Command::Art {
+            ref urls,
+            clear,
+            json,
+            each,
+        } => return art::run(urls, clear, json, each).await,
         Command::Complete {
             ref what,
             ref prefix,
@@ -728,6 +735,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Desktop { .. }
         | Command::Service { .. }
         | Command::Completions { .. }
+        | Command::Art { .. }
         | Command::Complete { .. }
         | Command::Tui
         | Command::Daemon { .. } => unreachable!("handled above"),

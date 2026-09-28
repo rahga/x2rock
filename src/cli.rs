@@ -977,6 +977,28 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Fetch cover art into a bounded local cache and print where each landed.
+    ///
+    /// One line per URL, in order: the cached file's path, or an empty line for
+    /// one that was not fetched. Only `https://`, or `http://` from a speaker on
+    /// the local network (port 1400), each at most 2 MB and 8 seconds, and only
+    /// if it is a JPEG, PNG, GIF or WebP. The cache is
+    /// `$XDG_CACHE_HOME/x2rock/art`, kept under 50 MB and 30 days, least
+    /// recently used first. What the bar widget shows art through.
+    Art {
+        /// Art URLs, as `now`, `queue`, `favorites` and the rest report them.
+        urls: Vec<String>,
+        /// Empty the cache first (on its own, just empty it).
+        #[arg(long)]
+        clear: bool,
+        /// Output as JSON: `[{url, path, error?}]`, `path` null when not fetched.
+        #[arg(long)]
+        json: bool,
+        /// One JSON row per line as each image lands, in that order, instead of
+        /// all of them at the end - for a caller showing covers as they arrive.
+        #[arg(long)]
+        each: bool,
+    },
     /// Generate shell completion scripts for bash, zsh, fish, elvish, or powershell.
     ///
     /// Outputs the script to stdout. Room names, households, services,
@@ -1347,6 +1369,7 @@ impl Command {
             | Command::Group { json, .. }
             | Command::Ungroup { json, .. }
             | Command::Party { json, .. }
+            | Command::Art { json, .. }
             | Command::Tv { json } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),
