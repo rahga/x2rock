@@ -9095,7 +9095,7 @@ WebSocket's form still to be found. Untested with a real token: nothing here hol
 **Built and verified the same day, with a real token** (Authentication on, `GUEST_TOKEN` in
 discovery). An integration registered at developer.sonos.com, the OAuth code flow through
 `api.sonos.com/login/v3/oauth` with the redirect caught by a static page
-(`rahga.github.io/x2rock/callback.html`, which shows the address and sends it nowhere), and the
+(`rahga.github.io/x2rock/callback.html`, which then only showed the address to paste back), and the
 token exchanged at `/oauth/access` with the integration's Basic credentials: `playback-control-all`,
 24 hours, a refresh token. Against the speakers:
 
@@ -9113,6 +9113,17 @@ expiry, cached per process. The daemon's refresh is a call to Sonos's cloud from
 exception to "talking to a service never enters the daemon", and for the same reason as the axiom's:
 a daemon that cannot refresh loses the household a day after sign-in. Not signed in, nothing is
 sent and nothing read but a missing file, once.
+
+**The paste became a loopback hop (2026-09-27, `dd5ac51`).** Sonos redirects only to a registered
+public HTTPS page, so the usual `127.0.0.1` redirect URI is not available directly. Instead
+`x2rock login` listens on a free `127.0.0.1` port and puts it at the front of the OAuth `state`, as
+`<port>.<random>`; Sonos echoes the state untouched, the callback page reads the port back out and
+`location.replace`s the tab to `http://127.0.0.1:<port>/callback` with the same query, and x2rock
+checks the state, exchanges the code and answers the tab. The page still makes no request of its
+own (its CSP is `default-src 'none'`); a navigation to 127.0.0.1 never leaves the machine. It also
+still shows the address, so a browser on another machine - whose 127.0.0.1 is not this one - can
+paste it into the waiting `x2rock login`, or finish with `x2rock login '<address>'`. The state
+round-trip is unit-tested (`the_listening_port_leads_the_state_and_survives_the_round_trip`).
 
 **The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
 Control API answering without authentication and on UPnP being open on :1400 - and those are

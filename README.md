@@ -4,8 +4,8 @@ Local-first Sonos control for Linux: a daemon that publishes every room as a sta
 media player, and a CLI that reaches everything the speakers will answer to on the LAN — playback,
 volume, grouping, the queue, favorites, music services, alarms, tone, and the physical speaker.
 
-**No Sonos login, ever.** x2rock talks to the speakers directly, the way the Sonos app itself does
-on your network. Control never leaves the LAN.
+**No Sonos login** — unless your household has switched Authentication on. x2rock talks to the
+speakers directly, the way the Sonos app itself does on your network. Control never leaves the LAN.
 
 **Every Sonos room is a Linux media player.** Media keys, the lock screen, GNOME and KDE media
 applets, `playerctl`, Waybar — anything that already speaks MPRIS plays, pauses, skips and shows
