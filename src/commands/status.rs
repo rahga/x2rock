@@ -585,14 +585,12 @@ mod tests {
         );
     }
 
-    /// A `playbackStatus` and a `metadataStatus` as the Media Room actually
-    /// sent them (captured 2026-09-03), trimmed of fields nothing here reads.
     /// `status --json` is the contract the skill says to read first, and `now
     /// --json` the subset it says is missing exactly seven fields. Both are held
     /// to the skill's own example object, parsed as JSON - so a key added to a
     /// row without updating the example fails, as does an example key the row
-    /// stopped emitting. Built from empty bodies, since only the key *set* is
-    /// under test, not the values.
+    /// stopped emitting. Checked on an empty body and on a real playing one, so
+    /// a key that only appears once something plays cannot slip past either.
     #[test]
     fn a_status_row_and_a_now_object_have_exactly_the_keys_the_skill_documents() {
         use std::collections::BTreeSet;
@@ -614,32 +612,8 @@ mod tests {
             serde_json::from_str(example).expect("the skill's status example is valid JSON");
         let documented = keys(&example[0]);
 
-        let status: PlaybackStatus = serde_json::from_str("{}").unwrap();
-        let meta: MetadataStatus = serde_json::from_str("{}").unwrap();
-        let members = vec!["Kitchen".to_string()];
-        let facts = RoomFacts {
-            name: "Kitchen",
-            members: &members,
-            coordinator: Some("Kitchen"),
-            has_tv: false,
-        };
-        let volume = Volume {
-            volume: 10,
-            muted: false,
-            fixed: false,
-        };
-        let row = room_value(&facts, Ok((status, meta, Some(volume))), None);
-        assert_eq!(
-            keys(&row),
-            documented,
-            "a status row's keys must match the skill's example object exactly"
-        );
-
         // `now` is documented as the row minus these seven, which live on the
         // room rather than on what is playing.
-        let status: PlaybackStatus = serde_json::from_str("{}").unwrap();
-        let meta: MetadataStatus = serde_json::from_str("{}").unwrap();
-        let now = now_json("Kitchen", &status, &meta, None);
         let room_only: BTreeSet<String> = [
             "volume",
             "muted",
@@ -653,13 +627,52 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let expected_now: BTreeSet<String> = documented.difference(&room_only).cloned().collect();
-        assert_eq!(
-            keys(&now),
-            expected_now,
-            "`now --json` must be the row minus the room fields"
-        );
+
+        let empty = || -> (PlaybackStatus, MetadataStatus) {
+            (
+                serde_json::from_str("{}").unwrap(),
+                serde_json::from_str("{}").unwrap(),
+            )
+        };
+        for (body, make) in [
+            (
+                "empty",
+                &empty as &dyn Fn() -> (PlaybackStatus, MetadataStatus),
+            ),
+            ("playing", &playing_body),
+        ] {
+            let members = vec!["Kitchen".to_string()];
+            let facts = RoomFacts {
+                name: "Kitchen",
+                members: &members,
+                coordinator: Some("Kitchen"),
+                has_tv: false,
+            };
+            let volume = Volume {
+                volume: 10,
+                muted: false,
+                fixed: false,
+            };
+            let (status, meta) = make();
+            let row = room_value(&facts, Ok((status, meta, Some(volume))), None);
+            assert_eq!(
+                keys(&row),
+                documented,
+                "{body}: a status row's keys must match the skill's example object exactly"
+            );
+
+            let (status, meta) = make();
+            let now = now_json("Kitchen", &status, &meta, None);
+            assert_eq!(
+                keys(&now),
+                expected_now,
+                "{body}: `now --json` must be the row minus the room fields"
+            );
+        }
     }
 
+    /// A `playbackStatus` and a `metadataStatus` as the Media Room actually
+    /// sent them (captured 2026-09-03), trimmed of fields nothing here reads.
     fn playing_body() -> (PlaybackStatus, MetadataStatus) {
         let status = serde_json::from_str(
             r#"{"_objectType":"playbackStatus","playbackState":"PLAYBACK_STATE_PLAYING",
@@ -779,50 +792,14 @@ mod tests {
         }
     }
 
-    /// The keys `now --json` emits. The skill teaches agents to read these by
-    /// name, so a rename or a drop breaks every consumer silently - and the
-    /// binary is the side that has to be held to it, because prose cannot
-    /// enforce itself.
+    /// What `now --json` carries for a real playing body. Which keys it has is
+    /// held to the skill by the test above; this is the other half - that
+    /// each carries what the body said, so neither can pass on a body that
+    /// parsed into nothing.
     #[test]
-    fn now_json_emits_exactly_the_documented_keys() {
+    fn now_json_carries_what_the_body_says() {
         let (status, meta) = playing_body();
         let now = now_json("Media Room", &status, &meta, None);
-        let mut keys: Vec<&str> = now
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "album",
-                "art_url",
-                "artist",
-                "crossfade",
-                "duration_ms",
-                "explicit",
-                "input_format",
-                "next_artist",
-                "next_title",
-                "on_tv",
-                "podcast",
-                "position_ms",
-                "queue_position",
-                "repeat",
-                "room",
-                "service",
-                "service_id",
-                "shuffle",
-                "state",
-                "stream_info",
-                "surround",
-                "title",
-            ]
-        );
-        // Spot-check that the keys carry what they claim, so this cannot pass
-        // on a body that parsed into nothing.
         assert_eq!(now["state"], "PLAYING");
         assert_eq!(now["title"], "Bodies");
         assert_eq!(now["artist"], "Offset, JID");
@@ -856,50 +833,6 @@ mod tests {
         assert_eq!(now["queue_position"], serde_json::Value::Null);
         assert_eq!(now["next_title"], serde_json::Value::Null);
         assert_eq!(now["explicit"], serde_json::Value::Null);
-    }
-
-    /// The skill documents `now --json` as a **subset** of a `status` entry and
-    /// names the seven fields only the latter has. Both directions are pinned:
-    /// nothing group- or volume-shaped leaks into `now`, and a status entry adds
-    /// nothing beyond those seven.
-    #[test]
-    fn a_status_entry_is_a_now_entry_plus_exactly_seven_room_facts() {
-        let (status, meta) = playing_body();
-        let now = now_json("Media Room", &status, &meta, None);
-        let members = vec!["Media Room".to_string()];
-        let facts = RoomFacts {
-            name: "Media Room",
-            members: &members,
-            coordinator: Some("Media Room"),
-            has_tv: false,
-        };
-        let entry = room_value(&facts, Ok((status, meta, Some(volume(2, false)))), None);
-
-        let keys = |v: &serde_json::Value| -> std::collections::BTreeSet<String> {
-            v.as_object().unwrap().keys().cloned().collect()
-        };
-        let now_keys = keys(&now);
-        let entry_keys = keys(&entry);
-        assert!(
-            now_keys.is_subset(&entry_keys),
-            "a status entry must still contain every now field"
-        );
-        let extra: Vec<&str> = entry_keys
-            .difference(&now_keys)
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            extra,
-            [
-                "audible",
-                "coordinator",
-                "fixed",
-                "has_tv",
-                "members",
-                "muted",
-                "volume"
-            ]
-        );
     }
 
     /// `audible` is the one read for "will this make a sound?", because muted
@@ -979,32 +912,14 @@ mod tests {
         assert_eq!(entry["muted"], serde_json::Value::Null);
     }
 
-    /// The envelope's shape, which the skill promises as
-    /// `{household, network, total, reachable, warnings, rooms}` - the one
-    /// documented JSON shape nothing held until now.
+    /// What the `--full` envelope carries. Its keys are held to the skill's
+    /// brace list by the test below; this checks the values ride through, and
+    /// that the rooms sit inside it rather than being replaced by it.
     #[test]
-    fn the_full_envelope_has_the_documented_shape() {
+    fn the_full_envelope_carries_its_values() {
         let rooms = vec![json!({"room": "Media Room"})];
         let envelope =
             status_envelope(Some("Sonos_abc123"), Some("gw:192.168.77.1"), 3, &[], rooms);
-        let mut keys: Vec<&str> = envelope
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "household",
-                "network",
-                "reachable",
-                "rooms",
-                "total",
-                "warnings"
-            ]
-        );
         assert_eq!(envelope["household"], "Sonos_abc123");
         assert_eq!(envelope["total"], json!(3));
         assert_eq!(envelope["reachable"], json!(3));

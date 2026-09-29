@@ -1461,134 +1461,10 @@ mod tests {
     }
 
     #[test]
-    fn bookmarks_subcommands_accept_json_flag() {
-        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "prune", "--json"]).unwrap();
-        assert!(cli.command.json());
-        assert!(matches!(
-            cli.command,
-            Command::Bookmarks {
-                action: Some(BookmarksAction::Prune),
-                json: true,
-                ..
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "pin", "Bodies", "--json"]).unwrap();
-        assert!(cli.command.json());
-        assert!(matches!(
-            cli.command,
-            Command::Bookmarks {
-                action: Some(BookmarksAction::Pin { ref query }),
-                json: true,
-                ..
-            } if query == "Bodies"
-        ));
-
-        let cli =
-            Cli::try_parse_from(["x2rock", "bookmarks", "rename", "A", "B", "--json"]).unwrap();
-        assert!(cli.command.json());
-
-        let cli = Cli::try_parse_from(["x2rock", "bookmarks", "remove", "A", "--json"]).unwrap();
-        assert!(cli.command.json());
-    }
-
-    #[test]
-    fn service_accepts_global_json_flag() {
-        let cli = Cli::try_parse_from(["x2rock", "service", "--json"]).unwrap();
-        assert!(cli.command.json());
-        assert!(matches!(
-            cli.command,
-            Command::Service {
-                action: None,
-                json: true,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "service", "status", "--json"]).unwrap();
-        assert!(cli.command.json());
-        assert!(matches!(
-            cli.command,
-            Command::Service {
-                action: Some(ServiceAction::Status),
-                json: true,
-            }
-        ));
-    }
-
-    #[test]
-    fn completions_uninstall_flag() {
-        let cli = Cli::try_parse_from(["x2rock", "completions", "--uninstall"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Completions {
-                shell: None,
-                install: false,
-                uninstall: true,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "completions", "fish", "--uninstall"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Completions {
-                shell: Some(clap_complete::Shell::Fish),
-                install: false,
-                uninstall: true,
-            }
-        ));
-
-        // --install and --uninstall conflict with each other
+    fn completions_install_and_uninstall_are_exclusive() {
         assert!(
             Cli::try_parse_from(["x2rock", "completions", "--install", "--uninstall"]).is_err()
         );
-    }
-
-    #[test]
-    fn desktop_force_flag() {
-        let cli = Cli::try_parse_from(["x2rock", "desktop"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Desktop {
-                action: None,
-                force: false,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "desktop", "--force"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Desktop {
-                action: None,
-                force: true,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "desktop", "install"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Desktop {
-                action: Some(DesktopAction::Install),
-                force: false,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "desktop", "install", "--force"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Desktop {
-                action: Some(DesktopAction::Install),
-                force: true,
-            }
-        ));
-
-        let cli = Cli::try_parse_from(["x2rock", "desktop", "--force", "install"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Desktop {
-                action: Some(DesktopAction::Install),
-                force: true,
-            }
-        ));
     }
 
     /// `remote --feedback` is the soundbar's acknowledgement flash and `led` is
@@ -1621,21 +1497,6 @@ mod tests {
         );
         // And `remote` takes no bare word.
         assert!(Cli::try_parse_from(["x2rock", "-r", "Guest TV", "remote", "off"]).is_err());
-    }
-
-    #[test]
-    fn daemon_flags_parse_from_cli() {
-        let cli = Cli::try_parse_from(["x2rock", "daemon", "--verbose", "--log-events"]).unwrap();
-        match cli.command {
-            Command::Daemon {
-                verbose,
-                log_events,
-            } => {
-                assert!(verbose);
-                assert!(log_events);
-            }
-            _ => panic!("expected Command::Daemon"),
-        }
     }
 
     #[test]

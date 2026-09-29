@@ -2009,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_body_is_not_a_fault_shape_but_it_is_a_failure() {
+    fn an_empty_body_is_not_a_fault_shape() {
         // fault_in has nothing to find in it, which is why the emptiness has to
         // be checked before the parser is asked.
         assert!(fault_in("").is_none());
