@@ -1003,11 +1003,24 @@ mod tests {
         assert!(line.contains("retrying"), "{line}");
     }
 
-    /// The two pre-existing shapes, kept: a generic failure is framed by its
-    /// consequence, and the unregistered-network line must not lead with the
-    /// name of the other code - agents are taught to tell them apart here.
+    /// Authentication switched on is the speakers refusing, not anything the
+    /// unit got wrong: the line keeps the refusal, which names the switch, and
+    /// says the daemon carries on, since the switch going off is the whole fix.
     #[test]
-    fn the_original_two_failure_shapes_are_unchanged() {
+    fn authentication_on_keeps_retrying_and_names_no_unit_setting() {
+        let e = anyhow::anyhow!("the speakers refused x2rock: Authentication is on");
+        let line = connect_failure_line(crate::hint::Code::AuthenticationRequired, &e);
+        assert!(line.starts_with("the speakers refused x2rock"), "{line}");
+        assert!(line.contains("retrying"), "{line}");
+        assert!(!line.contains("X2ROCK_HOUSEHOLD"), "{line}");
+        assert!(!line.starts_with("no player"), "{line}");
+    }
+
+    /// A generic failure is framed by its consequence, and the
+    /// unregistered-network line must not lead with the name of the other
+    /// code - agents are taught to tell them apart here.
+    #[test]
+    fn a_generic_failure_says_no_player_and_an_unregistered_network_says_only_that() {
         let e = anyhow::anyhow!("unregistered network (gateway aa:bb)");
         assert_eq!(
             connect_failure_line(crate::hint::Code::UnregisteredNetwork, &e),

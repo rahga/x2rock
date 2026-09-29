@@ -117,7 +117,7 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
     let body = encoded
         .strip_prefix("2:")
         .ok_or_else(|| anyhow!("unexpected account envelope version (want a `2:` prefix)"))?;
-    let raw = base64_decode(body).context("account envelope was not valid base64")?;
+    let raw = super::base64::decode(body).context("account envelope was not valid base64")?;
     if raw.len() < 32 || (raw.len() - 16) % 16 != 0 {
         bail!("account envelope is the wrong size to be iv + AES blocks");
     }
@@ -277,38 +277,6 @@ fn aes_128_cbc_decrypt(ciphertext: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<
         cipher.decrypt_block_mut(GenericArray::from_mut_slice(block));
     }
     buf
-}
-
-/// Standard base64 decode (with `+/` and `=` padding, whitespace tolerated).
-/// Hand-rolled to keep this the only new dependency-worth of code that base64
-/// costs; the envelope is the sole caller.
-fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    fn val(b: u8) -> Option<u8> {
-        match b {
-            b'A'..=b'Z' => Some(b - b'A'),
-            b'a'..=b'z' => Some(b - b'a' + 26),
-            b'0'..=b'9' => Some(b - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let mut bits: u32 = 0;
-    let mut nbits = 0;
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    for b in input.bytes() {
-        if b == b'=' || b.is_ascii_whitespace() {
-            continue;
-        }
-        let v = val(b).ok_or_else(|| anyhow!("invalid base64 byte {b:#x}"))?;
-        bits = (bits << 6) | v as u32;
-        nbits += 6;
-        if nbits >= 8 {
-            nbits -= 8;
-            out.push((bits >> nbits) as u8);
-        }
-    }
-    Ok(out)
 }
 
 /// Capture the encrypted `ThirdPartyMediaServersX` from a player.
@@ -516,33 +484,7 @@ mod tests {
 
         let mut raw = iv.to_vec();
         raw.extend_from_slice(&body);
-        format!("2:{}", base64_encode(&raw))
-    }
-
-    fn base64_encode(data: &[u8]) -> String {
-        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in data.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
-            out.push(A[(n >> 18 & 63) as usize] as char);
-            out.push(A[(n >> 12 & 63) as usize] as char);
-            out.push(if chunk.len() > 1 {
-                A[(n >> 6 & 63) as usize] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                A[(n & 63) as usize] as char
-            } else {
-                '='
-            });
-        }
-        out
+        format!("2:{}", crate::sonos::base64::encode(&raw))
     }
 
     // A household id chosen to have no special bytes; the real ones look like
@@ -668,14 +610,6 @@ mod tests {
     fn a_non_envelope_is_refused_by_its_prefix() {
         let err = decrypt_accounts("not-a-2-colon-thing", HH).unwrap_err();
         assert!(format!("{err:#}").contains("envelope version"));
-    }
-
-    #[test]
-    fn base64_round_trips() {
-        for sample in [&b"M"[..], b"Ma", b"Man", b"any carnal pleasure."] {
-            let encoded = base64_encode(sample);
-            assert_eq!(base64_decode(&encoded).unwrap(), sample);
-        }
     }
 
     #[test]
