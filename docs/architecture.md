@@ -149,6 +149,21 @@ Roughly 108 services appear in a household's catalogue; 23 are searchable here t
 `x2rock link`. The live per-household answer is always `x2rock search` (bare) and `x2rock link`
 (bare), which read the catalogue and the credential store rather than this table.
 
+**Re-read 2026-09-29, office: 109 services, 41 searchable, 15 linkable** - 62 app-link, 33
+anonymous, 14 device-link. The searchable count grew with the anonymous radio services now counted
+and with Amazon, Apple Music and Qobuz linked. Two rows above no longer match the catalogue:
+**TuneIn (New) and Radio Paradise are listed as app-link now**, not anonymous, and neither is among
+the searchable; not re-probed yet, so the rows stand as measured on 2026-09-04.
+
+**Regression pass after the HTTP client refactor (2026-09-29, office).** `get_bytes` reshaped
+`http::exchange`, which every SMAPI call goes through - Deezer's gzipped replies included - so a
+search was re-run on every linked service: Deezer, TIDAL, Saavn, Qobuz, Sonos Radio, Amazon Music,
+Apple Music (through iTunes) and TuneIn all answered; NTS Radio correctly refused as having no search
+categories. It found one old bug: **Amazon Music ignores `count`** and sends every hit (65 for a
+search asking for 2), which went straight through to `--count` and the widget. Search and browse
+pages are now cut to the count asked for (`smapi::at_most`), the total left as the service
+reported it.
+
 **Untested and worth something.** The free candidates are now spent: Saavn was linked and passes
 (non-Latin metadata survives SMAPI, DIDL and playback), and Classical Archives cannot be linked at
 all. What remains costs a subscription - so each was first asked for a browser page, which needs no

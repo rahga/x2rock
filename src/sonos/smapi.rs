@@ -566,7 +566,7 @@ pub async fn search(
         refreshed,
     )
     .await?;
-    parse_items(&body, "search")
+    parse_items(&body, "search").map(|page| at_most(page, count))
 }
 
 /// `getMetadata`: what a container holds.
@@ -593,7 +593,17 @@ pub async fn metadata(
         refreshed,
     )
     .await?;
-    parse_items(&body, "getMetadata")
+    parse_items(&body, "getMetadata").map(|page| at_most(page, count))
+}
+
+/// A page cut to the `count` that was asked for. `count` is a request, not a
+/// promise: Amazon Music answers a search for 2 with every hit it has - 65 for
+/// "miles davis" (office, 2026-09-29) - and everything downstream, from
+/// `--count` to the widget's category rows, reads the page as the size asked
+/// for. `total` is left as the service reported it.
+fn at_most((mut items, total): (Vec<Item>, u32), count: u32) -> (Vec<Item>, u32) {
+    items.truncate(count as usize);
+    (items, total)
 }
 
 /// The items in a `search` or `getMetadata` reply, and the total it claims.
@@ -2077,6 +2087,32 @@ mod tests {
             "{dumped}"
         );
         assert!(dumped.contains("(credentials omitted)"), "{dumped}");
+    }
+
+    /// Amazon Music's habit: asked for 2, it sends every hit. The page is cut to
+    /// what was asked for, and the total stays what the service claimed.
+    #[test]
+    fn a_service_that_sends_more_than_asked_is_cut_to_the_count() {
+        let track = |n: u32| {
+            format!(
+                "<mediaMetadata><id>t{n}</id><itemType>track</itemType>\
+                 <title>Track {n}</title></mediaMetadata>"
+            )
+        };
+        let body = format!(
+            "<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body>\
+             <searchResponse><searchResult><index>0</index><count>5</count><total>65</total>\
+             {}</searchResult></searchResponse></s:Body></s:Envelope>",
+            (1..=5).map(track).collect::<String>()
+        );
+        let (items, total) = at_most(parse_items(&body, "search").unwrap(), 2);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Track 1");
+        assert_eq!(total, 65);
+
+        // A service that honours the count is left exactly as it answered.
+        let (items, _) = at_most(parse_items(&body, "search").unwrap(), 10);
+        assert_eq!(items.len(), 5);
     }
 
     #[test]
