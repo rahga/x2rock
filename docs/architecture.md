@@ -9261,6 +9261,26 @@ refused by the queue (UPnP 800) and came back as the stderr note, with stdout's 
 `playing` empty and exit 0 - the rest of the scene applied and the room kept playing. **Multi-room regrouping has not met real speakers yet** - the
 office has one room - and needs the home household.
 
+## Away from every household (2026-09-29, a network with no Sonos)
+
+Exercised on a network x2rock had never seen, with the office and home households both remembered:
+
+- Every command that needs a speaker (`status`, `now`, `vol`, `queue`, `favorites`, `scene`,
+  `play`) fails at once with `unregistered_network`, `fix` null, exit 1 - no scan, no wait.
+- Bookmarks, the radio directory, `accounts`, `service status`, `desktop status` and `art` work.
+- The daemon logged four lines on resuming here and then went quiet; no MPRIS players are
+  published, so the widget hides itself.
+- **`households` scans** - by design, it always does - and ran a 3 s sweep of the foreign /24 when
+  called here. The skill's "never reflexive" rule named only `discover`; it now names both.
+- **Searching a linked service said to link it.** With two households remembered and none in reach,
+  `current_household` resolved to nothing and `search -s Deezer` answered "Deezer needs a linked
+  account" - wrong, and following it would have started a browser login for an account already
+  held. `--household <room>`, the documented spelling, did not help either: offline, only an id
+  fragment matched. Now a room name resolves against the rooms remembered per household
+  (`State::household_rooms`), and a service linked somewhere but with no household known answers
+  `multiple_households` naming each household's rooms, **with no fix** - the usual one is
+  `x2rock households`, which would scan this network.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

@@ -339,6 +339,38 @@ fn household_hint(
         .into()
 }
 
+/// No speaker is in reach to say which household this is, and `service` is
+/// linked in more than one: away from home, searching or browsing a service
+/// has to be told which household's account to use.
+///
+/// The `multiple_households` code, since the remedy is the same `--household`,
+/// but **no fix**, unlike [`multiple_households`]: its fix is `x2rock
+/// households`, which scans the network, and the network here has no speakers
+/// on it and is most likely someone else's. The households and their rooms
+/// come from what this machine remembers, in `data.households`.
+pub fn no_household_in_reach(service: &str, households: &[(String, Vec<String>)]) -> Error {
+    let summary: Vec<String> = households
+        .iter()
+        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
+        .collect();
+    let listed: Vec<_> = households
+        .iter()
+        .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
+        .collect();
+    Hint::new(
+        format!(
+            "No speaker is in reach to say which household this is, and {service} is linked \
+             in {}: {}. Pass --household <room> to choose.",
+            households.len(),
+            summary.join("; "),
+        ),
+        Code::MultipleHouseholds,
+        None,
+    )
+    .with_data(json!({ "households": listed }))
+    .into()
+}
+
 pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
     let summary: Vec<String> = households
         .iter()
