@@ -1047,6 +1047,23 @@ fn sealed_key_note(fault: &Fault) -> &'static str {
 fn parse_link_code(service_name: &str, action: &str, body: &str) -> Result<LinkCode> {
     let doc = Document::parse(body).with_context(|| format!("parsing {action} response"))?;
     let field = |tag: &str| element_text(&doc, tag).map(str::to_string);
+    // A reply element with nothing in it is a service that takes the call and
+    // hands out no code at all - Sonos Backgrounds answers `getDeviceLinkCode`
+    // with an empty `getDeviceLinkCodeResponse` at HTTP 200 (office,
+    // 2026-09-30). Said as that, with the one route left, rather than as a
+    // missing field, which reads like a parsing fault here.
+    let answered_empty = doc
+        .descendants()
+        .find(|n| n.tag_name().name() == format!("{action}Response"))
+        .is_some_and(|reply| !reply.children().any(|c| c.is_element()));
+    if answered_empty {
+        bail!(
+            "{service_name} answered {action} with nothing in it: it does not hand out link \
+             codes. If the household has {service_name} (added in the Sonos app), `x2rock link \
+             --from-household {}` takes the token it holds instead.",
+            crate::hint::shell_arg(service_name)
+        );
+    }
     let link_code =
         field("linkCode").ok_or_else(|| anyhow!("{service_name} returned no linkCode"))?;
     Ok(LinkCode {
@@ -2113,6 +2130,30 @@ mod tests {
         // A service that honours the count is left exactly as it answered.
         let (items, _) = at_most(parse_items(&body, "search").unwrap(), 10);
         assert_eq!(items.len(), 5);
+    }
+
+    /// Sonos Backgrounds' real reply: HTTP 200, an empty response element. It is
+    /// told apart from a reply that is merely missing a field, and says what is
+    /// left to try.
+    #[test]
+    fn an_empty_link_code_reply_says_the_service_hands_out_none() {
+        let empty = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+            <soap:Body><getDeviceLinkCodeResponse xmlns="http://www.sonos.com/Services/1.1"/>
+            </soap:Body></soap:Envelope>"#;
+        let err = parse_link_code("Sonos Backgrounds", "getDeviceLinkCode", empty).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("does not hand out link codes"), "{text}");
+        assert!(
+            text.contains("--from-household 'Sonos Backgrounds'"),
+            "{text}"
+        );
+
+        let partial = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+            <soap:Body><getDeviceLinkCodeResponse xmlns="http://www.sonos.com/Services/1.1">
+            <getDeviceLinkCodeResult><regUrl>https://x</regUrl></getDeviceLinkCodeResult>
+            </getDeviceLinkCodeResponse></soap:Body></soap:Envelope>"#;
+        let err = parse_link_code("X", "getDeviceLinkCode", partial).unwrap_err();
+        assert!(format!("{err:#}").contains("returned no linkCode"));
     }
 
     #[test]
