@@ -183,6 +183,25 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// Every household this machine remembers, with its room names, across
+    /// every network - what lets `--household <room>` resolve with no speaker
+    /// in reach.
+    pub fn household_rooms(&self) -> BTreeMap<String, Vec<String>> {
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for households in self.networks.values() {
+            for (id, players) in households {
+                let rooms = out.entry(id.clone()).or_default();
+                for p in players {
+                    if !rooms.contains(&p.name) {
+                        rooms.push(p.name.clone());
+                    }
+                }
+                rooms.sort();
+            }
+        }
+        out
+    }
+
     /// Room / player names remembered for this machine, deduplicated and sorted.
     /// Prefers the current network when a fingerprint is provided and matches;
     /// otherwise returns all players across all networks.

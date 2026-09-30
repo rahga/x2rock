@@ -5,6 +5,7 @@
 //! refreshed credential lives here too, since search and browse are the two
 //! callers. Playing a hit is `content::play_item`.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -142,18 +143,61 @@ async fn current_household(
     session: Option<&session::Session>,
     linked: &credentials::Credentials,
     named_household: Option<&str>,
+    rooms: &BTreeMap<String, Vec<String>>,
 ) -> String {
     if let Some(session) = session
         && let Ok(household) = session.connection.household_id().await
     {
         return household;
     }
-    if let Some(named) = named_household
-        && let Ok(household) = linked.resolve_household(named)
-    {
-        return household;
+    if let Some(named) = named_household {
+        if let Ok(household) = linked.resolve_household(named) {
+            return household;
+        }
+        // A room name, which `--household` documents: resolved against the
+        // rooms remembered for each household, since no player is here to ask.
+        // Only a name that belongs to one household decides anything.
+        let owners: Vec<&String> = rooms
+            .iter()
+            .filter(|(_, names)| names.iter().any(|n| n.eq_ignore_ascii_case(named)))
+            .map(|(id, _)| id)
+            .collect();
+        if let [only] = owners.as_slice() {
+            return (*only).clone();
+        }
     }
     linked.sole_household().unwrap_or_default()
+}
+
+/// Every household this machine remembers, with its rooms, for resolving a
+/// household with no speaker in reach. Empty, not an error, when there is no
+/// state to read: the callers are advisory.
+fn remembered_rooms() -> BTreeMap<String, Vec<String>> {
+    State::load()
+        .map(|state| state.household_rooms())
+        .unwrap_or_default()
+}
+
+/// The error for a service that needs an account, asked for with no speaker in
+/// reach and no household named: not "link it" when it *is* linked, in one
+/// household or several, but which household to use. `None` when a household
+/// is known, or none holds the service - then linking really is the answer.
+fn offline_choice(
+    linked: &credentials::Credentials,
+    household: &str,
+    rooms: &BTreeMap<String, Vec<String>>,
+    service: &sonos::smapi::Service,
+) -> Option<anyhow::Error> {
+    if !household.is_empty() {
+        return None;
+    }
+    let holding: Vec<(String, Vec<String>)> = linked
+        .households
+        .keys()
+        .filter(|h| linked.accounts_for(h, &service.id).is_some())
+        .map(|h| (h.clone(), rooms.get(h).cloned().unwrap_or_default()))
+        .collect();
+    (!holding.is_empty()).then(|| hint::no_household_in_reach(&service.name, &holding))
 }
 
 /// Collapse `(name, service id)` pairs to one row per service, keeping the
@@ -1198,7 +1242,8 @@ pub async fn run_browse(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let household = current_household(reached.as_ref().ok(), &linked, household).await;
+    let rooms = remembered_rooms();
+    let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
     // published search category on top of that. This comment used to say the
@@ -1227,7 +1272,17 @@ pub async fn run_browse(
         return Ok(());
     };
 
-    let chosen = catalogue.find_usable(&usable, query)?.clone();
+    let chosen = catalogue
+        .find_usable(&usable, query)
+        .map_err(|e| {
+            catalogue
+                .services()
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(query))
+                .and_then(|s| offline_choice(&linked, &household, &rooms, s))
+                .unwrap_or(e)
+        })?
+        .clone();
     let token = linked.token_for(&household, &chosen.id);
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
@@ -1423,7 +1478,8 @@ pub async fn run_search(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let household = current_household(reached.as_ref().ok(), &linked, household).await;
+    let rooms = remembered_rooms();
+    let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
 
     // A term with no service is the merged search. Checked before the listing
     // below, which is what a bare term used to fall into: it printed the
@@ -1515,7 +1571,10 @@ pub async fn run_search(
                 .iter()
                 .find(|s| s.name.to_lowercase() == query.to_lowercase())
             {
-                Some(s) if s.auth != sonos::smapi::Auth::Anonymous => s.needs_link_hint().into(),
+                Some(s) if s.auth != sonos::smapi::Auth::Anonymous => {
+                    offline_choice(&linked, &household, &rooms, s)
+                        .unwrap_or_else(|| s.needs_link_hint().into())
+                }
                 // A real service that `searchable` has since dropped for
                 // publishing no categories. Without this arm `find` calls it
                 // unmatched, which reads as a typo rather than as the fact it
@@ -2435,7 +2494,13 @@ async fn set_preference(
     };
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state, household, room).await.ok();
-    let mut hh = current_household(session.as_ref(), linked, household).await;
+    let mut hh = current_household(
+        session.as_ref(),
+        linked,
+        household,
+        &state.household_rooms(),
+    )
+    .await;
     // Strict where the advisory resolution above is not: this command writes to
     // one household's slot and has nothing sensible to do without knowing which,
     // so a `--household` that matched nothing is named as such rather than
@@ -2786,28 +2851,111 @@ mod tests {
             credentials::from_device_auth("Deezer", Some("Sonos_office.456"), None, auth),
         );
 
+        let none = BTreeMap::new();
         // When offline with multiple households and no household named, resolves to empty:
-        assert_eq!(current_household(None, &creds, None).await, "");
+        assert_eq!(current_household(None, &creds, None, &none).await, "");
 
         // When offline with a household named, resolves it against the store:
         assert_eq!(
-            current_household(None, &creds, Some("office")).await,
+            current_household(None, &creds, Some("office"), &none).await,
             "Sonos_office.456"
         );
         assert_eq!(
-            current_household(None, &creds, Some("home")).await,
+            current_household(None, &creds, Some("home"), &none).await,
             "Sonos_home.123"
         );
 
-        // A name that matches no stored household degrades to "not known"
-        // rather than failing. `--household` takes a **room name** as well as
-        // an id, and a room name can only ever be resolved by a player - so
-        // refusing here would break `browse`/`search` offline for the
-        // documented spelling of the flag, and for anyone who simply has
-        // X2ROCK_HOUSEHOLD exported. Commands that cannot proceed without a
-        // household resolve it strictly themselves.
-        assert_eq!(current_household(None, &creds, Some("Kitchen")).await, "");
-        assert_eq!(current_household(None, &creds, Some("beach")).await, "");
+        // A room name resolves through the rooms remembered for each household,
+        // which is what `--household <room>` documents - with no player in reach.
+        let rooms = BTreeMap::from([
+            (
+                "Sonos_home.123".to_string(),
+                vec!["Kitchen".to_string(), "Den".to_string()],
+            ),
+            (
+                "Sonos_office.456".to_string(),
+                vec!["Media Room".to_string(), "Den".to_string()],
+            ),
+        ]);
+        assert_eq!(
+            current_household(None, &creds, Some("kitchen"), &rooms).await,
+            "Sonos_home.123"
+        );
+        assert_eq!(
+            current_household(None, &creds, Some("Media Room"), &rooms).await,
+            "Sonos_office.456"
+        );
+
+        // A name that matches no household - or a room in both - degrades to
+        // "not known" rather than failing: the callers are advisory, and
+        // commands that cannot proceed without a household resolve it strictly
+        // themselves.
+        assert_eq!(
+            current_household(None, &creds, Some("Den"), &rooms).await,
+            ""
+        );
+        assert_eq!(
+            current_household(None, &creds, Some("beach"), &rooms).await,
+            ""
+        );
+        assert_eq!(
+            current_household(None, &creds, Some("Kitchen"), &none).await,
+            ""
+        );
+    }
+
+    /// Away from every household, a service linked in some of them is a choice
+    /// to make, not an account to link - and the error must not hand out
+    /// `x2rock households`, which would scan a network with no speakers on it.
+    #[test]
+    fn a_linked_service_with_no_household_in_reach_asks_which_rather_than_to_link() {
+        let mut creds = credentials::Credentials::default();
+        let auth = sonos::smapi::DeviceAuth {
+            auth_token: "tok".into(),
+            private_key: "key".into(),
+            user_id_hash_code: None,
+        };
+        for hh in ["Sonos_home.123", "Sonos_office.456"] {
+            creds.remember(
+                hh,
+                "2",
+                credentials::from_device_auth("Deezer", Some(hh), None, auth.clone()),
+            );
+        }
+        let rooms = BTreeMap::from([("Sonos_home.123".to_string(), vec!["Kitchen".to_string()])]);
+        let deezer = sonos::smapi::Service {
+            id: "2".into(),
+            name: "Deezer".into(),
+            uri: String::new(),
+            auth: sonos::smapi::Auth::DeviceLink,
+            manifest_uri: None,
+            service_type: None,
+        };
+
+        let asked = offline_choice(&creds, "", &rooms, &deezer).expect("a choice, not a link");
+        let (code, fix) = hint::of(&asked);
+        assert_eq!(code, hint::Code::MultipleHouseholds);
+        assert_eq!(fix, None, "no scan offered on a network with no speakers");
+        let text = format!("{asked:#}");
+        assert!(
+            text.contains("--household <room>") && text.contains("Kitchen"),
+            "{text}"
+        );
+        let json = hint::error_json(&asked);
+        assert_eq!(json["households"].as_array().map(Vec::len), Some(2));
+
+        // With a household known, or a service linked nowhere, linking is the
+        // answer and this says nothing.
+        assert!(offline_choice(&creds, "Sonos_home.123", &rooms, &deezer).is_none());
+        let tidal = sonos::smapi::Service {
+            id: "174".into(),
+            name: "TIDAL".into(),
+            uri: String::new(),
+            auth: sonos::smapi::Auth::DeviceLink,
+            manifest_uri: None,
+            service_type: None,
+        };
+        assert!(offline_choice(&creds, "", &rooms, &tidal).is_none());
     }
 
     fn cats(ids: &[&str]) -> Vec<Category> {

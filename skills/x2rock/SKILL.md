@@ -762,7 +762,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `no_player` | speakers were known here but none answered — a rescan already ran and found **nothing at all** | **null** (likely powered off; see below) |
 | `unregistered_network` | this network has no known speakers — normal away from home | **null** (do *not* auto-scan; see below) |
 | `too_many_rooms` | several `-r` on a command that takes one | null (re-run with one `-r`) |
-| `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household" | `x2rock households` (and see `data.households`) |
+| `multiple_households` | more than one Sonos household is reachable and nothing said which one — see "Addressing a household". Also raised **away from every household**, by `search`/`browse` of a service linked in more than one: then `fix` is **null** (a scan of a network with no speakers is the wrong move) | `x2rock households` (and see `data.households`); when null, retry with `--household <room>` from `data.households` |
 | `unknown_household` | the `-r` room or the `--household` selector matched no household — a stale id, a moved room, a typo | `x2rock households` (and see `data.households`) |
 | `household_unreachable` | a rescan found **other** households but not this one — it is off, or has moved networks. Not `no_player`: the network is fine | `x2rock households` (and see `data.households` for what did answer) |
 | `authentication_required` | the speakers answered and refused (`ERROR_NO_PERMISSION`): the household's Connection security has **Authentication** on, and x2rock is not signed in (or its sign-in was revoked or lapsed — the message says which). Every command fails the same way until one of the remedies is done | **null** — two remedies, the user's choice: turn Authentication off (Sonos app > Account > Privacy and Security > Connection Security), or `x2rock login` — **a browser sign-in to their Sonos account a person must finish**, and it needs their own Sonos integration saved first (see the README). `x2rock login` opens the page and waits (up to ten minutes) for the browser to hand the sign-in back to it on 127.0.0.1, then exits by itself; if the browser is on another machine, the page shows an address instead and `x2rock login '<address>'` finishes. Do not rescan or retry |
@@ -802,7 +802,14 @@ or the user is surprised nothing responds.
   network with two systems); it refuses to overwrite an edited unit without `--force`.
 - **`discover` is offered, never reflexive** — it scans the local network, so run it only when the
   user confirms this is their own. Away from home, the answer is "your speakers aren't on this
-  network", not a scan of it.
+  network", not a scan of it. **`households` scans the same way** (it always scans fresh), so the
+  same rule applies to it: not on a network that is not the user's.
+- **Searching and browsing still work away from home**, from the cached catalogue and the accounts
+  this machine holds - but with more than one household remembered, nothing says whose account to
+  use. The error is `multiple_households` with **`fix` null** and `data.households` listing each
+  household's rooms; answer it with `--household <room>` (`x2rock --household Kitchen search -s
+  Deezer "…"`). A room name resolves against the rooms this machine remembers, so it works with no
+  speaker in reach. What was found cannot be *played* until a speaker is.
 
 ## When a field is a trap
 
