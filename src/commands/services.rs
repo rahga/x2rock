@@ -753,7 +753,8 @@ pub async fn run_link(
     linked.save()?;
     println!(
         "Linked {}. Search it with: x2rock search -s {}",
-        chosen.name, chosen.name
+        chosen.name,
+        hint::shell_arg(&chosen.name)
     );
 
     if no_match {
@@ -1180,13 +1181,14 @@ where
         }
         if tokio::time::Instant::now() + sonos::smapi::LINK_POLL >= deadline {
             eprintln!();
+            let again = hint::shell_arg(service_name);
             match last_err {
                 Some(why) => bail!(
                     "{service_name} never confirmed the link, and the last attempt to ask \
-                     failed ({why}). Run `x2rock link {service_name}` again to start over."
+                     failed ({why}). Run `x2rock link {again}` again to start over."
                 ),
                 None => bail!(
-                    "{service_name} never confirmed the link. Run `x2rock link {service_name}` \
+                    "{service_name} never confirmed the link. Run `x2rock link {again}` \
                      again to start over."
                 ),
             }
@@ -1327,11 +1329,11 @@ pub async fn run_browse(
             !item.container,
             "{:?} is a container. Open it with: x2rock browse -s {} {}\n\
              To play the whole thing, save it as a favorite in the Sonos app - \
-             then: x2rock favorite {:?}",
+             then: x2rock favorite {}",
             item.title,
-            chosen.name,
-            item.id,
-            item.title
+            hint::shell_arg(&chosen.name),
+            hint::shell_arg(&item.id),
+            hint::shell_arg(&item.title)
         );
         return play_item(
             live()?,
@@ -1705,8 +1707,8 @@ pub async fn run_search(
             item.title,
             super::article(&item.item_type),
             item.item_type,
-            chosen.name,
-            item.id
+            hint::shell_arg(&chosen.name),
+            hint::shell_arg(&item.id)
         );
         return play_item(
             live()?,
@@ -2148,8 +2150,8 @@ async fn search_everywhere(
             row.item.title,
             super::article(&row.item.item_type),
             row.item.item_type,
-            row.service.name,
-            row.item.id
+            hint::shell_arg(&row.service.name),
+            hint::shell_arg(&row.item.id)
         );
         let session = reached.as_ref().map_err(hint::no_player_to_play)?;
         let token = linked.token_for(household, &row.service.id);

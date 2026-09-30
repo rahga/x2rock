@@ -135,8 +135,8 @@ local token buys search and browse, and nothing of playback.
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
 | **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
-| **TuneIn (New)** | anonymous | n/a | ✓ | streams ✓ with no registration anywhere | 2026-09-04 |
-| **Radio Paradise** | anonymous | ✓ | browse only (publishes no search categories) | ✗ both paths — implements no `getMediaURI` at all | 2026-09-04 |
+| **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
+| **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; the first attempt timed out unconfirmed, not yet completed | not re-tested: before 2026-09-30 browse only, no search categories | earlier ✗ both paths - no `getMediaURI`; not re-tested | 2026-09-30, office (link page only) |
 | **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
 | **Sonos Backgrounds** | device-link | **✗ no link code** — `getDeviceLinkCode` answers HTTP 200 with an empty `getDeviceLinkCodeResponse`; not in the office household's store, so there is no token to import either. `x2rock link` now says so and names `--from-household` | — | — | 2026-09-30, office |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
@@ -154,7 +154,8 @@ Roughly 108 services appear in a household's catalogue; 23 are searchable here t
 anonymous, 14 device-link. The searchable count grew with the anonymous radio services now counted
 and with Amazon, Apple Music and Qobuz linked. Two rows above no longer match the catalogue:
 **TuneIn (New) and Radio Paradise are listed as app-link now**, not anonymous, and neither is among
-the searchable; not re-probed yet, so the rows stand as measured on 2026-09-04.
+the searchable. Re-probed 2026-09-30: both hand over a real browser login through `getAppLink`, and
+TuneIn (New) passes end to end once linked - the rows above now say so.
 
 **Regression pass after the HTTP client refactor (2026-09-29, office).** `get_bytes` reshaped
 `http::exchange`, which every SMAPI call goes through - Deezer's gzipped replies included - so a
