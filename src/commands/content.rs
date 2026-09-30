@@ -263,10 +263,29 @@ pub async fn play_item(
             // not the item's fault and the stream session cannot fix it.
             Err(e) if is_refusal(&e) => {
                 upnp_off = upnp::Fault::of(&e).is_some_and(|f| !f.is_per_action());
+                // A `program` is a radio show or channel: not queue material,
+                // and a service can lack the `getMediaURI` streaming needs -
+                // Radio Paradise does. The Sonos app plays one by making it the
+                // room's source, so that is tried before the stream. Not with
+                // UPnP off: setting the source is UPnP too.
+                let radio = !upnp_off && kind.is_some_and(|k| k.eq_ignore_ascii_case("program"));
                 eprintln!(
-                    "x2rock: {title:?} {} ({e:#}); streaming it",
-                    refusal_was(&e)
-                )
+                    "x2rock: {title:?} {} ({e:#}); {}",
+                    refusal_was(&e),
+                    if radio {
+                        "playing it as radio"
+                    } else {
+                        "streaming it"
+                    }
+                );
+                if radio {
+                    match play_radio(session, room, service, &naming, id, title).await {
+                        Ok(()) => return Ok(()),
+                        Err(r) => eprintln!(
+                            "x2rock: {title:?} would not play as radio either ({r:#}); streaming it"
+                        ),
+                    }
+                }
             }
             Err(e) => return Err(e),
         }
@@ -284,6 +303,29 @@ pub async fn play_item(
         ))),
         other => other,
     }
+}
+
+/// A service's radio program as the room's own source - see
+/// `bookmarks::radio_uri` - and played, confirmed the way a resume is.
+async fn play_radio(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    naming: &Naming,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    let target = session::target(&session.groups, room)?;
+    let player = session::coordinator(session, &target).await?;
+    let upnp = Upnp::new(upnp_ip(&target, player.ip()));
+    upnp.set_radio(
+        &bookmarks::radio_uri(id, &service.id, naming.serial.as_deref()),
+        &bookmarks::radio_didl(id, title, &naming.cdudn),
+    )
+    .await?;
+    super::playback::play_confirmed(&player, &upnp, &target.group_id, &target.name).await?;
+    println!("{} — {title} on {}", target.name, service.name);
+    Ok(())
 }
 
 /// `play_item`'s routes that need no queue: a direct stream, then `loadContent`.

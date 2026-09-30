@@ -167,7 +167,12 @@ pub async fn transport(player: &Connection, group: &str, verb: &str) -> Result<(
 /// with the room still idle. The reasoning is `stream_url`'s - a loaded stream
 /// that never plays says nothing on its own - reached here through resume
 /// rather than a fresh load.
-async fn play_confirmed(player: &Connection, upnp: &Upnp, group: &str, room: &str) -> Result<()> {
+pub(crate) async fn play_confirmed(
+    player: &Connection,
+    upnp: &Upnp,
+    group: &str,
+    room: &str,
+) -> Result<()> {
     // Subscribed, and the receiver attached, before the play is sent: the error
     // can overtake the command's own reply, and a receiver opened afterwards
     // would miss exactly the event this went to see - the rule `raw api --watch`
