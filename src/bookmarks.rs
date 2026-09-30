@@ -288,6 +288,47 @@ pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> 
     )
 }
 
+/// A service's radio program as the Sonos app plays it: not a queue row but
+/// the transport's own source, under `x-sonosapi-radio` with `flags=0`.
+///
+/// Read off Radio Paradise as the app started it (office, 2026-09-30):
+/// `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20`. Its
+/// channels are `program`s that `AddURIToQueue` refuses with 800 and that it
+/// has no `getMediaURI` to stream, so this is the only way they play.
+pub fn radio_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
+    let sn = account
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("&sn={a}"))
+        .unwrap_or_default();
+    format!(
+        "x-sonosapi-radio:{}?sid={service_id}&flags=0{sn}",
+        encode_object_id(object_id)
+    )
+}
+
+/// The DIDL that travels with a [`radio_uri`]: the app's own shape, a
+/// broadcast (`audioBroadcast`) under the `000c0000` item prefix, rather than
+/// the `musicTrack` a queue row is.
+pub fn radio_didl(object_id: &str, title: &str, cdudn: &str) -> String {
+    let esc = xml_escape;
+    format!(
+        concat!(
+            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+            r#"<item id="000c0000{object}" parentID="-1" restricted="true">"#,
+            "<dc:title>{title}</dc:title>",
+            "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>",
+            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            "{cdudn}</desc></item></DIDL-Lite>"
+        ),
+        object = esc(&encode_object_id(object_id)),
+        title = esc(title),
+        cdudn = esc(cdudn),
+    )
+}
+
 /// The DIDL for a service item with no [`Bookmark`] behind it.
 ///
 /// Built from the same pieces [`Bookmark::didl`] uses, because a search hit and
@@ -694,6 +735,34 @@ mod tests {
             b.uri(),
             "x-sonosapi-hls-static:ALkSOiGTPQu2?sid=284&flags=65544&sn=3"
         );
+    }
+
+    /// Built from its pieces, a Radio Paradise channel comes out exactly as
+    /// the Sonos app wrote it (office, 2026-09-30), and its DIDL is a broadcast.
+    #[test]
+    fn a_radio_program_is_addressed_the_way_the_app_addresses_it() {
+        assert_eq!(
+            radio_uri("channel:5:4:resume", "308", Some("20")),
+            "x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20"
+        );
+        assert_eq!(
+            radio_uri("channel:0:3:resume", "308", None),
+            "x-sonosapi-radio:channel%3a0%3a3%3aresume?sid=308&flags=0"
+        );
+        let didl = radio_didl(
+            "channel:0:3:resume",
+            "The Main Mix",
+            "SA_RINCON78855_X_#Svc78855-26a4e09d-Token",
+        );
+        assert!(
+            didl.contains(r#"<item id="000c0000channel%3a0%3a3%3aresume""#),
+            "{didl}"
+        );
+        assert!(
+            didl.contains("object.item.audioItem.audioBroadcast"),
+            "{didl}"
+        );
+        assert!(didl.contains("SA_RINCON78855_X_#Svc78855-26a4e09d-Token</desc>"));
     }
 
     #[test]

@@ -2017,6 +2017,22 @@ impl Upnp {
         Ok(())
     }
 
+    /// Make a service's radio program the room's source, the way the Sonos app
+    /// does - see `bookmarks::radio_uri`. Loads only; the caller plays it.
+    pub async fn set_radio(&self, uri: &str, didl: &str) -> Result<()> {
+        self.soap(
+            Service::AvTransport,
+            "SetAVTransportURI",
+            &[
+                ("InstanceID", "0"),
+                ("CurrentURI", uri),
+                ("CurrentURIMetaData", didl),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Point a soundbar at its TV input.
     ///
     /// The Control API cannot do this: its `loadLineIn` is for analog line-in
