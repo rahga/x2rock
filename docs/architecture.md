@@ -200,9 +200,11 @@ early claim rather than leaving it standing beside a pointer. (A pass on 2026-09
 whole file: claims wholly overtaken by later testing were removed or rewritten in place, so the
 lines below record the reversals rather than warn about text that still says otherwise.)
 
-- **`queueVersion` is not the queue-change signal.** It was the intended push trigger; this
-  firmware sends no such field, in status or events. The real trigger is the UPnP `UpdateID` on a
-  `Q:0` browse. See "`queueVersion` does not exist".
+- **`queueVersion` is not the queue-change signal** *on the firmware this was measured on.* It was
+  the intended push trigger; that firmware sent no such field, in status or events, and the
+  trigger there is the UPnP `UpdateID` on a `Q:0` browse. See "`queueVersion` does not exist".
+  **Later firmware does send it**, and it moves on every edit: see "Findings from x2rocktv"
+  (2026-10-02), measured on build 97180312.
 - **`match` has succeeded, once.** Long recorded as never succeeding, it answered for Spotify on
   2026-09-10 with `sn_22` — the serial the household's Sonos-app registration already held. It has
   never *created* a registration. See "The real fix: the enqueue URI itself was wrong".
@@ -9283,6 +9285,58 @@ Exercised on a network x2rock had never seen, with the office and home household
   (`State::household_rooms`), and a service linked somewhere but with no household known answers
   `multiple_households` naming each household's rooms, **with no fix** - the usual one is
   `x2rock households`, which would scan this network.
+
+## Findings from x2rocktv (2026-10-01/02)
+
+The Kotlin TV app, working through this document's lessons, measured four things on the home
+household and the office One SL that this document does not yet say, or says otherwise. Each was
+read off the speakers, mostly with this CLI's `raw` commands; x2rocktv's own fixtures hold the
+captures (`core/src/testFixtures/resources/fixtures/`).
+
+**`queueVersion` is sent, and it moves on every queue edit.** In `playbackStatus`, on both
+households: `"8"` at home, `"QV:00019"` on the office One SL (build 97180312, display 18.8).
+Watching Kitchen's `playback:1` events while `x2rock queue move 1 2` and back ran took it
+26 → 27 → 28, each arriving as its own `playbackStatus` event, with the room idle throughout.
+So on this firmware a pushed version answers "did the queue change?" without a browse, and
+`RoomPlayer::queue_version_fetch`'s `UpdateID` browse per playback event may be unneeded — worth
+checking which firmware sends the field before relying on it, since this document measured its
+absence on an earlier one. The silent-append caveat may not hold either: the move was an edit to
+an idle room, and it was pushed.
+
+**iHeartRadio is `DeviceLink` in this household, not anonymous.** `ListAvailableServices` lists
+service 6 with `<Policy Auth="DeviceLink">`. A rating call made with no token therefore stops
+before it starts, which is what x2rocktv's ratings ran into on Kitchen's iHeart podcast track;
+`x2rock rate` works because it presents a linked token. (TuneIn, 254, is the anonymous one;
+TuneIn (New), Radio Paradise, Apple Music and Plex are `AppLink`.)
+
+**`hdmi:1` says whether anything is plugged in, and whether the TV is on.** Player-scoped
+`subscribe` on a Beam answers an `hdmiStatus` event at once:
+
+| Room | `connection` | `tvPowerStatus` | `tvCECStatus` | `stateARC` |
+|---|---|---|---|---|
+| Bedroom (TV attached) | `CONNECTED` | `ON` | `ENABLED` | `ERROR` (`ABORT_INCORRECT_MODE`) |
+| Guest TV (nothing plugged in) | `NO_CONNECTION` | `UNKNOWN` | `UNKNOWN` | `RESET` |
+
+`NO_CONNECTION` is what "TV Audio [Unavailable]" means (see "Player-scoped finds"). x2rocktv now
+treats such a soundbar as having no TV input — no badge, no Source row, no candidate for "the
+television's room" — while keeping its Night Sound and Speech Enhancement, which need no TV.
+`tvPowerStatus: ON` is captured but unused; it could settle which soundbar the TV in front of you
+is on.
+
+**A ringing alarm names itself in `playbackMetadata:1`.** With the built-in chime, the container
+is `{name: "x-rincon-buzzer:0", type: "other", id: {serviceId: "buzzer", objectId: "0"}}` with no
+current item, while `playback:1` goes `IDLE` → `BUFFERING` → `PLAYING`, and back to `IDLE` on
+`pause`. That is a pushed signal that a room is ringing, where `GetRunningAlarmProperties` has to
+be asked. The snooze reply was not captured.
+
+Two smaller ones, for completeness:
+
+- **`zones:1 activeZonesChange` at household scope** reports a bonded speaker that has dropped off
+  as `state.disconnected: true` on that member — captured with Bedroom's left surround unplugged.
+  Whether a later disconnect is pushed while subscribed is still unknown; x2rock only ever
+  subscribed, read and left.
+- **A favourite's playability** follows `x2rock favorites --json`'s rule (a service name or a
+  content type) in x2rocktv too; the home household has no shells to check it against.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
