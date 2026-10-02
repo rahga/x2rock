@@ -9370,6 +9370,80 @@ Two smaller ones, for completeness:
 - **A favourite's playability** follows `x2rock favorites --json`'s rule (a service name or a
   content type) in x2rocktv too; the home household has no shells to check it against.
 
+## `x2rock say`: speech from a service, served to the speaker from here (built 2026-10-02)
+
+Announcements in a real voice were the one thing ronor's `speak` had that x2rock did not, and the
+question of building them came up with an ElevenLabs account to hand. The mechanics were measured
+before anything was written, and they settled the design.
+
+**What ElevenLabs is.** One POST, `/v1/text-to-speech/{voice_id}`, key in an `xi-api-key` header,
+JSON body of text and `model_id`, answered with the audio bytes - MP3 at 44.1kHz/128kbps by
+default, WAV and PCM on request. A sentence to `eleven_flash_v2_5` came back in 0.6s as 49KB of
+mono MP3, billed at **8 characters** by the `character-cost` response header, with `request-id` and
+`history-item-id` beside it. Keys are scoped: the one here is text-to-speech only, and lacks
+`user_read`, `voices_read` and `speech_history_read`, each named in a 401 whose `detail.status` is
+`missing_permissions`. That is the right way to issue one, and it is why `--voices` and a voice
+given by name are the only parts of `say` that can fail on permissions. Models run from 5,000 to
+40,000 characters a request; an announcement is a sentence.
+
+**Why the audio must pass through this machine.** `loadAudioClip` has an `httpAuthorization`
+field the player sends as an `Authorization` header on an HTTPS fetch, and ElevenLabs keeps every
+generation as a history item with a GET URL - so for an hour it looked as if the speaker could fetch
+straight from ElevenLabs with nothing served here. It cannot. ElevenLabs does read an
+`Authorization` header, but answers the API key in it with `invalid_authorization_header` /
+"authorization header must contain a valid bearer token": the bearer path is a different credential
+(a session token), and nothing in their documentation index mints one a speaker could carry. There
+is no signed or public download URL either. So the bytes come back here, and the question becomes
+the firewall.
+
+**The firewall, measured twice.** The clip was served from this laptop with a one-line Python HTTP
+server and a `notify` sent to the office One SL. With Omarchy's default-deny `ufw` as shipped: the
+player accepted the request in 0.37s and never connected - the server log held only the local sanity
+check. With one rule (`ufw allow from 192.168.77.94 to any port 8765 proto tcp`): the player fetched
+the file with a single plain `GET`, no `HEAD` and no `Range`, within a second, over plain HTTP - no
+certificate involved. Same command, same file, same speaker; the rule was the only variable. This
+is "The firewall problem" again, and the same answer the account-event capture reached: a fixed
+port, opened once.
+
+**Built.** Three pieces, kept apart on purpose:
+
+- `src/speech.rs` is the provider: config and key in `$XDG_STATE_HOME/x2rock/speech.json` at 0600
+  (its own file, not `credentials.json`, because a text-to-speech key belongs to the machine, not to
+  a household), the vendor's own `ELEVENLABS_API_KEY` overriding the file, the key read from stdin
+  by `--set-key` so it never enters a shell history. It knows nothing about speakers. It is CLI-only
+  under the standing rule: the daemon never loads it.
+- `src/clipserve.rs` serves one file, once, to one address: bound to **TCP 3401, the port the
+  `ThirdPartyMediaServersX` capture already uses**, so a household's firewall rule is written once
+  and covers both of x2rock's inbound uses. It answers the clip's path to the player's IP alone,
+  closes the connection on anyone else, waits 8s for the fetch and 1.5s more after it, and reports
+  `clip_not_fetched` with the `ufw` line in `data.firewall_rule` when the player never comes. No
+  `fix`: a `sudo` rule is the person's to run.
+- `src/commands/say.rs` is the only place that knows both: cache under `$XDG_CACHE_HOME/x2rock/say/`
+  keyed by MD5 of (provider, voice, model, text) so a repeated sentence is free, the speaker resolved
+  before anything is spent, then `loadAudioClip` through the same player-scoped path as `notify`.
+  Measured end to end against the One SL: **2.5s** for a fresh sentence (generation plus the
+  player's fetch), and the cached repeat served without a call to the provider.
+
+**Interoperability, by design rather than by second implementation.** Every text-to-speech API in
+use has the same shape - a JSON POST naming a voice and a model, answered with bytes - and the LLM
+vendors are converging on OpenAI's `/v1/audio/speech` under a bearer key. `speech.json` is keyed by
+provider name with a `base_url` slot for an OpenAI-shaped endpoint hosted elsewhere, `Kind` is an
+enum whose one variant carries the request builder, and `Synth` exposes only `synthesize`,
+`voices` and `resolve_voice`. The second vendor is a variant and a builder, not a second file
+format or a second command. It is deliberately *not* built until there is an account to verify it
+against: this document records what was measured, and an unverified backend would be the first
+thing in it that was not.
+
+**Two choices worth defending.** The default voice is a hardcoded ElevenLabs premade id (George),
+because a text-to-speech-only key cannot list voices and the first `say` should need nothing chosen.
+The default model is Flash v2.5 rather than Multilingual v2, because it is billed at half the rate
+and an announcement is not where the difference is heard; `--model` and `--set-default` change it.
+
+**Left out.** A local engine (Piper) as the account-free fallback, which the seam would take; a
+served-directory alternative to the listener for people with a web root, which the firewall
+measurement made less pressing than it looked; and ronor's `--scrape` idea, which is an agent's job
+now rather than a CLI's.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

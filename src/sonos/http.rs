@@ -208,6 +208,67 @@ pub async fn get_bytes(
     .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
 }
 
+/// A POST whose answer is a binary body - speech from a text-to-speech
+/// service - read to at most `limit` bytes: `(status, head, body)`, framing
+/// removed and nothing else done to it, as [`get_bytes`].
+pub async fn post_bytes(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<(u16, String, Vec<u8>)> {
+    let (endpoint, path, tls) = parse_url(url)?;
+    tokio::time::timeout(
+        timeout,
+        exchange(
+            &endpoint,
+            tls,
+            "POST",
+            &path,
+            headers,
+            Some(body),
+            false,
+            Some(limit),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {timeout:?} talking to {url}"))?
+}
+
+/// [`get_bytes`] with headers: a capped binary GET that carries a credential.
+pub async fn get_bytes_with(
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+    limit: usize,
+) -> Result<(u16, String, Vec<u8>)> {
+    let (endpoint, path, tls) = parse_url(url)?;
+    tokio::time::timeout(
+        timeout,
+        exchange(
+            &endpoint,
+            tls,
+            "GET",
+            &path,
+            headers,
+            None,
+            false,
+            Some(limit),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
+}
+
+/// One header's value out of a raw response head, by name.
+pub fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
 /// Ask a URL what it is, reading its headers and nothing else.
 ///
 /// Returns the status and the raw response head, for a caller that needs the

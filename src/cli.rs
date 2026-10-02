@@ -834,6 +834,54 @@ pub enum Command {
         #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
         volume: Option<u8>,
     },
+    /// Say something in a room, in a text-to-speech voice, over whatever it
+    /// is playing.
+    ///
+    /// `notify` with the clip made for you: the text goes to a text-to-speech
+    /// provider (ElevenLabs, so far), the audio comes back to this machine,
+    /// and the room's own player fetches it from here and plays it ducked
+    /// over its programme - the queue and the room's volume survive. The
+    /// player connects *to this machine* for the clip, on one fixed port, so
+    /// a firewall here needs one rule (the error says which). The same
+    /// sentence in the same voice is generated once and cached.
+    ///
+    /// Needs a key: `x2rock say --set-key < keyfile` saves one at mode 0600,
+    /// or export the provider's own variable (`ELEVENLABS_API_KEY`).
+    Say {
+        /// What to say. Omit it with `--voices`, `--set-key` or `--set-default`.
+        text: Option<String>,
+        /// A voice: the provider's id, or a name looked up in its list (which
+        /// needs the key's voices permission). Default: the saved voice, else
+        /// the provider's stock one.
+        #[arg(long)]
+        voice: Option<String>,
+        /// The provider's model. Default: the saved one, else its cheapest
+        /// natural voice model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Which text-to-speech provider. Default: the saved one, else elevenlabs.
+        #[arg(long)]
+        provider: Option<String>,
+        /// How loud it plays, 0-100. Independent of the room's volume and not
+        /// remembered after. Defaults to the player's own setting.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        volume: Option<u8>,
+        /// The TCP port the player fetches the clip from. Fixed, so a firewall
+        /// rule is written once; shared with `link --from-household`.
+        #[arg(long, default_value_t = crate::clipserve::PORT)]
+        port: u16,
+        /// List the voices this key can see, and exit.
+        #[arg(long)]
+        voices: bool,
+        /// Read an API key from stdin and save it for the provider.
+        #[arg(long)]
+        set_key: bool,
+        /// Save --voice, --model and --provider as the defaults.
+        #[arg(long)]
+        set_default: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Group rooms into --room's group, so they play what it plays.
     Group {
         #[arg(required = true)]
@@ -1398,6 +1446,7 @@ impl Command {
             | Command::Rate { json, .. }
             | Command::Service { json, .. }
             | Command::Queue { json, .. }
+            | Command::Say { json, .. }
             | Command::Group { json, .. }
             | Command::Ungroup { json, .. }
             | Command::Party { json, .. }

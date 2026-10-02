@@ -67,6 +67,8 @@ codes! {
     NotQueueMaterial => "not_queue_material",
     AuthenticationRequired => "authentication_required",
     UpnpDisabled => "upnp_disabled",
+    SpeechNotConfigured => "speech_not_configured",
+    ClipNotFetched => "clip_not_fetched",
     Unknown => "unknown",
 }
 

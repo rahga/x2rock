@@ -352,7 +352,7 @@ pub async fn capture_envelope(
 
 /// The address this machine uses to reach the player, which is what the player
 /// must call back on.
-fn local_ip_toward(player: IpAddr) -> Result<IpAddr> {
+pub(crate) fn local_ip_toward(player: IpAddr) -> Result<IpAddr> {
     let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .context("finding this machine's address toward the player")?;
     socket.connect(SocketAddr::new(player, 1400))?;
