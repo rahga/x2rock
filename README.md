@@ -110,6 +110,7 @@ bridged through the wired one. `--redact` masks serials, addresses and uuids for
 | `x2rock sleep [30m\|off]` | the sleep timer; bare, it reads |
 | `x2rock -r <Room> tv` | switch a soundbar to its TV input |
 | `x2rock -r <Room> chime` · `notify "<url>" [--volume N]` | a chime or your own clip, ducked over whatever is playing |
+| `x2rock -r <Room> say "<text>" [--voice <id>] [--volume N]` | an announcement in a text-to-speech voice, ducked the same way; needs a provider key and one firewall rule |
 
 `play` only resumes: a room with an empty queue has nothing for it to do, and `favorite`, `playlist`,
 `bookmark`, a search hit or a stream is what starts one. `favorite` matches an id exactly or a name
@@ -119,6 +120,19 @@ whole name. Loading a favorite replaces the queue, as the Sonos app does.
 `now` on a soundbar shows what the TV is actually sending — `TV Audio [Dolby Digital 5.1]`, or
 `[Dolby Digital 2.0]` when the source has quietly fallen back to stereo, which is invisible
 anywhere else.
+
+`say` is `notify` with the clip made for you. The text goes to a text-to-speech provider
+(ElevenLabs, so far; the seam is built for the next one), the MP3 comes back to this machine and is
+cached under `$XDG_CACHE_HOME/x2rock/say/`, and the room's own player fetches it from here — so the
+same sentence in the same voice is generated and billed once. Two things to set up. A key:
+`x2rock say --set-key < keyfile` reads it from stdin and keeps it at mode 0600 in
+`$XDG_STATE_HOME/x2rock/speech.json`, or export `ELEVENLABS_API_KEY`; a key scoped to
+text-to-speech alone is enough, and `--voices` (or a voice given by name rather than id) is the one
+thing that also wants its voices permission. And a firewall rule: the player connects *to this
+machine* for the clip, on TCP 3401 — the same port `link --from-household` listens on, so one rule
+covers both — and a host with a default-deny firewall, which Omarchy is, otherwise sees the clip
+accepted and never fetched; the `clip_not_fetched` error spells out the `ufw` line. `--voice`,
+`--model` and `--provider` pick per call, and `--set-default` saves them.
 
 ### Volume
 

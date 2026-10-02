@@ -646,7 +646,7 @@ pub fn require_http_url(url: &str) -> Result<()> {
 /// The reverse-DNS id every audio clip is tagged with. `loadAudioClip` requires
 /// one - an absent `appId` is `ERROR_INVALID_PARAMETER` - and the player groups
 /// a caller's clips under it.
-const APP_ID: &str = "com.github.rahga.x2rock";
+pub const APP_ID: &str = "com.github.rahga.x2rock";
 
 /// Play a clip on the room's *own* player - the shared body of `chime` (the
 /// built-in sound, `stream_url` None) and `notify` (a URL). Player-scoped, so it

@@ -404,6 +404,7 @@ rooms; see "Ask before you act".
 | Scenes: a saved arrangement | `x2rock scene --json` (list) / `x2rock scene apply "<Name>" --json` / `x2rock [-r "<Room>"] scene save "<Name>" [--play "<favorite or bookmark>"]` / `x2rock scene delete "<Name>"` - see "Scenes" |
 | Soundbar TV input | `x2rock -r "<Room>" tv` (only where `has_tv` is true) |
 | Chime / announce over playback | `x2rock -r "<Room>" chime` / `x2rock -r "<Room>" notify "<http url>" [--volume N]` |
+| Say something, in a text-to-speech voice | `x2rock -r "<Room>" say "<text>" [--voice <id>] [--volume N] --json` — see "Saying things: `say`" |
 | Remember & replay | `x2rock keep` / `x2rock bookmarks --json` / `x2rock bookmark "<name>"` / `bookmarks pin|rename|prune|remove` |
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 | Link with no browser at all, from what the household already holds | `x2rock link --from-household ['<Service>']` — the only route to Qobuz, Apple Music and Amazon; needs inbound TCP 3401 from the player |
@@ -697,6 +698,28 @@ an announcement, a doorbell, anything short. Use them for "chime the kitchen", "
   the clip and returns before it sounds, and there is no state to poll (unlike a stream). A success
   line means it was accepted; it does not prove audio came out.
 
+## Saying things: `say`
+
+`x2rock -r "<Room>" say "<text>" [--voice <id>] [--volume N] --json` is `notify` with the clip made
+for you: the text goes to a text-to-speech provider (ElevenLabs), the audio comes back to this
+machine, and the room's own player fetches it from here. Use it for "tell the kitchen dinner is
+ready", "announce that the taxi is here", a timer going off, a reminder in a chosen voice. Everything
+under `chime`/`notify` holds: it ducks, it is per speaker, `--volume` is the clip's own level.
+
+- **It costs money per character and takes a second or two**, so say it once and keep it short. The
+  same text in the same voice is cached and free the second time (`cached: true`); the JSON's
+  `cost` is what the provider charged this time, in characters, or null when cached.
+- **Unlike `notify`, the confirmation is real.** `say` waits for the player to fetch the clip and
+  reports `fetched_in_ms`; a success means the player has the audio, not merely the request.
+- **Two setup errors, both the user's to fix, neither retryable:** `speech_not_configured` (no key;
+  the user runs `x2rock say --set-key < keyfile`, which reads stdin - never put a key on a command
+  line) and `clip_not_fetched` (a firewall here stopped the player connecting back; the message and
+  `data.firewall_rule` carry the `sudo ufw` line for port 3401). See the error table.
+- **Voices by id, not by name, unless the key allows listing.** `--voice` takes the provider's voice
+  id; a name is looked up with `--voices`, which needs the key's voices permission and otherwise
+  fails naming that permission. `--set-default` with `--voice`/`--model` saves them so later calls
+  need neither.
+
 ## Worked examples
 
 **"Play something in the kitchen."** `play` only *resumes* what the room already holds; to start
@@ -767,6 +790,8 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `household_unreachable` | a rescan found **other** households but not this one — it is off, or has moved networks. Not `no_player`: the network is fine | `x2rock households` (and see `data.households` for what did answer) |
 | `authentication_required` | the speakers answered and refused (`ERROR_NO_PERMISSION`): the household's Connection security has **Authentication** on, and x2rock is not signed in (or its sign-in was revoked or lapsed — the message says which). Every command fails the same way until one of the remedies is done | **null** — two remedies, the user's choice: turn Authentication off (Sonos app > Account > Privacy and Security > Connection Security), or `x2rock login` — **a browser sign-in to their Sonos account a person must finish**, and it needs their own Sonos integration saved first (see the README). `x2rock login` opens the page and waits (up to ten minutes) for the browser to hand the sign-in back to it on 127.0.0.1, then exits by itself; if the browser is on another machine, the page shows an address instead and `x2rock login '<address>'` finishes. Do not rescan or retry |
 | `upnp_disabled` | the household has **UPnP** switched off, so the speakers refuse everything x2rock does over UPnP: the queue (`queue`, adding to it, `play <n>`), `alarms`, `snooze`, `sleep`, `eq` and tone, `tv`, and `play-item` once its stream and load fallbacks have failed too. Playback, volume, grouping, favorites, `recent` and `replay` are unaffected | **null** — the user turns UPnP back on (Sonos app > Account > Privacy and Security > Connection Security > UPnP); it also switches off the Sonos macOS and Windows apps. Nothing x2rock can run fixes it, so do not retry; do the same errand another way if one exists (a favorite instead of the queue) |
+| `speech_not_configured` | `say` has no text-to-speech key: nothing saved and the provider's variable (`ELEVENLABS_API_KEY`) unset | **null** — a person saves one: `x2rock say --set-key < keyfile` reads it from stdin (never an argument), so ask them to run it; `data.provider` and `data.env` say which provider and variable |
+| `clip_not_fetched` | `say` made the clip and the player accepted it, but never connected back to fetch it within 8s — a firewall on this machine, almost always | **null** — the fix is a `sudo` firewall rule, which is the user's to run: it is spelled out in the message and in `data.firewall_rule` (one rule, port 3401, covers `say` and `link --from-household`). Do not retry until it is in place |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry** — except `needs_link`, whose fix opens a login page for
