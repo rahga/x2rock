@@ -46,6 +46,38 @@ the logind and NetworkManager mechanisms are not.
 A concrete porting guide lives in x2rocktv's own `docs/porting-from-x2rock.md`, where it moved on
 2026-09-23.
 
+## The computer's volume keys, driving a room (2026-10-02)
+
+A ricing trick rather than a feature, recorded here because it was weighed as a feature and
+declined. The question came from reading `migueltvms/speaker-volume-bridge`, a Tauri tray app whose
+entire job is to keep one Sonos speaker's volume and mute in step with the computer's output device,
+so that the keyboard's volume keys move the speaker. It does this over UPnP alone - SSDP discovery,
+SOAP `RenderingControl`, and GENA eventing with an inbound callback listener and a polling fallback
+for when the callbacks stop arriving - which is the transport design "The firewall problem" rules
+out here, and it addresses a single player with group coordination left unimplemented by its own
+ADR. The one thing it does that x2rock does not is the sink binding itself: MPRIS gives the media
+keys play, pause and skip, but a desktop's volume keys move the local sink, never an MPRIS player.
+
+**Why it is a script and not the daemon's.** The cheap transport is the PulseAudio protocol, not
+PipeWire's own. PipeWire serves it through pipewire-pulse on Omarchy and on every Ubuntu since
+22.10, and `pactl subscribe` is a ready-made event stream (verified on this machine: a nudge of the
+sink produces a `change` event on the sink each time, alongside events for the asking client and
+the card). Reading and writing the level is `pactl get-sink-volume` and `set-sink-volume`, so the
+whole feature is three subprocesses and no new crate - and real PulseAudio on a 22.04 desktop comes
+free, since it is the same protocol. The native route is the `pipewire` crate, which binds
+libpipewire through pkg-config: a C library build dependency and a foreign event loop in a tree
+that needs only a C compiler for ring. `wpctl` has no monitor mode at all, so a native subprocess
+approach would mean parsing `pw-mon`, worse than `pactl` on every axis. Even on the cheap path the
+daemon would have to supervise a long-lived child and grow a policy layer - which room, a cap, and
+telling an echo from a real change - for something few people want. That is what "front ends are
+consumers of the daemon" is for.
+
+**Built as `scripts/follow-sink.sh`.** It waits on `pactl subscribe`, re-reads the default sink on
+every sink or server event, and sends `x2rock -r <room> vol N` only when the mapped level actually
+moved, with the sink's 100% landing on a cap (50 by default) and mute following as `vol mute` /
+`vol unmute`. One direction only: the speaker never moves the computer. Several events arrive per
+keypress, so the dedupe is what keeps it to one command each. `X2ROCK=echo` dry-runs it.
+
 ## Reading the household's own tokens: the `ThirdPartyMediaServersX` decrypt
 
 *Written to be followed without a networking or cryptography background; the measured detail, the
