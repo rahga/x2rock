@@ -9434,6 +9434,14 @@ format or a second command. It is deliberately *not* built until there is an acc
 against: this document records what was measured, and an unverified backend would be the first
 thing in it that was not.
 
+**The voice list is remembered (same day).** The first run of `--voice Junior` needed the voices
+permission, and getting it meant switching the key's restrictions off altogether - a bad trade for
+one lookup, since generation never needs it and ids do not change. So a successful listing, whether
+from `--voices` or from a name that had to be looked up, is kept in `speech.json` under the provider
+(`voices`, with `voices_at`), names resolve there first, and `--voices` under a key that cannot
+list falls back to the remembered list and says so. The workflow is: list once with a broad key,
+restrict the key back to text-to-speech, and every name still works.
+
 **Two choices worth defending.** The default voice is a hardcoded ElevenLabs premade id (George),
 because a text-to-speech-only key cannot list voices and the first `say` should need nothing chosen.
 The default model is Flash v2.5 rather than Multilingual v2, because it is billed at half the rate

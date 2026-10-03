@@ -6,9 +6,28 @@
 //! used instead. It is stable per site and effectively unique.
 
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+
+/// The one TCP port a player ever connects to this machine on.
+///
+/// Everything x2rock does is outbound - see "The firewall problem" in
+/// docs/architecture.md - with two exceptions, both short-lived listeners: the
+/// account-event capture behind `link --from-household`, and the clip a `say`
+/// serves. They bind the same port so a household's firewall rule is written
+/// once and covers both; they never run at the same time in practice, and the
+/// second to bind finds the port taken and says so.
+pub const INBOUND_PORT: u16 = 3401;
+
+/// The address this machine uses to reach `peer`, which is what the peer must
+/// connect back to. Read off a connected UDP socket: no packet is sent.
+pub fn local_ip_toward(peer: IpAddr) -> Result<IpAddr> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .context("finding this machine's address toward the player")?;
+    socket.connect(SocketAddr::new(peer, 1400))?;
+    Ok(socket.local_addr()?.ip())
+}
 
 /// Default IPv4 gateway, parsed from a routing table in `/proc/net/route` format.
 ///

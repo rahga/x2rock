@@ -715,10 +715,12 @@ under `chime`/`notify` holds: it ducks, it is per speaker, `--volume` is the cli
   the user runs `x2rock say --set-key < keyfile`, which reads stdin - never put a key on a command
   line) and `clip_not_fetched` (a firewall here stopped the player connecting back; the message and
   `data.firewall_rule` carry the `sudo ufw` line for port 3401). See the error table.
-- **Voices by id, not by name, unless the key allows listing.** `--voice` takes the provider's voice
-  id; a name is looked up with `--voices`, which needs the key's voices permission and otherwise
-  fails naming that permission. `--set-default` with `--voice`/`--model` saves them so later calls
-  need neither.
+- **Voices by name or id.** `--voice` takes a name (whole, or a unique part of one) or the
+  provider's id. Names resolve from the list the last `say --voices` remembered, with no call to
+  the provider; only a name that is not in it asks the provider, which needs the key's voices
+  permission and otherwise fails naming that permission - then `x2rock say --voices --json` shows
+  what *is* remembered. `--set-default` with `--voice`/`--model` saves them so later calls need
+  neither.
 
 ## Worked examples
 

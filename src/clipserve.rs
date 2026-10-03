@@ -7,13 +7,9 @@
 //! address, and gone.
 //!
 //! **This is x2rock's second inbound connection, and it shares the first's
-//! port.** The Control API is outbound on :1443 and everything else this tool
-//! does is outbound too, by design - see "The firewall problem" in
-//! docs/architecture.md - with one exception before this: the account-event
-//! capture behind `link --from-household`, which listens on TCP 3401 for a
-//! player's callback. A clip is served on the same [`PORT`], so a household's
-//! firewall rule is written once and covers both. They never run at the same
-//! time in practice; if they do, the second finds the port taken and says so.
+//! port** - [`crate::netid::INBOUND_PORT`], which says why. The Control API is
+//! outbound on :1443 and everything else this tool does is outbound too, by
+//! design; see "The firewall problem" in docs/architecture.md.
 //!
 //! **What was measured (2026-10-02).** A Sonos One SL asked for a clip at
 //! `http://<this machine>:8765/clip.mp3` accepted the request in 0.37s and
@@ -22,7 +18,6 @@
 //! default-deny `ufw` was the only thing between the two.
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -31,10 +26,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::hint::{Code, Hint};
-use crate::sonos::stored::local_ip_toward;
+use crate::netid::local_ip_toward;
 
-/// The one port a player ever connects to this machine on.
-pub const PORT: u16 = 3401;
 /// After the clip has been fetched, how much longer to stay up for a second
 /// request. The player made exactly one in testing; this is for the day it
 /// makes two.
@@ -59,7 +52,7 @@ pub struct Served {
 /// `port` 0 asks the OS for an ephemeral one, which suits a host with nothing
 /// to open and is what the tests use.
 pub async fn serve_once<F, Fut>(
-    bytes: Arc<Vec<u8>>,
+    bytes: &[u8],
     mime: &str,
     name: &str,
     speaker: IpAddr,
@@ -96,7 +89,7 @@ where
 
     let mut deadline = started + wait;
     let mut requests = 0u32;
-    let mut first_fetch = None;
+    let mut waited: Option<Duration> = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -111,7 +104,7 @@ where
         if peer.ip() != speaker {
             continue;
         }
-        let answered = tokio::time::timeout(REQUEST_TIMEOUT, answer(stream, &path, mime, &bytes))
+        let answered = tokio::time::timeout(REQUEST_TIMEOUT, answer(stream, &path, mime, bytes))
             .await
             .ok()
             .and_then(Result::ok)
@@ -119,18 +112,15 @@ where
         if answered {
             requests += 1;
             let now = Instant::now();
-            first_fetch.get_or_insert(now);
+            waited.get_or_insert(now - started);
             deadline = deadline.min(now + GRACE);
         }
     }
 
-    if requests == 0 {
+    let Some(waited) = waited else {
         return Err(not_fetched(&url, speaker, port, wait));
-    }
-    Ok(Served {
-        waited: first_fetch.map_or_else(|| started.elapsed(), |t| t - started),
-        requests,
-    })
+    };
+    Ok(Served { waited, requests })
 }
 
 /// One HTTP exchange on an accepted connection. `Ok(true)` when the clip itself
@@ -156,18 +146,16 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let head = String::from_utf8_lossy(&raw);
     let sent = match parse_request(&head) {
-        Some((method, asked)) if asked == path && method == "GET" => {
+        Some((method, asked)) if asked == path && matches!(method, "GET" | "HEAD") => {
             stream
                 .write_all(ok_head(mime, bytes.len()).as_bytes())
                 .await?;
-            stream.write_all(bytes).await?;
-            true
-        }
-        Some((method, asked)) if asked == path && method == "HEAD" => {
-            stream
-                .write_all(ok_head(mime, bytes.len()).as_bytes())
-                .await?;
-            false
+            if method == "GET" {
+                stream.write_all(bytes).await?;
+                true
+            } else {
+                false
+            }
         }
         _ => {
             stream
@@ -251,62 +239,48 @@ mod tests {
         assert_eq!(parse_request(""), None);
     }
 
-    #[tokio::test]
-    async fn a_get_of_the_path_sends_the_bytes_and_anything_else_does_not() {
-        let clip = b"ID3fake".to_vec();
-        // GET: the whole clip, after a head that states its length.
+    /// One request against `answer`, as a client would send it: whether the
+    /// clip was counted as sent, and everything the client read back.
+    async fn exchange(request: &[u8]) -> (bool, String) {
         let (mut client, server) = tokio::io::duplex(4096);
         let served =
-            tokio::spawn(async move { answer(server, "/c.mp3", "audio/mpeg", &clip).await });
-        client
-            .write_all(b"GET /c.mp3 HTTP/1.1\r\nHost: x\r\n\r\n")
-            .await
-            .unwrap();
+            tokio::spawn(async move { answer(server, "/c.mp3", "audio/mpeg", b"ID3fake").await });
+        client.write_all(request).await.unwrap();
         let mut got = Vec::new();
         client.read_to_end(&mut got).await.unwrap();
-        assert!(served.await.unwrap().unwrap());
-        let text = String::from_utf8_lossy(&got);
+        (
+            served.await.unwrap().unwrap(),
+            String::from_utf8_lossy(&got).into_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_get_of_the_path_sends_the_bytes_and_anything_else_does_not() {
+        // GET: the whole clip, after a head that states its length.
+        let (sent, text) = exchange(b"GET /c.mp3 HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(sent);
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
         assert!(text.contains("Content-Length: 7\r\n"), "{text}");
         assert!(text.ends_with("ID3fake"), "{text}");
 
         // HEAD: the head alone, and it does not count as fetched.
-        let clip = b"ID3fake".to_vec();
-        let (mut client, server) = tokio::io::duplex(4096);
-        let served =
-            tokio::spawn(async move { answer(server, "/c.mp3", "audio/mpeg", &clip).await });
-        client
-            .write_all(b"HEAD /c.mp3 HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut got = Vec::new();
-        client.read_to_end(&mut got).await.unwrap();
-        assert!(!served.await.unwrap().unwrap());
-        assert!(String::from_utf8_lossy(&got).ends_with("\r\n\r\n"));
+        let (sent, text) = exchange(b"HEAD /c.mp3 HTTP/1.1\r\n\r\n").await;
+        assert!(!sent);
+        assert!(text.ends_with("\r\n\r\n"), "{text}");
 
         // The wrong path: a 404 and nothing else.
-        let clip = b"ID3fake".to_vec();
-        let (mut client, server) = tokio::io::duplex(4096);
-        let served =
-            tokio::spawn(async move { answer(server, "/c.mp3", "audio/mpeg", &clip).await });
-        client
-            .write_all(b"GET /other HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut got = Vec::new();
-        client.read_to_end(&mut got).await.unwrap();
-        assert!(!served.await.unwrap().unwrap());
-        assert!(String::from_utf8_lossy(&got).starts_with("HTTP/1.1 404"));
+        let (sent, text) = exchange(b"GET /other HTTP/1.1\r\n\r\n").await;
+        assert!(!sent);
+        assert!(text.starts_with("HTTP/1.1 404"), "{text}");
     }
 
     /// The whole thing against a loopback "player": the trigger is handed a
     /// URL, a client fetches it, and the serve returns having counted one.
     #[tokio::test]
     async fn serves_the_clip_to_the_player_that_was_triggered() {
-        let bytes = Arc::new(b"ID3 some mp3".to_vec());
         let me: IpAddr = Ipv4Addr::LOCALHOST.into();
         let served = serve_once(
-            bytes.clone(),
+            b"ID3 some mp3",
             "audio/mpeg",
             "x.mp3",
             me,
@@ -341,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn a_player_that_never_comes_is_clip_not_fetched_with_the_rule_in_data() {
         let err = serve_once(
-            Arc::new(vec![1, 2, 3]),
+            &[1, 2, 3],
             "audio/mpeg",
             "x.mp3",
             IpAddr::V4(Ipv4Addr::new(192, 168, 77, 94)),

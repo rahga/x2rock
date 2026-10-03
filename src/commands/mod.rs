@@ -35,6 +35,19 @@ use volume::apply_vol;
 /// which are plain ASCII words where the spelling rule holds. It would be wrong
 /// about "an hour" and "a European", and there is no reason for either to reach
 /// it.
+/// A rough age for a unix time, for a list where the exact second has never
+/// mattered: `accounts` dates its links with it and `say --voices` its
+/// remembered voice list.
+pub fn ago(then: u64) -> String {
+    let seconds = credentials::now().saturating_sub(then);
+    match seconds {
+        0..=90 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
 pub fn article(word: &str) -> &'static str {
     match word.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('a' | 'e' | 'i' | 'o' | 'u') => "an",

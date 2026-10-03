@@ -199,41 +199,7 @@ pub async fn get_bytes(
     timeout: Duration,
     limit: usize,
 ) -> Result<(u16, String, Vec<u8>)> {
-    let (endpoint, path, tls) = parse_url(url)?;
-    tokio::time::timeout(
-        timeout,
-        exchange(&endpoint, tls, "GET", &path, &[], None, false, Some(limit)),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
-}
-
-/// A POST whose answer is a binary body - speech from a text-to-speech
-/// service - read to at most `limit` bytes: `(status, head, body)`, framing
-/// removed and nothing else done to it, as [`get_bytes`].
-pub async fn post_bytes(
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &str,
-    timeout: Duration,
-    limit: usize,
-) -> Result<(u16, String, Vec<u8>)> {
-    let (endpoint, path, tls) = parse_url(url)?;
-    tokio::time::timeout(
-        timeout,
-        exchange(
-            &endpoint,
-            tls,
-            "POST",
-            &path,
-            headers,
-            Some(body),
-            false,
-            Some(limit),
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} talking to {url}"))?
+    get_bytes_with(url, &[], timeout, limit).await
 }
 
 /// [`get_bytes`] with headers: a capped binary GET that carries a credential.
@@ -243,25 +209,50 @@ pub async fn get_bytes_with(
     timeout: Duration,
     limit: usize,
 ) -> Result<(u16, String, Vec<u8>)> {
+    bytes("GET", url, headers, None, timeout, limit).await
+}
+
+/// A POST whose answer is a binary body - speech from a text-to-speech
+/// service - under the same cap as [`get_bytes`].
+pub async fn post_bytes(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<(u16, String, Vec<u8>)> {
+    bytes("POST", url, headers, Some(body), timeout, limit).await
+}
+
+/// The one capped binary exchange the three above name.
+async fn bytes(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+    timeout: Duration,
+    limit: usize,
+) -> Result<(u16, String, Vec<u8>)> {
     let (endpoint, path, tls) = parse_url(url)?;
     tokio::time::timeout(
         timeout,
         exchange(
             &endpoint,
             tls,
-            "GET",
+            method,
             &path,
             headers,
-            None,
+            body,
             false,
             Some(limit),
         ),
     )
     .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))?
+    .map_err(|_| anyhow!("timed out after {timeout:?} talking to {url}"))?
 }
 
-/// One header's value out of a raw response head, by name.
+/// One header's value out of a raw HTTP head, by name, case-insensitively.
+/// The first line - a status line or a request line - is skipped.
 pub fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.lines().skip(1).find_map(|line| {
         let (k, v) = line.split_once(':')?;
@@ -566,6 +557,18 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_header_is_found_whatever_its_case_and_the_first_line_is_skipped() {
+        let head = "HTTP/1.1 302 Found\r\nlocation: https://x/y\r\nContent-Encoding: gzip";
+        assert_eq!(header(head, "Location"), Some("https://x/y"));
+        assert_eq!(header(head, "content-encoding"), Some("gzip"));
+        assert_eq!(header(head, "etag"), None);
+        // A request line is skipped the same way, so a NOTIFY's headers read too.
+        let notify = "NOTIFY /cb HTTP/1.1\r\nSID: uuid:abc\r\nCONTENT-LENGTH: 0\r\n";
+        assert_eq!(header(notify, "sid"), Some("uuid:abc"));
+        assert_eq!(header(notify, "Content-Length"), Some("0"));
+    }
 
     /// A socket that serves a canned response and counts what was taken from
     /// it, so a test can assert the reader *stopped* rather than just that it

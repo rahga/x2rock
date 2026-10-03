@@ -689,7 +689,7 @@ pub enum Command {
         /// only if something else holds that port. `0` picks an ephemeral one,
         /// which suits a host with no firewall to open. Ignored without
         /// `--from-household`.
-        #[arg(long, default_value_t = 3401)]
+        #[arg(long, default_value_t = crate::netid::INBOUND_PORT)]
         callback_port: u16,
         /// Read the household's stored accounts and print them, storing
         /// nothing. Only with `--from-household`.
@@ -847,41 +847,7 @@ pub enum Command {
     ///
     /// Needs a key: `x2rock say --set-key < keyfile` saves one at mode 0600,
     /// or export the provider's own variable (`ELEVENLABS_API_KEY`).
-    Say {
-        /// What to say. Omit it with `--voices`, `--set-key` or `--set-default`.
-        text: Option<String>,
-        /// A voice: the provider's id, or a name looked up in its list (which
-        /// needs the key's voices permission). Default: the saved voice, else
-        /// the provider's stock one.
-        #[arg(long)]
-        voice: Option<String>,
-        /// The provider's model. Default: the saved one, else its cheapest
-        /// natural voice model.
-        #[arg(long)]
-        model: Option<String>,
-        /// Which text-to-speech provider. Default: the saved one, else elevenlabs.
-        #[arg(long)]
-        provider: Option<String>,
-        /// How loud it plays, 0-100. Independent of the room's volume and not
-        /// remembered after. Defaults to the player's own setting.
-        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
-        volume: Option<u8>,
-        /// The TCP port the player fetches the clip from. Fixed, so a firewall
-        /// rule is written once; shared with `link --from-household`.
-        #[arg(long, default_value_t = crate::clipserve::PORT)]
-        port: u16,
-        /// List the voices this key can see, and exit.
-        #[arg(long)]
-        voices: bool,
-        /// Read an API key from stdin and save it for the provider.
-        #[arg(long)]
-        set_key: bool,
-        /// Save --voice, --model and --provider as the defaults.
-        #[arg(long)]
-        set_default: bool,
-        #[arg(long)]
-        json: bool,
-    },
+    Say(SayArgs),
     /// Group rooms into --room's group, so they play what it plays.
     Group {
         #[arg(required = true)]
@@ -1408,6 +1374,46 @@ pub enum QueueAction {
     },
 }
 
+/// `say`'s arguments, as one value: the command has three errands besides
+/// saying, and every one of them reads the same flags.
+#[derive(Debug, Clone, clap::Args)]
+pub struct SayArgs {
+    /// What to say. Omit it with `--voices`, `--set-key` or `--set-default`.
+    pub text: Option<String>,
+    /// A voice: a name (whole, or a unique part of one) looked up in the list
+    /// the last `--voices` remembered, or the provider's id. Default: the
+    /// saved voice, else the provider's stock one.
+    #[arg(long)]
+    pub voice: Option<String>,
+    /// The provider's model. Default: the saved one, else its cheapest
+    /// natural voice model.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Which text-to-speech provider. Default: the saved one, else elevenlabs.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// How loud it plays, 0-100. Independent of the room's volume and not
+    /// remembered after. Defaults to the player's own setting.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub volume: Option<u8>,
+    /// The TCP port the player fetches the clip from. Fixed, so a firewall
+    /// rule is written once; shared with `link --from-household`.
+    #[arg(long, default_value_t = crate::netid::INBOUND_PORT)]
+    pub port: u16,
+    /// List the voices this key can see - or, when it cannot, the list the
+    /// last key that could left behind - and exit.
+    #[arg(long)]
+    pub voices: bool,
+    /// Read an API key from stdin and save it for the provider.
+    #[arg(long)]
+    pub set_key: bool,
+    /// Save --voice, --model and --provider as the defaults.
+    #[arg(long)]
+    pub set_default: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
 impl Command {
     /// Whether the command was asked for `--json`, so an error can match the
     /// output the caller expected. Every variant with the flag is here - a test
@@ -1446,7 +1452,7 @@ impl Command {
             | Command::Rate { json, .. }
             | Command::Service { json, .. }
             | Command::Queue { json, .. }
-            | Command::Say { json, .. }
+            | Command::Say(SayArgs { json, .. })
             | Command::Group { json, .. }
             | Command::Ungroup { json, .. }
             | Command::Party { json, .. }

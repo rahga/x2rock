@@ -34,6 +34,13 @@ pub fn path(file: &str) -> Result<PathBuf> {
     Ok(dir.join(file))
 }
 
+/// `$XDG_CACHE_HOME/x2rock/<sub>`: regenerable files, named for what fills them.
+pub fn cache_dir(sub: &str) -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "x2rock")
+        .ok_or_else(|| anyhow!("no home directory"))?;
+    Ok(dirs.cache_dir().join(sub))
+}
+
 /// `<file>.<ext>` beside `path`.
 fn sibling(path: &Path, ext: &str) -> PathBuf {
     let name = path
@@ -69,6 +76,11 @@ pub fn read_optional(path: &Path) -> Result<Option<String>> {
 /// bits whatever `mode` asks, so a leftover is removed first. It can only be
 /// this process's own name reused after a crash; nobody is mid-write in it.
 pub fn write_atomically(path: &Path, text: &str, mode: u32) -> Result<()> {
+    write_bytes_atomically(path, text.as_bytes(), mode)
+}
+
+/// [`write_atomically`] for bytes that are not text: a cached clip.
+pub fn write_bytes_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -80,7 +92,7 @@ pub fn write_atomically(path: &Path, text: &str, mode: u32) -> Result<()> {
         .mode(mode)
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
-    if let Err(e) = file.write_all(text.as_bytes()) {
+    if let Err(e) = file.write_all(bytes) {
         drop(file);
         let _ = fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("writing {}", tmp.display()));
