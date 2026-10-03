@@ -39,6 +39,9 @@ use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::netid::local_ip_toward;
+use crate::sonos::http;
+
 /// The fixed salt Sonos mixes with the household id to derive the blob key.
 /// A reverse-engineered constant, public in SoCo #1010; a firmware update could
 /// in principle change it, at which point the integrity check below would start
@@ -350,15 +353,6 @@ pub async fn capture_envelope(
     })
 }
 
-/// The address this machine uses to reach the player, which is what the player
-/// must call back on.
-pub(crate) fn local_ip_toward(player: IpAddr) -> Result<IpAddr> {
-    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .context("finding this machine's address toward the player")?;
-    socket.connect(SocketAddr::new(player, 1400))?;
-    Ok(socket.local_addr()?.ip())
-}
-
 /// SUBSCRIBE to ZoneGroupTopology, returning the subscription id to cancel with.
 async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String> {
     let callback = match local_ip {
@@ -379,7 +373,7 @@ async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String
         .context("subscribing to the player's topology events")?;
     stream.write_all(request.as_bytes()).await?;
     let response = read_http_message(&mut stream).await?;
-    header_value(&response, "SID")
+    http::header(&response, "SID")
         .map(str::to_string)
         .ok_or_else(|| anyhow!("the player accepted the subscription but named no SID"))
 }
@@ -407,7 +401,7 @@ async fn read_http_message<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<St
         let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
         if let Some(end) = head_end {
             let head = String::from_utf8_lossy(&raw[..end]);
-            let want = header_value(&head, "Content-Length")
+            let want = http::header(&head, "Content-Length")
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .unwrap_or(0);
             if raw.len() >= end + 4 + want {
@@ -424,13 +418,6 @@ async fn read_http_message<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<St
 }
 
 /// One header value from an HTTP message, case-insensitive on the name.
-fn header_value<'a>(message: &'a str, name: &str) -> Option<&'a str> {
-    message.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
-    })
-}
-
 /// Pull one evented variable's value out of a GENA property-set NOTIFY body.
 ///
 /// The body is `<e:propertyset><e:property><Name>value</Name></e:property>...`,
@@ -623,12 +610,5 @@ mod tests {
             extract_variable(body, "ThirdPartyMediaServersX").as_deref(),
             Some("2:AAAA")
         );
-    }
-
-    #[test]
-    fn header_values_are_case_insensitive() {
-        let msg = "HTTP/1.1 200 OK\r\nSID: uuid:abc\r\nContent-Length: 0\r\n\r\n";
-        assert_eq!(header_value(msg, "sid"), Some("uuid:abc"));
-        assert_eq!(header_value(msg, "CONTENT-LENGTH"), Some("0"));
     }
 }

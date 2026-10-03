@@ -16,21 +16,22 @@
 //! more than [`MAX_CACHED`] - because a cached announcement does not go stale.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::net::IpAddr;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::clipserve;
-use crate::commands::Report;
+use crate::cli::SayArgs;
 use crate::commands::speaker::named_speaker;
 use crate::commands::stream::APP_ID;
-use crate::session::{Session, Target};
-use crate::speech::{self, Config, Synth};
+use crate::commands::{Report, ago, emit};
+use crate::session::{self, Session, Target};
+use crate::speech::{self, Config, Listing, Synth};
+use crate::state::State;
+use crate::{art, clipserve, store};
 
 /// How long the player gets to come for the clip. It took under a second in
 /// testing; this is for a busy player, not a slow one.
@@ -70,112 +71,27 @@ impl Report for SayOutcome {
     }
 }
 
-/// Say `text` on the room's own player.
-#[allow(clippy::too_many_arguments)]
-pub async fn say(
-    session: &Session,
-    target: &Target,
+/// The command. The errands that need no speaker - saving a key, saving
+/// defaults, listing voices - run first and on their own; only text opens a
+/// session, the way `accounts --content` does.
+pub async fn run(
+    args: &SayArgs,
+    ip: Option<IpAddr>,
+    household: Option<&str>,
     room: Option<&str>,
-    text: &str,
-    provider: Option<&str>,
-    voice: Option<&str>,
-    model: Option<&str>,
-    volume: Option<u8>,
-    port: u16,
-) -> Result<SayOutcome> {
-    let text = text.trim();
-    if text.is_empty() {
-        bail!("nothing to say");
-    }
-    let config = Config::load()?;
-    let mut synth = Synth::from_config(&config, provider, None, model)?;
-    if let Some(voice) = voice {
-        synth.voice = synth.resolve_voice(voice).await?;
-    }
-
-    // The speaker first, before anything is spent: an unknown room should not
-    // cost a generation.
-    let (this, upnp) = named_speaker(session, target, room)?;
-    let ip = upnp.ip();
-    let player = session.player(Some(ip)).await?;
-
-    let key = synth.cache_key(text);
-    let dir = cache_dir()?;
-    let file = dir.join(format!("{key}.mp3"));
-    let (bytes, cached, cost) = match read_cached(&file) {
-        Some(bytes) => (bytes, true, None),
-        None => {
-            let clip = synth.synthesize(text).await?;
-            keep(&dir, &file, &clip.bytes)?;
-            prune(&dir, MAX_CACHED);
-            (clip.bytes, false, clip.cost)
-        }
-    };
-    let size = bytes.len();
-    let bytes = Arc::new(bytes);
-
-    let served = clipserve::serve_once(
-        bytes,
-        speech::MIME,
-        &format!("{key}.mp3"),
-        ip,
-        port,
-        WAIT,
-        |url| async move {
-            player
-                .load_audio_clip(&this.id, APP_ID, "x2rock say", Some(&url), volume)
-                .await
-        },
-    )
-    .await?;
-
-    Ok(SayOutcome {
-        room: this.name.clone(),
-        text: text.to_string(),
-        provider: synth.kind.id(),
-        voice: synth.voice,
-        model: synth.model,
-        cached,
-        cost,
-        bytes: size,
-        fetched_in_ms: served.waited.as_millis(),
-        fetches: served.requests,
-    })
-}
-
-/// The parts of `say` that need no speaker: saving a key, saving defaults,
-/// listing voices. Returns `true` when there is nothing left to do - no text
-/// was given, or the voices were listed - so the caller can return without a
-/// session.
-#[allow(clippy::too_many_arguments)]
-pub async fn manage(
-    text: Option<&str>,
-    provider: Option<&str>,
-    voice: Option<&str>,
-    model: Option<&str>,
-    voices: bool,
-    set_key: bool,
-    set_default: bool,
-    json: bool,
-) -> Result<bool> {
-    if !(voices || set_key || set_default) {
-        if text.is_none() {
-            bail!("nothing to say: give the text, or one of --voices, --set-key, --set-default");
-        }
-        return Ok(false);
-    }
+) -> Result<()> {
     let mut config = Config::load()?;
+    let provider = args.provider.as_deref();
     let kind = config.kind(provider)?;
 
-    if set_key {
+    if args.set_key {
         let key = speech::key_from_stdin()?;
         config.provider_mut(kind).api_key = Some(key);
         if config.provider.is_none() {
             config.provider = Some(kind.id().to_string());
         }
-        config.save()?;
-        let path = crate::store::path(speech::FILE)?;
-        if json {
+        let path = store::path(speech::FILE)?;
+        if args.json {
             println!(
                 "{}",
                 serde_json::json!({ "provider": kind.id(), "saved": true, "file": path })
@@ -185,32 +101,33 @@ pub async fn manage(
         }
     }
 
-    if set_default {
-        if voice.is_none() && model.is_none() && provider.is_none() {
+    if args.set_default {
+        if args.voice.is_none() && args.model.is_none() && provider.is_none() {
             bail!("--set-default saves --voice, --model or --provider; give at least one");
         }
-        if let Some(voice) = voice {
-            // Resolve a name to an id now, so the saved default never needs
-            // the voices permission again.
+        if let Some(voice) = &args.voice {
+            // Saved as an id, so the default never needs a lookup again.
             let synth = Synth::from_config(&config, provider, None, None)?;
-            let id = synth.resolve_voice(voice).await?;
+            let id = synth.resolve_voice(&mut config, voice).await?;
             config.provider_mut(kind).voice = Some(id);
         }
-        if let Some(model) = model {
-            config.provider_mut(kind).model = Some(model.to_string());
+        if let Some(model) = &args.model {
+            config.provider_mut(kind).model = Some(model.clone());
         }
         if provider.is_some() {
+            config.provider_mut(kind);
             config.provider = Some(kind.id().to_string());
         }
-        config.save()?;
-        let saved = config.providers.get(kind.id()).cloned().unwrap_or_default();
-        if json {
+        let saved = config.providers.get(kind.id());
+        let voice = saved.and_then(|p| p.voice.as_deref());
+        let model = saved.and_then(|p| p.model.as_deref());
+        if args.json {
             println!(
                 "{}",
                 serde_json::json!({
                     "provider": kind.id(),
-                    "voice": saved.voice,
-                    "model": saved.model,
+                    "voice": voice,
+                    "model": model,
                     "default_provider": config.provider,
                 })
             );
@@ -218,16 +135,31 @@ pub async fn manage(
             println!(
                 "{} defaults: voice {}, model {}",
                 kind.id(),
-                saved.voice.as_deref().unwrap_or("(provider's)"),
-                saved.model.as_deref().unwrap_or("(provider's)")
+                voice.unwrap_or("(provider's)"),
+                model.unwrap_or("(provider's)")
             );
         }
     }
 
-    if voices {
+    if args.voices {
         let synth = Synth::from_config(&config, provider, None, None)?;
-        let list = synth.voices().await?;
-        if json {
+        let list = match synth.list_voices(&mut config).await? {
+            Listing::Fresh(list) => list,
+            Listing::Remembered {
+                voices,
+                at,
+                because,
+            } => {
+                eprintln!(
+                    "note: this key cannot list voices ({because:#}); showing the {} remembered{}",
+                    voices.len(),
+                    at.map(|t| format!(" from {}", ago(t))).unwrap_or_default()
+                );
+                voices
+            }
+        };
+        config.save_if_changed()?;
+        if args.json {
             println!("{}", serde_json::to_value(&list)?);
         } else if list.is_empty() {
             println!("no voices listed for this key");
@@ -246,27 +178,104 @@ pub async fn manage(
                 );
             }
         }
-        return Ok(true);
+        return Ok(());
     }
+    config.save_if_changed()?;
 
-    Ok(text.is_none())
+    let Some(text) = args.text.as_deref() else {
+        if args.set_key || args.set_default {
+            return Ok(());
+        }
+        bail!("nothing to say: give the text, or one of --voices, --set-key, --set-default");
+    };
+    let mut state = State::load()?;
+    let session = session::connect(ip, &mut state, household, room).await?;
+    let target = session::target(&session.groups, room)?;
+    let outcome = say(&session, &target, room, text, args, &mut config).await?;
+    config.save_if_changed()?;
+    emit(&outcome, args.json)
 }
 
-/// `$XDG_CACHE_HOME/x2rock/say`.
-fn cache_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    Ok(dirs.cache_dir().join("say"))
+/// Say `text` on the room's own player.
+async fn say(
+    session: &Session,
+    target: &Target,
+    room: Option<&str>,
+    text: &str,
+    args: &SayArgs,
+    config: &mut Config,
+) -> Result<SayOutcome> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("nothing to say");
+    }
+    let mut synth = Synth::from_config(
+        config,
+        args.provider.as_deref(),
+        None,
+        args.model.as_deref(),
+    )?;
+    if let Some(voice) = &args.voice {
+        synth.voice = synth.resolve_voice(config, voice).await?;
+    }
+
+    // The speaker first, before anything is spent: an unknown room should not
+    // cost a generation.
+    let (this, upnp) = named_speaker(session, target, room)?;
+    let ip = upnp.ip();
+
+    let dir = store::cache_dir("say")?;
+    let name = format!("{}.mp3", synth.cache_key(text));
+    let file = dir.join(&name);
+    // The player's connection and the clip are independent, and each is the
+    // slow part on a different day - the connect when the room is not the
+    // session's own player, the generation on a cache miss - so they overlap.
+    let (player, (bytes, cached, cost)) = tokio::try_join!(session.player(Some(ip)), async {
+        match read_cached(&file) {
+            Some(bytes) => Ok((bytes, true, None)),
+            None => {
+                let clip = synth.synthesize(text).await?;
+                keep(&dir, &file, &clip.bytes)?;
+                prune(&dir, MAX_CACHED);
+                Ok((clip.bytes, false, clip.cost))
+            }
+        }
+    })?;
+
+    let served = clipserve::serve_once(
+        &bytes,
+        speech::MIME,
+        &name,
+        ip,
+        args.port,
+        WAIT,
+        |url| async move {
+            player
+                .load_audio_clip(&this.id, APP_ID, "x2rock say", Some(&url), args.volume)
+                .await
+        },
+    )
+    .await?;
+
+    Ok(SayOutcome {
+        room: this.name.clone(),
+        text: text.to_string(),
+        provider: synth.kind.id(),
+        voice: synth.voice,
+        model: synth.model,
+        cached,
+        cost,
+        bytes: bytes.len(),
+        fetched_in_ms: served.waited.as_millis(),
+        fetches: served.requests,
+    })
 }
 
 /// A cached clip, its modification time bumped so pruning by age-of-use works
-/// where `atime` does not.
+/// where `atime` does not - the same move the art cache makes.
 fn read_cached(file: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(file).ok().filter(|b| !b.is_empty())?;
-    let _ = fs::File::options()
-        .append(true)
-        .open(file)
-        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    art::touch(file);
     Some(bytes)
 }
 
@@ -278,19 +287,7 @@ fn keep(dir: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
         .mode(0o700)
         .create(dir)
         .with_context(|| format!("creating {}", dir.display()))?;
-    let scratch = dir.join(format!(".{}.tmp", std::process::id()));
-    {
-        let mut f = fs::File::options()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&scratch)
-            .with_context(|| format!("writing {}", scratch.display()))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&scratch, file).with_context(|| format!("placing {}", file.display()))
+    store::write_bytes_atomically(file, bytes, store::SECRET)
 }
 
 /// Keep at most `max` clips: the oldest by modification time go first.
@@ -298,16 +295,20 @@ fn prune(dir: &Path, max: usize) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut clips: Vec<(std::time::SystemTime, PathBuf)> = entries
+    let clips: Vec<PathBuf> = entries
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "mp3"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "mp3"))
         .collect();
     if clips.len() <= max {
         return;
     }
-    clips.sort();
-    for (_, path) in clips.iter().take(clips.len() - max) {
+    let mut dated: Vec<_> = clips
+        .into_iter()
+        .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    dated.sort();
+    for (_, path) in dated.iter().take(dated.len().saturating_sub(max)) {
         let _ = fs::remove_file(path);
     }
 }

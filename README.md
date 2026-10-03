@@ -126,9 +126,10 @@ anywhere else.
 cached under `$XDG_CACHE_HOME/x2rock/say/`, and the room's own player fetches it from here — so the
 same sentence in the same voice is generated and billed once. Two things to set up. A key:
 `x2rock say --set-key < keyfile` reads it from stdin and keeps it at mode 0600 in
-`$XDG_STATE_HOME/x2rock/speech.json`, or export `ELEVENLABS_API_KEY`; a key scoped to
-text-to-speech alone is enough, and `--voices` (or a voice given by name rather than id) is the one
-thing that also wants its voices permission. And a firewall rule: the player connects *to this
+`$XDG_STATE_HOME/x2rock/speech.json`, or export `ELEVENLABS_API_KEY`. A key scoped to
+text-to-speech alone is enough: listing voices wants the key's voices permission too, but the list
+is remembered in the same file, so one `--voices` with a key that can list lets every voice name
+work afterwards with one that cannot. And a firewall rule: the player connects *to this
 machine* for the clip, on TCP 3401 — the same port `link --from-household` listens on, so one rule
 covers both — and a host with a default-deny firewall, which Omarchy is, otherwise sees the clip
 accepted and never fetched; the `clip_not_fetched` error spells out the `ufw` line. `--voice`,

@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
+use super::ago;
 use super::content::{play_item, queueable};
 use super::nth;
 use crate::cli::RateDirection;
@@ -234,18 +235,6 @@ fn account_label(
     // settles what that takes: the nickname alone where it distinguishes this
     // account, the key alongside or instead where it does not.
     format!("{} ({})", account.service_name, held.distinguisher(key))
-}
-
-/// A rough age, for a list where the exact second has never mattered.
-fn ago(then: u64) -> String {
-    let now = credentials::now();
-    let seconds = now.saturating_sub(then);
-    match seconds {
-        0..=90 => "just now".to_string(),
-        s if s < 3600 => format!("{}m ago", s / 60),
-        s if s < 86_400 => format!("{}h ago", s / 3600),
-        s => format!("{}d ago", s / 86_400),
-    }
 }
 
 /// What the household should call this machine's account, when nothing was given.

@@ -115,6 +115,10 @@ impl Kind {
 pub struct Config {
     #[serde(default)]
     pub schema: u32,
+    /// Set by every write-side accessor, so a command saves once at the end
+    /// and only when something moved. Never on disk.
+    #[serde(skip)]
+    changed: bool,
     /// The provider `say` uses when `--provider` is not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -134,6 +138,17 @@ pub struct ProviderConfig {
     /// endpoint hosted elsewhere. Unused by ElevenLabs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// The provider's voices as last listed, so a name resolves here first.
+    ///
+    /// Listing needs a permission (`voices_read`) that a key scoped to
+    /// text-to-speech alone does not have, and generating never needs. Keeping
+    /// the list means the key can be broad for one `--voices` and narrow ever
+    /// after, with every name still working.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voices: Vec<Voice>,
+    /// When `voices` was taken, unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voices_at: Option<u64>,
 }
 
 fn path() -> Result<PathBuf> {
@@ -172,14 +187,34 @@ impl Config {
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let copy = Config {
             schema: SCHEMA,
+            changed: false,
             provider: self.provider.clone(),
             providers: self.providers.clone(),
         };
         store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
     }
 
+    /// The provider's entry, for writing; marks the config as changed.
     pub fn provider_mut(&mut self, kind: Kind) -> &mut ProviderConfig {
+        self.changed = true;
         self.providers.entry(kind.id().to_string()).or_default()
+    }
+
+    /// Keep a freshly listed voice list for `kind`, replacing the last.
+    pub fn remember_voices(&mut self, kind: Kind, voices: Vec<Voice>) {
+        let entry = self.provider_mut(kind);
+        entry.voices = voices;
+        entry.voices_at = Some(crate::credentials::now());
+    }
+
+    /// Write the file if anything was written to the config since it was
+    /// loaded or last saved.
+    pub fn save_if_changed(&mut self) -> Result<()> {
+        if self.changed {
+            self.save()?;
+            self.changed = false;
+        }
+        Ok(())
     }
 
     /// The provider to use: `--provider`, else the saved default, else
@@ -196,7 +231,9 @@ impl Config {
 /// one token, so trailing newlines from `echo` or a file are not part of it.
 pub fn key_from_stdin() -> Result<String> {
     let mut text = String::new();
+    // A key is a line; a file mistaken for one should not be buffered whole.
     std::io::stdin()
+        .take(64 * 1024)
         .read_to_string(&mut text)
         .context("reading the key from stdin")?;
     let key = text.trim().to_string();
@@ -217,6 +254,10 @@ pub struct Synth {
     base_url: String,
     pub voice: String,
     pub model: String,
+    /// The voices remembered from the last listing; see
+    /// [`ProviderConfig::voices`].
+    pub remembered: Vec<Voice>,
+    pub remembered_at: Option<u64>,
 }
 
 /// One clip of speech, as the provider returned it.
@@ -232,7 +273,21 @@ pub struct Clip {
 /// and every provider here is asked for.
 pub const MIME: &str = "audio/mpeg";
 
-#[derive(Debug, Clone, Serialize)]
+/// What [`Synth::list_voices`] came back with, and from where.
+#[derive(Debug)]
+pub enum Listing {
+    /// The provider answered; the list is now remembered.
+    Fresh(Vec<Voice>),
+    /// The provider refused and this is the last list it gave, with when,
+    /// and the refusal for the caller to show.
+    Remembered {
+        voices: Vec<Voice>,
+        at: Option<u64>,
+        because: anyhow::Error,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Voice {
     pub id: String,
     pub name: String,
@@ -269,6 +324,8 @@ impl Synth {
                 .map(str::to_string)
                 .or(saved.model)
                 .unwrap_or_else(|| kind.default_model().to_string()),
+            remembered: saved.voices,
+            remembered_at: saved.voices_at,
         })
     }
 
@@ -282,11 +339,7 @@ impl Synth {
             hasher.update(part.as_bytes());
             hasher.update([0]);
         }
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        format!("{:x}", hasher.finalize())
     }
 
     fn headers(&self) -> Vec<(&str, &str)> {
@@ -332,12 +385,12 @@ impl Synth {
         })
     }
 
-    /// The provider's voices - the ones this key may list.
-    pub async fn voices(&self) -> Result<Vec<Voice>> {
+    /// The provider's voices, asked for afresh - the ones this key may list.
+    async fn fetch_voices(&self) -> Result<Vec<Voice>> {
         match self.kind {
             Kind::ElevenLabs => {
                 let url = format!("{}/v2/voices?page_size=100", self.base_url);
-                let (status, head, bytes) = http::get_bytes_with(
+                let (status, _head, bytes) = http::get_bytes_with(
                     &url,
                     &[
                         ("xi-api-key", self.key.as_str()),
@@ -347,7 +400,6 @@ impl Synth {
                     MAX_BYTES,
                 )
                 .await?;
-                let _ = head;
                 if status != 200 {
                     return Err(self.refusal(status, &bytes, "listing voices"));
                 }
@@ -358,39 +410,54 @@ impl Synth {
         }
     }
 
-    /// A voice as the person gave it: an id passes through, a name is looked
-    /// up in the provider's list. Case-insensitive, whole name first, then a
-    /// unique prefix or substring.
-    pub async fn resolve_voice(&self, query: &str) -> Result<String> {
+    /// The voices: fresh from the provider and remembered into `config` when
+    /// the key can list, else the remembered list and the reason it is being
+    /// shown instead. A key that can do neither is an error.
+    pub async fn list_voices(&self, config: &mut Config) -> Result<Listing> {
+        match self.fetch_voices().await {
+            Ok(list) => {
+                config.remember_voices(self.kind, list.clone());
+                Ok(Listing::Fresh(list))
+            }
+            Err(because) if !self.remembered.is_empty() => Ok(Listing::Remembered {
+                voices: self.remembered.clone(),
+                at: self.remembered_at,
+                because,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A voice as the person gave it: an id passes through; a name is looked
+    /// up in the remembered list first and in the provider's own list only
+    /// when that fails - and a list fetched for the purpose is remembered into
+    /// `config`, since that was a moment the key could list.
+    pub async fn resolve_voice(&self, config: &mut Config, query: &str) -> Result<String> {
         if looks_like_voice_id(self.kind, query) {
             return Ok(query.to_string());
         }
-        let voices = self.voices().await.with_context(|| {
-            format!("looking up the voice {query:?} by name (give the id to skip the lookup)")
+        if let Some(id) = find_voice(&self.remembered, query)? {
+            return Ok(id);
+        }
+        let voices = self.fetch_voices().await.with_context(|| {
+            if self.remembered.is_empty() {
+                format!("looking up the voice {query:?} by name (give the id to skip the lookup)")
+            } else {
+                format!(
+                    "{query:?} is not among the {} voices remembered from the last `say --voices`, \
+                     and listing afresh failed (a key that can list once lets names work ever after; \
+                     or give the id)",
+                    self.remembered.len()
+                )
+            }
         })?;
-        let wanted = query.to_lowercase();
-        if let Some(v) = voices.iter().find(|v| v.name.to_lowercase() == wanted) {
-            return Ok(v.id.clone());
-        }
-        let partial: Vec<_> = voices
-            .iter()
-            .filter(|v| v.name.to_lowercase().contains(&wanted))
-            .collect();
-        match partial.as_slice() {
-            [one] => Ok(one.id.clone()),
-            [] => bail!(
-                "no voice named {query:?} among the {} this key can list (x2rock say --voices)",
-                voices.len()
-            ),
-            several => bail!(
-                "{query:?} matches several voices: {} - name one in full, or give its id",
-                several
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
+        let found = find_voice(&voices, query)?;
+        config.remember_voices(self.kind, voices);
+        found.ok_or_else(|| {
+            anyhow!(
+                "no voice named {query:?} among the voices this key can list (x2rock say --voices)"
+            )
+        })
     }
 
     /// Turn a non-200 into something that says what to do. ElevenLabs's
@@ -425,6 +492,33 @@ impl Synth {
 fn looks_like_voice_id(kind: Kind, value: &str) -> bool {
     match kind {
         Kind::ElevenLabs => value.len() == 20 && value.chars().all(|c| c.is_ascii_alphanumeric()),
+    }
+}
+
+/// A name against a list: the whole name first, case-insensitively, then a
+/// unique partial match. `Ok(None)` when nothing matches; several partial
+/// matches are an error naming them, since guessing between voices is worse
+/// than asking.
+pub fn find_voice(voices: &[Voice], query: &str) -> Result<Option<String>> {
+    let wanted = query.to_lowercase();
+    if let Some(v) = voices.iter().find(|v| v.name.to_lowercase() == wanted) {
+        return Ok(Some(v.id.clone()));
+    }
+    let partial: Vec<_> = voices
+        .iter()
+        .filter(|v| v.name.to_lowercase().contains(&wanted))
+        .collect();
+    match partial.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.id.clone())),
+        several => bail!(
+            "{query:?} matches several voices: {} - name one in full, or give its id",
+            several
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -506,6 +600,102 @@ mod tests {
         let saved = &back.providers["elevenlabs"];
         assert_eq!(saved.api_key.as_deref(), Some("sk-test"));
         assert_eq!(saved.voice.as_deref(), Some("abc"));
+        assert!(saved.voices.is_empty() && saved.voices_at.is_none());
+
+        // A remembered list survives the round trip and is dated.
+        config.remember_voices(Kind::ElevenLabs, vec![junior()]);
+        config.save_to(&path).unwrap();
+        let back = Config::load_from(&path).unwrap();
+        let saved = &back.providers["elevenlabs"];
+        assert_eq!(saved.voices, vec![junior()]);
+        assert!(saved.voices_at.is_some());
+    }
+
+    impl Config {
+        /// Tests build configs by writing to them, which marks them changed.
+        fn save_if_changed_marker_reset(&mut self) {
+            self.changed = false;
+        }
+    }
+
+    fn junior() -> Voice {
+        Voice {
+            id: "tNczbDo8I6QZ94GTdVG0".into(),
+            name: "Junior".into(),
+            category: "cloned".into(),
+            labels: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_name_matches_whole_first_then_uniquely_in_part_and_never_by_guess() {
+        let v = |id: &str, name: &str| Voice {
+            id: id.into(),
+            name: name.into(),
+            category: String::new(),
+            labels: BTreeMap::new(),
+        };
+        let list = vec![
+            v("1", "Adam - warm and friendly"),
+            v("2", "Adam - Dominant, Firm"),
+            v("3", "Junior"),
+            v("4", "Junior Junior"),
+        ];
+        // Whole name wins even when it is also a prefix of another.
+        assert_eq!(find_voice(&list, "junior").unwrap().as_deref(), Some("3"));
+        // A unique partial match is enough.
+        assert_eq!(find_voice(&list, "dominant").unwrap().as_deref(), Some("2"));
+        // Several partial matches: refused, naming them.
+        let err = find_voice(&list, "adam").unwrap_err().to_string();
+        assert!(
+            err.contains("Adam - warm and friendly") && err.contains("Dominant"),
+            "{err}"
+        );
+        // Nothing: None, not an error - the caller decides whether to go and ask.
+        assert_eq!(find_voice(&list, "nobody").unwrap(), None);
+        assert_eq!(find_voice(&[], "junior").unwrap(), None);
+    }
+
+    /// With the name remembered, no request leaves this machine: the key here
+    /// is nonsense and the base URL unreachable, and it still resolves.
+    #[tokio::test]
+    async fn a_remembered_name_resolves_without_the_provider() {
+        let mut config = Config::default();
+        config.provider_mut(Kind::ElevenLabs).api_key = Some("not-a-key".into());
+        config.provider_mut(Kind::ElevenLabs).base_url = Some("http://127.0.0.1:9".into());
+        config.remember_voices(Kind::ElevenLabs, vec![junior()]);
+        let synth = Synth::from_config(&config, None, None, None).unwrap();
+        config.save_if_changed_marker_reset();
+        let id = synth.resolve_voice(&mut config, "Junior").await.unwrap();
+        assert_eq!(id, "tNczbDo8I6QZ94GTdVG0");
+        // An id never goes anywhere either.
+        let id = synth
+            .resolve_voice(&mut config, "JBFqnCBsd6RMkjVDRZzb")
+            .await
+            .unwrap();
+        assert_eq!(id, "JBFqnCBsd6RMkjVDRZzb");
+        // Neither touched the config.
+        assert!(!config.changed);
+        // A name not remembered does go and ask, and the failure says what the
+        // list did not hold.
+        let err = synth
+            .resolve_voice(&mut config, "Nobody")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("remembered"), "{err:#}");
+        // The refusal falls back to the remembered list, dated, with the reason.
+        match synth.list_voices(&mut config).await.unwrap() {
+            Listing::Remembered {
+                voices,
+                at,
+                because,
+            } => {
+                assert_eq!(voices, vec![junior()]);
+                assert!(at.is_some());
+                assert!(!format!("{because:#}").is_empty());
+            }
+            Listing::Fresh(_) => panic!("nothing at 127.0.0.1:9 can answer"),
+        }
     }
 
     #[test]

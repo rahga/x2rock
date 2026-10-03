@@ -183,36 +183,12 @@ async fn run(cli: Cli) -> Result<()> {
             "--all applies only to the per-room commands (volume, transport, repeat, shuffle, crossfade)"
         );
     }
-    // `say` has three errands that need no speaker - saving a key, saving a
-    // default voice, listing voices - and they run here, before any session.
-    // With text as well, the defaults are saved and the saying goes on below.
-    if let Command::Say {
-        ref text,
-        ref provider,
-        ref voice,
-        ref model,
-        voices,
-        set_key,
-        set_default,
-        json,
-        ..
-    } = cli.command
-        && commands::say::manage(
-            text.as_deref(),
-            provider.as_deref(),
-            voice.as_deref(),
-            model.as_deref(),
-            voices,
-            set_key,
-            set_default,
-            json,
-        )
-        .await?
-    {
-        return Ok(());
-    }
     match cli.command {
         Command::Discover => return household::discover_and_remember().await,
+        // Opens its own session, and only when there is something to say.
+        Command::Say(ref args) => {
+            return commands::say::run(args, cli.ip, cli.household.as_deref(), room).await;
+        }
         Command::Households { json, redact } => {
             return household::run_households(json, redact).await;
         }
@@ -686,32 +662,6 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             stream::require_http_url(&url)?;
             stream::play_audio_clip(session, &target, room, Some(&url), volume).await?;
         }
-        Command::Say {
-            text,
-            provider,
-            voice,
-            model,
-            volume,
-            port,
-            json,
-            ..
-        } => {
-            // `manage` returned without text already; this arm only runs with some.
-            let text = text.unwrap_or_default();
-            let outcome = commands::say::say(
-                session,
-                &target,
-                room,
-                &text,
-                provider.as_deref(),
-                voice.as_deref(),
-                model.as_deref(),
-                volume,
-                port,
-            )
-            .await?;
-            emit(&outcome, json)?;
-        }
         Command::Eq {
             bass,
             treble,
@@ -806,6 +756,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Art { .. }
         | Command::Complete { .. }
         | Command::Tui
+        | Command::Say(..)
         | Command::Daemon { .. } => unreachable!("handled above"),
     }
     Ok(())

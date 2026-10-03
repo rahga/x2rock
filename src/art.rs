@@ -39,7 +39,8 @@ use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use serde_json::json;
 
-use crate::sonos::http;
+use crate::sonos::http::{self, header};
+use crate::store;
 
 /// The most one image may be, as it arrives. A 544px cover - what Sonos and
 /// the services hand out - is 50-150 KB; this is well above any real one.
@@ -63,9 +64,7 @@ const KINDS: [&str; 4] = ["jpg", "png", "gif", "webp"];
 
 /// `$XDG_CACHE_HOME/x2rock/art`.
 pub fn dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    Ok(dirs.cache_dir().join("art"))
+    store::cache_dir("art")
 }
 
 /// Refuse a URL this module will not fetch - see the module docs.
@@ -123,14 +122,6 @@ fn key(url: &str) -> String {
         .collect()
 }
 
-/// One header's value out of a raw response head, by name.
-fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.lines().skip(1).find_map(|line| {
-        let (k, v) = line.split_once(':')?;
-        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
-    })
-}
-
 /// Where a redirect's `Location` points, made absolute against `from`.
 fn follow(from: &str, location: &str) -> String {
     if location.contains("://") {
@@ -180,7 +171,7 @@ fn cached(dir: &Path, url: &str) -> Option<PathBuf> {
 }
 
 /// Mark a file as just used, for [`prune`]'s least-recently-used order.
-fn touch(path: &Path) {
+pub(crate) fn touch(path: &Path) {
     if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
         let _ = file.set_modified(SystemTime::now());
     }
@@ -389,14 +380,6 @@ mod tests {
             follow("https://a.example/x", "http://b.example/"),
             "http://b.example/"
         );
-    }
-
-    #[test]
-    fn a_header_is_found_whatever_its_case() {
-        let head = "HTTP/1.1 302 Found\r\nlocation: https://x/y\r\nContent-Encoding: gzip";
-        assert_eq!(header(head, "Location"), Some("https://x/y"));
-        assert_eq!(header(head, "content-encoding"), Some("gzip"));
-        assert_eq!(header(head, "etag"), None);
     }
 
     /// Stale files go, then the least recently used until under the cap -
