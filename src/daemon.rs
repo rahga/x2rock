@@ -123,15 +123,9 @@ impl StatusLog {
     /// The side-effect-free heart of [`note`], with the clock passed in so the
     /// window and the count can be tested without waiting an hour.
     fn decide(&mut self, key: String, now: Instant) -> Option<Emit> {
-        if self.verbose {
-            // Every pass logs; the state is still tracked so turning coalescing
-            // back on (a restart without the env) resumes cleanly.
-            self.key = Some(key);
-            self.last_logged = now;
-            self.suppressed = 0;
-            return Some(Emit::Fresh);
-        }
-        if self.key.as_ref() == Some(&key) {
+        // Verbose logs every pass as fresh; the state is still tracked below so
+        // turning coalescing back on (a restart without the env) resumes cleanly.
+        if !self.verbose && self.key.as_ref() == Some(&key) {
             if now.duration_since(self.last_logged) < HEARTBEAT {
                 self.suppressed += 1;
                 return None;
@@ -930,7 +924,7 @@ async fn apply(
 /// room - so a track playing for four minutes writes once, however many
 /// metadata events it sends.
 fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
-    let Some(track) = status.current_item.as_ref().and_then(|i| i.track.as_ref()) else {
+    let Some(track) = status.track() else {
         return;
     };
     let (Some(id), Some(name)) = (track.id.as_ref(), track.name.as_deref()) else {
@@ -956,10 +950,7 @@ fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
         .and_then(|c| c.service.as_ref())
         .and_then(|s| s.name.clone());
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::credentials::now();
 
     // Under the file's lock: `x2rock keep` may be writing the same file at
     // this very moment, and without the lock one of the two was lost. Off the

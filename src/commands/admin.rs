@@ -115,6 +115,16 @@ fn detect_shell() -> Option<clap_complete::Shell> {
     }
 }
 
+/// `systemctl --user <args>`, and whether it said yes: false for a non-zero
+/// exit and for a `systemctl` that could not be run at all.
+fn systemctl_ok(args: &[&str]) -> bool {
+    std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// The pid of the daemon systemd is running, or `None` when it is not running
 /// or `systemctl` could not be asked. `MainPID` reads `0` for an inactive unit,
 /// which is no process, so it is folded into `None` rather than handed on.
@@ -281,11 +291,7 @@ fn install_service(
     // already active, so a daemon that was running keeps running the *old*
     // binary unless it is restarted - and "Enabled and started" would then be
     // a lie about which build is up.
-    let was_active = std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "x2rock.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let was_active = systemctl_ok(&["is-active", "--quiet", "x2rock.service"]);
     // An upgrade in place leaves the unit identical, so "changed" alone misses
     // the commonest reinstall; ask the running process what it is running.
     let stale = was_active && main_pid().is_some_and(|pid| daemon_runs_stale_binary(&exe, pid));
@@ -430,17 +436,9 @@ fn status_service(json: bool) -> Result<()> {
     let dropin_path = dir.join("x2rock.service.d").join("headless.conf");
     let headless_installed = dropin_path.exists();
 
-    let active = std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "x2rock.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let active = systemctl_ok(&["is-active", "--quiet", "x2rock.service"]);
 
-    let enabled = std::process::Command::new("systemctl")
-        .args(["--user", "is-enabled", "--quiet", "x2rock.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let enabled = systemctl_ok(&["is-enabled", "--quiet", "x2rock.service"]);
 
     let pid = if active { main_pid() } else { None };
 
@@ -541,11 +539,7 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     // Read before the disable, which does not change it, so that a failure can
     // be told from "there was nothing to disable".
     let unit_existed = unit_path.exists();
-    let disabled = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "x2rock.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let disabled = systemctl_ok(&["disable", "--now", "x2rock.service"]);
     // A disable that failed while there *was* a unit to disable is worth
     // saying: the file is removed either way, so a daemon still running from it
     // would otherwise be a surprise with nothing left on disk to explain it.
@@ -593,11 +587,7 @@ fn uninstall_service(desktop: bool) -> Result<()> {
     }
 
     if removed_something {
-        let reloaded = std::process::Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let reloaded = systemctl_ok(&["daemon-reload"]);
         if disabled && reloaded {
             println!("Disabled x2rock.service and reloaded systemd user daemon.");
         } else if disabled {

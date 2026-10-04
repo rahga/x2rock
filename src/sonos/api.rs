@@ -5,11 +5,12 @@
 //! group's coordinator; callers are responsible for connecting to the right player.
 
 use anyhow::Result;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::local::Connection;
 use super::proto::{
-    Bond, ContentId, FavoritesList, GroupInfo, History, MetadataStatus, PlaybackStatus,
+    Bond, ContentId, FavoritesList, GroupInfo, Groups, History, MetadataStatus, PlaybackStatus,
     PlayerSettings, PlaylistsList, Repeat, SecuritySettings, Volume, Zones,
 };
 
@@ -111,6 +112,14 @@ fn account_id(body: &Value) -> Option<String> {
 }
 
 impl Connection {
+    pub async fn groups(&self) -> Result<Groups> {
+        let household = self.household_id().await?;
+        let body = self
+            .call(on_household("groups:1", "getGroups", &household), json!({}))
+            .await?;
+        Ok(serde_json::from_value(body)?)
+    }
+
     /// Start receiving a namespace's events for a group. They arrive on
     /// [`Connection::events`], beginning with a snapshot of the current state.
     pub async fn subscribe_group(&self, namespace: &str, group_id: &str) -> Result<()> {
@@ -292,7 +301,7 @@ impl Connection {
             if event.namespace != "zones:1" {
                 continue;
             }
-            let Ok(zones) = serde_json::from_value::<Zones>(event.body.clone()) else {
+            let Ok(zones) = Zones::deserialize(&event.body) else {
                 continue;
             };
             let members = zones.zones.iter().flat_map(|z| &z.members);

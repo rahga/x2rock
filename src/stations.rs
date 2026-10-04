@@ -100,14 +100,10 @@ pub async fn search(
     // every row and knows which answered. Asking for stations that are known
     // not to play would be a strange default.
     let mut query = format!("limit={limit}&hidebroken=true&order=votes&reverse=true");
-    if let Some(name) = name {
-        query.push_str(&format!("&name={}", http::urlencode(name)));
-    }
-    if let Some(tag) = tag {
-        query.push_str(&format!("&tag={}", http::urlencode(tag)));
-    }
-    if let Some(country) = country {
-        query.push_str(&format!("&countrycode={}", http::urlencode(country)));
+    for (key, value) in [("name", name), ("tag", tag), ("countrycode", country)] {
+        if let Some(value) = value {
+            query.push_str(&format!("&{key}={}", http::urlencode(value)));
+        }
     }
 
     let url = format!("{DIRECTORY}/json/stations/search?{query}");

@@ -402,7 +402,7 @@ async fn read_http_message<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<St
         if let Some(end) = head_end {
             let head = String::from_utf8_lossy(&raw[..end]);
             let want = http::header(&head, "Content-Length")
-                .and_then(|v| v.trim().parse::<usize>().ok())
+                .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
             if raw.len() >= end + 4 + want {
                 break;
@@ -417,7 +417,6 @@ async fn read_http_message<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<St
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
-/// One header value from an HTTP message, case-insensitive on the name.
 /// Pull one evented variable's value out of a GENA property-set NOTIFY body.
 ///
 /// The body is `<e:propertyset><e:property><Name>value</Name></e:property>...`,

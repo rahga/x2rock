@@ -24,11 +24,12 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::credentials::now;
 use crate::sonos::http;
 use crate::store;
 
@@ -84,12 +85,6 @@ impl Token {
     fn fresh(&self, now: u64) -> bool {
         now + MARGIN < self.obtained_at + self.expires_in
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn token_path() -> Result<PathBuf> {
@@ -316,9 +311,15 @@ pub async fn exchange(integration: &Integration, code: &str) -> Result<Token> {
         http::urlencode(&integration.redirect_uri)
     );
     let token = token_request(integration, &form).await?;
-    save(&token)?;
-    *CACHE.lock().unwrap() = Some(Some(token.clone()));
+    keep(&token)?;
     Ok(token)
+}
+
+/// Persist a fresh token, then make it the one this process uses.
+fn keep(token: &Token) -> Result<()> {
+    save(token)?;
+    *CACHE.lock().unwrap() = Some(Some(token.clone()));
+    Ok(())
 }
 
 /// The token in use, read once and then held - including the answer "none",
@@ -361,8 +362,7 @@ async fn refresh(held: &Token) -> Result<Token> {
     if token.refresh_token.is_empty() {
         token.refresh_token.clone_from(&held.refresh_token);
     }
-    save(&token)?;
-    *CACHE.lock().unwrap() = Some(Some(token.clone()));
+    keep(&token)?;
     Ok(token)
 }
 

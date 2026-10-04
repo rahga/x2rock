@@ -413,13 +413,7 @@ fn holds_stream(meta: &MetadataStatus, stream: &streams::Stream, service_name: &
                     .and_then(|s| s.name.as_deref())
                     .is_none_or(|name| name == service_name)
         }
-        None => {
-            meta.current_item
-                .as_ref()
-                .and_then(|i| i.track.as_ref())
-                .and_then(|t| t.name.as_deref())
-                == title
-        }
+        None => meta.track().and_then(|t| t.name.as_deref()) == title,
     }
 }
 

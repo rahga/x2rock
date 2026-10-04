@@ -36,6 +36,15 @@ pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
 /// SOAP arguments and DIDL-Lite alike; `'` is left alone because every caller
 /// quotes attributes with `"`. Four copies of this chain had grown up - two in
 /// `bookmarks`, one each in `upnp` and `smapi` - before it was written once.
+/// One element's text, by local name - the lookup every reply parser does,
+/// in SOAP replies from the players and from music services alike. Written out
+/// longhand six times in one file before it had a name, then twice more.
+pub(crate) fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Option<&'a str> {
+    doc.descendants()
+        .find(|n| n.tag_name().name() == tag)
+        .and_then(|n| n.text())
+}
+
 pub fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")

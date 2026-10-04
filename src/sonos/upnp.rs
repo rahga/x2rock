@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
 
+use super::element_text as text_of;
 use super::http;
 use super::xml_escape;
 
@@ -868,23 +869,12 @@ impl Upnp {
     /// once rather than twice - the create and update argument lists are
     /// identical but for `ID` being an output here and an input there.
     pub async fn create_alarm(&self, alarm: &Alarm) -> Result<u32> {
-        let bit = |on: bool| if on { "1" } else { "0" };
+        let volume = alarm.volume.to_string();
         let text = self
             .soap(
                 Service::AlarmClock,
                 "CreateAlarm",
-                &[
-                    ("StartLocalTime", &alarm.start),
-                    ("Duration", &alarm.duration),
-                    ("Recurrence", &alarm.recurrence),
-                    ("Enabled", bit(alarm.enabled)),
-                    ("RoomUUID", &alarm.room_uuid),
-                    ("ProgramURI", &alarm.program_uri),
-                    ("ProgramMetaData", &alarm.program_metadata),
-                    ("PlayMode", &alarm.play_mode),
-                    ("Volume", &alarm.volume.to_string()),
-                    ("IncludeLinkedZones", bit(alarm.include_linked_zones)),
-                ],
+                &alarm_args(alarm, &volume),
             )
             .await?;
         let doc = Document::parse(&text)?;
@@ -898,26 +888,11 @@ impl Upnp {
     /// Every field goes, because the action requires it - see [`Alarm`]. Read
     /// one, change what you meant to change, hand it back.
     pub async fn update_alarm(&self, alarm: &Alarm) -> Result<()> {
-        let bit = |on: bool| if on { "1" } else { "0" };
-        self.soap(
-            Service::AlarmClock,
-            "UpdateAlarm",
-            &[
-                ("ID", &alarm.id.to_string()),
-                // Reported as StartTime, written as StartLocalTime.
-                ("StartLocalTime", &alarm.start),
-                ("Duration", &alarm.duration),
-                ("Recurrence", &alarm.recurrence),
-                ("Enabled", bit(alarm.enabled)),
-                ("RoomUUID", &alarm.room_uuid),
-                ("ProgramURI", &alarm.program_uri),
-                ("ProgramMetaData", &alarm.program_metadata),
-                ("PlayMode", &alarm.play_mode),
-                ("Volume", &alarm.volume.to_string()),
-                ("IncludeLinkedZones", bit(alarm.include_linked_zones)),
-            ],
-        )
-        .await?;
+        let id = alarm.id.to_string();
+        let volume = alarm.volume.to_string();
+        let mut args = vec![("ID", id.as_str())];
+        args.extend(alarm_args(alarm, &volume));
+        self.soap(Service::AlarmClock, "UpdateAlarm", &args).await?;
         Ok(())
     }
 
@@ -1322,10 +1297,7 @@ impl Upnp {
         self.soap(
             Service::RenderingControl,
             "SetRoomCalibrationStatus",
-            &[
-                ("InstanceID", "0"),
-                ("RoomCalibrationEnabled", if on { "1" } else { "0" }),
-            ],
+            &[("InstanceID", "0"), ("RoomCalibrationEnabled", bit(on))],
         )
         .await?;
         Ok(())
@@ -1385,7 +1357,7 @@ impl Upnp {
             &[
                 ("InstanceID", "0"),
                 ("Channel", "Master"),
-                ("DesiredLoudness", if on { "1" } else { "0" }),
+                ("DesiredLoudness", bit(on)),
             ],
         )
         .await?;
@@ -1415,7 +1387,7 @@ impl Upnp {
             &[
                 ("InstanceID", "0"),
                 ("EQType", eq_type),
-                ("DesiredValue", if on { "1" } else { "0" }),
+                ("DesiredValue", bit(on)),
             ],
         )
         .await?;
@@ -1807,7 +1779,7 @@ impl Upnp {
                     ("EnqueuedURIMetaData", metadata),
                     // 0 appends.
                     ("DesiredFirstTrackNumberEnqueued", &position.to_string()),
-                    ("EnqueueAsNext", if next { "1" } else { "0" }),
+                    ("EnqueueAsNext", bit(next)),
                 ],
             )
             .await?;
@@ -1962,17 +1934,8 @@ impl Upnp {
 
     /// Make the coordinator's queue the current source.
     pub async fn use_queue(&self, coordinator_id: &str) -> Result<()> {
-        self.soap(
-            Service::AvTransport,
-            "SetAVTransportURI",
-            &[
-                ("InstanceID", "0"),
-                ("CurrentURI", &format!("x-rincon-queue:{coordinator_id}#0")),
-                ("CurrentURIMetaData", ""),
-            ],
-        )
-        .await?;
-        Ok(())
+        self.set_transport_uri(&format!("x-rincon-queue:{coordinator_id}#0"), "")
+            .await
     }
 
     /// Play one URL as a track: a finite file, with a duration and a seek
@@ -2004,22 +1967,17 @@ impl Upnp {
             ),
             title = xml_escape(title)
         );
-        self.soap(
-            Service::AvTransport,
-            "SetAVTransportURI",
-            &[
-                ("InstanceID", "0"),
-                ("CurrentURI", url),
-                ("CurrentURIMetaData", &didl),
-            ],
-        )
-        .await?;
-        Ok(())
+        self.set_transport_uri(url, &didl).await
     }
 
     /// Make a service's radio program the room's source, the way the Sonos app
     /// does - see `bookmarks::radio_uri`. Loads only; the caller plays it.
     pub async fn set_radio(&self, uri: &str, didl: &str) -> Result<()> {
+        self.set_transport_uri(uri, didl).await
+    }
+
+    /// `SetAVTransportURI`: make `uri` the room's source, with its metadata.
+    async fn set_transport_uri(&self, uri: &str, didl: &str) -> Result<()> {
         self.soap(
             Service::AvTransport,
             "SetAVTransportURI",
@@ -2364,10 +2322,26 @@ impl Enqueued {
     }
 }
 
-fn text_of<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
-    doc.descendants()
-        .find(|n| n.tag_name().name() == tag)
-        .and_then(|n| n.text())
+/// A SOAP boolean argument.
+fn bit(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// The ten fields `CreateAlarm` and `UpdateAlarm` share, in wire order.
+fn alarm_args<'a>(alarm: &'a Alarm, volume: &'a str) -> [(&'static str, &'a str); 10] {
+    [
+        // Reported as StartTime, written as StartLocalTime.
+        ("StartLocalTime", &alarm.start),
+        ("Duration", &alarm.duration),
+        ("Recurrence", &alarm.recurrence),
+        ("Enabled", bit(alarm.enabled)),
+        ("RoomUUID", &alarm.room_uuid),
+        ("ProgramURI", &alarm.program_uri),
+        ("ProgramMetaData", &alarm.program_metadata),
+        ("PlayMode", &alarm.play_mode),
+        ("Volume", volume),
+        ("IncludeLinkedZones", bit(alarm.include_linked_zones)),
+    ]
 }
 
 /// The URI a player reports while on its TV input. The player id in the middle

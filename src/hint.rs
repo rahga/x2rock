@@ -332,13 +332,26 @@ fn household_hint(
     code: Code,
     households: &[(String, Vec<String>)],
 ) -> Error {
-    let households: Vec<_> = households
+    Hint::new(message.into(), code, Some("x2rock households".into()))
+        .with_data(json!({ "households": listed(households) }))
+        .into()
+}
+
+/// Households as a message lists them: `Kitchen, Den (id); Studio (id)`.
+fn summary(households: &[(String, Vec<String>)]) -> String {
+    households
+        .iter()
+        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Households as `data.households` carries them: `[{id, rooms}]`.
+fn listed(households: &[(String, Vec<String>)]) -> Vec<Value> {
+    households
         .iter()
         .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
-        .collect();
-    Hint::new(message.into(), code, Some("x2rock households".into()))
-        .with_data(json!({ "households": households }))
-        .into()
+        .collect()
 }
 
 /// No speaker is in reach to say which household this is, and `service` is
@@ -351,40 +364,28 @@ fn household_hint(
 /// on it and is most likely someone else's. The households and their rooms
 /// come from what this machine remembers, in `data.households`.
 pub fn no_household_in_reach(service: &str, households: &[(String, Vec<String>)]) -> Error {
-    let summary: Vec<String> = households
-        .iter()
-        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
-        .collect();
-    let listed: Vec<_> = households
-        .iter()
-        .map(|(id, rooms)| json!({ "id": id, "rooms": rooms }))
-        .collect();
     Hint::new(
         format!(
             "No speaker is in reach to say which household this is, and {service} is linked \
              in {}: {}. Pass --household <room> to choose.",
             households.len(),
-            summary.join("; "),
+            summary(households),
         ),
         Code::MultipleHouseholds,
         None,
     )
-    .with_data(json!({ "households": listed }))
+    .with_data(json!({ "households": listed(households) }))
     .into()
 }
 
 pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
-    let summary: Vec<String> = households
-        .iter()
-        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
-        .collect();
     ambiguous_household(
         format!(
             "{} Sonos households are reachable on this network: {}. Pass --household <room> \
              (or, if that name is in more than one, --household <id>) to choose; `x2rock \
              households` lists them.",
             households.len(),
-            summary.join("; "),
+            summary(households),
         ),
         households,
     )
@@ -422,10 +423,6 @@ pub fn household_unreachable(
     previously: &[&str],
     answered: &[(String, Vec<String>)],
 ) -> Error {
-    let summary: Vec<String> = answered
-        .iter()
-        .map(|(id, rooms)| format!("{} ({id})", rooms.join(", ")))
-        .collect();
     household_hint(
         format!(
             "the household holding {} did not answer, but {} other household(s) on this \
@@ -433,7 +430,7 @@ pub fn household_unreachable(
              (Looking for {wanted:?}.)",
             previously.join(", "),
             answered.len(),
-            summary.join("; "),
+            summary(answered),
         ),
         Code::HouseholdUnreachable,
         answered,

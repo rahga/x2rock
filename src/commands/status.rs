@@ -15,7 +15,7 @@ use crate::sonos::upnp::Upnp;
 use crate::{catalogue, hint, netid};
 
 fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
-    let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
+    let track = meta.track();
     let title = meta.title();
     let artist = track
         .and_then(|t| t.artist.as_ref())
@@ -116,7 +116,7 @@ fn now_json(
     meta: &MetadataStatus,
     services: Option<&catalogue::Catalogue>,
 ) -> serde_json::Value {
-    let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
+    let track = meta.track();
     let next = meta.next_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
     let art = track
@@ -415,10 +415,15 @@ async fn fetch_room(
     target: &session::Target,
 ) -> Result<(PlaybackStatus, MetadataStatus, Option<Volume>)> {
     let conn = session::coordinator(session, target).await?;
-    let status = conn.playback_status(&target.group_id).await?;
-    let meta = conn.metadata(&target.group_id).await?;
-    let volume = conn.group_volume(&target.group_id).await.ok();
-    Ok((status, meta, volume))
+    // One socket, replies matched by cmdId, so the three go out together.
+    // `join!` rather than `try_join!`, with the `?`s in order, so that when
+    // both fail it is still the status error that is reported.
+    let (status, meta, volume) = tokio::join!(
+        conn.playback_status(&target.group_id),
+        conn.metadata(&target.group_id),
+        conn.group_volume(&target.group_id),
+    );
+    Ok((status?, meta?, volume.ok()))
 }
 
 /// The line `x2rock rooms` adds for a person who is about to need `--room` and
@@ -495,8 +500,11 @@ pub fn print_rooms(groups: &Groups, json: bool) {
 /// `x2rock now`: what `target` is playing, as one line or as the documented
 /// JSON object.
 pub async fn now(player: &Connection, target: &Target, json: bool) -> Result<()> {
-    let status = player.playback_status(&target.group_id).await?;
-    let meta = player.metadata(&target.group_id).await?;
+    let (status, meta) = tokio::join!(
+        player.playback_status(&target.group_id),
+        player.metadata(&target.group_id),
+    );
+    let (status, meta) = (status?, meta?);
     if json {
         let services = catalogue::Catalogue::load();
         let mut out = now_json(&target.name, &status, &meta, Some(&services));

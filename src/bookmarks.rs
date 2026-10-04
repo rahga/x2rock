@@ -14,6 +14,7 @@
 //! catalogue. Regenerable in principle - everything here can be re-kept from the
 //! app - but losing it would be a real annoyance, so it is written atomically.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -127,30 +128,52 @@ impl Bookmark {
     /// accepts the item and then has nothing to show, for the whole queue rather
     /// than just the new row.
     pub fn didl(&self, cdudn: &str) -> String {
-        let esc = xml_escape;
         let artist = self
             .artist
             .as_deref()
-            .map(|a| format!("<dc:creator>{}</dc:creator>", esc(a)))
+            .map(|a| format!("<dc:creator>{}</dc:creator>", xml_escape(a)))
             .unwrap_or_default();
-        format!(
-            concat!(
-                r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
-                r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
-                r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
-                r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
-                r#"<item id="00032020{object}" parentID="-1" restricted="true">"#,
-                "<dc:title>{title}</dc:title>{artist}",
-                "<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
-                r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
-                "{cdudn}</desc></item></DIDL-Lite>"
+        didl(
+            &format!("00032020{}", encode_object_id(&self.object_id)),
+            "-1",
+            &format!(
+                "<dc:title>{}</dc:title>{artist}<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
+                xml_escape(&self.name)
             ),
-            object = esc(&encode_object_id(&self.object_id)),
-            title = esc(&self.name),
-            artist = artist,
-            cdudn = esc(cdudn),
+            cdudn,
         )
     }
+}
+
+/// The DIDL-Lite envelope every item here travels in: the namespaces, one
+/// `<item>` with `id` and `parentID`, the caller's elements, and the cdudn that
+/// tells the player whose item it is. `item_id` is unescaped; `inner` is
+/// already-escaped markup.
+fn didl(item_id: &str, parent: &str, inner: &str, cdudn: &str) -> String {
+    format!(
+        concat!(
+            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+            r#"<item id="{id}" parentID="{parent}" restricted="true">"#,
+            "{inner}",
+            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            "{cdudn}</desc></item></DIDL-Lite>"
+        ),
+        id = xml_escape(item_id),
+        parent = parent,
+        inner = inner,
+        cdudn = xml_escape(cdudn),
+    )
+}
+
+/// `&sn=<serial>` for a playback URI, or nothing: an empty account names none.
+fn sn_param(account: Option<&str>) -> String {
+    account
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("&sn={a}"))
+        .unwrap_or_default()
 }
 
 /// Spotify's own service id in the catalogue, per `services.json`.
@@ -224,10 +247,7 @@ fn container_class(item_type: &str) -> &'static str {
 /// player resolves the service from the cdudn in the DIDL - but both are sent,
 /// because that is what the player writes for itself.
 pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = account
-        .filter(|a| !a.is_empty())
-        .map(|a| format!("&sn={a}"))
-        .unwrap_or_default();
+    let sn = sn_param(account);
     format!(
         "x-rincon-cpcontainer:1004206c{}?sid={service_id}&flags=8300{sn}",
         encode_object_id(object_id)
@@ -239,23 +259,15 @@ pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -
 /// Its `id` carries the same prefix the URI does, and the class says which kind
 /// of container it is; the cdudn is what tells the player whose it is.
 pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str) -> String {
-    let esc = xml_escape;
-    format!(
-        concat!(
-            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
-            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
-            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
-            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
-            r#"<item id="1004206c{object}" parentID="0" restricted="true">"#,
-            "<dc:title>{title}</dc:title>",
-            "<upnp:class>{class}</upnp:class>",
-            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
-            "{cdudn}</desc></item></DIDL-Lite>"
+    didl(
+        &format!("1004206c{}", encode_object_id(object_id)),
+        "0",
+        &format!(
+            "<dc:title>{}</dc:title><upnp:class>{}</upnp:class>",
+            xml_escape(title),
+            container_class(item_type)
         ),
-        object = esc(&encode_object_id(object_id)),
-        title = esc(title),
-        class = container_class(item_type),
-        cdudn = esc(cdudn),
+        cdudn,
     )
 }
 
@@ -277,10 +289,7 @@ pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str
 /// every future service this constant might reach, only that it is not a
 /// coincidence limited to the two it was first checked against.
 pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = account
-        .filter(|a| !a.is_empty())
-        .map(|a| format!("&sn={a}"))
-        .unwrap_or_default();
+    let sn = sn_param(account);
     let scheme = native_scheme(service_id);
     format!(
         "{scheme}:{}?sid={service_id}&flags=65544{sn}",
@@ -296,10 +305,7 @@ pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> 
 /// channels are `program`s that `AddURIToQueue` refuses with 800 and that it
 /// has no `getMediaURI` to stream, so this is the only way they play.
 pub fn radio_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = account
-        .filter(|a| !a.is_empty())
-        .map(|a| format!("&sn={a}"))
-        .unwrap_or_default();
+    let sn = sn_param(account);
     format!(
         "x-sonosapi-radio:{}?sid={service_id}&flags=0{sn}",
         encode_object_id(object_id)
@@ -310,22 +316,14 @@ pub fn radio_uri(object_id: &str, service_id: &str, account: Option<&str>) -> St
 /// broadcast (`audioBroadcast`) under the `000c0000` item prefix, rather than
 /// the `musicTrack` a queue row is.
 pub fn radio_didl(object_id: &str, title: &str, cdudn: &str) -> String {
-    let esc = xml_escape;
-    format!(
-        concat!(
-            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
-            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
-            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
-            r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
-            r#"<item id="000c0000{object}" parentID="-1" restricted="true">"#,
-            "<dc:title>{title}</dc:title>",
-            "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>",
-            r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
-            "{cdudn}</desc></item></DIDL-Lite>"
+    didl(
+        &format!("000c0000{}", encode_object_id(object_id)),
+        "-1",
+        &format!(
+            "<dc:title>{}</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class>",
+            xml_escape(title)
         ),
-        object = esc(&encode_object_id(object_id)),
-        title = esc(title),
-        cdudn = esc(cdudn),
+        cdudn,
     )
 }
 
@@ -334,19 +332,15 @@ pub fn radio_didl(object_id: &str, title: &str, cdudn: &str) -> String {
 /// Built from the same pieces [`Bookmark::didl`] uses, because a search hit and
 /// a kept item are the same thing to a player.
 pub fn service_didl(object_id: &str, title: &str, cdudn: &str) -> String {
-    Bookmark {
-        name: title.to_string(),
-        object_id: object_id.to_string(),
-        service_id: String::new(),
-        account: String::new(),
-        service_name: None,
-        artist: None,
-        art_url: None,
-        kind: None,
-        pinned: false,
-        last_played: None,
-    }
-    .didl(cdudn)
+    didl(
+        &format!("00032020{}", encode_object_id(object_id)),
+        "-1",
+        &format!(
+            "<dc:title>{}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>",
+            xml_escape(title)
+        ),
+        cdudn,
+    )
 }
 
 /// Percent-encode an object id for a playback URI, lowercase hex, as the player
@@ -371,7 +365,9 @@ fn encode_object_id(id: &str) -> String {
                 out.push(byte as char)
             }
             // Lowercase, matching the `%3a` the player itself writes.
-            _ => out.push_str(&format!("%{byte:02x}")),
+            _ => {
+                let _ = write!(out, "%{byte:02x}");
+            }
         }
     }
     out

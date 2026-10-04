@@ -341,11 +341,8 @@ impl Catalogue {
         // Fixed rather than cached: Apple Music's presentation map lists what its
         // SMAPI search would take, and that search is not the one asked. See
         // `itunes`. A list cached from the map before it existed is passed over.
-        if crate::itunes::serves(&service.id) {
-            return Ok(crate::itunes::categories().to_vec());
-        }
-        if let Some(hit) = self.categories.get(&service.id) {
-            return Ok(hit.clone());
+        if let Some(hit) = self.cached_categories(&service.id) {
+            return Ok(hit.to_vec());
         }
         let fetched = smapi::categories(service).await?;
         self.categories.insert(service.id.clone(), fetched.clone());

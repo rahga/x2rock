@@ -57,6 +57,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use roxmltree::Document;
 use serde::{Deserialize, Serialize};
 
+use super::element_text;
 use super::http;
 use super::xml_escape;
 
@@ -880,8 +881,6 @@ pub async fn rate_item(
     parse_rate_result(&body).with_context(|| format!("{} rateItem response", service.name))
 }
 
-/// One element's text, by tag - the lookup every reply parser in this file
-/// does. Written out longhand six times before it had a name.
 /// A reply that uses the `xsi:` prefix without declaring it, made parseable.
 ///
 /// Sonos Radio's `getMetadata` does exactly that - `xsi:type` on an element,
@@ -915,12 +914,6 @@ fn declare_xsi(body: &str) -> std::borrow::Cow<'_, str> {
     fixed.push_str(DECLARATION);
     fixed.push_str(&body[name_end..]);
     fixed.into()
-}
-
-fn element_text<'a>(doc: &'a Document, tag: &str) -> Option<&'a str> {
-    doc.descendants()
-        .find(|n| n.has_tag_name(tag))
-        .and_then(|n| n.text())
 }
 
 /// A `rateItem` response, pure for testing against a captured payload.
@@ -1358,17 +1351,6 @@ fn parse_fault(text: &str, status: u16) -> Fault {
     }
 }
 
-/// One SMAPI call for everything that is not the link flow.
-///
-/// A service that needs an account is refused here rather than sent and
-/// rejected, and the error names the command that would fix it.
-///
-/// **A `tokenRefreshRequired` fault gets one retry, transparently.** The
-/// service handed back a working replacement token in the same reply that
-/// refused the call - there is nothing to ask the person for, so asking them
-/// (or just failing) would be making them pay for a problem the service
-/// already solved. `refreshed` carries the new token out to the caller, which
-/// owns persisting it; this function only spends it once, on the retry.
 /// A music service answering "no" - a SOAP fault or an HTTP refusal - as
 /// against not answering at all.
 ///
@@ -1399,6 +1381,17 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// One SMAPI call for everything that is not the link flow.
+///
+/// A service that needs an account is refused here rather than sent and
+/// rejected, and the error names the command that would fix it.
+///
+/// **A `tokenRefreshRequired` fault gets one retry, transparently.** The
+/// service handed back a working replacement token in the same reply that
+/// refused the call - there is nothing to ask the person for, so asking them
+/// (or just failing) would be making them pay for a problem the service
+/// already solved. `refreshed` carries the new token out to the caller, which
+/// owns persisting it; this function only spends it once, on the retry.
 async fn call(
     service: &Service,
     token: Option<&Token>,

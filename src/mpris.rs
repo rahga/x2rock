@@ -77,9 +77,6 @@ struct RoomState {
     /// Fixed for the life of the player: a group whose membership changes is
     /// republished from scratch.
     members: Vec<(String, String)>,
-    /// Each member's own volume, in the same order. Grouped rooms share a group
-    /// volume; this is the balance between them, which MPRIS has no room for.
-    member_volumes: Vec<u8>,
     /// Whether the group, and each member, is muted - see [`MUTED`].
     muted: bool,
     member_muted: Vec<bool>,
@@ -88,7 +85,9 @@ struct RoomState {
     fixed: bool,
     member_fixed: Vec<bool>,
     /// The group's and each member's volume regardless of mute - see
-    /// [`VOLUME_LEVEL`].
+    /// [`VOLUME_LEVEL`]. Each member's *heard* volume, the balance between
+    /// grouped rooms that MPRIS has no room for, is derived from this and
+    /// `member_muted` rather than stored, as the group's is - see `heard`.
     level: u8,
     member_levels: Vec<u8>,
     /// Nothing loaded - see [`NO_SOURCE`].
@@ -140,7 +139,7 @@ pub(crate) const MEMBERS: &str = "x2rock:members";
 /// either, so it is absent from the event body too and not merely from the
 /// polled response.
 ///
-/// **So it is filled from UPnP instead**, by [`RoomPlayer::refresh_queue_version`]
+/// **So it is filled from UPnP instead**, by [`RoomPlayer::queue_version_fetch`]
 /// on each playback event: the `UpdateID` of a `Q:0` browse, which is the
 /// version every queue mutation already reads before acting. The local API has
 /// no queue namespace to subscribe to - `queue:1` and `playbackQueue:1` both
@@ -404,46 +403,22 @@ impl RoomState {
         metadata.set(NO_SOURCE, Some(self.no_source));
         let names: Vec<_> = self.members.iter().map(|(_, name)| name.clone()).collect();
         metadata.set(MEMBERS, Some(names));
-        metadata.set(
-            MEMBER_VOLUMES,
-            Some(
-                self.member_volumes
-                    .iter()
-                    .map(u8::to_string)
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        // Muted reads as nothing heard, matching how group volume is reported;
+        // the flag beside it is what says which of the two it is.
+        let heard: Vec<u8> = self
+            .member_levels
+            .iter()
+            .zip(&self.member_muted)
+            .map(|(level, muted)| if *muted { 0 } else { *level })
+            .collect();
+        metadata.set(MEMBER_VOLUMES, Some(strings(&heard)));
         metadata.set(MUTED, Some(self.muted));
-        metadata.set(
-            MEMBER_MUTED,
-            Some(
-                self.member_muted
-                    .iter()
-                    .map(bool::to_string)
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        metadata.set(MEMBER_MUTED, Some(strings(&self.member_muted)));
         metadata.set(CROSSFADE, Some(self.play_modes.crossfade));
         metadata.set(FIXED_VOLUME, Some(self.fixed));
-        metadata.set(
-            MEMBER_FIXED_VOLUME,
-            Some(
-                self.member_fixed
-                    .iter()
-                    .map(bool::to_string)
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        metadata.set(MEMBER_FIXED_VOLUME, Some(strings(&self.member_fixed)));
         metadata.set(VOLUME_LEVEL, Some(self.level.to_string()));
-        metadata.set(
-            MEMBER_VOLUME_LEVELS,
-            Some(
-                self.member_levels
-                    .iter()
-                    .map(u8::to_string)
-                    .collect::<Vec<_>>(),
-            ),
-        );
+        metadata.set(MEMBER_VOLUME_LEVELS, Some(strings(&self.member_levels)));
         metadata.set(QUEUE_VERSION, Some(self.queue_version.clone()));
         metadata.set(INPUT_FORMAT, Some(self.input_format.clone()));
         metadata.set(ON_TV_INPUT, Some(self.on_tv_input));
@@ -483,7 +458,6 @@ impl RoomPlayer {
         members: Vec<(String, String)>,
         has_tv_input: bool,
     ) -> Self {
-        let member_volumes = vec![0; members.len()];
         let member_muted = vec![false; members.len()];
         let member_fixed = vec![false; members.len()];
         let member_levels = vec![0; members.len()];
@@ -493,7 +467,6 @@ impl RoomPlayer {
             room,
             state: Mutex::new(RoomState {
                 members,
-                member_volumes,
                 member_muted,
                 member_fixed,
                 member_levels,
@@ -521,18 +494,11 @@ impl RoomPlayer {
         let Some(at) = state.members.iter().position(|(id, _)| id == player_id) else {
             return Vec::new();
         };
-        // Muted reads as nothing heard, matching how group volume is reported;
-        // the flag beside it is what says which of the two it is.
-        let level = if volume.muted { 0 } else { volume.volume };
-        if state.member_volumes.get(at) == Some(&level)
-            && state.member_muted.get(at) == Some(&volume.muted)
+        if state.member_muted.get(at) == Some(&volume.muted)
             && state.member_fixed.get(at) == Some(&volume.fixed)
             && state.member_levels.get(at) == Some(&volume.volume)
         {
             return Vec::new();
-        }
-        if let Some(slot) = state.member_volumes.get_mut(at) {
-            *slot = level;
         }
         if let Some(slot) = state.member_muted.get_mut(at) {
             *slot = volume.muted;
@@ -693,7 +659,7 @@ impl RoomPlayer {
 }
 
 fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
-    let track = meta.current_item.as_ref().and_then(|i| i.track.as_ref());
+    let track = meta.track();
     let container = meta.container.as_ref();
     let title = meta.title();
     let artist = track
@@ -744,10 +710,14 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
 /// The same test `run_rate` makes before anything else: a track, with an id,
 /// that names real content rather than the `-1` a player uses for "nothing
 /// to say".
+/// Per-member values as the strings MPRIS publishes them - deliberately
+/// string-typed, see the key's own documentation.
+fn strings<T: ToString>(values: &[T]) -> Vec<String> {
+    values.iter().map(T::to_string).collect()
+}
+
 fn has_track_id(meta: &MetadataStatus) -> bool {
-    meta.current_item
-        .as_ref()
-        .and_then(|i| i.track.as_ref())
+    meta.track()
         .and_then(|t| t.id.as_ref())
         .is_some_and(|id| id.is_real())
 }

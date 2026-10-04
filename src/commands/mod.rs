@@ -29,12 +29,6 @@ use crate::{catalogue, credentials, sonos};
 use playback::{apply_crossfade, apply_repeat, apply_shuffle, apply_transport, play_or_resume};
 use volume::apply_vol;
 
-/// "a" or "an" for a word about to follow it.
-///
-/// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
-/// which are plain ASCII words where the spelling rule holds. It would be wrong
-/// about "an hour" and "a European", and there is no reason for either to reach
-/// it.
 /// A rough age for a unix time, for a list where the exact second has never
 /// mattered: `accounts` dates its links with it and `say --voices` its
 /// remembered voice list.
@@ -48,6 +42,12 @@ pub fn ago(then: u64) -> String {
     }
 }
 
+/// "a" or "an" for a word about to follow it.
+///
+/// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
+/// which are plain ASCII words where the spelling rule holds. It would be wrong
+/// about "an hour" and "a European", and there is no reason for either to reach
+/// it.
 pub fn article(word: &str) -> &'static str {
     match word.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('a' | 'e' | 'i' | 'o' | 'u') => "an",

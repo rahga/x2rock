@@ -478,7 +478,7 @@ pub fn playback_error(body: &serde_json::Value) -> Option<PlaybackError> {
     if body.get("_objectType")?.as_str()? != "playbackError" {
         return None;
     }
-    serde_json::from_value(body.clone()).ok()
+    PlaybackError::deserialize(body).ok()
 }
 
 /// `playlists:1 getPlaylists`: the household's saved queues.
@@ -532,13 +532,16 @@ pub struct MetadataStatus {
 }
 
 impl MetadataStatus {
+    /// The current item's track, when there is one.
+    pub fn track(&self) -> Option<&Track> {
+        self.current_item.as_ref()?.track.as_ref()
+    }
+
     /// What the room is showing: the track's name, else the container's. The
     /// one derivation, so `now`, the MPRIS title and anything else that says
     /// "what is on" say the same thing.
     pub fn title(&self) -> Option<&str> {
-        self.current_item
-            .as_ref()
-            .and_then(|i| i.track.as_ref())
+        self.track()
             .and_then(|t| t.name.as_deref())
             .or_else(|| self.container.as_ref().and_then(|c| c.name.as_deref()))
     }

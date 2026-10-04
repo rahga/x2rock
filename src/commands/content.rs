@@ -1150,11 +1150,7 @@ pub async fn keep(
     let _ = catalogue
         .refresh(&Upnp::new(session.connection.ip()), false)
         .await;
-    bookmark.service_name = catalogue
-        .services()
-        .iter()
-        .find(|s| s.id == bookmark.service_id)
-        .map(|s| s.name.clone());
+    bookmark.service_name = catalogue.name_of(&bookmark.service_id).map(str::to_string);
 
     let replaced = bookmarks::Bookmarks::update(|list| Ok(list.keep(bookmark)))?;
     println!("{} {title}", if replaced { "Updated" } else { "Kept" });
@@ -1183,9 +1179,7 @@ async fn resolve_bookmark(
     // Two different failures, worth telling apart: a service the player
     // has never heard of, and one it lists but gives no type for.
     let service = catalogue
-        .services()
-        .iter()
-        .find(|s| s.id == bookmark.service_id)
+        .by_id(&bookmark.service_id)
         .ok_or_else(|| {
             anyhow!(
                 "service {} is not in this player's service list, so {:?} cannot be played",
@@ -1367,8 +1361,7 @@ pub async fn queue(
     let room = target.name.as_str();
     match action {
         None => {
-            let queue = upnp.queue().await?;
-            let in_use = upnp.playing_from_queue().await?;
+            let (queue, in_use) = tokio::try_join!(upnp.queue(), upnp.playing_from_queue())?;
             let current = if in_use {
                 upnp.current_track().await?
             } else {

@@ -246,13 +246,10 @@ pub async fn connect(
     // was actually asked for, which ruled out the old `attach_any`-over-the-
     // raw-scan fallback (first responder wins, whoever that is).
     progress("Remembered players did not answer; rescanning...");
-    let nobody_answered = || {
-        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
-        crate::hint::no_players_answered(&names)
-    };
+    let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
     let scan = discover::scan_local_subnet().await?;
     if scan.found.is_empty() {
-        return Err(nobody_answered());
+        return Err(crate::hint::no_players_answered(&names));
     }
     let discovered = discover_households(&scan.found, state, Some(fingerprint)).await?;
 
@@ -280,11 +277,10 @@ pub async fn connect(
         found.session.connection.close();
     }
     selected.ok_or_else(|| {
-        // Not `nobody_answered`: players answered, just none of this
+        // Not `no_players_answered`: players answered, just none of this
         // household's. Saying "a rescan found nothing" here would be false and
         // would hand back `discover` as a fix, which repeats a scan that
         // already worked.
-        let names: Vec<_> = players.iter().map(|p| p.name.as_str()).collect();
         crate::hint::household_unreachable(household_id, &names, &answered)
     })
 }
