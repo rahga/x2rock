@@ -8650,6 +8650,34 @@ command rather than being read as empty. Which is the discipline the whole featu
 household's own stored tokens are the source of truth, and the local store is a cache of them for
 the household you are standing in.
 
+### What #1010's review found about writing accounts (read 2026-10-04)
+
+The PR's reviewer, goldyfruit, retested it on a third household on 2026-10-01: six players on
+older firmware (86.10-81100, display 17.2.7). All eight configured accounts decrypted, through the
+`cryptography` package and through its openssl fallback alike. That is independent confirmation that
+the hardcoded salt above holds across firmware generations, the risk this section flags.
+
+The rest of that review concerns *writing* household accounts, which x2rock does not do (see "What
+stays with the Sonos app" in the README). Two findings are worth keeping so nobody repeats them:
+
+- **`ReplaceAccountX` reissues the account's identity on 86.10.** Relinking a Deezer account through
+  it succeeded, kept the nickname and played afterwards, but the record came back as
+  `SA_RINCON519_X_#Svc519-0-Token`: a new UDN, and an account UID of **0**. The SCPD declares
+  `NewAccountUDN` as an *output*, which the PR was sending as an empty input and discarding. An
+  account with UID 0 can no longer be refreshed with `RefreshAccountCredentialsX`, which wants a
+  positive UID - a quiet break that nothing reports at the time.
+- **`RefreshAccountCredentialsX` takes credentials only inside the household's `2:` envelope.** Raw
+  token and key values are refused with UPnP 402; enveloped, the refresh kept the serial, UDN, UID,
+  username, nickname and tier exactly. goldyfruit's fix (a PR against the author's branch, 2026-10-03)
+  relinks positive-UID accounts that way and keeps `ReplaceAccountX` for UID-0 and legacy records.
+
+Deezer also accepted the same device-link code three times, so a retry that works there proves
+nothing about a stricter provider.
+
+None of this changes the position. A failed read is an error message; a failed write damages the
+household's own records, here silently and in a way that depends on firmware. Re-authorizing an
+account is a prompt the Sonos app already shows, and that is where it stays.
+
 ## Apple Music: playback yes, search no - the household holds no usable search credential (2026-09-24, office)
 
 The last app-link service left untested, now tested. A fresh Apple Music subscription was added in
