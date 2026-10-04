@@ -245,27 +245,6 @@ fn report_started_json(room: &str, title: &str, url: &str, started: &Started) ->
     Ok(())
 }
 
-/// Open a playback session in the room and load one stream URL into it.
-///
-/// The half of [`stream_item`] that has nothing to do with services, shared so
-/// that `play-url` and a service's live stream cannot drift apart: they are the
-/// same two calls to the same namespace, and the only difference is whether a
-/// service gets named in the metadata. The caller resolves the target, since it
-/// needs the room's name to word its own confirmation anyway.
-///
-/// **A session rather than the transport, on purpose.** `SetAVTransportURI`
-/// with `x-rincon-mp3radio://<url>` also plays an arbitrary stream (verified
-/// 2026-09-04, and see "A stream URL needs no service" in
-/// docs/architecture.md), but it *replaces* what the room was doing and loses
-/// the queue's position. A session plays alongside the queue and leaves it
-/// exactly as it was, which is what a radio station should do.
-///
-/// **Except when the URL is not a stream at all**, which is what a music
-/// service's `getMediaURI` usually hands back: Deezer and TIDAL both answer
-/// with a plain, signed, seekable FLAC file. A session cannot play one - see
-/// [`Upnp::play_url_as_track`] for the measurement - so a file goes to the
-/// transport instead, and the queue's position is lost. That is the worse of
-/// two behaviours and better than the only alternative, which was silence.
 /// Whether a URL is a finite file rather than a broadcast, asked of the server
 /// rather than guessed from the URL.
 ///
@@ -350,6 +329,27 @@ fn shaped_like_file(status: u16, head: &str) -> bool {
 /// only ever an optimisation over failing.
 const PROBE: Duration = Duration::from_secs(4);
 
+/// Open a playback session in the room and load one stream URL into it.
+///
+/// The half of [`stream_item`] that has nothing to do with services, shared so
+/// that `play-url` and a service's live stream cannot drift apart: they are the
+/// same two calls to the same namespace, and the only difference is whether a
+/// service gets named in the metadata. The caller resolves the target, since it
+/// needs the room's name to word its own confirmation anyway.
+///
+/// **A session rather than the transport, on purpose.** `SetAVTransportURI`
+/// with `x-rincon-mp3radio://<url>` also plays an arbitrary stream (verified
+/// 2026-09-04, and see "A stream URL needs no service" in
+/// docs/architecture.md), but it *replaces* what the room was doing and loses
+/// the queue's position. A session plays alongside the queue and leaves it
+/// exactly as it was, which is what a radio station should do.
+///
+/// **Except when the URL is not a stream at all**, which is what a music
+/// service's `getMediaURI` usually hands back: Deezer and TIDAL both answer
+/// with a plain, signed, seekable FLAC file. A session cannot play one - see
+/// [`Upnp::play_url_as_track`] for the measurement - so a file goes to the
+/// transport instead, and the queue's position is lost. That is the worse of
+/// two behaviours and better than the only alternative, which was silence.
 async fn stream_url(
     session: &session::Session,
     target: &Target,
@@ -506,35 +506,15 @@ pub async fn run_stations(
                 found.len()
             )
         })?;
-        let mut state = State::load()?;
-        let session = session::connect(ip, &mut state, household, room).await?;
-        let target = session::target(&session.groups, room)?;
-        let wait = if no_wait {
-            Duration::ZERO
-        } else {
-            STREAM_START
-        };
         // A directory row is a stranger's URL and the directory's own liveness
         // check is stale, so this is the one place the silent failure is
         // routine rather than exotic. That is why waiting is the default here.
-        let started = stream_url(
-            &session,
-            &target,
-            &station.url_resolved,
-            &station.name,
-            None,
-            wait,
-        )
-        .await?;
-        if json {
-            return report_started_json(
-                &target.name,
-                &station.name,
-                &station.url_resolved,
-                &started,
-            );
-        }
-        return report_started(&target.name, &station.name, None, &started);
+        let reach = Reach {
+            ip,
+            household,
+            room,
+        };
+        return play_stream(reach, &station.url_resolved, &station.name, no_wait, json).await;
     }
 
     if json {
@@ -707,19 +687,49 @@ pub async fn run_play_url(
     json: bool,
 ) -> Result<()> {
     let name = stream_display_name(url, title)?;
+    play_stream(
+        Reach {
+            ip,
+            household,
+            room,
+        },
+        url,
+        &name,
+        no_wait,
+        json,
+    )
+    .await
+}
+
+/// Where a command was pointed: `--ip`, `--household` and `--room` as given.
+struct Reach<'a> {
+    ip: Option<IpAddr>,
+    household: Option<&'a str>,
+    room: Option<&'a str>,
+}
+
+/// Connect, play one stream URL in the room, and report it - the tail `play-url`
+/// and `stations --play` share, so the two cannot report a start differently.
+async fn play_stream(
+    reach: Reach<'_>,
+    url: &str,
+    name: &str,
+    no_wait: bool,
+    json: bool,
+) -> Result<()> {
     let mut state = State::load()?;
-    let session = session::connect(ip, &mut state, household, room).await?;
-    let target = session::target(&session.groups, room)?;
+    let session = session::connect(reach.ip, &mut state, reach.household, reach.room).await?;
+    let target = session::target(&session.groups, reach.room)?;
     let wait = if no_wait {
         Duration::ZERO
     } else {
         STREAM_START
     };
-    let started = stream_url(&session, &target, url, &name, None, wait).await?;
+    let started = stream_url(&session, &target, url, name, None, wait).await?;
     if json {
-        return report_started_json(&target.name, &name, url, &started);
+        return report_started_json(&target.name, name, url, &started);
     }
-    report_started(&target.name, &name, None, &started)
+    report_started(&target.name, name, None, &started)
 }
 
 #[cfg(test)]

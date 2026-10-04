@@ -193,7 +193,7 @@ async fn drive(
                         // event is what shows it - so once nothing else is still
                         // on its way, the line has nothing left to say.
                         Ok(_) if in_flight == 0 => {
-                            app.status.take_if(|status| status.kind == Kind::Busy);
+                            clear_busy(&mut app.status);
                         }
                         Ok(_) => {}
                     }
@@ -297,23 +297,9 @@ fn reread(source: &Source, heard: &mpsc::UnboundedSender<Vec<RoomSnapshot>>) {
     });
 }
 
-/// Carry out an intent in a task of its own, and report how it went.
-fn dispatch(
-    source: &Source,
-    speakers: &action::Speakers,
-    intent: Intent,
-    finished: mpsc::UnboundedSender<Result<Vec<String>>>,
-) {
-    let source = source.clone();
-    let speakers = speakers.clone();
-    tokio::spawn(async move {
-        let outcome =
-            match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &speakers, intent)).await {
-                Ok(outcome) => outcome,
-                Err(_) => Err(anyhow::anyhow!(gave_up(speakers.connected().await))),
-            };
-        let _ = finished.send(outcome);
-    });
+/// Take down the "working" line, and only that: a note or an error stays.
+fn clear_busy(status: &mut Option<Status>) {
+    status.take_if(|status| status.kind == Kind::Busy);
 }
 
 /// What a write given up on says. The wait covers the connect as well as the
@@ -339,7 +325,17 @@ fn launch(
     finished: &mpsc::UnboundedSender<Result<Vec<String>>>,
 ) {
     *in_flight += 1;
-    dispatch(source, speakers, intent, finished.clone());
+    let source = source.clone();
+    let speakers = speakers.clone();
+    let finished = finished.clone();
+    tokio::spawn(async move {
+        let outcome =
+            match tokio::time::timeout(WRITE_TIMEOUT, execute(&source, &speakers, intent)).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow::anyhow!(gave_up(speakers.connected().await))),
+            };
+        let _ = finished.send(outcome);
+    });
 }
 
 /// Send one folded run of volume keys, unless it folded to nothing: `+5` then
@@ -443,41 +439,34 @@ async fn execute(
         Intent::Nudge(nudge) => speakers.nudge(&nudge.room, nudge.by, nudge.player).await,
         Intent::Mute(room, on) => speakers.mute(&room, on).await,
         Intent::Crossfade(room, on) => speakers.crossfade(&room, on).await,
-        Intent::PlayPause(bus) => source
-            .player(&bus)
-            .await?
-            .play_pause()
-            .await
-            .context("play/pause")
-            .map(|()| Vec::new()),
-        Intent::Next(bus) => source
-            .player(&bus)
-            .await?
-            .next()
-            .await
-            .context("skipping forward")
-            .map(|()| Vec::new()),
-        Intent::Previous(bus) => source
-            .player(&bus)
-            .await?
-            .previous()
-            .await
-            .context("skipping back")
-            .map(|()| Vec::new()),
-        Intent::SetLoop(bus, status) => source
-            .player(&bus)
-            .await?
-            .set_loop_status(status)
-            .await
-            .context("setting repeat")
-            .map(|()| Vec::new()),
-        Intent::SetShuffle(bus, on) => source
-            .player(&bus)
-            .await?
-            .set_shuffle(on)
-            .await
-            .context("setting shuffle")
-            .map(|()| Vec::new()),
+        Intent::PlayPause(bus) => {
+            let player = source.player(&bus).await?;
+            player.play_pause().await.context("play/pause")?;
+            Ok(Vec::new())
+        }
+        Intent::Next(bus) => {
+            let player = source.player(&bus).await?;
+            player.next().await.context("skipping forward")?;
+            Ok(Vec::new())
+        }
+        Intent::Previous(bus) => {
+            let player = source.player(&bus).await?;
+            player.previous().await.context("skipping back")?;
+            Ok(Vec::new())
+        }
+        Intent::SetLoop(bus, status) => {
+            let player = source.player(&bus).await?;
+            player
+                .set_loop_status(status)
+                .await
+                .context("setting repeat")?;
+            Ok(Vec::new())
+        }
+        Intent::SetShuffle(bus, on) => {
+            let player = source.player(&bus).await?;
+            player.set_shuffle(on).await.context("setting shuffle")?;
+            Ok(Vec::new())
+        }
         Intent::Group {
             coordinator,
             others,
@@ -687,9 +676,9 @@ impl App {
             // footer must stop saying otherwise in the same breath - not at the
             // next heartbeat, up to thirty seconds on.
             self.emptied = None;
-            self.status.take_if(|status| status.kind == Kind::Busy);
+            clear_busy(&mut self.status);
         } else if self.emptied.take().is_some() {
-            self.status.take_if(|status| status.kind == Kind::Busy);
+            clear_busy(&mut self.status);
         }
         // What the overlay shows now, before this snapshot can take it away.
         // Only from a resolved selection: a second partial snapshot in a row
@@ -809,8 +798,6 @@ impl App {
         rows
     }
 
-    /// How many rows [`Self::group_rows`] would have, without building them:
-    /// every member of the selected group, then every room outside it.
     /// What the overlay last showed, while the selection is unresolved - see
     /// [`App::shown_group`]. `None` once the room is back, and whenever the
     /// selection is simply empty rather than waiting on a republish.
@@ -828,6 +815,8 @@ impl App {
             .or_else(|| self.held_group().map(|(room, _)| room))
     }
 
+    /// How many rows [`Self::group_rows`] would have, without building them:
+    /// every member of the selected group, then every room outside it.
     fn group_row_count(&self) -> usize {
         let Some(selected) = self.selected() else {
             return 0;

@@ -33,7 +33,7 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
 };
 
-use super::proto::{ErrorBody, Event, Groups, Header};
+use super::proto::{ErrorBody, Event, Header};
 
 pub const PORT: u16 = 1443;
 const API_KEY: &str = "123e4567-e89b-12d3-a456-426655440000";
@@ -394,31 +394,13 @@ impl Connection {
         *self.inner.household_id.lock().unwrap() = Some(id.clone());
         Ok(id)
     }
-
-    pub async fn groups(&self) -> Result<Groups> {
-        let household = self.household_id().await?;
-        let body = self
-            .call(
-                json!({
-                    "namespace": "groups:1",
-                    "command": "getGroups",
-                    "householdId": household,
-                }),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
-    }
 }
 
 impl Inner {
     /// Route one incoming frame: a reply to whoever is waiting for it, anything
     /// else out as an event.
     fn dispatch(&self, text: &str) {
-        let Ok((header_raw, body)) = serde_json::from_str::<(Value, Value)>(text) else {
-            return;
-        };
-        let Ok(header) = serde_json::from_value::<Header>(header_raw) else {
+        let Ok((header, body)) = serde_json::from_str::<(Header, Value)>(text) else {
             return;
         };
 

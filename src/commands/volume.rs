@@ -4,7 +4,7 @@
 //! and `normalize` and `--each` are the two ways of evening a group out: to
 //! its own average, or to one level on every member.
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use super::{PerRoom, Report, fan_out_as, transition};
@@ -12,7 +12,6 @@ use crate::session::{self, Session};
 use crate::sonos;
 use crate::sonos::local::Connection;
 use crate::sonos::proto::Player;
-use crate::sonos::upnp::Upnp;
 
 enum VolumeChange {
     Set(u8),
@@ -182,28 +181,11 @@ pub async fn apply_vol(
     // --player names the speaker, so it resolves the room asked for rather than
     // the group's name: once rooms are grouped the group is called after its
     // coordinator ("Dining Room + 1"), which is no player's name at all.
-    let this = one_room
-        .then(|| match room {
-            Some(name) => session.groups.player_named(name),
-            // No room named, so the group resolved by default; its coordinator
-            // is the speaker meant. By id: the group's name ("Kitchen + 1") is
-            // not a player's once grouped.
-            None => session
-                .groups
-                .player(&target.coordinator_id)
-                .ok_or_else(|| anyhow!("no player for {}", target.name)),
-        })
+    let named = one_room
+        .then(|| super::speaker::named_speaker(session, target, room))
         .transpose()?;
-    // Resolved before anything is opened, so the address is available without a
-    // mutable written from inside a match arm.
-    let speaker_ip = this
-        .as_ref()
-        .map(|named| {
-            named
-                .ip()
-                .with_context(|| format!("{} did not report an address to reach it on", named.name))
-        })
-        .transpose()?;
+    let speaker_ip = named.as_ref().map(|(_, upnp)| upnp.ip());
+    let this = named.as_ref().map(|(player, _)| *player);
     // One connection, resolved lazily. A player-scoped command is refused by
     // anyone but that player ("Incorrect playerId") so it cannot ride the
     // coordinator's; a group-scoped one *is* the coordinator's, which is why
@@ -267,14 +249,13 @@ pub async fn apply_vol(
     let (level, muted) = match change {
         _ if ramp_to.is_some() => {
             let level = ramp_to.expect("matched just above");
-            // `ramp` implies `one_room`, which is what makes `speaker_ip` Some.
-            let ip = speaker_ip.expect("a ramp is always addressed to one speaker");
+            // `ramp` implies `one_room`, which is what makes `named` Some.
+            let (_, upnp) = named
+                .as_ref()
+                .expect("a ramp is always addressed to one speaker");
             // Stays `None` when the player did not say, so `ramp_seconds` is
             // null rather than a zero that would read as "already there".
-            ramp_secs = Upnp::new(ip)
-                .ramp_to_volume(level)
-                .await?
-                .map(|d| d.as_secs());
+            ramp_secs = upnp.ramp_to_volume(level).await?.map(|d| d.as_secs());
             // A ramp leaves mute alone rather than clearing it the way a plain
             // set does, so a muted speaker would slide silently. Say so instead
             // of letting the level look like it took effect.

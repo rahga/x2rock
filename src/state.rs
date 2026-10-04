@@ -206,15 +206,13 @@ impl State {
     /// Prefers the current network when a fingerprint is provided and matches;
     /// otherwise returns all players across all networks.
     pub fn room_names(&self, current_network: Option<&str>) -> Vec<String> {
-        let mut names: Vec<String> = if let Some(fp) = current_network {
-            let on_net = self.players_on(fp);
-            if !on_net.is_empty() {
-                on_net.into_iter().map(|p| p.name).collect()
-            } else {
-                self.all_room_names()
-            }
-        } else {
+        let on_net = current_network
+            .map(|fp| self.players_on(fp))
+            .unwrap_or_default();
+        let mut names: Vec<String> = if on_net.is_empty() {
             self.all_room_names()
+        } else {
+            on_net.into_iter().map(|p| p.name).collect()
         };
         names.sort();
         names.dedup();

@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::net::Ipv4Addr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -116,10 +116,7 @@ fn kind(bytes: &[u8]) -> Option<&'static str> {
 
 /// The cache file's name, without its extension.
 fn key(url: &str) -> String {
-    Md5::digest(url.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    format!("{:x}", Md5::digest(url.as_bytes()))
 }
 
 /// Where a redirect's `Location` points, made absolute against `from`.
@@ -181,17 +178,7 @@ pub(crate) fn touch(path: &Path) {
 /// loads nothing but finished files from this directory - never sees half of one.
 fn store(dir: &Path, url: &str, bytes: &[u8], ext: &str) -> Result<PathBuf> {
     let path = dir.join(format!("{}.{ext}", key(url)));
-    let tmp = dir.join(format!("{}.{}.tmp", key(url), std::process::id()));
-    let _ = fs::remove_file(&tmp);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(bytes)?;
-    drop(file);
-    fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    store::write_bytes_atomically(&path, bytes, store::SECRET)?;
     Ok(path)
 }
 

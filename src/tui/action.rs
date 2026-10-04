@@ -272,7 +272,7 @@ impl Speakers {
     /// but MPRIS has no property for it, so of the three it is the one that
     /// goes through a command.
     pub async fn crossfade(&self, room: &str, on: bool) -> Result<Vec<String>> {
-        let word = if on { "on" } else { "off" };
+        let word = crate::commands::on_word(on);
         self.write(|s| async move {
             let target = session::target(&s.groups, Some(room))?;
             playback::apply_crossfade(&s, &target, Some(word.into())).await

@@ -144,42 +144,8 @@ pub fn place_desktop_files_at(
     icon: &Path,
     force: bool,
 ) -> Result<DesktopPlacement> {
-    use anyhow::Context;
-    let mut desktop_written = false;
-    let mut icon_written = false;
-
-    let desktop_content = std::fs::read_to_string(desktop).ok();
-    let desktop_edited = desktop_content
-        .as_deref()
-        .map(|c| c != DESKTOP_ENTRY)
-        .unwrap_or(false);
-
-    if !desktop.exists() || (desktop_edited && force) {
-        if let Some(parent) = desktop.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-        std::fs::write(desktop, DESKTOP_ENTRY)
-            .with_context(|| format!("writing {}", desktop.display()))?;
-        desktop_written = true;
-    }
-
-    let icon_content = std::fs::read(icon).ok();
-    let icon_edited = icon_content
-        .as_deref()
-        .map(|c| c != DESKTOP_ICON.as_bytes())
-        .unwrap_or(false);
-
-    if !icon.exists() || (icon_edited && force) {
-        if let Some(parent) = icon.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-        std::fs::write(icon, DESKTOP_ICON)
-            .with_context(|| format!("writing {}", icon.display()))?;
-        icon_written = true;
-    }
-
+    let (desktop_written, desktop_edited) = place(desktop, DESKTOP_ENTRY.as_bytes(), force)?;
+    let (icon_written, icon_edited) = place(icon, DESKTOP_ICON.as_bytes(), force)?;
     Ok(DesktopPlacement {
         desktop_path: desktop.to_path_buf(),
         icon_path: icon.to_path_buf(),
@@ -188,6 +154,33 @@ pub fn place_desktop_files_at(
         desktop_edited,
         icon_edited,
     })
+}
+
+/// Write `content` to `path` when it is missing, or when it differs and
+/// `force` is set: `(written, edited)`, where edited means it was there and
+/// not what this build ships.
+fn place(path: &Path, content: &[u8], force: bool) -> Result<(bool, bool)> {
+    use anyhow::Context;
+    let edited = std::fs::read(path).is_ok_and(|c| c != content);
+    if path.exists() && !(edited && force) {
+        return Ok((false, edited));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
+    Ok((true, edited))
+}
+
+/// Remove `path` if it is there; whether it was.
+fn remove_if_present(path: &Path) -> Result<bool> {
+    use anyhow::Context;
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(true)
 }
 
 /// Install desktop entry and icon files if missing or if forced.
@@ -209,22 +202,8 @@ pub fn desktop_installed() -> (bool, bool) {
 
 /// Remove installed desktop entry and icon files if present.
 pub fn uninstall_desktop_files() -> Result<(bool, bool)> {
-    use anyhow::Context;
     let (desktop, icon) = desktop_paths()?;
-    let desktop_removed = if desktop.exists() {
-        std::fs::remove_file(&desktop)
-            .with_context(|| format!("removing {}", desktop.display()))?;
-        true
-    } else {
-        false
-    };
-    let icon_removed = if icon.exists() {
-        std::fs::remove_file(&icon).with_context(|| format!("removing {}", icon.display()))?;
-        true
-    } else {
-        false
-    };
-    Ok((desktop_removed, icon_removed))
+    Ok((remove_if_present(&desktop)?, remove_if_present(&icon)?))
 }
 
 /// Where the user unit goes: `$XDG_CONFIG_HOME/systemd/user`, which is where

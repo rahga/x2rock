@@ -757,7 +757,7 @@ impl Credentials {
             .ok_or_else(|| {
                 anyhow!(
                     "no account matching {query:?}. This service holds: {}.",
-                    describe(&held.accounts)
+                    describe_accounts(&held.accounts)
                 )
             })
     }
@@ -836,10 +836,10 @@ fn account_nickname(a: &Account) -> Option<&str> {
 /// What to call an account in output: its nickname where it has one, else the
 /// key, which is always something a person can type back.
 pub fn account_display(nickname: Option<&str>, key: &str) -> String {
-    match nickname {
-        Some(nick) if !nick.is_empty() => nick.to_string(),
-        _ => key.to_string(),
-    }
+    nickname
+        .filter(|n| !n.is_empty())
+        .unwrap_or(key)
+        .to_string()
 }
 
 /// Name accounts the way an error should: nickname and key.
@@ -852,11 +852,6 @@ fn describe_accounts<'a>(accounts: impl IntoIterator<Item = (&'a String, &'a Acc
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Name every account of a service the way an error should: nickname and key.
-fn describe(accounts: &BTreeMap<String, Account>) -> String {
-    describe_accounts(accounts)
 }
 
 /// What an account says about which account it is, if anything:

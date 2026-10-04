@@ -136,16 +136,12 @@ impl Source {
     /// household is a handful of groups, and diffing would buy nothing but a
     /// chance to be subtly wrong about which row moved.
     pub async fn snapshot(&self) -> Result<Vec<RoomSnapshot>> {
-        let mut rooms = Vec::new();
-        for name in self.players().await? {
-            // A player that vanished between listing and reading is not an
-            // error, it is a regroup landing mid-read. The next event brings
-            // the corrected list along.
-            if let Ok(room) = self.read_one(&name).await {
-                rooms.push(room);
-            }
-        }
-        Ok(rooms)
+        let names = self.players().await?;
+        // All at once, in listing order. A player that vanished between
+        // listing and reading is not an error, it is a regroup landing
+        // mid-read; the next event brings the corrected list along.
+        let reads = futures_util::future::join_all(names.iter().map(|n| self.read_one(n))).await;
+        Ok(reads.into_iter().filter_map(Result::ok).collect())
     }
 
     /// The proxies here are read once and dropped, so they are built without a

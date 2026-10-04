@@ -170,13 +170,23 @@ async fn current_household(
     linked.sole_household().unwrap_or_default()
 }
 
-/// Every household this machine remembers, with its rooms, for resolving a
-/// household with no speaker in reach. Empty, not an error, when there is no
-/// state to read: the callers are advisory.
-fn remembered_rooms() -> BTreeMap<String, Vec<String>> {
-    State::load()
-        .map(|state| state.household_rooms())
-        .unwrap_or_default()
+/// One browse or search hit as `--json` gives it. Deliberately the same field
+/// names `favorites --json` uses: the bar widget merges the lists into one
+/// picker, and matching shapes keep that a concatenation rather than a
+/// translation layer. `container` is there because a hit is not always a thing
+/// to play - Mixcloud searches tags and answers with collections, so a caller
+/// that assumed otherwise would hand a container to `play-item`.
+fn item_json(i: &sonos::smapi::Item, service: &sonos::smapi::Service) -> serde_json::Value {
+    json!({
+        "id": i.id,
+        "name": i.title,
+        "type": i.item_type,
+        "description": i.summary,
+        "service": service.name,
+        "art_url": i.art_url,
+        "container": i.container,
+        "queueable": queueable(i, service),
+    })
 }
 
 /// The error for a service that needs an account, asked for with no speaker in
@@ -413,9 +423,7 @@ pub async fn run_rate(
     let (meta, dirty) =
         tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, refresh))?;
     let track_id = meta
-        .current_item
-        .as_ref()
-        .and_then(|i| i.track.as_ref())
+        .track()
         .and_then(|t| t.id.as_ref())
         .filter(|id| id.is_real())
         .ok_or_else(|| {
@@ -664,11 +672,7 @@ pub async fn run_link(
                     .container
                     .as_ref()
                     .and_then(|c| c.image_url.as_deref()),
-                status
-                    .current_item
-                    .as_ref()
-                    .and_then(|i| i.track.as_ref())
-                    .and_then(|t| t.image_url.as_deref()),
+                status.track().and_then(|t| t.image_url.as_deref()),
             ];
             token = urls.into_iter().flatten().find_map(sonos::plex::token_in);
             if token.is_some() {
@@ -1233,7 +1237,7 @@ pub async fn run_browse(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let rooms = remembered_rooms();
+    let rooms = state.household_rooms();
     let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
@@ -1341,18 +1345,8 @@ pub async fn run_browse(
             .iter()
             .map(|i| {
                 // The field names `favorites`, `search` and `bookmarks` already
-                // use, plus the one thing only browsing has: whether a row is a
-                // place or a thing.
-                json!({
-                    "id": i.id,
-                    "name": i.title,
-                    "type": i.item_type,
-                    "description": i.summary,
-                    "service": chosen.name,
-                    "art_url": i.art_url,
-                    "container": i.container,
-                    "queueable": queueable(i, &chosen),
-                })
+                // use, plus whether a row is a place or a thing.
+                item_json(i, &chosen)
             })
             .collect();
         // An envelope, not a bare array. `total` is the whole point: a caller
@@ -1469,7 +1463,7 @@ pub async fn run_search(
     }
 
     let mut linked = credentials::Credentials::load()?;
-    let rooms = remembered_rooms();
+    let rooms = state.household_rooms();
     let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
 
     // A term with no service is the merged search. Checked before the listing
@@ -1711,28 +1705,7 @@ pub async fn run_search(
         .await;
     }
     if json {
-        let rows: Vec<_> = items
-            .iter()
-            .map(|i| {
-                // Deliberately the same field names `favorites --json` uses.
-                // The bar widget merges the two lists into one picker, and
-                // matching shapes keep that a concatenation rather than a
-                // translation layer.
-                json!({
-                    "id": i.id,
-                    "name": i.title,
-                    "type": i.item_type,
-                    "description": i.summary,
-                    "service": chosen.name,
-                    "art_url": i.art_url,
-                    // A hit is not always a thing to play. Mixcloud searches
-                    // tags and answers with collections, so a caller that
-                    // assumed otherwise would hand a container to `play-item`.
-                    "container": i.container,
-                    "queueable": queueable(i, chosen),
-                })
-            })
-            .collect();
+        let rows: Vec<_> = items.iter().map(|i| item_json(i, chosen)).collect();
         // An envelope, not a bare array. `total` is the whole point: a caller
         // that got `count` rows has no way to tell a full container from a
         // truncated one, and `--json` used to drop the number the plain-text
@@ -2173,21 +2146,13 @@ async fn search_everywhere(
         let items: Vec<_> = rows
             .iter()
             .map(|r| {
-                json!({
-                    "id": r.item.id,
-                    "name": r.item.title,
-                    "type": r.item.item_type,
-                    "description": r.item.summary,
-                    "service": r.service.name,
-                    "art_url": r.item.art_url,
-                    "container": r.item.container,
-                    "queueable": queueable(&r.item, r.service),
-                    "linked": linked.get(household, &r.service.id).is_some(),
-                    // Unconditional, even when only one category was asked: a
-                    // caller grouping by it should not have to work out whether
-                    // the field exists before it can read it.
-                    "category": r.category,
-                })
+                let mut row = item_json(&r.item, r.service);
+                row["linked"] = json!(linked.get(household, &r.service.id).is_some());
+                // Unconditional, even when only one category was asked: a
+                // caller grouping by it should not have to work out whether the
+                // field exists before it can read it.
+                row["category"] = json!(r.category);
+                row
             })
             .collect();
         println!(
@@ -2782,12 +2747,7 @@ pub async fn accounts(
                 let mut rows: Vec<_> = found.iter().collect();
                 rows.sort_by_key(|(_, sn)| sn.parse::<u64>().unwrap_or(u64::MAX));
                 for (sid, sn) in rows {
-                    let name = catalogue
-                        .services()
-                        .iter()
-                        .find(|s| &s.id == sid)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| "not in the catalogue".to_string());
+                    let name = catalogue.name_of(sid).unwrap_or("not in the catalogue");
                     println!("  sn_{sn:<4} {name:<24} sid {sid}");
                 }
             }

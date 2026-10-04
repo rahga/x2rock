@@ -57,6 +57,14 @@ impl Soundtrack {
             Self::Favorite { name } | Self::Bookmark { name } => name,
         }
     }
+
+    /// Which kind of soundtrack, as the `--json` output names it.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Favorite { .. } => "favorite",
+            Self::Bookmark { .. } => "bookmark",
+        }
+    }
 }
 
 /// One group: its rooms, the coordinator first.
@@ -427,10 +435,7 @@ fn played(scene: &Scene) -> Vec<Playing> {
             Some(Playing {
                 room: g.rooms.first()?.name.clone(),
                 title: play.name().to_owned(),
-                kind: match play {
-                    Soundtrack::Favorite { .. } => "favorite",
-                    Soundtrack::Bookmark { .. } => "bookmark",
-                },
+                kind: play.kind(),
             })
         })
         .collect()
@@ -558,10 +563,7 @@ pub async fn apply(session: &Session, name: &str, json: bool) -> Result<()> {
             Ok(title) => playing.push(Playing {
                 room: target.name.clone(),
                 title,
-                kind: match play {
-                    Soundtrack::Favorite { .. } => "favorite",
-                    Soundtrack::Bookmark { .. } => "bookmark",
-                },
+                kind: play.kind(),
             }),
             Err(e) => notes.push(format!(
                 "note: {}: {:?} did not start: {e:#}",

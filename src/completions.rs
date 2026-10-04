@@ -56,19 +56,13 @@ pub fn install_path(shell: Shell) -> Result<std::path::PathBuf> {
 
 /// Install completion script directly to the shell's user completion directory.
 pub fn install(shell: Shell) -> Result<()> {
-    use anyhow::Context;
     let path = install_path(shell)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
     // Rendered first and written atomically, so a failure part-way cannot leave
-    // a truncated script where a working one was.
+    // a truncated script where a working one was. The writer makes the
+    // directory and names the path in its own errors.
     let mut text = Vec::new();
     generate(shell, &mut text)?;
-    let text = String::from_utf8(text).context("completion script is not UTF-8")?;
-    crate::store::write_atomically(&path, &text, crate::store::PLAIN)
-        .with_context(|| format!("writing {}", path.display()))?;
+    crate::store::write_bytes_atomically(&path, &text, crate::store::PLAIN)?;
     println!("Installed {shell} completions to {}.", path.display());
     Ok(())
 }
@@ -146,9 +140,8 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
             .map(|creds| {
                 creds
                     .all()
-                    .map(|(_, _, key, a)| match a.nickname.as_deref() {
-                        Some(nick) if !nick.is_empty() => nick.to_string(),
-                        _ => key.to_string(),
+                    .map(|(_, _, key, a)| {
+                        crate::credentials::account_display(a.nickname.as_deref(), key)
                     })
                     .collect()
             })

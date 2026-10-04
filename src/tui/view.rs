@@ -408,7 +408,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 /// that here rather than at each call site is also what keeps the reserved
 /// widths from being guessed twice and disagreeing.
 fn shoulders(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
-    let reserved = Line::from(right.clone()).width();
+    let reserved = right.iter().map(Span::width).sum::<usize>();
     let free = width.saturating_sub(reserved + 1);
     let mut spans = Vec::with_capacity(left.len() + right.len() + 1);
     let mut used = 0;
