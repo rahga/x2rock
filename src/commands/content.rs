@@ -948,12 +948,43 @@ fn replayable<'a>(
     }
 }
 
+/// The service catalogue for reading history: brought up to date against the
+/// player first, like every other by-id lookup, because a history row's
+/// service name and - for a service with no token here - whether it needs an
+/// account at all both come from it. Read from disk alone, a machine that had
+/// never searched or browsed named every row "unknown service" and refused to
+/// replay free ones such as TuneIn, telling the person to link an account
+/// that does not exist.
+///
+/// Best effort, unlike [`refreshed_catalogue`]: history is still worth listing
+/// from whatever is cached when the refresh fails, so a failure is said on
+/// stderr rather than returned. Saved when it changed, as `browse` does.
+async fn history_catalogue(session: &Session) -> catalogue::Catalogue {
+    let mut catalogue = catalogue::Catalogue::load();
+    match catalogue
+        .refresh(&Upnp::new(session.connection.ip()), false)
+        .await
+    {
+        Ok(true) => {
+            if let Err(e) = catalogue.save() {
+                eprintln!("x2rock: could not save the service list ({e:#})");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "x2rock: could not read the service list ({e:#}); service names and what can be \
+             replayed may be incomplete"
+        ),
+    }
+    catalogue
+}
+
 /// `x2rock recent`: what the household played lately, newest first.
 pub async fn recent(session: &Session, query: Option<&str>, json: bool) -> Result<()> {
     let household = session.connection.household_id().await?;
     let history = session.connection.history(&household).await?;
     let linked = credentials::Credentials::load()?;
-    let catalogue = catalogue::Catalogue::load();
+    let catalogue = history_catalogue(session).await;
     let needle = query.map(str::to_lowercase);
     let rows: Vec<_> = history
         .resources
@@ -1027,7 +1058,7 @@ pub async fn replay(
         "x2rock recent",
     )?;
     let linked = credentials::Credentials::load()?;
-    let catalogue = catalogue::Catalogue::load();
+    let catalogue = history_catalogue(session).await;
     let r = replayable(item, &household, &linked, &catalogue);
     ensure!(
         r.playable,
