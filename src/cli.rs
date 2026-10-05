@@ -117,6 +117,9 @@ pub enum Command {
     /// Show or change volume: a level (0-100), a change (+5, -5), mute/unmute,
     /// or normalize - every speaker in a group set to the group's level, the
     /// Sonos app's "Normalize Group Volume".
+    // `volume` is a hidden alias: what people type when they spell it out,
+    // kept out of `--help` so the listing stays one name per command.
+    #[command(alias = "volume")]
     Vol {
         #[arg(allow_negative_numbers = true)]
         change: Option<String>,
