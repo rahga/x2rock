@@ -372,7 +372,7 @@ async fn stream_url(
                     "command": "createSession",
                     "groupId": target.group_id,
                 }),
-                json!({ "appId": "com.rahga.x2rock", "appContext": "cli" }),
+                json!({ "appId": APP_ID, "appContext": "cli" }),
             )
             .await?;
         let session_id = opened["sessionId"]
@@ -623,10 +623,13 @@ pub fn require_http_url(url: &str) -> Result<()> {
     }
 }
 
-/// The reverse-DNS id every audio clip is tagged with. `loadAudioClip` requires
-/// one - an absent `appId` is `ERROR_INVALID_PARAMETER` - and the player groups
-/// a caller's clips under it.
-pub const APP_ID: &str = "com.github.rahga.x2rock";
+/// The reverse-DNS id x2rock names itself with to a player: on every audio
+/// clip, where `loadAudioClip` requires one (an absent `appId` is
+/// `ERROR_INVALID_PARAMETER`) and groups a caller's clips under it, and on every
+/// playback session, which the player then reports back as `clientId`. One
+/// constant, so the two can never name the program differently - they did,
+/// until 2026-10-05. Under rahga.com, the project's own domain.
+pub const APP_ID: &str = "com.rahga.x2rock";
 
 /// Play a clip on the room's *own* player - the shared body of `chime` (the
 /// built-in sound, `stream_url` None) and `notify` (a URL). Player-scoped, so it

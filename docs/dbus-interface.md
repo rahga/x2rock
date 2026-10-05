@@ -106,16 +106,20 @@ for everything that stays on the LAN.
 
 | | |
 |---|---|
-| Bus name | `io.github.rahga.x2rock` |
-| Root object | `/io/github/rahga/x2rock` — `…Household1`, plus `org.freedesktop.DBus.ObjectManager` |
-| Rooms | `/io/github/rahga/x2rock/room/<player id>` — `…Room1` |
-| Groups | `/io/github/rahga/x2rock/group/<group id>` — `…Group1` |
-| Errors | `io.github.rahga.x2rock.Error.<Code>` |
+| Bus name | `com.rahga.x2rock` |
+| Root object | `/com/rahga/x2rock` — `…Household1`, plus `org.freedesktop.DBus.ObjectManager` |
+| Rooms | `/com/rahga/x2rock/room/<player id>` — `…Room1` |
+| Groups | `/com/rahga/x2rock/group/<group id>` — `…Group1` |
+| Errors | `com.rahga.x2rock.Error.<Code>` |
 
-Reverse-DNS on the GitHub namespace is the freedesktop and GNOME convention for a project without
-its own domain. `x2rock` as a bare name is not a valid well-known bus name, and `org.x2rock` would
-claim a domain nobody here owns. If gx2rock takes an app id, it would be
-`io.github.rahga.gx2rock` under the same root, which keeps the two unconfusable.
+Reverse-DNS under rahga.com, the project's own domain (decided 2026-10-05). An earlier draft used
+`io.github.rahga.x2rock`, the freedesktop and GNOME convention for a project *without* a domain;
+with one, the domain is the namespace, and it is what Flathub would ask to verify if a front end
+ever ships there. It is also the `appId` x2rock already gives the speakers for its clips and
+playback sessions, so one name covers the program everywhere it identifies itself. `x2rock` as a
+bare name is not a valid well-known bus name, and `org.x2rock` would claim a domain nobody here
+owns. If gx2rock takes an app id, it would be `com.rahga.gx2rock` under the same root, which keeps
+the two unconfusable.
 
 **The version is in the interface name.** Within `Household1` members may be added, never changed
 or removed. A breaking change is `Household2`, served beside `1` for a release. The bus name and
@@ -260,7 +264,7 @@ job is to make them hard to break from the client side.
 
 ## Errors
 
-A failed method returns `io.github.rahga.x2rock.Error.<Code>`, where `<Code>` is the CLI's code in
+A failed method returns `com.rahga.x2rock.Error.<Code>`, where `<Code>` is the CLI's code in
 CamelCase — `unknown_room` is `…Error.UnknownRoom`, and the set is `hint::Code::ALL` plus the few
 this interface adds (`NotASoundbar`, `StaleQueue`, `NotConnected`). The message is the CLI's own
 sentence. When the CLI would offer a `fix`, the message ends with one more line:
@@ -343,8 +347,6 @@ makes it pay.
 - **Does the daemon run commands over its held sockets, or over a fresh session per call like the
   CLI?** Held sockets are the point, but the CLI's paths are the tested ones. Starting with the
   CLI's session code inside the daemon, then moving to held sockets, keeps phase 1 honest.
-- **Is `io.github.rahga.x2rock` right**, or does the project want a domain before it has a public
-  interface under a name it cannot easily change?
 - **Activation.** A `.service` file under `dbus-1/services` would let a client start the daemon by
   calling it. The systemd user unit is the supported start today, and two ways to start one daemon
   is one too many unless the D-Bus file just names the unit (`SystemdService=x2rock.service`).
@@ -370,7 +372,7 @@ and § Deliberately never consign search, browse, stations, linking, accounts, `
   calls run in their own spawned async tasks with strict timeouts (e.g., 5–8s). A timed-out service
   query fails only that call, leaving held WebSockets and local playback completely unaffected.
 - **Recommendation:** Rather than excluding service interactions entirely from D-Bus, isolate them on a
-  dedicated interface (e.g. `io.github.rahga.x2rock.MediaService1` or `Directory1` on the root or a child
+  dedicated interface (e.g. `com.rahga.x2rock.MediaService1` or `Directory1` on the root or a child
   object). This preserves process cleanliness while giving sandboxed clients a typed, first-class route.
 
 ### 2. End the "two-bus tango": mirror transport and now-playing on `Group1`
@@ -393,7 +395,7 @@ a cumbersome dual-bus design:
 
 In GNOME and freedesktop environments, D-Bus activation is the standard mechanism to launch user daemons
 on demand.
-- A service definition at `~/.local/share/dbus-1/services/io.github.rahga.x2rock.service` with
+- A service definition at `~/.local/share/dbus-1/services/com.rahga.x2rock.service` with
   `SystemdService=x2rock.service` delegates activation directly to the systemd user manager.
 - This creates no duplicate lifecycle paths: systemd remains the single process manager, but opening
   a front end or logging into a desktop session can start the daemon automatically if it is not already
