@@ -597,6 +597,77 @@ pub async fn metadata(
     parse_items(&body, "getMetadata").map(|page| at_most(page, count))
 }
 
+/// Where a listener left off in something the service keeps a place in - an
+/// audiobook, so far, from Audible. Read from the `positionInformation` the
+/// service puts in `getMetadata` beside the book's chapters.
+///
+/// `id` is the *chapter* to play, not the book, which is not itself playable;
+/// `offset_millis` counts from that chapter's start. Measured, not assumed
+/// (2026-10-06, Dune): a chapter sought to 689,440 and played a minute was
+/// reported back as 756,107 against the player's 756,034 - book-relative it
+/// would have read about 875,000. See "Audible: a book resumes" in
+/// docs/architecture.md.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoint {
+    pub id: String,
+    pub offset_millis: u64,
+}
+
+/// `getMetadata` on a resumable item: where its listener left off, if the
+/// service says, and its first playable leaf - the place to start when it does
+/// not. One call, one item asked for, since a book's chapter list is not
+/// otherwise wanted.
+pub async fn resume_point(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<(Option<ResumePoint>, Option<Item>)> {
+    let body = call(
+        service,
+        token,
+        "getMetadata",
+        &format!(
+            "<id>{}</id><index>0</index><count>1</count>",
+            xml_escape(id)
+        ),
+        refreshed,
+    )
+    .await?;
+    let first = parse_items(&body, "getMetadata")?
+        .0
+        .into_iter()
+        .find(|item| !item.container);
+    Ok((parse_resume_point(&body)?, first))
+}
+
+/// The `positionInformation` in a `getMetadata` reply, or `None` when there is
+/// none - a book never started, or anything that is not resumable at all.
+fn parse_resume_point(body: &str) -> Result<Option<ResumePoint>> {
+    let body = declare_xsi(body);
+    let doc = Document::parse(&body).context("parsing getMetadata response")?;
+    let Some(node) = doc
+        .descendants()
+        .find(|n| n.has_tag_name("positionInformation"))
+    else {
+        return Ok(None);
+    };
+    let text = |tag: &str| {
+        node.children()
+            .find(|c| c.has_tag_name(tag))
+            .and_then(|c| c.text())
+            .map(str::trim)
+    };
+    Ok(text("id")
+        .filter(|id| !id.is_empty())
+        .map(|id| ResumePoint {
+            id: id.to_string(),
+            offset_millis: text("offsetMillis")
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(0),
+        }))
+}
+
 /// A page cut to the `count` that was asked for. `count` is a request, not a
 /// promise: Amazon Music answers a search for 2 with every hit it has - 65 for
 /// "miles davis" (office, 2026-09-29) - and everything downstream, from
@@ -1440,6 +1511,41 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audible's own reply for Dune, as it answered `getMetadata` with a count
+    /// of 1 (2026-10-06): the resume point beside the first chapter.
+    const DUNE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><getMetadataResponse xmlns="http://www.sonos.com/Services/1.1"><getMetadataResult><index>0</index><count>1</count><total>53</total><positionInformation><id>refchapter:B002V1OF70_119953071_com_119000_1795000</id><index>0</index><offsetMillis>756107</offsetMillis></positionInformation><mediaMetadata><id>refchapter:B002V1OF70_119953071_com_0_61000</id><itemType>track</itemType><title>Opening Credits</title><mimeType>audio/x-m4a</mimeType><trackMetadata><canPlay>true</canPlay><canResume>true</canResume><canSeek>true</canSeek><duration>61</duration></trackMetadata></mediaMetadata></getMetadataResult></getMetadataResponse></soap:Body></soap:Envelope>"#;
+
+    #[test]
+    fn a_books_resume_point_is_the_chapter_and_its_offset() {
+        let resume = parse_resume_point(DUNE).unwrap().unwrap();
+        assert_eq!(
+            resume.id,
+            "refchapter:B002V1OF70_119953071_com_119000_1795000"
+        );
+        assert_eq!(resume.offset_millis, 756_107);
+        // And the chapter beside it is an ordinary playable leaf.
+        let (items, total) = parse_items(DUNE, "getMetadata").unwrap();
+        assert_eq!(total, 53);
+        assert_eq!(items[0].title, "Opening Credits");
+        assert!(!items[0].container);
+    }
+
+    #[test]
+    fn no_position_information_is_no_resume_point_and_a_bare_id_offsets_from_zero() {
+        let none = DUNE.replace(
+            "<positionInformation><id>refchapter:B002V1OF70_119953071_com_119000_1795000</id><index>0</index><offsetMillis>756107</offsetMillis></positionInformation>",
+            "",
+        );
+        assert_eq!(parse_resume_point(&none).unwrap(), None);
+        let bare = DUNE.replace("<offsetMillis>756107</offsetMillis>", "");
+        assert_eq!(parse_resume_point(&bare).unwrap().unwrap().offset_millis, 0);
+        let empty = DUNE.replace(
+            "<id>refchapter:B002V1OF70_119953071_com_119000_1795000</id>",
+            "<id></id>",
+        );
+        assert_eq!(parse_resume_point(&empty).unwrap(), None);
+    }
 
     #[test]
     fn an_undeclared_xsi_prefix_is_declared_and_nothing_else_moves() {

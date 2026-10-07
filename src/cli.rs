@@ -541,11 +541,17 @@ pub enum Command {
         #[arg(long)]
         title: Option<String>,
         /// The item's own kind, as `search`/`browse --json` report it in `type`.
-        /// `stream` plays as a stream; anything else goes in the queue, which is
-        /// the only way on-demand service content plays. Omitted, the queue is
-        /// tried first and a refusal falls back to streaming.
+        /// `stream` plays as a stream; `audiobook` resumes where its listener
+        /// left off; anything else goes in the queue, which is the only way
+        /// on-demand service content plays. Omitted, the queue is tried first
+        /// and a refusal falls back to streaming.
         #[arg(long)]
         kind: Option<String>,
+        /// An audiobook from its first chapter, rather than where it was left
+        /// off. Playing it moves the service's saved place to wherever it
+        /// stops, as playing it anywhere would.
+        #[arg(long)]
+        from_start: bool,
     },
     /// Search the internet radio directory: stations from outside Sonos's
     /// catalogue entirely.

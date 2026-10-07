@@ -81,6 +81,43 @@ pub fn save_refreshed_token(
     let _ = creds.save();
 }
 
+/// A play path's refresh: persisted against the household and account the
+/// token names, and the token to use from here on handed back - the refreshed
+/// one, or the original when nothing was refreshed. For the paths that hold no
+/// `Credentials` of their own (`play-item`'s stream and resume), which load one
+/// only when there is something to write.
+pub fn after_refresh(
+    service_id: &str,
+    token: Option<&sonos::smapi::Token>,
+    refreshed: Option<sonos::smapi::RefreshedToken>,
+) -> Option<sonos::smapi::Token> {
+    let Some(new_token) = refreshed else {
+        return token.cloned();
+    };
+    let old = token.cloned().unwrap_or_default();
+    let fresh = sonos::smapi::Token {
+        token: new_token.auth_token.clone(),
+        key: if new_token.private_key.is_empty() {
+            old.key.clone()
+        } else {
+            new_token.private_key.clone()
+        },
+        ..old.clone()
+    };
+    if let Some(household) = old.household.as_deref()
+        && let Ok(mut creds) = credentials::Credentials::load()
+    {
+        save_refreshed_token(
+            &mut creds,
+            household,
+            service_id,
+            old.account.as_deref(),
+            new_token,
+        );
+    }
+    Some(fresh)
+}
+
 /// The token to use for whatever comes right after a call that may have
 /// refreshed it - the refreshed one, persisted along the way, or the original
 /// unchanged. Without this, a `browse`/`search --play` that had to refresh
@@ -1336,6 +1373,7 @@ pub async fn run_browse(
             Some(item.item_type.as_str()),
             &item.id,
             &item.title,
+            false,
         )
         .await;
     }
@@ -1701,6 +1739,7 @@ pub async fn run_search(
             Some(item.item_type.as_str()),
             &item.id,
             &item.title,
+            false,
         )
         .await;
     }
@@ -2125,6 +2164,7 @@ async fn search_everywhere(
             Some(row.item.item_type.as_str()),
             &row.item.id,
             &row.item.title,
+            false,
         )
         .await;
     }

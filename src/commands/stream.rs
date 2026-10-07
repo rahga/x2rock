@@ -11,13 +11,12 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use super::nth;
-use super::services::save_refreshed_token;
 use super::speaker::named_speaker;
 use super::upnp_ip;
 use crate::session::{self, Target};
 use crate::sonos::upnp::Upnp;
 use crate::state::State;
-use crate::{credentials, hint, sonos, stations, streams};
+use crate::{hint, sonos, stations, streams};
 
 /// Whether a stream is starting fresh or replacing one whose URL expired.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,18 +46,8 @@ pub async fn stream_item(
 ) -> Result<()> {
     let mut refreshed = None;
     let uri = sonos::smapi::media_uri(service, token, id, &mut refreshed).await?;
-    if let Some(new_token) = refreshed
-        && let Some(household) = token.and_then(|t| t.household.as_deref())
-        && let Ok(mut creds) = credentials::Credentials::load()
-    {
-        save_refreshed_token(
-            &mut creds,
-            household,
-            &service.id,
-            token.and_then(|t| t.account.as_deref()),
-            new_token,
-        );
-    }
+    // Persisted for next time; this call has already spent the refresh.
+    super::services::after_refresh(&service.id, token, refreshed);
     // A direct stream, not a queued track: the player fetches a URL the service
     // signed, so it neither pauses-and-resumes nor survives that URL ageing out
     // - and when it ages out the room simply goes idle, which reads as a

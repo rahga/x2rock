@@ -398,6 +398,7 @@ rooms; see "Ask before you act".
 | Find a radio station | `x2rock stations "<name>" --json` / `--tag jazz` / `--country GB` / `--play N -r "<Room>"` |
 | Play a search/browse hit | `x2rock search [-s <svc>] <term> --play N -r "<Room>"` — `N` counts the merged list |
 | Play or queue a hit you already have the id for | `x2rock -r "<Room>" play-item -s <svc> <id> --title "<name>" --kind <type>` / `queue-item` (same arguments; adds without playing, refuses a stream) |
+| Resume an audiobook ("carry on with Dune") | `x2rock -r "<Room>" play-item -s Audible <id> --kind audiobook --title "<book>"` — or `search -s Audible "<book>" --play N` — picks up where the listener left off, in any app; add `--from-start` only when asked to start it over. Playing it moves the saved place, so never play a book just to look at it |
 | Queue a whole album or playlist | the same commands with `--kind album` or `--kind playlist` — the player expands it into the queue. An `artist` is refused: it holds albums and playlists rather than tracks, so browse it and queue what is inside |
 | Group rooms | `x2rock -r "<Coordinator>" group <Other> …` |
 | Ungroup / party | `x2rock ungroup <Room>` (positional, no `-r`) / `x2rock -r "<Room>" party` / `x2rock party off` |
