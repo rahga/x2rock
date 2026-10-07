@@ -229,6 +229,7 @@ fn print_queue(queue: &upnp::Queue, current: u32, in_use: bool, json: bool) {
 /// a stream, and **fall back to the session on any refusal**, because a refusal
 /// is the player saying this is not queue material. The reverse fallback is not
 /// possible - `loadStreamUrl` fails *silently*, minutes later, at `IDLE`.
+#[allow(clippy::too_many_arguments)]
 pub async fn play_item(
     session: &session::Session,
     room: Option<&str>,
@@ -237,10 +238,8 @@ pub async fn play_item(
     kind: Option<&str>,
     id: &str,
     title: &str,
+    from_start: bool,
 ) -> Result<()> {
-    // A stream is never queue material, and a service with no type in the
-    // player's list has no cdudn to build - `SA_RINCONNone` is not an account.
-    let streamish = kind.is_some_and(|k| k.eq_ignore_ascii_case("stream"));
     // A container of containers is not queue material and is not a stream
     // either, so neither path fits: falling through would try to stream an
     // artist, which fails silently minutes later at IDLE.
@@ -252,6 +251,107 @@ pub async fn play_item(
             kind.unwrap_or_default()
         );
     }
+    if !from_start && kind.is_some_and(is_resumable) {
+        return play_resumed(session, room, service, token, id, title).await;
+    }
+    play_one(session, room, service, token, kind, id, title).await
+}
+
+/// Whether a kind is something the service keeps the listener's place in, so
+/// playing it means picking up there. An audiobook, so far - Audible's.
+fn is_resumable(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("audiobook")
+}
+
+/// Play a book from where its listener left off: the chapter the service names,
+/// then a seek to the offset into it. Without this a book was an album to the
+/// queue - every chapter, from the first - and the place was lost without a
+/// word, and then overwritten, since the speaker reports position back to the
+/// service as it plays. See "Audible: a book resumes" in docs/architecture.md.
+///
+/// With no place kept (a book never started), the first chapter from its start.
+async fn play_resumed(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    let mut refreshed = None;
+    let (resume, first) = sonos::smapi::resume_point(service, token, id, &mut refreshed)
+        .await
+        .with_context(|| format!("reading where {title:?} was left off"))?;
+    let token = super::services::after_refresh(&service.id, token, refreshed);
+    let (chapter, offset) = match resume {
+        Some(at) => (at.id, at.offset_millis),
+        None => (
+            first
+                .ok_or_else(|| anyhow!("{title:?} has no chapters to play"))?
+                .id,
+            0,
+        ),
+    };
+    // A chapter is an ordinary track: the queue takes it, as it takes any.
+    play_one(
+        session,
+        room,
+        service,
+        token.as_ref(),
+        Some("track"),
+        &chapter,
+        title,
+    )
+    .await?;
+    if offset == 0 {
+        return Ok(());
+    }
+    let target = session::target(&session.groups, room)?;
+    let player = session::coordinator(session, &target).await?;
+    // Sought once it is playing, which is when the measured seek landed; one
+    // sent while the chapter is still buffering has nothing to move yet.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while player
+        .playback_status(&target.group_id)
+        .await?
+        .playback_state
+        .as_deref()
+        != Some("PLAYBACK_STATE_PLAYING")
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    player
+        .seek_to(&target.group_id, offset)
+        .await
+        .with_context(|| {
+            format!(
+                "{title:?} is playing, from the start of the chapter it was left in, but \
+                 could not be moved to where it was left off"
+            )
+        })?;
+    println!(
+        "{} — resumed {} into the chapter",
+        target.name,
+        mmss(Some(std::time::Duration::from_millis(offset)))
+    );
+    Ok(())
+}
+
+/// One playable leaf - a track, a stream, a radio program - by whichever route
+/// takes it: the queue, the room's own source, a stream, `loadContent`.
+async fn play_one(
+    session: &session::Session,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    kind: Option<&str>,
+    id: &str,
+    title: &str,
+) -> Result<()> {
+    // A stream is never queue material, and a service with no type in the
+    // player's list has no cdudn to build - `SA_RINCONNone` is not an account.
+    let streamish = kind.is_some_and(|k| k.eq_ignore_ascii_case("stream"));
     // Whether the queue was refused because the household has UPnP off, rather
     // than because of the item: if nothing below plays it either, that is the
     // reason worth ending on, and the one the person can do something about.
@@ -550,6 +650,7 @@ async fn play_bookmark(
 /// `search --play N` re-runs the search to find the Nth result, which costs a
 /// second round trip and can land on a different item if the service reorders.
 /// Anything holding results already - the bar widget - should come here instead.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_play_item(
     ip: Option<IpAddr>,
     household: Option<&str>,
@@ -558,6 +659,7 @@ pub async fn run_play_item(
     kind: Option<&str>,
     id: &str,
     title: Option<&String>,
+    from_start: bool,
 ) -> Result<()> {
     let (session, chosen, token) = connect_for_service(ip, household, room, service).await?;
     play_item(
@@ -568,6 +670,7 @@ pub async fn run_play_item(
         kind,
         id,
         title.map(String::as_str).unwrap_or(id),
+        from_start,
     )
     .await
 }

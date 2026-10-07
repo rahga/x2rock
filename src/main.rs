@@ -231,6 +231,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref id,
             ref title,
             ref kind,
+            from_start,
         } => {
             return content::run_play_item(
                 cli.ip,
@@ -240,6 +241,7 @@ async fn run(cli: Cli) -> Result<()> {
                 kind.as_deref(),
                 id,
                 title.as_ref(),
+                from_start,
             )
             .await;
         }

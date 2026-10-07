@@ -9480,6 +9480,53 @@ served-directory alternative to the listener for people with a web root, which t
 measurement made less pressing than it looked; and ronor's `--scrape` idea, which is an agent's job
 now rather than a CLI's.
 
+## Audible: a book resumes from `positionInformation`, chapter-relative (measured 2026-10-06)
+
+Audible was added to the home household for this and imported with `link --from-household`; the
+book was Dune (`reftitle:B002V1OF70_com`), played in the Bedroom at volume 2. The shape was first
+captured by x2rocktv (its `parsePositionInformation`, 2026-10-06); what it could not settle - it
+had not played a book - is settled here.
+
+**What a book is.** `search` answers it as `itemType` `audiobook`. Its id is not itself playable;
+`getMetadata` on it lists the chapters as ordinary `track`s (53 for Dune) and carries the
+listener's place beside them:
+
+```xml
+<positionInformation><id>refchapter:B002V1OF70_119953071_com_119000_1795000</id>
+  <index>0</index><offsetMillis>689440</offsetMillis></positionInformation>
+```
+
+A chapter id ends in its own span in book time - `_119000_1795000` is 1:59-29:55, and its
+`duration` (1676s) is exactly that difference. Each chapter carries `canResume`, `canSeek` and
+`canSkip`.
+
+**The offset is chapter-relative.** The chapter played through `play-item` reported a
+`duration_ms` of 1,676,000 - the chapter, not the book - and started at 0. A Control API
+`playback:1 seek` to 689,440 landed at 691,062. After about a minute the player read 756,034 and
+paused; `getMetadata` then answered `offsetMillis` **756,107**, 73ms from the player. Book-relative
+it would have read about 875,000. So resuming is: play the chapter `positionInformation` names,
+seek to `offsetMillis` as given. No arithmetic on the id.
+
+**The speaker reports the position back to Audible itself.** While playing, the resume point
+trailed the player by about 16s (739,096 against 755,052), so it is reported periodically; on
+pause it was exact within a second. A book left off through x2rock is therefore where the Audible
+app, the Sonos app and the next `getMetadata` will pick it up - nothing in x2rock has to write it.
+
+**What x2rock did with a book, and why it was wrong.** `bookmarks::container_holds_tracks`
+counts `audiobook` as a container of tracks, like an album, so `play-item` or `browse --play` on a
+book enqueued every chapter and started at chapter one: the place was lost without a word, and
+playing it then *moved* the service's resume point to the start. The chapter played here went in
+as queue row 13, `x-sonosapi-hls-static:refchapter%3a…?sid=239&…&sn=29`, through the ordinary
+track path, which is the one resume uses.
+
+**Built the same day.** `play_item` sends an `audiobook` to `play_resumed`: one `getMetadata`
+with a count of 1 (`smapi::resume_point`) for the place and the first chapter, the chapter played
+as a `track` through the ordinary path, a wait for `PLAYING`, then `playback:1 seek` to the
+offset. No place kept means the first chapter from its start; `play-item --from-start` takes the
+old route on purpose. Verified in the Dining Room: Dune resumed at 756,107 - the saved place to the
+millisecond - in 3.5s, and Audible held 756,530 after the pause. `search`/`browse --play` resume
+too; `queue-item` on a book still adds every chapter, which is what queueing a book means.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

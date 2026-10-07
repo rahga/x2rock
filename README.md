@@ -492,6 +492,12 @@ media. Do not trust a service's `canPlay` flag — iHeartRadio marks an `artist_
 playable and refuses to play it; what decides is whether the row is a container, which `browse`
 reports.
 
+An **audiobook resumes**. A book (`type` `audiobook`, Audible's) is played from where its listener
+left off: the chapter the service names, sought to the offset into it, whichever controller left
+it there - and the speaker reports the new place back to the service as it plays, so the Audible
+app picks up where x2rock stopped. A book never started begins at its first chapter.
+`play-item … --kind audiobook --from-start` starts one over deliberately.
+
 ### Internet radio
 
 `x2rock stations` searches a community directory — [Radio Browser](https://www.radio-browser.info),
