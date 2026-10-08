@@ -1413,7 +1413,14 @@ impl PickArgs {
 #[derive(Subcommand)]
 pub enum QueueAction {
     /// Remove one track, or an inclusive range like 4-8.
-    Remove { range: String },
+    Remove {
+        range: String,
+        /// The queue version the positions were read at - `version` in
+        /// `queue --json`. Quoted, the player refuses the edit if the queue has
+        /// changed since, rather than removing whatever now sits there.
+        #[arg(long, value_name = "VERSION")]
+        at: Option<String>,
+    },
     /// Remove every track. Sonos keeps no undo for this.
     Clear {
         /// Confirm: clearing a queue cannot be undone.
@@ -1421,7 +1428,13 @@ pub enum QueueAction {
         yes: bool,
     },
     /// Move a track to another position.
-    Move { from: u32, to: u32 },
+    Move {
+        from: u32,
+        to: u32,
+        /// The queue version the positions were read at, as for `remove`.
+        #[arg(long, value_name = "VERSION")]
+        at: Option<String>,
+    },
     /// Save the queue as a Sonos playlist.
     Save { name: String },
     /// List what `queue add` can draw on: saved playlists and favorites.

@@ -146,8 +146,21 @@ pub(crate) fn find_favorite<'a>(favorites: &'a [Favorite], query: &str) -> Resul
     )
 }
 
+/// A refusal of a quoted version, said as what it means: the list the edit was
+/// worked out on is no longer the queue. Anything else passes through.
+fn stale(e: anyhow::Error, at: Option<&str>) -> anyhow::Error {
+    match (at, upnp::Fault::of(&e).and_then(upnp::Fault::upnp_code)) {
+        (Some(at), Some("1028")) => anyhow!(
+            "the queue has changed since version {at} was read, so nothing was edited; \
+             read it again (`x2rock queue --json` reports `version`) and redo the edit"
+        ),
+        _ => e,
+    }
+}
+
 /// `in_use` is the Sonos app's "Queue" versus "Queue (Not In Use)": whether the
-/// group's source is its queue, which an empty queue can still be.
+/// group's source is its queue, which an empty queue can still be. `version` is
+/// the `UpdateID` the list was read at, for `queue remove`/`move --at`.
 fn queue_json(queue: &upnp::Queue, current: u32, in_use: bool) -> serde_json::Value {
     let items: Vec<_> = queue
         .items
@@ -164,7 +177,13 @@ fn queue_json(queue: &upnp::Queue, current: u32, in_use: bool) -> serde_json::Va
             })
         })
         .collect();
-    json!({ "total": queue.total, "current": current, "in_use": in_use, "items": items })
+    json!({
+        "total": queue.total,
+        "current": current,
+        "in_use": in_use,
+        "version": queue.update_id,
+        "items": items,
+    })
 }
 
 fn print_queue(queue: &upnp::Queue, current: u32, in_use: bool, json: bool) {
@@ -588,7 +607,7 @@ async fn enqueue_and_play(
         Err(e) if upnp::Fault::of(&e).is_some() || ApiError::of(&e).is_some() => {
             // Everything that went in comes back out: a container expands to
             // many rows, and taking only the last one left the rest behind.
-            if let Err(cleanup) = upnp.remove_range(queued.first, queued.added).await {
+            if let Err(cleanup) = upnp.remove_range(queued.first, queued.added, None).await {
                 eprintln!(
                     "x2rock: could not take the unplayable rows back out of {}'s queue \
                      ({cleanup:#}); they start at position {}",
@@ -1616,13 +1635,14 @@ pub async fn queue(
         // Changes report what the queue became rather than what was
         // asked for, and read the length cheaply rather than paging the
         // whole queue back just to count it.
-        Some(QueueAction::Remove { range }) => {
+        Some(QueueAction::Remove { range, at }) => {
             let (start, count) = parse_range(&range)?;
-            if count == 1 {
-                upnp.remove_track(start).await?;
-            } else {
-                upnp.remove_range(start, count).await?;
-            }
+            let at = at.as_deref();
+            let removed = match count {
+                1 => upnp.remove_track(start, at).await,
+                _ => upnp.remove_range(start, count, at).await,
+            };
+            removed.map_err(|e| stale(e, at))?;
             let left = upnp.queue_len().await?;
             if json {
                 println!(
@@ -1646,9 +1666,12 @@ pub async fn queue(
                 println!("{room:<24} queue cleared");
             }
         }
-        Some(QueueAction::Move { from, to }) => {
+        Some(QueueAction::Move { from, to, at }) => {
             ensure!(from >= 1 && to >= 1, "queue tracks are numbered from 1");
-            upnp.move_track(from, to).await?;
+            let at = at.as_deref();
+            upnp.move_track(from, to, at)
+                .await
+                .map_err(|e| stale(e, at))?;
             if json {
                 println!("{}", json!({ "room": room, "from": from, "to": to }));
             } else {
@@ -1889,7 +1912,8 @@ mod tests {
         let q = queue_json(&queue, 0, false);
         let mut keys: Vec<&str> = q.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["current", "in_use", "items", "total"]);
+        assert_eq!(keys, ["current", "in_use", "items", "total", "version"]);
+        assert_eq!(q["version"], json!("1"));
         assert_eq!(q["in_use"], json!(false));
         assert_eq!(q["current"], json!(0));
         assert_eq!(q["items"][0]["current"], json!(false));

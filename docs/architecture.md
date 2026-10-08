@@ -9591,6 +9591,25 @@ The same `replay "Happy Radio"` now keeps pressing until Saavn plays (4.8s); `re
 over itself takes as long as before (4.3-5.0s both ways). A `loadContent` the player never
 answers is no longer an error either: judged by the same check, after x2rocktv's e4b2848.
 
+**The pushed `queueVersion` cannot stand in for the `UpdateID`, as value or as trigger.** "Findings
+from x2rocktv" above wondered whether `queue_version_fetch`'s browse per playback event was
+unneeded where the player pushes a version. Measured on Media Room while it played a Sonos Radio
+station: an add and a remove left `playbackStatus.queueVersion` at `28`, while the `UpdateID` went
+168 to 170. An edit to a queue that is not the room's source does not move the pushed version, so
+the fetch stays on every playback event. What was wrong was `apply_playback` writing the pushed
+value into the same field the fetch fills: on firmware that sends it, `x2rock:queueVersion`
+alternated between the two counts on every event, and each change re-read the widget's queue. It
+now carries the `UpdateID` only (172 to 184 across seven edits, with no other value between).
+
+**Queue edits quote the version their positions came from.** Every `remove`/`move` read a fresh
+`UpdateID` immediately before sending it - one extra browse, and a version that always matches, so
+the player's 1028 for a stale queue could never fire. `queue --json` now reports `version`, the
+`UpdateID` of its first page, and `remove`/`move --at VERSION` quote it; without `--at` the fresh
+read stands, there being no list to be stale against. Measured: `move 6 5 --at 164` after two adds
+(now 166) was refused with nothing moved; `--at 166` moved it. The widget quotes the version of the
+list it shows, and its refusal re-reads the list, as `docs/dbus-interface.md` planned for
+`Group1`. `clear` takes no version: `RemoveAllTracksFromQueue` has no `UpdateID` argument.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

@@ -106,7 +106,7 @@ the confirm-step after a play. It is a **subset** of a `status` entry: `volume`,
 `bookmarks --json` is a bare array of `{id, name, type, service, description, art_url}`.
 `accounts --json` is a bare array of `{service, service_id, account_id, nickname, linked,
 household}` — see "Linking a music service". `queue --json` is an **object**:
-`{"total": <n>, "current": <index>, "in_use": <bool>, "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
+`{"total": <n>, "current": <index>, "in_use": <bool>, "version": "<UpdateID>", "items": [{"index","title","artist","album","duration_ms","art_url","current"}]}`
 — indices are 1-based, and `play N` plays item `N`. **`in_use` is whether the queue is the group's
 source** — the Sonos app's "Queue" versus "Queue (Not In Use)". When it is `false` the group is on a
 stream, TV or line-in, `current` is `0` and no item is current, but the items are still listed and
@@ -114,6 +114,10 @@ stream, TV or line-in, `current` is `0` and no item is current, but the items ar
 `in_use: true`). A change to the queue reports what it became rather than the whole queue:
 `queue add --json` gives `{room, added, source, total}`, `queue remove` `{room, removed, total}`,
 `queue clear` `{room, total}`, `queue move` `{room, from, to}` and `queue save` `{room, name, id}`.
+**Quote `version` when editing by position from a list you read.** `queue remove 3 --at <version>`
+and `queue move 5 2 --at <version>` are refused, with nothing changed, if the queue has moved since
+that list was read (someone else's edit renumbers the rows); without `--at` the edit applies to
+whatever sits at that position now. On that refusal, read the queue again and redo the edit.
 
 ## Grouping — how `-r` resolves once rooms are joined
 

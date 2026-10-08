@@ -1793,16 +1793,28 @@ impl Upnp {
 
     /// The queue's current version, read cheaply.
     ///
-    /// Every mutation asks for this immediately beforehand rather than making
-    /// callers carry one around: a version fetched a moment ago is the whole
-    /// point of the field, and one carried across a user's deliberations is not.
+    /// What a mutation quotes when its caller has no version of its own. A
+    /// version read a moment ago always matches, so the player's stale-queue
+    /// refusal can never fire on it; a caller acting on a list it showed
+    /// someone passes the version that list was read at instead.
     pub async fn update_id(&self) -> Result<String> {
         Ok(self.browse_queue(0, 1).await?.update_id)
     }
 
-    /// Drop one track, by its 1-based queue position.
-    pub async fn remove_track(&self, index: u32) -> Result<()> {
-        let update_id = self.update_id().await?;
+    /// The version a mutation quotes: `at`, the one the caller's list was read
+    /// at, when it has one - so a queue someone else has changed since is
+    /// refused with 1028 rather than edited by position - else a fresh read,
+    /// which can only ever match.
+    async fn quoted(&self, at: Option<&str>) -> Result<String> {
+        match at {
+            Some(at) => Ok(at.to_owned()),
+            None => self.update_id().await,
+        }
+    }
+
+    /// Drop one track, by its 1-based queue position. `at`: see [`Self::quoted`].
+    pub async fn remove_track(&self, index: u32, at: Option<&str>) -> Result<()> {
+        let update_id = self.quoted(at).await?;
         self.soap(
             Service::AvTransport,
             "RemoveTrackFromQueue",
@@ -1818,8 +1830,8 @@ impl Upnp {
 
     /// Drop `count` tracks from `start`. The player does the whole range itself,
     /// so a half-removed range is not a state this can leave behind.
-    pub async fn remove_range(&self, start: u32, count: u32) -> Result<()> {
-        let update_id = self.update_id().await?;
+    pub async fn remove_range(&self, start: u32, count: u32, at: Option<&str>) -> Result<()> {
+        let update_id = self.quoted(at).await?;
         self.soap(
             Service::AvTransport,
             "RemoveTrackRangeFromQueue",
@@ -1846,8 +1858,8 @@ impl Upnp {
     }
 
     /// Move the track at `from` so that it sits at `to`, both 1-based.
-    pub async fn move_track(&self, from: u32, to: u32) -> Result<()> {
-        let update_id = self.update_id().await?;
+    pub async fn move_track(&self, from: u32, to: u32, at: Option<&str>) -> Result<()> {
+        let update_id = self.quoted(at).await?;
         self.soap(
             Service::AvTransport,
             "ReorderTracksInQueue",
