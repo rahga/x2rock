@@ -912,23 +912,68 @@ pub struct RatingsMatch {
     pub ratings: Vec<Rating>,
 }
 
+/// What a [`Rating`] does, whatever the service calls it.
+///
+/// Two shapes are on record. Thumbs (Pandora, iHeartRadio): `THUMBS_UP_*`
+/// and `THUMBS_DOWN_*`. A heart and a ban (Deezer): `SAVE_TRACK` adds the
+/// track to the listener's favourites, `DELETE_TRACK` takes it back out, and
+/// `SKIP_TRACK` - "Add to Dislike tracks" in Deezer's own strings, declared
+/// `AutoSkip="ALWAYS"` - is the ban. A heart is an up and a ban a down, so the
+/// one vocabulary covers both; only taking a favourite back has no thumbs
+/// counterpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RatingKind {
+    Up,
+    Down,
+    Unfavorite,
+}
+
+impl Rating {
+    /// Which [`RatingKind`] this is, read off [`Rating::string_id`] - the only
+    /// signal a service gives - or `None` for a string no service has been
+    /// seen to use.
+    pub fn kind(&self) -> Option<RatingKind> {
+        let id = self.string_id.to_uppercase();
+        if id.contains("UP") || id.starts_with("SAVE") {
+            Some(RatingKind::Up)
+        } else if id.contains("DOWN") || id.starts_with("SKIP") {
+            Some(RatingKind::Down)
+        } else if id.starts_with("DELETE") {
+            Some(RatingKind::Unfavorite)
+        } else {
+            None
+        }
+    }
+}
+
 impl RatingsMatch {
-    /// The `Rating` a caller means by "up" or "down" - matched on
-    /// [`Rating::string_id`], the only signal a service gives for which is
-    /// which.
+    /// The ratings offered for a track whose `propname` reads `value` - its
+    /// rating state - or `None` if no row of the map is about that state.
+    pub fn offered<'a>(
+        matches: &'a [RatingsMatch],
+        propname: &str,
+        value: &str,
+    ) -> Option<&'a [Rating]> {
+        matches
+            .iter()
+            .find(|m| m.propname == propname && m.value == value)
+            .map(|m| m.ratings.as_slice())
+    }
+
+    /// The `Rating` of `kind` offered in that state, if there is one: a
+    /// Deezer track already in the favourites offers no `Up`, only
+    /// `Unfavorite` and `Down`. `rate` reads [`Self::offered`] itself, to say
+    /// what was offered when this would be `None`; the tests ask this.
+    #[cfg(test)]
     pub fn find<'a>(
         matches: &'a [RatingsMatch],
         propname: &str,
         value: &str,
-        up: bool,
+        kind: RatingKind,
     ) -> Option<&'a Rating> {
-        let word = if up { "UP" } else { "DOWN" };
-        matches
+        Self::offered(matches, propname, value)?
             .iter()
-            .find(|m| m.propname == propname && m.value == value)?
-            .ratings
-            .iter()
-            .find(|r| r.string_id.to_uppercase().contains(word))
+            .find(|r| r.kind() == Some(kind))
     }
 }
 
@@ -2533,15 +2578,17 @@ mod tests {
         // caller that cached "5 means up" from one track would send the
         // wrong id on the next.
         assert_eq!(
-            RatingsMatch::find(&matches, "unselected", "0", true).map(|r| r.id.clone()),
+            RatingsMatch::find(&matches, "unselected", "0", RatingKind::Up).map(|r| r.id.clone()),
             Some("555".into())
         );
         assert_eq!(
-            RatingsMatch::find(&matches, "thumbs_down_selected", "1", true).map(|r| r.id.clone()),
+            RatingsMatch::find(&matches, "thumbs_down_selected", "1", RatingKind::Up)
+                .map(|r| r.id.clone()),
             Some("55".into())
         );
         assert_eq!(
-            RatingsMatch::find(&matches, "thumbs_up_selected", "5", true).map(|r| r.id.clone()),
+            RatingsMatch::find(&matches, "thumbs_up_selected", "5", RatingKind::Up)
+                .map(|r| r.id.clone()),
             Some("5".into())
         );
     }
@@ -2549,9 +2596,53 @@ mod tests {
     #[test]
     fn find_reads_direction_from_the_string_id_not_position() {
         let matches = parse_ratings_map(IHEART_RATINGS).unwrap();
-        let down = RatingsMatch::find(&matches, "unselected", "0", false).unwrap();
+        let down = RatingsMatch::find(&matches, "unselected", "0", RatingKind::Down).unwrap();
         assert_eq!(down.id, "111");
         assert!(down.string_id.to_uppercase().contains("DOWN"));
+    }
+
+    /// Deezer's `NowPlayingRatings`, as its presentation map publishes it
+    /// (version 301, 2026-10-08), icons dropped.
+    const DEEZER_RATINGS: &str = r#"<Presentation>
+        <PresentationMap type="NowPlayingRatings">
+            <Match propname="ISFAVORITE" value="0">
+                <Ratings>
+                    <Rating AutoSkip="ALWAYS" Id="3" StringId="SKIP_TRACK" OnSuccessStringId="SKIP_TRACK_SUCCESS"/>
+                    <Rating AutoSkip="NEVER" Id="1" StringId="SAVE_TRACK" OnSuccessStringId="SAVE_TRACK_SUCCESS"/>
+                </Ratings>
+            </Match>
+            <Match propname="ISFAVORITE" value="1">
+                <Ratings>
+                    <Rating AutoSkip="ALWAYS" Id="3" StringId="SKIP_TRACK" OnSuccessStringId="SKIP_TRACK_SUCCESS"/>
+                    <Rating AutoSkip="NEVER" Id="0" StringId="DELETE_TRACK" OnSuccessStringId="DELETE_TRACK_SUCCESS"/>
+                </Ratings>
+            </Match>
+        </PresentationMap>
+    </Presentation>"#;
+
+    /// A heart is an up and a ban a down - and a heart already given offers
+    /// no second one, only taking it back.
+    #[test]
+    fn deezer_s_heart_and_ban_read_as_up_and_down() {
+        let matches = parse_ratings_map(DEEZER_RATINGS).unwrap();
+        let id = |value, kind| {
+            RatingsMatch::find(&matches, "ISFAVORITE", value, kind).map(|r| r.id.as_str())
+        };
+        assert_eq!(id("0", RatingKind::Up), Some("1"));
+        assert_eq!(id("0", RatingKind::Down), Some("3"));
+        assert_eq!(id("0", RatingKind::Unfavorite), None);
+        assert_eq!(id("1", RatingKind::Up), None);
+        assert_eq!(id("1", RatingKind::Unfavorite), Some("0"));
+        assert_eq!(id("1", RatingKind::Down), Some("3"));
+    }
+
+    #[test]
+    fn a_rating_string_no_service_uses_has_no_kind() {
+        let odd = Rating {
+            id: "9".into(),
+            string_id: "SHARE_TRACK".into(),
+        };
+        assert_eq!(odd.kind(), None);
     }
 
     #[test]
@@ -2561,7 +2652,7 @@ mod tests {
         // all, so nothing here matches - no special-casing "is this Live"
         // needed anywhere in this function.
         let matches = parse_ratings_map(IHEART_RATINGS).unwrap();
-        assert!(RatingsMatch::find(&matches, "some_other_property", "1", true).is_none());
+        assert!(RatingsMatch::find(&matches, "some_other_property", "1", RatingKind::Up).is_none());
     }
 
     #[test]

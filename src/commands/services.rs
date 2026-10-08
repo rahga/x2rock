@@ -515,17 +515,47 @@ pub async fn run_rate(
     .await?;
     let token = use_refreshed_token(&mut linked, &service.id, token, refreshed);
 
-    let up = direction == RateDirection::Up;
-    let chosen = properties
+    // Two different refusals, told apart: no rating state at all (a track the
+    // service does not rate), and a state that does not offer this one (a
+    // Deezer track already in the favourites has no second heart to give).
+    // One message for both sent a person after the wrong cause.
+    let want = direction.kind();
+    let offered: Vec<&sonos::smapi::Rating> = properties
         .iter()
-        .find_map(|(propname, value)| {
-            sonos::smapi::RatingsMatch::find(&ratings, propname, value, up)
+        .filter_map(|(propname, value)| {
+            sonos::smapi::RatingsMatch::offered(&ratings, propname, value)
         })
+        .flatten()
+        .collect();
+    ensure!(
+        !offered.is_empty(),
+        "{} did not report a rating state for the current track, so it cannot be rated \
+         right now.",
+        service.name
+    );
+    let chosen = offered
+        .iter()
+        .copied()
+        .find(|r| r.kind() == Some(want))
         .ok_or_else(|| {
+            let mut can: Vec<&str> = offered
+                .iter()
+                .filter_map(|r| r.kind())
+                .map(rate_word)
+                .collect();
+            can.dedup();
             anyhow!(
-                "{} did not report a rating state for the current track, so it cannot be rated \
-                 right now.",
-                service.name
+                "{} does not offer `rate {}` for this track right now; it offers {}.",
+                service.name,
+                rate_word(want),
+                match can.is_empty() {
+                    true => "nothing x2rock can name".to_string(),
+                    false => can
+                        .iter()
+                        .map(|w| format!("`rate {w}`"))
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                }
             )
         })?;
 
@@ -554,13 +584,14 @@ pub async fn run_rate(
             }
         };
 
-    let word = if up { "up" } else { "down" };
+    let word = rate_word(want);
     if json {
         println!(
             "{}",
             json!({
                 "service": service.name,
                 "rating": word,
+                "action": chosen.string_id,
                 "should_skip": result.should_skip,
                 "skipped": skipped,
                 "message": result.message_string_id,
@@ -574,9 +605,32 @@ pub async fn run_rate(
         } else {
             ""
         };
-        println!("Rated {word} on {}{skip_note}", service.name);
+        println!("{} on {}{skip_note}", rate_done(chosen), service.name);
     }
     Ok(())
+}
+
+/// A [`RatingKind`](sonos::smapi::RatingKind) as `rate` spells it.
+fn rate_word(kind: sonos::smapi::RatingKind) -> &'static str {
+    use sonos::smapi::RatingKind;
+    match kind {
+        RatingKind::Up => "up",
+        RatingKind::Down => "down",
+        RatingKind::Unfavorite => "unfavorite",
+    }
+}
+
+/// What a landed rating did, in the service's terms: a heart service saves a
+/// favourite where a thumbs one rates up.
+fn rate_done(rating: &sonos::smapi::Rating) -> &'static str {
+    let id = rating.string_id.to_uppercase();
+    match rating.kind() {
+        _ if id.starts_with("SAVE") => "Added to favorites",
+        _ if id.starts_with("SKIP") => "Added to disliked tracks",
+        Some(sonos::smapi::RatingKind::Unfavorite) => "Removed from favorites",
+        Some(sonos::smapi::RatingKind::Down) => "Rated down",
+        _ => "Rated up",
+    }
 }
 
 /// `x2rock link`: the device-link flow, end to end.

@@ -373,7 +373,7 @@ rooms; see "Ask before you act".
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
-| Rate the current track up/down | `x2rock -r <Room> rate up\|down [--refresh] [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations); see "Rating a track" |
+| Rate the current track up/down, like/dislike, heart it or take a heart back | `x2rock -r <Room> rate up\|down\|unfavorite [--refresh] [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations, Deezer's heart and dislike); see "Rating a track" |
 | Sleep timer | `x2rock sleep --json` (read) / `x2rock sleep 30m` / `x2rock sleep off` |
 | Silence an alarm that is sounding | `x2rock -r <Room> snooze [9m] [--json]` - nine minutes by default; it *acts* rather than reads |
 | Firmware check (read-only) | `x2rock update --json` |
@@ -642,7 +642,16 @@ systems on the same network (test households included).
   `X2ROCK_HOUSEHOLD`. It is ignored alongside an explicit `--ip`, which already names one player
   unambiguously.
 
-## Rating a track: `x2rock -r <Room> rate up|down`
+## Rating a track: `x2rock -r <Room> rate up|down|unfavorite`
+
+**Two shapes of rating, one vocabulary.** Thumbs services (Pandora, iHeartRadio) offer up and down.
+Deezer offers a heart and a ban instead: `rate up` (also `like`, `love`, `heart`, `favorite`) adds
+the track to the listener's Deezer favourites, `rate down` (also `dislike`, `ban`) adds it to their
+disliked tracks *and skips it*, and `rate unfavorite` (also `unlike`) takes a heart back. A track
+already hearted offers no second heart: the refusal names what *is* offered (`rate down` and `rate
+unfavorite`), so read it rather than retrying. `--json` adds `action`, the service's own name for
+what was sent (`SAVE_TRACK`, `THUMBS_UP_TIP`, ...). **Dislike is not undoable from here**; confirm
+before sending `rate down` on Deezer unless the person asked for exactly that.
 
 **Only a Pandora-shaped radio feature offers this, and only on a track that has one.** A **Live**
 broadcast station cannot be rated **at all**, structurally - not "usually," not "rarely," not a

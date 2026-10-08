@@ -106,7 +106,7 @@ bridged through the wired one. `--redact` masks serials, addresses and uuids for
 | `x2rock favorite "<name or id>"` | play a favorite — **the one way to start a room that has nothing queued** |
 | `x2rock playlist "<name or id>"` | play a saved Sonos playlist, replacing the queue |
 | `x2rock repeat [all\|one\|off]` · `shuffle [on\|off]` · `crossfade [on\|off]` | play modes; bare, they read |
-| `x2rock -r <Room> rate up\|down [--refresh]` | thumbs up/down where the service offers it (Pandora-style radio, iHeartRadio Custom Stations) |
+| `x2rock -r <Room> rate up\|down\|unfavorite [--refresh]` | thumbs up/down where the service offers it (Pandora-style radio, iHeartRadio Custom Stations); on Deezer, `up` adds to the favourites, `down` to the disliked tracks, and `unfavorite` takes a favourite back |
 | `x2rock sleep [30m\|off]` | the sleep timer; bare, it reads |
 | `x2rock -r <Room> tv` | switch a soundbar to its TV input |
 | `x2rock -r <Room> chime` · `notify "<url>" [--volume N]` | a chime or your own clip, ducked over whatever is playing |
