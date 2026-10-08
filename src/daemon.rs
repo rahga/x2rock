@@ -428,7 +428,7 @@ async fn follow(
     // room's events for that long. One fetch per group in flight at a time - a
     // burst of playback events collapses onto it - see `apply`.
     let (versions, mut fetched) = mpsc::unbounded_channel::<(String, Option<String>)>();
-    let mut fetching: HashSet<String> = HashSet::new();
+    let mut fetching = QueueFetches::default();
 
     loop {
         let event = tokio::select! {
@@ -439,12 +439,18 @@ async fn follow(
             done = fetched.recv() => {
                 // Cannot close: `versions` lives on this stack.
                 let Some((group_id, version)) = done else { continue };
-                fetching.remove(&group_id);
+                let again = fetching.done(&group_id);
+                let room = rooms.iter().find(|s| s.imp().group_id == group_id);
                 if let Some(version) = version
-                    && let Some(room) = rooms.iter().find(|s| s.imp().group_id == group_id)
+                    && let Some(room) = room
                     && let Some(property) = room.imp().apply_queue_version(version)
                 {
                     announce(room, vec![property]).await;
+                }
+                // An event arrived while that fetch was out, so its answer may
+                // already be old: one more, which every event since folds into.
+                if again && let Some(room) = room {
+                    fetching.want(room.imp(), &versions);
                 }
                 continue;
             }
@@ -879,11 +885,62 @@ fn still_published(published: &[Published], groups: &Groups) -> bool {
         })
 }
 
+/// The queue-version fetches out, per group, and which groups have had an
+/// event since theirs went out.
+///
+/// One fetch per group in flight: the events of a burst all want the same
+/// answer. But an event that lands while one is out can mean a queue change
+/// that fetch read too early to see, and it used to be dropped - the old
+/// version was published and nothing asked again until some later event. So
+/// it is remembered, and the fetch's return sends exactly one more.
+#[derive(Default)]
+struct QueueFetches {
+    in_flight: HashSet<String>,
+    dirty: HashSet<String>,
+}
+
+impl QueueFetches {
+    /// A playback event says the version may have moved: fetch it now, or if
+    /// one is already out, once more when it returns.
+    fn want(
+        &mut self,
+        player: &RoomPlayer,
+        versions: &mpsc::UnboundedSender<(String, Option<String>)>,
+    ) {
+        if !self.start(&player.group_id) {
+            return;
+        }
+        let fetch = player.queue_version_fetch();
+        let versions = versions.clone();
+        let group_id = player.group_id.clone();
+        tokio::spawn(async move {
+            let _ = versions.send((group_id, fetch.await));
+        });
+    }
+
+    /// Whether to send a fetch for `group` now: not while one is out, which
+    /// marks it to go again instead.
+    fn start(&mut self, group: &str) -> bool {
+        if self.in_flight.contains(group) {
+            self.dirty.insert(group.to_owned());
+            return false;
+        }
+        self.in_flight.insert(group.to_owned());
+        true
+    }
+
+    /// A fetch for `group` is back. Whether another is owed.
+    fn done(&mut self, group: &str) -> bool {
+        self.in_flight.remove(group);
+        self.dirty.remove(group)
+    }
+}
+
 async fn apply(
     server: &Server<RoomPlayer>,
     event: &Arc<Event>,
     versions: &mpsc::UnboundedSender<(String, Option<String>)>,
-    fetching: &mut HashSet<String>,
+    fetching: &mut QueueFetches,
 ) -> Result<()> {
     let player = server.imp();
     let body = &event.body;
@@ -919,15 +976,7 @@ async fn apply(
             // answers, as a Metadata of its own that supersedes the one built
             // here. One fetch per group at a time: the events of a burst all
             // want the same answer.
-            if !fetching.contains(&player.group_id) {
-                fetching.insert(player.group_id.clone());
-                let fetch = player.queue_version_fetch();
-                let versions = versions.clone();
-                let group_id = player.group_id.clone();
-                tokio::spawn(async move {
-                    let _ = versions.send((group_id, fetch.await));
-                });
-            }
+            fetching.want(player, versions);
             properties
         }
         "playbackMetadata:1" => {
@@ -996,6 +1045,21 @@ fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An event during a fetch is answered by exactly one more fetch, however
+    /// many arrive; without one, none follows.
+    #[test]
+    fn an_event_during_a_fetch_owes_one_more() {
+        let mut fetches = QueueFetches::default();
+        assert!(fetches.start("g"));
+        assert!(!fetches.start("g"));
+        assert!(!fetches.start("g"), "a burst folds into one");
+        assert!(fetches.done("g"), "owed one more");
+        assert!(fetches.start("g"));
+        assert!(!fetches.done("g"), "nothing arrived during that one");
+        assert!(fetches.start("g"), "idle again");
+        assert!(fetches.start("h"), "groups are independent");
+    }
 
     /// A rename moves no id and must still republish; an unchanged snapshot
     /// must not.
