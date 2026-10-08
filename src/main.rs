@@ -493,6 +493,10 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
     // Players, not rooms - so this reads the topology rather than `getGroups`,
     // which has no word for a Sub. One player answers for the whole household,
     // and each one is then asked to describe itself.
+    if let Command::Security { json } = &cli.command {
+        return emit(&household::security(session, room).await?, *json);
+    }
+
     if let Command::System { json, redact } = &cli.command {
         return household::system(session, *json, *redact).await;
     }
@@ -752,6 +756,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Alarm { .. }
         | Command::Update { .. }
         | Command::System { .. }
+        | Command::Security { .. }
         | Command::Battery { .. }
         | Command::Group { .. }
         | Command::Scene { .. }

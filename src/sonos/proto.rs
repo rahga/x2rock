@@ -938,8 +938,8 @@ pub struct PlayerSettings {
 /// player-scoped and answered with no `userId` or `locationId` (verified on the
 /// office One SL, 2026-09-28). Account > Privacy and Security > Connection
 /// Security in the Sonos app; see docs/architecture.md for which switch is
-/// which. Only UPnP is read: Authentication already announces itself as a
-/// refusal, and Guest Access touches nothing x2rock does.
+/// which. The daemon acts on UPnP alone; all three are shown by `x2rock
+/// security`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecuritySettings {
@@ -956,6 +956,14 @@ pub struct SecurityAttributes {
     /// queue, alarms, tone, the sleep timer and the TV input with it.
     #[serde(rename = "allowInsecureUPnP")]
     pub allow_insecure_upnp: bool,
+    /// Authentication, inverted: `true` is the app's "Authentication: Off".
+    /// On, a connection like this one is refused before it could read this.
+    #[serde(rename = "allowUnauthenticatedControl", default)]
+    pub allow_unauthenticated_control: Option<bool>,
+    /// Guest Access: whether people on the network without a Sonos account
+    /// may control the system from the app.
+    #[serde(rename = "allowGuestAccess", default)]
+    pub allow_guest_access: Option<bool>,
 }
 
 /// An `effectiveSettings:1` `settingsChanged` event: which settings groups

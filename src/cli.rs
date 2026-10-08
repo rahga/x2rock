@@ -219,6 +219,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The household's Connection Security switches - Authentication, UPnP
+    /// and Guest Access - and what each means for x2rock.
+    ///
+    /// **Read-only.** Change them in the Sonos app: Account > Privacy and
+    /// Security > Connection Security. UPnP off withdraws the queue, alarms,
+    /// the sleep timer, tone and the TV input handover; Authentication on
+    /// refuses x2rock outright (so it can only ever be read as off here);
+    /// Guest Access touches nothing x2rock does.
+    Security {
+        /// `{authentication, upnp, guest_access}`, each `true` for the app's
+        /// "On" and `null` when the player did not say.
+        #[arg(long)]
+        json: bool,
+    },
     /// Every speaker in the household: model, firmware, hardware and bonding.
     ///
     /// The Sonos apps' "About My System", and the one command that speaks in
@@ -1552,6 +1566,7 @@ impl Command {
             | Command::Party { json, .. }
             | Command::Art { json, .. }
             | Command::Scene { json, .. }
+            | Command::Security { json }
             | Command::Tv { json } => *json,
             Command::Desktop {
                 action: Some(DesktopAction::Status { json }),

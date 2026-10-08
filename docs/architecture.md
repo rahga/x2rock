@@ -9651,6 +9651,13 @@ handover. So it is the fallback only when the 403 is the switch being off and th
 the bar. Not exercised against hardware on 2026-10-08: the office household, the only one reachable,
 has no soundbar.
 
+**All three Connection Security switches are shown, by `x2rock security`.** The daemon reads only
+UPnP, because only UPnP changes what it does; the review asked for the other two. They are
+displayed rather than acted on: Authentication on refuses x2rock before the read could happen, so
+it can only ever read Off here, and Guest Access touches nothing x2rock does. The command is the
+answer to "is UPnP on?" without the Sonos app. Media Room: Authentication Off, UPnP On, Guest
+Access On.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
