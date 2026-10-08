@@ -80,6 +80,7 @@ table are the ones worth knowing by heart.
 | `x2rock now [--json]` | what one room is playing |
 | `x2rock status [--json] [--full]` | **every room in one call**: now-playing, volume, grouping, TV — the snapshot to start from |
 | `x2rock system [--json] [--redact]` | every *speaker*: model, firmware, hardware, bonding, and how it is connected |
+| `x2rock security [--json]` | the app's Connection Security switches — Authentication, UPnP, Guest Access — and what each means here |
 | `x2rock update [--json]` | what firmware each speaker has and whether one is offered — read-only |
 | `x2rock households [--json]` | every Sonos household on this network; only matters with more than one |
 | `x2rock discover` | scan the local subnet once and remember what it finds |

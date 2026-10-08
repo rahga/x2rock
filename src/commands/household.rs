@@ -491,6 +491,64 @@ pub async fn update(session: &Session, json: bool) -> Result<()> {
 
 /// `x2rock system`: every player with its model, role, bonding and firmware -
 /// the About My System readout. `redact` masks serials, ips and uuids.
+/// `x2rock security`: the Connection Security switches, as the Sonos app
+/// shows them. Each is `true` for the app's "On".
+#[derive(Debug, Serialize)]
+pub struct SecurityOutcome {
+    pub authentication: Option<bool>,
+    pub upnp: bool,
+    pub guest_access: Option<bool>,
+}
+
+impl Report for SecurityOutcome {
+    fn text(&self) -> String {
+        let word = |on: Option<bool>| match on {
+            Some(true) => "On ",
+            Some(false) => "Off",
+            None => "?  ",
+        };
+        let upnp = match self.upnp {
+            true => "the queue, alarms, sleep timer, tone and TV input work",
+            false => "the queue, alarms, sleep timer, tone and TV input are unavailable",
+        };
+        [
+            format!(
+                "Authentication  {}  x2rock can control the system",
+                word(self.authentication)
+            ),
+            format!("UPnP            {}  {upnp}", word(Some(self.upnp))),
+            format!(
+                "Guest Access    {}  nothing x2rock does depends on it",
+                word(self.guest_access)
+            ),
+            "Change them in the Sonos app: Account > Privacy and Security > Connection Security."
+                .to_string(),
+        ]
+        .join("\n")
+    }
+}
+
+/// Read the switches off the coordinator of the default group: they are the
+/// household's, and every player applies the same ones.
+pub async fn security(session: &Session, room: Option<&str>) -> Result<SecurityOutcome> {
+    let target = session::target(&session.groups, room)?;
+    let player = session::coordinator(session, &target).await?;
+    let read = player.security_settings(&target.coordinator_id).await?;
+    Ok(SecurityOutcome::from(read.attributes))
+}
+
+impl From<crate::sonos::proto::SecurityAttributes> for SecurityOutcome {
+    fn from(read: crate::sonos::proto::SecurityAttributes) -> Self {
+        Self {
+            // Inverted: the field allows unauthenticated control, the switch
+            // requires authentication.
+            authentication: read.allow_unauthenticated_control.map(|allowed| !allowed),
+            upnp: read.allow_insecure_upnp,
+            guest_access: read.allow_guest_access,
+        }
+    }
+}
+
 pub async fn system(session: &Session, json: bool, redact: bool) -> Result<()> {
     let any = session
         .groups
@@ -871,6 +929,29 @@ pub async fn ungroup(session: &Session, room: &str) -> Result<GroupOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The switches read as the app shows them - Authentication inverted from
+    /// the field that allows going without it - and a field the player did not
+    /// send stays unknown rather than reading as off.
+    #[test]
+    fn the_security_switches_read_as_the_app_shows_them() {
+        let read = |body: serde_json::Value| -> SecurityOutcome {
+            serde_json::from_value::<crate::sonos::proto::SecuritySettings>(body)
+                .unwrap()
+                .attributes
+                .into()
+        };
+        let all = read(serde_json::json!({"attributes": {
+            "allowUnauthenticatedControl": true, "allowInsecureUPnP": false, "allowGuestAccess": true
+        }}));
+        assert_eq!(
+            (all.authentication, all.upnp, all.guest_access),
+            (Some(false), false, Some(true))
+        );
+        assert!(all.text().contains("UPnP            Off  the queue"));
+        let bare = read(serde_json::json!({"attributes": {"allowInsecureUPnP": true}}));
+        assert_eq!((bare.authentication, bare.guest_access), (None, None));
+    }
 
     #[test]
     fn a_bond_says_something_only_when_there_is_something_to_say() {

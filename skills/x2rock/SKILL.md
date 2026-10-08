@@ -388,6 +388,7 @@ rooms; see "Ask before you act".
 | Firmware check (read-only) | `x2rock update --json` |
 | Battery on the portables | `x2rock battery --json` (sweeps) / `-r <Room>` (one) — mains speakers are skipped, not listed as empty |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
+| Why the queue/alarms/TV don't work, "is UPnP on?" | `x2rock security --json` — `{authentication, upnp, guest_access}`, `true` meaning the app's "On"; `upnp: false` is the `upnp_disabled` cause. Read-only: only the person can change them, in the Sonos app |
 | Which Sonos household(s) are reachable | `x2rock households --json` — only matters with more than one; see "Addressing a household" |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |
 | Create an alarm | `x2rock -r <Room> alarms add 07:00 [--program "<favorite>"] [--recurrence daily] [--volume 25] [--off] [--json]` — `--json` returns the created alarm as the same object `alarms --json` lists, so keep its `id` for `alarm <id> off` |
