@@ -366,7 +366,19 @@ async fn play_one(
     if !streamish && let Some(naming) = Naming::of(service, token) {
         let first = match program {
             true => play_radio(session, room, service, &naming, id, title).await,
-            false => enqueue_item(session, room, service, &naming, id, title, kind, true).await,
+            false => {
+                enqueue_item(
+                    session,
+                    room,
+                    service,
+                    &naming,
+                    id,
+                    title,
+                    kind,
+                    Enqueue::Play,
+                )
+                .await
+            }
         };
         match first {
             Ok(()) => return Ok(()),
@@ -478,7 +490,7 @@ async fn enqueue_item(
     id: &str,
     title: &str,
     kind: Option<&str>,
-    play: bool,
+    how: Enqueue,
 ) -> Result<()> {
     let target = session::target(&session.groups, room)?;
     let (cdudn, sn) = (naming.cdudn.as_str(), naming.serial.as_deref());
@@ -501,12 +513,21 @@ async fn enqueue_item(
             bookmarks::service_didl(id, title, cdudn),
         ),
     };
-    if !play {
-        let queued = upnp.add_to_queue(&uri, &didl, false).await?;
+    if how != Enqueue::Play {
+        let next = how == Enqueue::Next;
+        let queued = upnp.add_to_queue(&uri, &didl, next).await?;
+        // Said only where it went in ahead of something: with the queue not the
+        // room's source, "next" appends (see `add_to_queue`), and calling an
+        // append "next" would promise an order nothing is playing.
+        let ahead = queued.first + queued.added <= queued.length;
+        let place = if next && ahead { "next, " } else { "" };
         match queued.added {
-            1 => println!("{} — queued {title} at {}", target.name, queued.first),
+            1 => println!(
+                "{} — queued {title} {place}at {}",
+                target.name, queued.first
+            ),
             n => println!(
-                "{} — queued {title} at {}, {n} tracks",
+                "{} — queued {title} {place}at {}, {n} tracks",
                 target.name, queued.first
             ),
         }
@@ -515,6 +536,22 @@ async fn enqueue_item(
     enqueue_and_play(session, &target, &upnp, &uri, &didl).await?;
     println!("{} — {title} on {}", target.name, service.name);
     Ok(())
+}
+
+/// What [`enqueue_item`] does with what it adds: the Sonos app's Play Now, Add
+/// to End of Queue and Play Next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Enqueue {
+    Play,
+    End,
+    Next,
+}
+
+/// One row of a `search` or `browse` listing, 1-based, and what to do with it.
+#[derive(Debug, Clone, Copy)]
+pub struct Pick {
+    pub row: usize,
+    pub how: Enqueue,
 }
 
 /// Add one item to the group's queue and play it from there: the shared body
@@ -671,7 +708,8 @@ pub async fn run_play_item(
 }
 
 /// `queue-item`: the same lookup `run_play_item` does, then enqueue without
-/// playing.
+/// playing - at the end, or with `next` after what is playing now.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_queue_item(
     ip: Option<IpAddr>,
     household: Option<&str>,
@@ -680,12 +718,40 @@ pub async fn run_queue_item(
     kind: Option<&str>,
     id: &str,
     title: Option<&String>,
+    next: bool,
 ) -> Result<()> {
     // Nothing here talks to the service. The token is wanted only for which
     // account it names, which the enqueue has to name to the player too.
     let (session, chosen, token) = connect_for_service(ip, household, room, service).await?;
     let title = title.map(String::as_str).unwrap_or(id);
+    let how = if next { Enqueue::Next } else { Enqueue::End };
+    queue_item(
+        &session,
+        room,
+        &chosen,
+        token.as_ref(),
+        kind,
+        id,
+        title,
+        how,
+    )
+    .await
+}
 
+/// Add one hit to the queue without playing it: `queue-item`, and `search` or
+/// `browse` with `--queue`/`--next`. `how` is [`Enqueue::End`] or
+/// [`Enqueue::Next`].
+#[allow(clippy::too_many_arguments)]
+pub async fn queue_item(
+    session: &session::Session,
+    room: Option<&str>,
+    chosen: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    kind: Option<&str>,
+    id: &str,
+    title: &str,
+    how: Enqueue,
+) -> Result<()> {
     // Refused rather than half-worked. `play-item` answers a stream by streaming
     // it, which is a different thing from queueing and cannot be what someone
     // pressing "add to queue" meant.
@@ -709,14 +775,14 @@ pub async fn run_queue_item(
     }
     // Without a service type there is no cdudn, and `SA_RINCONNone` is not an
     // account - the enqueue would be refused by the player with less to say.
-    let Some(naming) = Naming::of(&chosen, token.as_ref()) else {
+    let Some(naming) = Naming::of(chosen, token) else {
         bail!(
             "{} is not in the player's service-type list, so nothing can be \
              built to name the account that owns {title:?}.",
             chosen.name
         );
     };
-    enqueue_item(&session, room, &chosen, &naming, id, title, kind, false).await
+    enqueue_item(session, room, chosen, &naming, id, title, kind, how).await
 }
 
 /// How an enqueue names the account that owns the item: the cdudn in its DIDL

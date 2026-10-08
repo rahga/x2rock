@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
 use super::ago;
-use super::content::{play_item, queueable};
+use super::content::{Enqueue, Pick, play_item, queue_item, queueable};
 use super::nth;
 use crate::cli::RateDirection;
 use crate::session;
@@ -1245,7 +1245,7 @@ pub async fn run_browse(
     container: Option<&str>,
     count: u32,
     index: u32,
-    play: Option<usize>,
+    pick: Option<Pick>,
     refresh: bool,
     json: bool,
 ) -> Result<()> {
@@ -1343,8 +1343,23 @@ pub async fn run_browse(
     // token that just proved stale must not be handed straight to `play_item`.
     let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
 
-    if let Some(n) = play {
+    if let Some(Pick { row: n, how }) = pick {
         let item = nth(&items, n).ok_or_else(|| anyhow!("no row {n}; {at} has {}", items.len()))?;
+        // Queueing takes an album or a playlist where playing from here does
+        // not: `queue_item` refuses only what has no tracks of its own.
+        if how != Enqueue::Play {
+            return queue_item(
+                live()?,
+                room,
+                &chosen,
+                token.as_ref(),
+                Some(item.item_type.as_str()),
+                &item.id,
+                &item.title,
+                how,
+            )
+            .await;
+        }
         // A container is a place, and refusing here is kinder than letting
         // getMediaURI refuse it with a grammar error about ids.
         //
@@ -1473,7 +1488,7 @@ pub async fn run_search(
     per_service: Option<usize>,
     count: Option<u32>,
     index: u32,
-    play: Option<usize>,
+    pick: Option<Pick>,
     refresh: bool,
     json: bool,
 ) -> Result<()> {
@@ -1532,7 +1547,7 @@ pub async fn run_search(
             per_service.unwrap_or(FAN_OUT_PER_SERVICE),
             count.unwrap_or(FAN_OUT_COUNT),
             index,
-            play,
+            pick,
             json,
         )
         .await;
@@ -1661,7 +1676,7 @@ pub async fn run_search(
             per_service.unwrap_or(0),
             count,
             index,
-            play,
+            pick,
             json,
         )
         .await;
@@ -1711,7 +1726,7 @@ pub async fn run_search(
     // token that just proved stale must not be handed straight to `play_item`.
     let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
 
-    if let Some(n) = play {
+    if let Some(Pick { row: n, how }) = pick {
         let item = nth(&items, n)
             .ok_or_else(|| anyhow!("no result {n}; the search returned {}", items.len()))?;
         // A search can return places rather than things: every Mixcloud hit is a
@@ -1731,6 +1746,19 @@ pub async fn run_search(
             hint::shell_arg(&chosen.name),
             hint::shell_arg(&item.id)
         );
+        if how != Enqueue::Play {
+            return queue_item(
+                live()?,
+                room,
+                chosen,
+                token.as_ref(),
+                Some(item.item_type.as_str()),
+                &item.id,
+                &item.title,
+                how,
+            )
+            .await;
+        }
         return play_item(
             live()?,
             room,
@@ -1964,7 +1992,7 @@ async fn search_everywhere(
     per_service: usize,
     count: u32,
     index: u32,
-    play: Option<usize>,
+    pick: Option<Pick>,
     json: bool,
 ) -> Result<()> {
     ensure!(
@@ -2141,7 +2169,7 @@ async fn search_everywhere(
         )
     });
 
-    if let Some(n) = play {
+    if let Some(Pick { row: n, how }) = pick {
         let row = nth(&rows, n)
             .ok_or_else(|| anyhow!("no result {n}; the search returned {}", rows.len()))?;
         ensure!(
@@ -2156,6 +2184,19 @@ async fn search_everywhere(
         );
         let session = reached.as_ref().map_err(hint::no_player_to_play)?;
         let token = linked.token_for(household, &row.service.id);
+        if how != Enqueue::Play {
+            return queue_item(
+                session,
+                room,
+                row.service,
+                token.as_ref(),
+                Some(row.item.item_type.as_str()),
+                &row.item.id,
+                &row.item.title,
+                how,
+            )
+            .await;
+        }
         return play_item(
             session,
             room,

@@ -187,8 +187,8 @@ See [The queue](#the-queue) for why it is versioned and what can and cannot be a
 |---|---|
 | `x2rock search [-s <svc>] [<term>] [--count N] [--index N]` | search a service; bare, it lists what can be searched |
 | `x2rock browse [-s <svc>] [<container>] [--count N] [--index N]` | walk a service's own containers |
-| `… --play N` | play the Nth hit of the page returned |
-| `x2rock play-item -s <svc> <id>` · `queue-item` | play, or queue, a hit you already have the id for |
+| `… --play N` · `--queue N` · `--next N` | play the Nth hit of the page returned, add it to the end of the queue, or add it after what is playing |
+| `x2rock play-item -s <svc> <id>` · `queue-item [--next]` | play, or queue, a hit you already have the id for |
 | `x2rock stations "<name>" \| --tag jazz \| --country GB [--play N]` | tens of thousands of internet radio stations, no account |
 | `x2rock play-url "<http url>" [--title "<name>"]` | any stream URL, no service at all |
 | `x2rock link [<svc>] [--no-open]` · `accounts [--json] [--content]` · `unlink <svc>` | link an account so a service can be searched |
@@ -491,6 +491,11 @@ on-demand is added to the queue, because that is the only way a player resolves 
 media. Do not trust a service's `canPlay` flag — iHeartRadio marks an `artist_radio` collection
 playable and refuses to play it; what decides is whether the row is a container, which `browse`
 reports.
+
+`--queue N` and `--next N` are the Sonos app's Add to End of Queue and Play Next: the hit goes in the
+queue and nothing starts. An album or playlist adds every track; a stream, which has no queue form,
+is refused. "Next" means after the queue's current track, and only while the queue is what the room
+is playing — over a station it appends, and says so by not saying "next".
 
 **iHeartRadio is searched as the Sonos app shows it**: Stations and Podcasts. Its map also
 publishes artists, tracks, albums and playlists, but what those return are radio stations - an
