@@ -1,0 +1,136 @@
+{
+ "id": {
+  "objectId": "Sonos Radio"
+ },
+ "content": {
+  "container": {
+   "name": "Sonos Radio",
+   "type": "container"
+  }
+ },
+ "total": 28,
+ "views": [
+  {
+   "displayType": "swimlane",
+   "id": {
+    "objectId": "/stations/en-US/US/c2Q6VVM6dHJlbmRpbmctbm93"
+   },
+   "content": {
+    "container": {
+     "name": "Trending Now",
+     "type": "container"
+    }
+   },
+   "items": [
+    {
+     "id": {
+      "objectId": "sonos:153184"
+     },
+     "displayType": "swimlane-genre",
+     "content": {
+      "container": {
+       "name": "Nashville Now",
+       "type": "trackList.program",
+       "id": {
+        "serviceId": "d0d8cf7aff8437c87a9347614f7f91ff-US-DZR",
+        "objectId": "sonos:153184"
+       },
+       "service": {
+        "id": "d0d8cf7aff8437c87a9347614f7f91ff-US-DZR",
+        "name": "Nashville Now"
+       },
+       "artist": {
+        "name": "Now & Next in Country"
+       },
+       "imageUrl": "https://sonosradio.imgix.net/station-images/34015396-a2e6-4330-9c53-6361b9472167.png?w=200&auto=format,compress",
+       "summary": "Now & Next in Country"
+      }
+     },
+     "browsePolicies": {
+      "canPlay": true,
+      "canEnumerate": false
+     }
+    },
+    {
+     "id": {
+      "objectId": "sonos:157317"
+     },
+     "displayType": "swimlane-genre",
+     "content": {
+      "container": {
+       "name": "Monster Bash",
+       "type": "trackList.program",
+       "id": {
+        "serviceId": "3a25a3b183a0e49316349695d6fdd140-US-DZR",
+        "objectId": "sonos:157317"
+       },
+       "service": {
+        "id": "3a25a3b183a0e49316349695d6fdd140-US-DZR",
+        "name": "Monster Bash"
+       },
+       "artist": {
+        "name": "Halloween Hits"
+       },
+       "imageUrl": "https://sonosradio.imgix.net/station-images/8d63a8b9-d960-4b8c-8486-c1eaca36c527.png?w=200&auto=format,compress",
+       "summary": "Halloween Hits"
+      }
+     },
+     "browsePolicies": {
+      "canPlay": true,
+      "canEnumerate": false
+     }
+    }
+   ],
+   "total": 10,
+   "browsePolicies": {
+    "canAddToFavorites": false,
+    "isFavorite": false,
+    "isEphemeral": false
+   }
+  },
+  {
+   "displayType": "list",
+   "id": {
+    "objectId": "/others/en-US/US"
+   },
+   "content": {
+    "container": {
+     "name": "Browse Radio",
+     "type": "container"
+    }
+   },
+   "items": [
+    {
+     "id": {
+      "objectId": "/genres/en-US/US"
+     },
+     "displayType": "list",
+     "content": {
+      "container": {
+       "name": "Music",
+       "type": "container",
+       "id": {
+        "objectId": "/genres/en-US/US"
+       },
+       "service": {
+        "name": "Music"
+       },
+       "imageUrl": "https://sonosradio.imgix.net/icons/Music_active_80_04.png?auto=format,compress",
+       "summary": ""
+      }
+     },
+     "browsePolicies": {
+      "canPlay": false,
+      "canEnumerate": true
+     }
+    }
+   ],
+   "total": 4,
+   "browsePolicies": {
+    "canAddToFavorites": false,
+    "isFavorite": false,
+    "isEphemeral": false
+   }
+  }
+ ]
+}

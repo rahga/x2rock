@@ -17,6 +17,7 @@ mod restart;
 mod service;
 mod session;
 mod sonos;
+mod sonosradio;
 mod speech;
 mod state;
 mod stations;

@@ -169,7 +169,7 @@ local token buys search and browse, and nothing of playback.
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
 | **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; linked on the second attempt (the first timed out unconfirmed). Sends no `userIdHashCode`, so the household is not matched | browse ✓ with the token - three bitrate tiers (128k, 320k, FLAC), each listing the channels (Main Mix, Mellow Mix, RockIt!, The Globe, Beyond, Serenity, KFAT) as `program`s; still **no search categories** | **✓ as radio, once the household has it** (added in the Sonos app). Its channels are not queue material (`AddURIToQueue` 800) and it has no `getMediaURI`; the app plays one by making it the transport's source, `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20` with an `audioBroadcast` DIDL, and `play-item` now does the same for a `program` the queue refuses. Played with the generic `-0-` cdudn and no `sn`, the household's one account resolved | 2026-09-30, office |
-| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200 | content plays when reached through a favorite or bookmark | 2026-09-18 |
+| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200, empty; the front page comes from `browse/v1` (2026-10-08, see "The 2026-10-08 review") | content plays when reached through a favorite or bookmark, or from a shelf | 2026-09-18 |
 | **Sonos Backgrounds** | device-link | **✗ no link code** — `getDeviceLinkCode` answers HTTP 200 with an empty `getDeviceLinkCodeResponse`; not in the office household's store, so there is no token to import either. `x2rock link` now says so and names `--from-household` | — | — | 2026-09-30, office |
 | **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
 | **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token. **Catalogue search ✓ through Apple's public iTunes API instead** (tracks, albums; `src/itunes.rs`) | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home |
@@ -9609,6 +9609,19 @@ read stands, there being no list to be stale against. Measured: `move 6 5 --at 1
 (now 166) was refused with nothing moved; `--at 166` moved it. The widget quotes the version of the
 list it shows, and its refusal re-reads the list, as `docs/dbus-interface.md` planned for
 `Group1`. `clear` takes no version: `RemoveAllTracksFromQueue` has no `UpdateID` argument.
+
+**Sonos Radio's front page is not SMAPI's.** `getMetadata root` answers 200 with nothing in it,
+which `browse` reported as "root is empty". The service's manifest
+(`https://cf.ws.sonos.com/p/m/53495571-…`) names a second endpoint, `{"type": "browse", "uri":
+"https://sali.sonos.superhi.fi/browse/v1"}`, and an unauthenticated GET there answers the app's
+page: 28 `views` (Trending Now, Discover Sonos Radio, Sonos Presents, Recently Updated, Spooky
+Season, ..., Browse Radio), 216 items inline. The shelf ids it hands out - `/stations/en-US/US/
+c2Q6VVM6dHJlbmRpbmctbm93` - are ordinary SMAPI container ids: `getMetadata` on one lists its
+stations as `program`s (`sonos:2997`, Hit List), and on Browse Radio's `/genres/en-US/US` and
+`/stations/en-US/US/EgdVUzpHOjIy` (News & Talk) the genres and the stations under them. Only the
+top level was missing, so `sonosradio.rs` builds `root` from `browse/v1`'s views, reading the
+endpoint from the manifest, and `smapi::metadata` walks the rest as for any service. Played from a
+shelf, Smooth Jazz started in Media Room as `program` radio, the route `play_radio` already takes.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
