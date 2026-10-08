@@ -45,11 +45,15 @@ pub(crate) fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Optio
         .and_then(|n| n.text())
 }
 
+/// All five of XML's predefined entities. Nothing here writes a single-quoted
+/// attribute, so `'` was safe left alone; escaping it as well means no future
+/// one can be broken by a title like "Don't Stop".
 pub fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// The one rustls crypto backend in this binary, named in one place.
@@ -78,7 +82,10 @@ mod tests {
     use super::xml_escape;
 
     #[test]
-    fn xml_escape_covers_the_four_reserved_characters() {
-        assert_eq!(xml_escape(r#"a&b<c>"d""#), "a&amp;b&lt;c&gt;&quot;d&quot;");
+    fn xml_escape_covers_the_five_reserved_characters() {
+        assert_eq!(
+            xml_escape(r#"a&b<c>"d"'e'"#),
+            "a&amp;b&lt;c&gt;&quot;d&quot;&apos;e&apos;"
+        );
     }
 }
