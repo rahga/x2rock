@@ -749,10 +749,31 @@ pub async fn tv(
             room.name
         ));
     }
-    upnp.use_tv_input(&room.id, bar).await?;
+    match upnp.use_tv_input(&room.id, bar).await {
+        Ok(()) => {}
+        // **UPnP off, a bar on its own: the Control API can do it.** Its
+        // `loadHomeTheaterPlayback` is addressed to the soundbar, which takes
+        // the TV for itself - for a bar in a group that is not the same thing
+        // (UPnP hands the group over; this would take the bar out of it), so
+        // only a bar alone gets it, and a grouped one still hears why not.
+        Err(e) if upnp_switched_off(&e) && members.len() == 1 => {
+            session
+                .player(Some(bar))
+                .await?
+                .load_home_theater_playback(&room.id)
+                .await?;
+        }
+        Err(e) => return Err(e),
+    }
     Ok(TvOutcome {
         room: room.name.clone(),
     })
+}
+
+/// Whether an error is the household's UPnP switch being off, rather than one
+/// action refused.
+fn upnp_switched_off(e: &anyhow::Error) -> bool {
+    upnp::Fault::of(e).is_some_and(|f| !f.is_per_action())
 }
 
 /// `x2rock alarms`: list the household's alarms, or with `add` create one on
@@ -900,6 +921,24 @@ pub async fn alarm(session: &Session, id: u32, action: &AlarmAction) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fallback is for the switch being off, never for one action refused:
+    /// a per-action fault is the player saying no to the TV input itself.
+    #[test]
+    fn only_upnp_switched_off_takes_the_tv_fallback() {
+        let fault = |kind| {
+            anyhow!(upnp::Fault {
+                action: "SetAVTransportURI".into(),
+                kind,
+                detail: String::new(),
+            })
+        };
+        assert!(upnp_switched_off(&fault(upnp::FaultKind::UpnpDisabled)));
+        assert!(!upnp_switched_off(&fault(upnp::FaultKind::Action(
+            "714".into()
+        ))));
+        assert!(!upnp_switched_off(&anyhow!("timed out")));
+    }
 
     #[test]
     fn a_tv_outcome_is_the_room_and_its_line() {

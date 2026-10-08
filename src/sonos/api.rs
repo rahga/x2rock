@@ -499,6 +499,21 @@ impl Connection {
         Ok(serde_json::from_value(body)?)
     }
 
+    /// Switch a soundbar to its TV input, over the Control API: `homeTheater:1
+    /// loadHomeTheaterPlayback`, player-scoped, no parameters. Verified on
+    /// Guest TV (2026-09-05): from paused on its queue to the TV input within
+    /// about 2s. The UPnP route stays the first choice, because it hands a
+    /// whole group over to the TV; this one is for a bar standing alone when
+    /// UPnP is switched off.
+    pub async fn load_home_theater_playback(&self, player_id: &str) -> Result<()> {
+        self.call(
+            on_player("homeTheater:1", "loadHomeTheaterPlayback", player_id),
+            json!({}),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Set a speaker's volume limit, `factor` 0.0-1.0 - see
     /// [`PlayerSettings::volume_scaling_factor`]. The one `setPlayerSettings`
     /// write this connection is allowed: night mode and dialog are refused
