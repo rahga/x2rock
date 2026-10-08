@@ -311,12 +311,7 @@ async fn play_resumed(
     // Sought once it is playing, which is when the measured seek landed; one
     // sent while the chapter is still buffering has nothing to move yet.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
-    while player
-        .playback_status(&target.group_id)
-        .await?
-        .playback_state
-        .as_deref()
-        != Some("PLAYBACK_STATE_PLAYING")
+    while player.playback_status(&target.group_id).await?.state() != Some("PLAYING")
         && tokio::time::Instant::now() < deadline
     {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -1269,20 +1264,14 @@ async fn load_and_start(
             Err(e) => return Err(e),
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let state = player
-            .playback_status(&target.group_id)
-            .await?
-            .playback_state;
-        match state.as_deref() {
-            Some("PLAYBACK_STATE_PLAYING") => break,
+        let status = player.playback_status(&target.group_id).await?;
+        match status.state() {
+            Some("PLAYING") => break,
             // Already asked to play and on its way; give it the time.
-            Some("PLAYBACK_STATE_BUFFERING") => {
+            Some("BUFFERING") => {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let again = player
-                    .playback_status(&target.group_id)
-                    .await?
-                    .playback_state;
-                if again.as_deref() == Some("PLAYBACK_STATE_PLAYING") {
+                let again = player.playback_status(&target.group_id).await?;
+                if again.state() == Some("PLAYING") {
                     break;
                 }
             }
