@@ -1319,6 +1319,15 @@ lock file is a sibling because the rename replaces the data file's inode. The pl
 lock: both its writers write what a player just said, and the loser of that race loses nothing the
 next `attach` does not put back.
 
+**Credentials take the same lock, as a transaction (2026-10-08).** `credentials.json` was saved
+whole from the copy a command loaded at its start, and a command holds that copy across a browser
+link or a SMAPI call. So two links at once kept only the second, and a token refresh landing after
+an `unlink` wrote the unlinked account back - found by a review, reproduced in tests.
+`Credentials::update` takes `credentials.json.lock`, reloads, applies only the command's own
+change and saves; link, the household import and token refresh go through it, and `unlink` and
+`--prefer`, whose read-to-save is local, hold the lock throughout. A refresh lands only on the token
+it refreshed (`apply_refresh`): an account unlinked or relinked meanwhile keeps what it has.
+
 ### Two things learned keeping an album (2026-08-31)
 
 **`keep --container` is only meaningful while a real container is playing.** After x2rock replays a

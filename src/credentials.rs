@@ -427,6 +427,82 @@ impl Credentials {
         self.save_to(&path()?)
     }
 
+    /// Hold the credentials file against every other writer, for a command
+    /// whose whole read, change and save is local and quick - `unlink`,
+    /// `--prefer`. Taken *before* the load, or the save would still write back
+    /// a copy read before someone else's.
+    pub fn lock() -> Result<store::Lock> {
+        store::Lock::exclusive(&path()?)
+    }
+
+    /// Change the file without losing anyone else's change to it: under the
+    /// lock, `self` is reloaded from disk, `change` is applied to that, and the
+    /// result saved. `self` is left as what was written.
+    ///
+    /// For a command that held its copy across network or browser work - a
+    /// link, a household import, a token refresh - since saving that copy
+    /// whole would overwrite whatever was linked or unlinked meanwhile: two
+    /// links at once kept only the second, and a refresh landing after an
+    /// unlink wrote the unlinked account back. `change` names only what this
+    /// command did, and sees the file as it is now.
+    pub fn update<T>(&mut self, change: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.update_at(&path()?, change)
+    }
+
+    pub fn update_at<T>(
+        &mut self,
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = store::Lock::exclusive(path)?;
+        *self = Self::load_from(path)?;
+        let outcome = change(self)?;
+        self.save_to(path)?;
+        Ok(outcome)
+    }
+
+    /// Put a refreshed token onto the account it was refreshed for - `used`, as
+    /// this command held it when it made the call - if the file still holds
+    /// that token. Run inside [`Self::update`], against the file as it is now:
+    /// an account unlinked meanwhile stays unlinked, and one relinked with a
+    /// new token keeps it, since a refresh of the old one says nothing about
+    /// either. `account` is the record's key, or `None` for the one a read
+    /// resolves to.
+    pub fn apply_refresh(
+        &mut self,
+        household: &str,
+        service_id: &str,
+        account: Option<&str>,
+        used: &Account,
+        refreshed: crate::sonos::smapi::RefreshedToken,
+    ) -> bool {
+        let current = match account {
+            Some(key) => self
+                .accounts_for(household, service_id)
+                .and_then(|held| held.accounts.get(key)),
+            None => self.get(household, service_id),
+        };
+        if current.is_none_or(|c| c.auth_token != used.auth_token) {
+            return false;
+        }
+        let private_key = if refreshed.private_key.is_empty() {
+            used.private_key.clone()
+        } else {
+            refreshed.private_key
+        };
+        self.remember(
+            household,
+            service_id,
+            Account {
+                auth_token: refreshed.auth_token,
+                private_key,
+                user_id_hash_code: refreshed.user_id_hash_code,
+                ..used.clone()
+            },
+        );
+        true
+    }
+
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let copy = Self {
             schema: SCHEMA,
@@ -949,6 +1025,118 @@ pub fn from_device_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two commands that each loaded the file before the other saved - two
+    /// links, a link and an unlink - each keep what they did.
+    #[test]
+    fn overlapping_changes_each_keep_what_they_did() {
+        let dir = crate::testdir::TempDir::new("creds-overlap");
+        let path = dir.path().join("credentials.json");
+        let mut a = Credentials::load_from(&path).unwrap();
+        let mut b = Credentials::load_from(&path).unwrap();
+        a.update_at(&path, |c| Ok(c.remember("HH", "A", held("A"))))
+            .unwrap();
+        b.update_at(&path, |c| Ok(c.remember("HH", "B", held("B"))))
+            .unwrap();
+        let after = Credentials::load_from(&path).unwrap();
+        assert!(
+            after.get("HH", "A").is_some(),
+            "the second link lost the first"
+        );
+        assert!(after.get("HH", "B").is_some());
+        assert!(
+            b.get("HH", "A").is_some(),
+            "the writer is left as what was written"
+        );
+    }
+
+    /// A refresh that lands after an unlink, or after a relink, changes nothing;
+    /// one that lands on the token it refreshed is kept.
+    #[test]
+    fn a_refresh_lands_only_on_the_token_it_refreshed() {
+        let dir = crate::testdir::TempDir::new("creds-refresh");
+        let path = dir.path().join("credentials.json");
+        let mut base = Credentials::default();
+        base.remember("HH", "A", held("A"));
+        base.remember("HH", "B", held("B"));
+        base.save_to(&path).unwrap();
+        let refreshed = |token: &str| crate::sonos::smapi::RefreshedToken {
+            auth_token: token.into(),
+            private_key: String::new(),
+            user_id_hash_code: None,
+        };
+
+        let mut stale = Credentials::load_from(&path).unwrap();
+        let used = stale.get("HH", "B").unwrap().clone();
+        let mut other = Credentials::load_from(&path).unwrap();
+        other.update_at(&path, |c| Ok(c.forget("HH", "B"))).unwrap();
+        let landed = stale
+            .update_at(&path, |c| {
+                Ok(c.apply_refresh("HH", "B", None, &used, refreshed("new")))
+            })
+            .unwrap();
+        assert!(!landed);
+        assert!(
+            Credentials::load_from(&path)
+                .unwrap()
+                .get("HH", "B")
+                .is_none(),
+            "unlink undone"
+        );
+
+        let used = stale.get("HH", "A").unwrap().clone();
+        other
+            .update_at(&path, |c| {
+                let mut relinked = held("A");
+                relinked.auth_token = "relinked".into();
+                Ok(c.remember("HH", "A", relinked))
+            })
+            .unwrap();
+        let landed = stale
+            .update_at(&path, |c| {
+                Ok(c.apply_refresh("HH", "A", None, &used, refreshed("old+1")))
+            })
+            .unwrap();
+        assert!(!landed);
+        let now = Credentials::load_from(&path).unwrap();
+        assert_eq!(now.get("HH", "A").unwrap().auth_token, "relinked");
+
+        let used = now.get("HH", "A").unwrap().clone();
+        let mut fresh = now;
+        assert!(
+            fresh
+                .update_at(&path, |c| Ok(c.apply_refresh(
+                    "HH",
+                    "A",
+                    None,
+                    &used,
+                    refreshed("next")
+                )))
+                .unwrap()
+        );
+        let after = Credentials::load_from(&path).unwrap();
+        assert_eq!(after.get("HH", "A").unwrap().auth_token, "next");
+        assert_eq!(
+            after.get("HH", "A").unwrap().private_key,
+            "key",
+            "an empty key keeps the old"
+        );
+    }
+
+    fn held(name: &str) -> Account {
+        Account {
+            service_name: name.into(),
+            auth_token: format!("{name}-token"),
+            private_key: "key".into(),
+            user_id_hash_code: Some(name.into()),
+            nickname: None,
+            household: Some("HH".into()),
+            account_id: None,
+            serial: None,
+            account_key: None,
+            linked: 1000,
+        }
+    }
     use crate::testdir::TempDir;
 
     const HH: &str = "Sonos_house";
