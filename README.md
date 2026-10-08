@@ -147,12 +147,17 @@ accepted and never fetched; the `clip_not_fetched` error spells out the `ufw` li
 | `x2rock -r <Room> vol normalize` | every speaker to the group's level — the app's *Normalize Group Volume* |
 | `x2rock -r <Room> vol 30 --ramp` | slide there over a few seconds instead of jumping |
 | `x2rock --all vol -10` | every room at once |
+| `x2rock -r <Room> vol --limit` · `--limit 50` · `--limit off` | read or set each speaker's volume limit — the app's *Volume Limit* |
 
 Inside a group the plain `vol` is the group's mix and preserves the members' balance, the way the
 Sonos app's slider does. `--player` reads or sets one speaker; `--each` erases the balance;
 `normalize` evens it out at the level the group already has (`vol --json` says whether the members
 are `balanced`). `--ramp` is per speaker — there is no group ramp — and composes with several `-r`
 and with `--each`, but not with `--all`.
+
+`--limit` is a speaker setting rather than a level: `-r` names each speaker and `--all` covers every
+one. A limit scales what the speaker plays, it does not clamp the slider — under a 50% limit `vol`
+still reads and sets 0–100, and 100 sounds as 50 did.
 
 ### Grouping
 

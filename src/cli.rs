@@ -152,6 +152,21 @@ pub enum Command {
         /// the new level. Not for mute, which is not a level to slide to.
         #[arg(long)]
         ramp: bool,
+        /// Read or set each speaker's volume limit - the Sonos app's Settings >
+        /// System > <room> > Volume Limit. Bare, it reads; a percent (1-100)
+        /// sets it; `off` (or 100) lifts it.
+        ///
+        /// **A limit scales, it does not clamp.** The level keeps its 0-100
+        /// range and reads back as set; the speaker plays it scaled, so under
+        /// a 50% limit the level 100 sounds as 50 did. Per speaker, like
+        /// `--player`: `-r` names each speaker, `--all` means every one.
+        #[arg(
+            long,
+            value_name = "PCT",
+            num_args = 0..=1,
+            conflicts_with_all = ["change", "each", "ramp", "player"]
+        )]
+        limit: Option<Option<String>>,
         /// The resulting `{room, volume, muted, fixed}` as JSON - for reading it
         /// or for confirming a change. With `--ramp`, a `ramp_seconds` beside
         /// them: the player's own estimate, which runs a little long. A group

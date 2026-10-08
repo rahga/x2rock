@@ -526,6 +526,7 @@ mod tests {
             player: false,
             each: false,
             ramp: false,
+            limit: None,
             json: false
         }));
         assert!(fans_out(&Command::Repeat {
@@ -586,6 +587,7 @@ mod tests {
             player: false,
             each: false,
             ramp: true,
+            limit: None,
             json: false,
         };
         match per_room(&command).expect("vol fans out") {

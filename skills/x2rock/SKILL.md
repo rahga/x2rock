@@ -375,6 +375,7 @@ rooms; see "Ask before you act".
 | Even a group out at its own level (app's "Normalize") | `x2rock -r <Room> vol normalize` (check `balanced` in `vol --json` first) |
 | Fade instead of jumping | `x2rock -r <Room> vol 30 --ramp` — composes with several `-r` and with `--each`, not with `--all`; `ramp_seconds` is null when the player does not say |
 | Everywhere at once | `x2rock --all vol -10` (per-room commands only) |
+| Volume limit ("cap the kids' room at 30%") | `x2rock -r <Room> vol --limit` (read) / `--limit 30` / `--limit off` — per speaker; `--json` gives `{room, limit, previous_limit}`, `limit` 100 meaning none. It **scales** the output: `vol` still reads 0-100, so do not report a low limit as the room being quiet, and do not lift a limit unless asked |
 | Repeat / shuffle | `x2rock repeat [all\|one\|off] --json` / `x2rock shuffle [on\|off] --json` |
 | Crossfade | `x2rock crossfade [on\|off] --json` |
 | Rate the current track up/down, like/dislike, heart it or take a heart back | `x2rock -r <Room> rate up\|down\|unfavorite [--refresh] [--json]` — only where the service offers it (Pandora-style radio, iHeartRadio Custom Stations, Deezer's heart and dislike); see "Rating a track" |

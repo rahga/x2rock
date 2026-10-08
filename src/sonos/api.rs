@@ -499,6 +499,20 @@ impl Connection {
         Ok(serde_json::from_value(body)?)
     }
 
+    /// Set a speaker's volume limit, `factor` 0.0-1.0 - see
+    /// [`PlayerSettings::volume_scaling_factor`]. The one `setPlayerSettings`
+    /// write this connection is allowed: night mode and dialog are refused
+    /// with `ERROR_NO_PERMISSION`, this is accepted (build 97180312,
+    /// 2026-10-08), and reads back as written.
+    pub async fn set_volume_limit(&self, player_id: &str, factor: f64) -> Result<()> {
+        self.call(
+            on_player("settings:1", "setPlayerSettings", player_id),
+            json!({ "volumeScalingFactor": factor }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The household's Connection security switches, as this player applies
     /// them - see [`SecuritySettings`]. Player-scoped; the household-scoped form
     /// is refused for want of a `playerId`, `locationId` or `userId`.

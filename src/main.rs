@@ -581,6 +581,21 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         return emit(&household::ungroup(session, room).await?, *json);
     }
 
+    // `vol --limit` is a speaker setting, not a level: every speaker with
+    // --all, each -r, or the default room's, read or set one by one. Ahead of
+    // the fan-outs, which are for levels and know nothing of it.
+    if let Command::Vol {
+        limit: Some(value),
+        json,
+        ..
+    } = &cli.command
+    {
+        for outcome in volume::limit(session, &cli.room, cli.all, value.as_deref()).await? {
+            emit(&outcome, *json)?;
+        }
+        return Ok(());
+    }
+
     // `vol --each` sets every speaker in one group individually - the flatten
     // the group slider cannot do, because the slider preserves the members'
     // balance to match the Sonos app. It desugars to fanning `--player` over

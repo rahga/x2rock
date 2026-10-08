@@ -900,13 +900,16 @@ impl From<&HomeTheaterOptions> for HomeTheaterUpdate {
 
 /// `settings:1 getPlayerSettings` - player-scoped, and answered without an
 /// account, unlike `getSettings`, which wants a `userId`. Only the home-theatre
-/// block is deserialized; the object carries more (room name, volume mode,
+/// block and the volume limit are deserialized; the object carries more (room name, volume mode,
 /// spatial audio) that x2rock does not report - see docs/architecture.md on why
 /// spatial audio and volume mode are deliberately left out.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerSettings {
     pub home_theater: Option<HomeTheaterOptions>,
+    /// The speaker's volume limit, 0.0-1.0: the Sonos app's Volume Limit.
+    /// Absent reads as no limit.
+    pub volume_scaling_factor: Option<f64>,
 }
 
 /// The household's Connection security switches, as a player applies them:
