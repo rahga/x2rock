@@ -64,22 +64,10 @@ pub fn save_refreshed_token(
     let Some(existing) = existing else {
         return;
     };
-    let private_key = if refreshed.private_key.is_empty() {
-        existing.private_key.clone()
-    } else {
-        refreshed.private_key
-    };
-    creds.remember(
-        household,
-        service_id,
-        credentials::Account {
-            auth_token: refreshed.auth_token,
-            private_key,
-            user_id_hash_code: refreshed.user_id_hash_code,
-            ..existing
-        },
-    );
-    let _ = creds.save();
+    let _ = creds.update(|now| {
+        now.apply_refresh(household, service_id, account, &existing, refreshed);
+        Ok(())
+    });
 }
 
 /// A play path's refresh: persisted against the household and account the
@@ -870,8 +858,7 @@ pub async fn run_link(
     // Stored before anything else is attempted. A link code is single-use, so
     // losing the token to a later failure would mean walking back through the
     // browser to fix something that already worked.
-    let account_key = linked.remember(&household, id, account);
-    linked.save()?;
+    let account_key = linked.update(|now| Ok(now.remember(&household, id, account)))?;
     println!(
         "Linked {}. Search it with: x2rock search -s {}",
         chosen.name,
@@ -908,15 +895,17 @@ pub async fn run_link(
         .await
     {
         Ok(account_id) => {
-            if let Some(entry) = linked
-                .households
-                .get_mut(&household)
-                .and_then(|s| s.get_mut(id))
-                .and_then(|held| held.accounts.get_mut(&account_key))
-            {
-                entry.account_id = account_id.clone();
-            }
-            linked.save()?;
+            linked.update(|now| {
+                if let Some(entry) = now
+                    .households
+                    .get_mut(&household)
+                    .and_then(|s| s.get_mut(id))
+                    .and_then(|held| held.accounts.get_mut(&account_key))
+                {
+                    entry.account_id = account_id.clone();
+                }
+                Ok(())
+            })?;
             match account_id {
                 Some(id) => println!("The household knows this account as {id}."),
                 None => println!("The household accepted the account."),
@@ -1146,6 +1135,7 @@ async fn link_from_household(
             .collect(),
     };
 
+    let mut records = Vec::with_capacity(wanted.len());
     for (name, id, account) in &wanted {
         // The stored nickname is the app's own label ("Qb1"); prefer an explicit
         // --nickname, then that, then this machine's default.
@@ -1172,9 +1162,14 @@ async fn link_from_household(
             "" | "0" => None,
             k => Some(k.to_string()),
         };
-        linked.remember(long_household, id, record);
+        records.push((id.clone(), record));
     }
-    linked.save()?;
+    linked.update(|now| {
+        for (id, record) in records {
+            now.remember(long_household, &id, record);
+        }
+        Ok(())
+    })?;
 
     // Reported per *service*, not per account read, because the two differ:
     // this household holds two iHeartRadio accounts, and a "Kept" line each
@@ -2523,6 +2518,9 @@ pub fn unlink(
     account: Option<&str>,
     household: Option<&str>,
 ) -> Result<()> {
+    // Held from the load to the save: everything between is local, and a
+    // link or refresh saving meanwhile would otherwise be written over.
+    let _lock = credentials::Credentials::lock()?;
     let mut linked = credentials::Credentials::load()?;
     let scope = household.map(|h| linked.resolve_household(h)).transpose()?;
 
@@ -2722,8 +2720,7 @@ async fn set_preference(
         &key,
     );
     let others = held.accounts.len().saturating_sub(1);
-    linked.prefer(&hh, &id, &key)?;
-    linked.save()?;
+    linked.update(|now| now.prefer(&hh, &id, &key))?;
     if already {
         println!("{name} already uses {named:?}.");
     } else if others == 0 {
