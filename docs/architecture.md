@@ -568,7 +568,9 @@ as a first-class steady state:
   player that cannot be controlled. A dead media widget in the Omarchy bar is worse than no widget.
 - Reconnect with **capped exponential backoff** — retrying every few seconds forever on a network
   that has no Sonos wastes battery and fills logs. Reset the backoff on a network change, not on a
-  timer.
+  timer. (Done since 2026-10-08: `wait_to_retry` sits out the backoff unless a
+  network change or a resume arrives, which retries at once from the floor. Before, the signal was
+  read only once connected, so a return early in a 60s wait sat out nearly all of it.)
 - Never treat absence as a failure worth reporting loudly. Log it once, quietly.
 
 ### Identify the network before deciding what to try
