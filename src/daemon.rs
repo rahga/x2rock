@@ -883,12 +883,13 @@ async fn apply(
                 return Ok(());
             }
             let properties = player.apply_playback(&proto::PlaybackStatus::deserialize(body)?);
-            // The queue's version has to be fetched rather than read off the
-            // event, because the players do not send one - see
-            // `RoomPlayer::queue_version_fetch`. Fetched off the event loop and
-            // folded in by `follow` when it answers, as a Metadata of its own
-            // that supersedes the one built here. One fetch per group at a
-            // time: the events of a burst all want the same answer.
+            // The queue's version - its `UpdateID` - has to be fetched rather
+            // than read off the event; see `RoomPlayer::queue_version_fetch`,
+            // which says why the pushed `queueVersion` cannot even say when.
+            // Fetched off the event loop and folded in by `follow` when it
+            // answers, as a Metadata of its own that supersedes the one built
+            // here. One fetch per group at a time: the events of a burst all
+            // want the same answer.
             if !fetching.contains(&player.group_id) {
                 fetching.insert(player.group_id.clone());
                 let fetch = player.queue_version_fetch();

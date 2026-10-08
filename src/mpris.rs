@@ -92,7 +92,8 @@ struct RoomState {
     member_levels: Vec<u8>,
     /// Nothing loaded - see [`NO_SOURCE`].
     no_source: bool,
-    /// The queue's version, straight from `playback:1`.
+    /// The queue's version: its `Q:0` `UpdateID`, fetched over UPnP - see
+    /// [`QUEUE_VERSION`].
     queue_version: String,
     /// Whether the room is on its TV input right now.
     on_tv_input: bool,
@@ -290,12 +291,12 @@ impl RoomState {
             self.position_millis = position_millis;
             self.position_at = Some(Instant::now());
         }
-        // The queue version, the availability hints and crossfade all ride on
-        // Metadata, and each used to be compared here to decide whether to
-        // re-announce it. `announce` compares the whole thing instead.
-        if let Some(version) = status.queue_version.as_deref() {
-            self.queue_version = version.to_owned();
-        }
+        // The availability hints and crossfade ride on Metadata, and each used
+        // to be compared here to decide whether to re-announce it. `announce`
+        // compares the whole thing instead. The pushed `queueVersion` is not
+        // read: it is not the `UpdateID` an edit quotes, and writing it here
+        // while the fetch wrote the other made the property alternate between
+        // the two on every event - see `queue_version_fetch`.
         if let Some(actions) = status.available_playback_actions {
             self.actions = actions;
         }
@@ -556,11 +557,13 @@ impl RoomPlayer {
 
     /// Read the queue's real version over UPnP, and say so if it moved.
     ///
-    /// The players do not send one. `playbackStatus.queueVersion` is the field
-    /// this was designed around and firmware 95.0-77060 omits it entirely, in
-    /// the polled response and in events alike - see [`QUEUE_VERSION`]. UPnP
-    /// does have it, as the `UpdateID` on a `Q:0` browse, which is what every
-    /// queue mutation already reads before acting.
+    /// The `UpdateID` on a `Q:0` browse is the version a queue edit quotes, so
+    /// it is the one published. `playbackStatus.queueVersion` is a different
+    /// count, and firmware 95.0-77060 omits it entirely - see
+    /// [`QUEUE_VERSION`]. Nor can it stand in as the signal for when to fetch,
+    /// where it is sent: on build 97180312 it held at 28 through an add and a
+    /// remove made while the room played a station, as the `UpdateID` went
+    /// 168 to 170 (2026-10-08). So every playback event still fetches.
     ///
     /// **Called on a playback event, not on a timer.** That is the whole of the
     /// no-polling promise this keeps: the read rides an event the daemon was
@@ -982,6 +985,21 @@ mod tests {
     /// all-false and were assigned unconditionally. Every failed stream sent
     /// one, so a `playbackError` blanked the room's capabilities and reported
     /// its queue as neither repeating nor shuffling.
+    /// The pushed `queueVersion` is never published: writing it beside the
+    /// fetched `UpdateID` made the property alternate between the two on
+    /// every event.
+    #[test]
+    fn a_pushed_queue_version_is_not_published() {
+        let mut state = RoomState {
+            queue_version: "164".into(),
+            ..Default::default()
+        };
+        let status: proto::PlaybackStatus =
+            serde_json::from_value(serde_json::json!({ "queueVersion": "QV:00019" })).unwrap();
+        state.apply_playback(&status);
+        assert_eq!(state.queue_version, "164");
+    }
+
     #[test]
     fn a_body_that_omits_the_actions_leaves_the_capabilities_standing() {
         let mut state = RoomState::default();

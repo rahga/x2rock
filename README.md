@@ -171,7 +171,7 @@ stopped at its first track rather than where it was. `party` reaches every room 
 | | |
 |---|---|
 | `x2rock queue [--json]` | the queue, current track marked, and whether it is in use |
-| `x2rock queue remove 4` · `remove 4-8` · `move 4 1` | edit it |
+| `x2rock queue remove 4` · `remove 4-8` · `move 4 1` `[--at VERSION]` | edit it; `--at` quotes the `version` from `queue --json`, and the player refuses the edit if the queue has moved since |
 | `x2rock queue save "Tonight"` | save it as a Sonos playlist |
 | `x2rock queue clear --yes` | empty it — Sonos keeps no undo, hence `--yes` |
 | `x2rock queue sources` · `queue add "<name>" [--next]` | what can be appended, and appending it |
@@ -248,7 +248,7 @@ an **envelope**, `{total, index, items}`, because one page cannot say how much t
 `--index`. A search with no `-s` asks every reachable service at once and adds `asked`, `searches`,
 `answered`, `slow` and `refused` to that envelope, so a caller can tell "nothing on any service"
 from "three services never answered"; the slow and refused services are also named on stderr, which
-never mixes with the JSON on stdout. `queue --json` is `{current, in_use, items}`. `favorites`,
+never mixes with the JSON on stdout. `queue --json` is `{total, current, in_use, version, items}`. `favorites`,
 `bookmarks`, `accounts`, `alarms` and `rooms` are bare arrays.
 
 ### Errors are data
