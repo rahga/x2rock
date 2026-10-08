@@ -9580,6 +9580,17 @@ state does not offer that". Measured on "Fame is a Gun": `rate up` added it to t
 second `rate up` was refused naming `rate down` and `rate unfavorite`; `rate unfavorite` sent
 `DELETE_TRACK` and took it back out. `rate down` was not sent, since nothing here undoes a dislike.
 
+**A replay could report the paused content as the new one.** `load_and_start` pauses, loads, and
+presses play until the room reads PLAYING. Measured on Media Room: `replay "Happy Radio"` (Saavn)
+over Sonos Radio's Hit List printed success, and polling after it read Hit List's "Saturn" playing
+for a moment, then `IDLE · on Saavn` for good - the first press had resumed the paused station
+before the load took over. PLAYING now counts only when what plays differs from before (track id,
+container name) or the container is the item named, which is how replaying what is already on
+still passes; history's id (`sonos:2997`) and the container's (`2997`) do not line up to compare.
+The same `replay "Happy Radio"` now keeps pressing until Saavn plays (4.8s); `replay "Hit List"`
+over itself takes as long as before (4.3-5.0s both ways). A `loadContent` the player never
+answers is no longer an error either: judged by the same check, after x2rocktv's e4b2848.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
