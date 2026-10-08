@@ -9632,6 +9632,17 @@ field of that command this connection may write; night mode and dialog are still
 `ERROR_NO_PERMISSION`. A limit scales rather than clamps: under 0.01, `vol 50` was accepted and read
 back 50. `vol --limit [PCT|off]` reads and sets it per speaker; Media Room was returned to 0.02.
 
+**A favorite's object id carries the player's container prefix, which the service does not
+know.** `favorites:1` gives each favorite a `resource.id` - Saavn's album Irumudi is
+`1004206cALBUM:79488223`, its playlist Top Kuthu `1006706cplaylist:109815423`. `getMetadata` on
+the first is refused, "Item not found"; on `ALBUM:79488223` it lists the four tracks. The eight hex
+digits are the prefix `container_uri` itself writes. They cannot be stripped from every id on
+sight, since an all-digit id (Apple Music's) has the same shape. So they come off a favorite's own
+id, which the player wrote, and otherwise only on a retry after the service refuses the whole id.
+`browse --favorite <name>` opens an album or playlist favorite that way, the app's album page; a
+song or station is refused. `favorites` lists in the app's sections (Playlists, Songs, Albums,
+Stations), and `--json` adds `category`.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

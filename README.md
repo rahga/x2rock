@@ -180,7 +180,8 @@ stopped at its first track rather than where it was. `party` reaches every room 
 | `x2rock queue save "Tonight"` | save it as a Sonos playlist |
 | `x2rock queue clear --yes` | empty it — Sonos keeps no undo, hence `--yes` |
 | `x2rock queue sources` · `queue add "<name>" [--next]` | what can be appended, and appending it |
-| `x2rock favorites [query] [--json]` | saved favorites, household-wide |
+| `x2rock favorites [query] [--json]` | saved favorites, household-wide, in the app's sections (Playlists, Songs, Albums, Stations) |
+| `x2rock browse --favorite "<name>"` | open an album or playlist favorite to see its tracks; `--play N`/`--queue N` as for any browse |
 | `x2rock keep [name] [--container]` · `bookmarks [--all]` · `bookmark "<name>"` · `bookmarks pin|rename|prune|remove` | remember what is playing, replay, and manage saved bookmarks |
 
 See [The queue](#the-queue) for why it is versioned and what can and cannot be appended, and

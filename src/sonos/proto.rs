@@ -834,12 +834,33 @@ impl Favorite {
     pub fn kind(&self) -> Option<&str> {
         self.resource.as_ref()?.kind.as_deref()
     }
+
+    /// The service's own id for what this plays, e.g. Saavn's
+    /// `1004206cALBUM:79488223` - with the container prefix the player wrote
+    /// on it; see `bookmarks::without_container_prefix`.
+    pub fn object(&self) -> Option<&MusicObjectId> {
+        self.resource.as_ref()?.id.as_ref()
+    }
+
+    /// Which section of the Sonos app's favorites this falls under: its
+    /// Playlists, Songs, Albums and Stations, as one word each. `other` for a
+    /// kind the app was not seen to section, or none.
+    pub fn category(&self) -> &'static str {
+        match self.kind().map(str::to_ascii_uppercase).as_deref() {
+            Some("PLAYLIST") => "playlist",
+            Some("TRACK") => "song",
+            Some("ALBUM") => "album",
+            Some("PROGRAM" | "STREAM" | "STATION") => "station",
+            _ => "other",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Resource {
     #[serde(rename = "type")]
     pub kind: Option<String>,
+    pub id: Option<MusicObjectId>,
 }
 
 /// `groupVolume:1` / `playerVolume:1` `getVolume`, and their events.
@@ -967,6 +988,29 @@ impl SettingsChanged {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Sonos app's favorites sections, read off the resource's type, and
+    /// the object id a favorite opens to.
+    #[test]
+    fn a_favorite_falls_in_the_app_s_section_for_its_kind() {
+        let favorite = |kind: &str| -> Favorite {
+            serde_json::from_value(serde_json::json!({
+                "id": "9", "name": "Irumudi",
+                "resource": {"type": kind, "id": {"objectId": "1004206cALBUM:79488223", "serviceId": "164"}}
+            }))
+            .unwrap()
+        };
+        assert_eq!(favorite("ALBUM").category(), "album");
+        assert_eq!(favorite("PLAYLIST").category(), "playlist");
+        assert_eq!(favorite("TRACK").category(), "song");
+        assert_eq!(favorite("PROGRAM").category(), "station");
+        assert_eq!(favorite("STREAM").category(), "station");
+        assert_eq!(favorite("PODCAST").category(), "other");
+        assert_eq!(
+            favorite("ALBUM").object().map(|o| o.object_id.as_str()),
+            Some("1004206cALBUM:79488223")
+        );
+    }
 
     /// Both shapes as the office One SL sent them, 2026-09-28.
     #[test]

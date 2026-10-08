@@ -308,6 +308,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Browse {
             ref service,
+            ref favorite,
             ref container,
             count,
             index,
@@ -320,6 +321,7 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.household.as_deref(),
                 room,
                 service.as_ref(),
+                favorite.as_deref(),
                 container.as_deref(),
                 count,
                 index,
