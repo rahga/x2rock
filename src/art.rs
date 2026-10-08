@@ -11,7 +11,7 @@
 //! queue arrive. Nothing else, and a redirect is held to the same rule before
 //! it is followed. What comes back must be at most [`MAX_BYTES`], arrive within
 //! [`TIMEOUT`], carry no `Content-Encoding` (which would undo the cap), and
-//! start like a JPEG, PNG, GIF or WebP - or it is not kept.
+//! start like a JPEG, PNG, GIF, WebP, AVIF or BMP - or it is not kept.
 //!
 //! **What is kept, and for how long.** `$XDG_CACHE_HOME/x2rock/art/`, owner
 //! only, one file per URL named for its MD5 - a key, not a security property.
@@ -60,7 +60,7 @@ const REDIRECTS: usize = 3;
 const PARALLEL: usize = 6;
 /// Its modification time is when the directory was last pruned.
 const MARKER: &str = ".pruned";
-const KINDS: [&str; 4] = ["jpg", "png", "gif", "webp"];
+const KINDS: [&str; 6] = ["jpg", "png", "gif", "webp", "avif", "bmp"];
 
 /// `$XDG_CACHE_HOME/x2rock/art`.
 pub fn dir() -> Result<PathBuf> {
@@ -110,6 +110,28 @@ fn kind(bytes: &[u8]) -> Option<&'static str> {
             b'P',
             ..,
         ] => Some("webp"),
+        // An ISO-BMFF box, `ftyp`, branded AVIF - a still (`avif`) or a
+        // sequence (`avis`). Some services' CDNs answer with it; x2rocktv met
+        // it on station logos. Kept even where the viewer cannot decode it -
+        // this Qt has no AVIF plugin - since refusing it leaves the art just
+        // as missing, and one that can decode it then shows it.
+        [
+            _,
+            _,
+            _,
+            _,
+            b'f',
+            b't',
+            b'y',
+            b'p',
+            b'a',
+            b'v',
+            b'i',
+            b'f' | b's',
+            ..,
+        ] => Some("avif"),
+        // A bitmap: rare, but Qt reads it with no plugin at all.
+        [b'B', b'M', ..] => Some("bmp"),
         _ => None,
     }
 }
@@ -352,6 +374,10 @@ mod tests {
         assert_eq!(kind(b"\x89PNG\r\n\x1a\n...."), Some("png"));
         assert_eq!(kind(b"GIF89a"), Some("gif"));
         assert_eq!(kind(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(kind(b"\0\0\0\x1cftypavif\0\0"), Some("avif"));
+        assert_eq!(kind(b"\0\0\0\x20ftypavis\0\0"), Some("avif"));
+        assert_eq!(kind(b"\0\0\0\x1cftypheic"), None, "HEIC is not AVIF");
+        assert_eq!(kind(b"BM\x36\x00\x0c\x00"), Some("bmp"));
         assert_eq!(kind(b"<html><img src=x>"), None);
         assert_eq!(kind(b"<svg"), None);
         assert_eq!(kind(b""), None);

@@ -9280,8 +9280,8 @@ for favorites, recently played and search (`dzcdn.net`, `saavncdn.com`, `qobuz.c
 address on port 1400; redirects are followed at most three times and each hop is held to the same
 rule. `http::get_bytes` stops reading once the raw response passes **2 MB** (a real 9 MB image was
 refused in 0.4 s) within **8 s**, a `Content-Encoding` is refused rather than inflated past the
-cap, and the body must start like a JPEG, PNG, GIF or WebP. Kept in `$XDG_CACHE_HOME/x2rock/art`,
-mode 700, one file per URL named for its MD5, written by rename. A hit bumps the file's mtime - atime
+cap, and the body must start like a JPEG, PNG, GIF or WebP (AVIF and BMP since 2026-10-08).
+Kept in `$XDG_CACHE_HOME/x2rock/art`, mode 700, one file per URL named for its MD5, written by rename. A hit bumps the file's mtime - atime
 is unreliable under `relatime` - and each run prunes at most hourly (a `.pruned` marker): past
 **30 days** goes, then the least recently used until under **50 MB**. A cache hit answers in
 ~2 ms. The widget shows only a `file://` path matching that cache's naming; `CoverArt.qml` refuses

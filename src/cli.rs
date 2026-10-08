@@ -1036,7 +1036,7 @@ pub enum Command {
     /// One line per URL, in order: the cached file's path, or an empty line for
     /// one that was not fetched. Only `https://`, or `http://` from a speaker on
     /// the local network (port 1400), each at most 2 MB and 8 seconds, and only
-    /// if it is a JPEG, PNG, GIF or WebP. The cache is
+    /// if it is a JPEG, PNG, GIF, WebP, AVIF or BMP. The cache is
     /// `$XDG_CACHE_HOME/x2rock/art`, kept under 50 MB and 30 days, least
     /// recently used first. What the bar widget shows art through.
     Art {
