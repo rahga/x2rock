@@ -168,6 +168,19 @@ impl Pending {
     }
 }
 
+/// A command's place in [`Pending`], given up when the command's future ends
+/// however it ends. Removing an entry a reply already took is a no-op.
+struct Registered<'a> {
+    inner: &'a Inner,
+    id: u64,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.inner.pending.lock().unwrap().remove(self.id);
+    }
+}
+
 #[derive(Clone)]
 pub struct Connection {
     inner: Arc<Inner>,
@@ -316,30 +329,52 @@ impl Connection {
         }
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-
-        let payload = Value::Array(vec![command, options]).to_string();
-        let sent = match self.inner.sink.lock().await.as_mut() {
-            Some(sink) => sink
-                .send(Message::Text(payload.into()))
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("socket closed".to_string()),
+        // Unregistered however this ends - a reply, a failure, the deadline,
+        // or the caller dropping this future (an outer timeout, a `try_join!`
+        // whose sibling failed), which ran none of the explicit removals and
+        // left the sender registered for as long as the socket lived.
+        let _registered = Registered {
+            inner: &self.inner,
+            id,
         };
-        if let Err(e) = sent {
-            self.inner.pending.lock().unwrap().remove(id);
-            return Err(Unreachable::error(format!(
+
+        // **One deadline over the whole exchange**: the wait for the shared
+        // write half, the write, and the reply. It covered only the reply,
+        // so a socket that stopped draining held this command - and every
+        // command queued behind the write lock - for as long as it liked.
+        let payload = Value::Array(vec![command, options]).to_string();
+        let mut sent = false;
+        let exchange = async {
+            match self.inner.sink.lock().await.as_mut() {
+                Some(sink) => sink
+                    .send(Message::Text(payload.into()))
+                    .await
+                    .map_err(|e| e.to_string())?,
+                None => return Err("socket closed".to_string()),
+            }
+            sent = true;
+            Ok(rx.await)
+        };
+        match tokio::time::timeout(REPLY_TIMEOUT, exchange).await {
+            Ok(Ok(Ok(reply))) => Ok(reply),
+            Ok(Ok(Err(_))) => Err(self.lost()),
+            Ok(Err(e)) => Err(Unreachable::error(format!(
                 "sending to player at {}: {e}",
                 self.inner.ip
-            )));
-        }
-
-        match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-            Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(_)) => Err(self.lost()),
+            ))),
+            // Sent, and no answer: the player's silence, as it always was.
+            Err(_) if sent => Err(Unreachable::error(format!(
+                "player at {} did not reply within {:?}",
+                self.inner.ip, REPLY_TIMEOUT
+            ))),
+            // The write itself never finished. A frame may be half on the wire,
+            // so nothing more can be sent on this socket: it is closed, and the
+            // next command reconnects. Not retried here - what did reach the
+            // player may already have acted.
             Err(_) => {
-                self.inner.pending.lock().unwrap().remove(id);
+                self.inner.shutdown.notify_one();
                 Err(Unreachable::error(format!(
-                    "player at {} did not reply within {:?}",
+                    "could not send to player at {} within {:?}",
                     self.inner.ip, REPLY_TIMEOUT
                 )))
             }
@@ -435,9 +470,16 @@ async fn read_loop(inner: Arc<Inner>, mut stream: SplitStream<Socket>) {
             Some(Ok(Message::Text(text))) => inner.dispatch(&text),
             // The library queues pongs but only flushes them on our next write,
             // which on a quiet daemon could be never. Answer explicitly.
+            // Bounded like every write: a socket that will not drain must not
+            // stop this loop from noticing it is shut down.
             Some(Ok(Message::Ping(payload))) => {
-                if let Some(sink) = inner.sink.lock().await.as_mut() {
-                    let _ = sink.send(Message::Pong(payload)).await;
+                let pong = async {
+                    if let Some(sink) = inner.sink.lock().await.as_mut() {
+                        let _ = sink.send(Message::Pong(payload)).await;
+                    }
+                };
+                if tokio::time::timeout(REPLY_TIMEOUT, pong).await.is_err() {
+                    break;
                 }
             }
             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -452,9 +494,15 @@ async fn read_loop(inner: Arc<Inner>, mut stream: SplitStream<Socket>) {
     // connection goes down when the socket is closed or found dead, not up to
     // thirty seconds later. A session's `close` used to leave its sockets
     // `ESTAB` for that long.
-    if let Some(mut sink) = inner.sink.lock().await.take() {
-        let _ = sink.close().await;
-    }
+    // Bounded: on a socket that stopped draining, both the lock (a write
+    // holding it) and the Close frame could wait for ever, and the sink is
+    // what has to go for the connection to close.
+    let _ = tokio::time::timeout(REPLY_TIMEOUT, async {
+        if let Some(mut sink) = inner.sink.lock().await.take() {
+            let _ = sink.close().await;
+        }
+    })
+    .await;
 }
 
 async fn keepalive(inner: Arc<Inner>) {
@@ -471,10 +519,17 @@ async fn keepalive(inner: Arc<Inner>) {
             inner.shutdown.notify_one();
             return;
         }
-        let pinged = match inner.sink.lock().await.as_mut() {
-            Some(sink) => sink.send(Message::Ping(Vec::new().into())).await.is_ok(),
-            None => false,
+        // Bounded, so a ping stuck behind a socket that will not drain comes
+        // back to the silence check rather than waiting with it.
+        let ping = async {
+            match inner.sink.lock().await.as_mut() {
+                Some(sink) => sink.send(Message::Ping(Vec::new().into())).await.is_ok(),
+                None => false,
+            }
         };
+        let pinged = tokio::time::timeout(REPLY_TIMEOUT, ping)
+            .await
+            .unwrap_or(false);
         if !pinged {
             inner.shutdown.notify_one();
             return;
@@ -485,6 +540,72 @@ async fn keepalive(inner: Arc<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection over a loopback socket whose far end is handed back and
+    /// never read or answered: no TLS, no handshake, no read loop - only the
+    /// command path, which is what these tests are about.
+    async fn unanswered() -> (Connection, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ours = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (theirs, _) = listener.accept().await.unwrap();
+        let socket = WebSocketStream::from_raw_socket(
+            MaybeTlsStream::Plain(ours),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let (sink, _stream) = socket.split();
+        let (events, _) = broadcast::channel(16);
+        let inner = Arc::new(Inner {
+            ip: "127.0.0.1".parse().unwrap(),
+            sink: tokio::sync::Mutex::new(Some(sink)),
+            pending: Mutex::new(Pending::default()),
+            events,
+            next_id: AtomicU64::new(1),
+            household_id: Mutex::new(None),
+            last_rx: Mutex::new(Instant::now()),
+            alive: AtomicBool::new(true),
+            shutdown: Notify::new(),
+        });
+        (Connection { inner }, theirs)
+    }
+
+    /// A caller that gives up - an outer timeout, a `try_join!` whose sibling
+    /// failed - takes its registration with it.
+    #[tokio::test]
+    async fn a_cancelled_command_leaves_nothing_registered() {
+        let (connection, _theirs) = unanswered().await;
+        let caller = connection.clone();
+        let task = tokio::spawn(async move { caller.command(json!({}), json!({})).await });
+        while connection.inner.pending.lock().unwrap().by_id.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        let _ = task.await;
+        let pending = connection.inner.pending.lock().unwrap();
+        assert!(pending.by_id.is_empty() && pending.order.is_empty());
+    }
+
+    /// A socket that will not drain fails the command blocked writing to it,
+    /// and the one queued behind the write lock, within the deadline - rather
+    /// than holding both for as long as it stays stuck.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_that_cannot_drain_is_bounded_too() {
+        let (connection, _theirs) = unanswered().await;
+        // Past what loopback buffers hold, so the write really blocks.
+        let big = json!({ "padding": "x".repeat(16 * 1024 * 1024) });
+        let (first, second) = tokio::join!(
+            tokio::time::timeout(REPLY_TIMEOUT * 2, connection.command(json!({}), big)),
+            tokio::time::timeout(REPLY_TIMEOUT * 2, connection.command(json!({}), json!({}))),
+        );
+        let first = first.expect("the blocked write outlived its deadline");
+        let second = second.expect("the command behind it outlived its deadline");
+        assert!(first.is_err() && second.is_err());
+        assert!(Unreachable::of(&first.unwrap_err()).is_some());
+        assert!(connection.inner.pending.lock().unwrap().by_id.is_empty());
+    }
 
     /// `enqueue_and_play` decides whether to delete a queue row and fall back to
     /// streaming on whether this downcast finds anything, so the mechanism is
