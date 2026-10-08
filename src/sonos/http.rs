@@ -399,7 +399,10 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     // socket without a TLS close_notify, which rustls reports as
     // `UnexpectedEof`. The response is already complete at that point, so
     // failing on it would turn a working service into an intermittent one.
-    // A truncated body is still caught downstream, by the parse.
+    // A truncated body is caught below, against the length the head promised:
+    // a parse alone does not catch it for a body nobody parses - cover art is
+    // judged by its first bytes, a speech clip by being non-empty - nor for a
+    // JSON prefix that happens to be valid on its own.
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
     // Where to resume looking for the header terminator, so a `head_only` read
@@ -440,13 +443,32 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow!("no HTTP status in response from {authority}"))?;
+    // A head-only read left the body unread on purpose, so there is none to
+    // decode: handing its first fragment to `dechunk` failed a chunked reply
+    // as truncated, and failed it or not depending on how the reads fell.
+    if head_only {
+        return Ok((status, head.into_owned(), Vec::new()));
+    }
     let chunked = head.lines().any(|l| {
         let l = l.to_ascii_lowercase();
         l.starts_with("transfer-encoding:") && l.contains("chunked")
     });
     let body = if chunked {
+        // Chunked framing wins over any Content-Length, and `dechunk` checks
+        // its own end.
         dechunk(body)?
     } else {
+        // A status that carries no body is exempt whatever its header says.
+        let bodiless = (100..200).contains(&status) || status == 204 || status == 304;
+        if let Some(promised) = header(&head, "Content-Length").and_then(|v| v.trim().parse().ok())
+            && !bodiless
+            && body.len() < promised
+        {
+            bail!(
+                "{authority} promised {promised} bytes and sent {} before closing",
+                body.len()
+            );
+        }
         body.to_vec()
     };
     Ok((status, head.into_owned(), body))
@@ -649,6 +671,50 @@ mod tests {
             head.len(),
             "read past the header terminator into a body it had no use for"
         );
+    }
+
+    /// A probe of a chunked reply gets its head, wherever the reads fall -
+    /// rather than the start of a body it never read, failed as truncated.
+    #[tokio::test]
+    async fn a_head_only_read_of_a_chunked_reply_returns_its_head() {
+        let head = "HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n\
+                    Content-Range: bytes 0-0/30000\r\nETag: abc\r\n\r\n";
+        for tail in ["", "1\r\nA", "1\r\nA\r\n0\r\n\r\n"] {
+            let tap = Tap {
+                data: format!("{head}{tail}").into_bytes(),
+                read: Default::default(),
+            };
+            let (status, got, body) = round_trip(tap, "GET / HTTP/1.1\r\n\r\n", "test", true, None)
+                .await
+                .unwrap_or_else(|e| panic!("with {tail:?} after the head: {e:#}"));
+            assert_eq!(status, 206);
+            assert!(got.contains("Content-Range: bytes 0-0/30000"));
+            assert!(body.is_empty());
+        }
+    }
+
+    /// A body cut short of its Content-Length is an error, not a smaller
+    /// success; a complete one is fine however the stream ends.
+    #[tokio::test]
+    async fn a_body_short_of_its_content_length_is_refused() {
+        let read = |data: &[u8]| {
+            round_trip(
+                Tap {
+                    data: data.to_vec(),
+                    read: Default::default(),
+                },
+                "GET / HTTP/1.1\r\n\r\n",
+                "test",
+                false,
+                None,
+            )
+        };
+        let short = read(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n[]").await;
+        assert!(short.is_err(), "accepted 2 bytes of a promised 100");
+        let whole = read(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]").await;
+        assert_eq!(whole.unwrap().2, b"[]");
+        let none = read(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\n\r\n").await;
+        assert!(none.is_ok(), "a 304 carries no body whatever it says");
     }
 
     /// And the ordinary path is unchanged: everything else here needs the body.
