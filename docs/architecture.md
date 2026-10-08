@@ -9563,6 +9563,23 @@ something had gone wrong. Measured 2026-10-07 in the Kitchen: `artist_radio.1648
 then radio, 1.6s, playing Coldplay's "Magic". Now a `program` goes to the room's source first and
 the queue is not tried; the same station started in 1.4s with nothing on stderr.
 
+## The 2026-10-08 review: what was measured and built
+
+A review of x2rock against x2rocktv's findings and the Sonos app (v89.01), worked through on the
+office household (Media Room, One SL, build 97180312). Each entry is what was measured, then what
+changed. Media Room's `volumeScalingFactor` sits at 0.02 on purpose while it is the test room.
+
+**Deezer rates with a heart and a ban, not thumbs.** Its `NowPlayingRatings` (presentation map
+version 301) keys on `ISFAVORITE`: at `0` it offers `SKIP_TRACK` (id 3) and `SAVE_TRACK` (id 1), at
+`1` `SKIP_TRACK` and `DELETE_TRACK` (id 0). Its strings name them: `SAVE_TRACK` adds to the
+favourite tracks, `DELETE_TRACK` removes from them, and `SKIP_TRACK` is "Add to Dislike tracks",
+declared `AutoSkip="ALWAYS"`. `rate` looked for `UP`/`DOWN` in the string id, found neither, and
+said Deezer "did not report a rating state" - a state it had reported. `smapi::RatingKind` now reads
+a heart as up, a ban as down and a delete as `unfavorite`, and `rate` tells "no state" from "this
+state does not offer that". Measured on "Fame is a Gun": `rate up` added it to the favourites; a
+second `rate up` was refused naming `rate down` and `rate unfavorite`; `rate unfavorite` sent
+`DELETE_TRACK` and took it back out. `rate down` was not sent, since nothing here undoes a dislike.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

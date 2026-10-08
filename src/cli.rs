@@ -1209,10 +1209,31 @@ pub enum RawScope {
     None,
 }
 
+/// What `rate` does to the playing track. A heart is an up and a ban a down,
+/// so one word works on a thumbs service and a heart one alike.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RateDirection {
+    /// Thumbs up, or on a heart service (Deezer) add it to the favourites.
+    #[value(aliases = ["like", "love", "heart", "favorite", "favourite"])]
     Up,
+    /// Thumbs down, or on Deezer add it to the disliked tracks, which also
+    /// skips it.
+    #[value(aliases = ["dislike", "ban"])]
     Down,
+    /// Take a heart back: out of the favourites again.
+    #[value(aliases = ["unlike", "unlove", "unheart", "unfavourite"])]
+    Unfavorite,
+}
+
+impl RateDirection {
+    pub fn kind(self) -> crate::sonos::smapi::RatingKind {
+        use crate::sonos::smapi::RatingKind;
+        match self {
+            Self::Up => RatingKind::Up,
+            Self::Down => RatingKind::Down,
+            Self::Unfavorite => RatingKind::Unfavorite,
+        }
+    }
 }
 
 /// What `service` can do to the daemon's unit: install, check status, or uninstall.
