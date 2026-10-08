@@ -264,8 +264,9 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
         if verbose() {
             log(&format!("retrying in {}s", backoff.as_secs()));
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        if let Some(reason) = wait_to_retry(&mut backoff, &mut restarts).await {
+            log(&format!("{reason}; retrying now"));
+        }
 
         // `discover` may have run while we were waiting. On a network this daemon
         // started out knowing nothing about, that file is the only way it ever
@@ -276,6 +277,30 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
         match State::load() {
             Ok(fresh) => state = fresh,
             Err(e) => log(&format!("could not re-read remembered players ({e:#})")),
+        }
+    }
+}
+
+/// Sit out the backoff before the next connect - unless the network changes or
+/// the machine resumes meanwhile, which is the moment a retry is most likely
+/// to work and the one the design says resets the backoff
+/// (docs/architecture.md, "capped exponential backoff"). Without this a
+/// return to a known network early in a 60s wait sat out nearly all of it,
+/// though the watcher had said so at once. Returns what cut it short, with the
+/// backoff back at its floor; otherwise doubles it, up to the cap. A signal
+/// that came in while connecting is already waiting here, and answers at once.
+async fn wait_to_retry(
+    backoff: &mut Duration,
+    restarts: &mut broadcast::Receiver<Restart>,
+) -> Option<crate::restart::Reason> {
+    tokio::select! {
+        _ = tokio::time::sleep(*backoff) => {
+            *backoff = (*backoff * 2).min(MAX_BACKOFF);
+            None
+        }
+        restart = restarted(restarts) => {
+            *backoff = MIN_BACKOFF;
+            Some(restart.reason)
         }
     }
 }
@@ -1045,6 +1070,39 @@ fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A network change during the wait retries at once, from the floor; with
+    /// none the backoff runs its full length and doubles.
+    #[tokio::test(start_paused = true)]
+    async fn a_network_change_cuts_the_backoff_short() {
+        let (tx, mut rx) = broadcast::channel(1);
+        let mut backoff = MAX_BACKOFF;
+        let started = tokio::time::Instant::now();
+        let signal = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = tx.send(Restart {
+                reason: crate::restart::Reason::NetworkChanged,
+                at: Instant::now(),
+            });
+            tx
+        });
+        let reason = wait_to_retry(&mut backoff, &mut rx).await;
+        assert!(matches!(
+            reason,
+            Some(crate::restart::Reason::NetworkChanged)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "sat out the backoff"
+        );
+        assert_eq!(backoff, MIN_BACKOFF);
+        let _tx = signal.await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        assert!(wait_to_retry(&mut backoff, &mut rx).await.is_none());
+        assert!(started.elapsed() >= MIN_BACKOFF);
+        assert_eq!(backoff, MIN_BACKOFF * 2);
+    }
 
     /// An event during a fetch is answered by exactly one more fetch, however
     /// many arrive; without one, none follows.
