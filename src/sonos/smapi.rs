@@ -449,6 +449,21 @@ async fn presentation_map(service: &Service) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
+/// The categories a service is searched in regardless of what its presentation
+/// map says: Apple Music, whose search is not SMAPI's at all (see `itunes`),
+/// and iHeartRadio, whose map's categories do not mean what they say (see
+/// `iheart`). `None` for every other service, which is searched as published.
+/// A list cached from a map before the override existed is passed over.
+pub fn fixed_categories(service_id: &str) -> Option<&'static [Category]> {
+    if crate::itunes::serves(service_id) {
+        Some(crate::itunes::categories())
+    } else if crate::iheart::serves(service_id) {
+        Some(crate::iheart::categories())
+    } else {
+        None
+    }
+}
+
 /// The categories a service will accept in `search`, from its presentation map.
 ///
 /// The manifest names the presentation map; both are plain documents on Sonos's
@@ -456,8 +471,8 @@ async fn presentation_map(service: &Service) -> Result<Option<String>> {
 /// be searched, and says so by returning an empty list rather than by failing -
 /// that is a fact about the service, not an error.
 pub async fn categories(service: &Service) -> Result<Vec<Category>> {
-    if crate::itunes::serves(&service.id) {
-        return Ok(crate::itunes::categories().to_vec());
+    if let Some(fixed) = fixed_categories(&service.id) {
+        return Ok(fixed.to_vec());
     }
     let Some(body) = presentation_map(service).await? else {
         return Ok(Vec::new());
@@ -555,6 +570,104 @@ pub async fn search(
     if crate::itunes::serves(&service.id) {
         return crate::itunes::search(category, term, index, count).await;
     }
+    if crate::iheart::serves(&service.id) && category == crate::iheart::STATIONS_ID {
+        return search_as_one(
+            service,
+            token,
+            &crate::iheart::STATIONS,
+            term,
+            index,
+            count,
+            refreshed,
+        )
+        .await;
+    }
+    search_one(service, token, category, term, index, count, refreshed).await
+}
+
+/// Several categories searched as one list, in order: the first category's
+/// rows, then the next's. `index` and `count` page through the whole, so each
+/// category is asked from where the page falls in it; one whose rows are all
+/// before or past the page is still asked for a single row, because its total
+/// is part of the whole's. A row an earlier category already gave is dropped.
+async fn search_as_one(
+    service: &Service,
+    token: Option<&Token>,
+    categories: &[&str],
+    term: &str,
+    index: u32,
+    count: u32,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<(Vec<Item>, u32)> {
+    let mut pager = Pager::new(index, count);
+    for category in categories {
+        let (from, ask) = pager.next_ask();
+        let (page, of) = search_one(service, token, category, term, from, ask, refreshed).await?;
+        pager.take(page, of);
+    }
+    Ok(pager.finish())
+}
+
+/// The bookkeeping of [`search_as_one`], apart from the network so it can be
+/// tested: which slice of the next category to ask for, and what the answers
+/// add up to.
+struct Pager {
+    /// How far into the categories not yet asked the page starts.
+    offset: u32,
+    count: u32,
+    items: Vec<Item>,
+    total: u32,
+}
+
+impl Pager {
+    fn new(index: u32, count: u32) -> Self {
+        Self {
+            offset: index,
+            count,
+            items: Vec::new(),
+            total: 0,
+        }
+    }
+
+    /// `(index, count)` for the next category. At least one row, always: a
+    /// category the page does not reach is still asked, for its total.
+    fn next_ask(&self) -> (u32, u32) {
+        (self.offset, self.wanted().max(1))
+    }
+
+    fn wanted(&self) -> u32 {
+        self.count.saturating_sub(self.items.len() as u32)
+    }
+
+    /// One category's answer: `page` from where it was asked, `of` its total.
+    fn take(&mut self, page: Vec<Item>, of: u32) {
+        let wanted = self.wanted() as usize;
+        if wanted > 0 && self.offset < of {
+            for item in page.into_iter().take(wanted) {
+                if !self.items.iter().any(|kept| kept.id == item.id) {
+                    self.items.push(item);
+                }
+            }
+        }
+        self.offset = self.offset.saturating_sub(of);
+        self.total += of;
+    }
+
+    fn finish(self) -> (Vec<Item>, u32) {
+        (self.items, self.total)
+    }
+}
+
+/// One category's `search`, over SMAPI.
+async fn search_one(
+    service: &Service,
+    token: Option<&Token>,
+    category: &str,
+    term: &str,
+    index: u32,
+    count: u32,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<(Vec<Item>, u32)> {
     let body = call(
         service,
         token,
@@ -1511,6 +1624,77 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive a [`Pager`] over fake categories, each a list of ids, the way
+    /// `search_as_one` drives it over real ones: ask, slice, take.
+    fn paged(categories: &[&[&str]], index: u32, count: u32) -> (Vec<String>, u32) {
+        let mut pager = Pager::new(index, count);
+        for ids in categories {
+            let (from, ask) = pager.next_ask();
+            let page = ids
+                .iter()
+                .skip(from as usize)
+                .take(ask as usize)
+                .map(|id| Item {
+                    id: (*id).into(),
+                    title: String::new(),
+                    item_type: "program".into(),
+                    summary: None,
+                    art_url: None,
+                    container: true,
+                })
+                .collect();
+            pager.take(page, ids.len() as u32);
+        }
+        let (items, total) = pager.finish();
+        (items.into_iter().map(|i| i.id).collect(), total)
+    }
+
+    #[test]
+    fn several_categories_page_as_one_list() {
+        let live: &[&str] = &["z100", "z100pdx"];
+        let artists: &[&str] = &["ar1", "ar2", "ar3", "ar4"];
+        // From the start: live first, then artists, totals summed.
+        assert_eq!(
+            paged(&[live, artists], 0, 3),
+            (vec!["z100".into(), "z100pdx".into(), "ar1".into()], 6)
+        );
+        // A page that starts inside the second category.
+        assert_eq!(
+            paged(&[live, artists], 3, 2),
+            (vec!["ar2".into(), "ar3".into()], 6)
+        );
+        // A page the first category fills still counts the second's total.
+        assert_eq!(paged(&[live, artists], 0, 2).1, 6);
+        // An empty first category - an artist's name finds no live station.
+        assert_eq!(
+            paged(&[&[], artists], 0, 2),
+            (vec!["ar1".into(), "ar2".into()], 4)
+        );
+        // Past the end: nothing, and the total still right.
+        assert_eq!(paged(&[live, artists], 9, 2), (vec![], 6));
+        // A row both categories give appears once.
+        assert_eq!(
+            paged(&[&["x", "y"], &["y", "z"]], 0, 4).0,
+            vec!["x", "y", "z"]
+        );
+    }
+
+    #[test]
+    fn iheart_and_apple_are_searched_in_fixed_categories_and_no_one_else_is() {
+        let ids = |s: &str| {
+            fixed_categories(s).map(|c| c.iter().map(|c| c.id.clone()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            ids(crate::iheart::SERVICE_ID),
+            Some(vec!["stations".into(), "podcasts".into()])
+        );
+        assert_eq!(
+            ids(crate::itunes::SERVICE_ID),
+            Some(vec!["tracks".into(), "albums".into()])
+        );
+        assert_eq!(ids("2"), None);
+    }
 
     /// Audible's own reply for Dune, as it answered `getMetadata` with a count
     /// of 1 (2026-10-06): the resume point beside the first chapter.

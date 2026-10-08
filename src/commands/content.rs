@@ -355,37 +355,30 @@ async fn play_one(
     // Whether the queue was refused because the household has UPnP off, rather
     // than because of the item: if nothing below plays it either, that is the
     // reason worth ending on, and the one the person can do something about.
+    // A `program` is a radio show or channel - an iHeartRadio artist station,
+    // a Radio Paradise channel - and never queue material: `AddURIToQueue`
+    // refuses every one with 800. The Sonos app plays one by making it the
+    // room's source, so that is its first route, not a fallback reached after
+    // a refusal that was certain (and printed as if something had gone wrong).
+    // Measured on iHeart's `artist_radio.1648`, 2026-10-07.
+    let program = kind.is_some_and(|k| k.eq_ignore_ascii_case("program"));
     let mut upnp_off = false;
     if !streamish && let Some(naming) = Naming::of(service, token) {
-        match enqueue_item(session, room, service, &naming, id, title, kind, true).await {
+        let first = match program {
+            true => play_radio(session, room, service, &naming, id, title).await,
+            false => enqueue_item(session, room, service, &naming, id, title, kind, true).await,
+        };
+        match first {
             Ok(()) => return Ok(()),
             // Only a refusal earns the fallback. An unreachable coordinator is
             // not the item's fault and the stream session cannot fix it.
             Err(e) if is_refusal(&e) => {
                 upnp_off = upnp::Fault::of(&e).is_some_and(|f| !f.is_per_action());
-                // A `program` is a radio show or channel: not queue material,
-                // and a service can lack the `getMediaURI` streaming needs -
-                // Radio Paradise does. The Sonos app plays one by making it the
-                // room's source, so that is tried before the stream. Not with
-                // UPnP off: setting the source is UPnP too.
-                let radio = !upnp_off && kind.is_some_and(|k| k.eq_ignore_ascii_case("program"));
-                eprintln!(
-                    "x2rock: {title:?} {} ({e:#}); {}",
-                    refusal_was(&e),
-                    if radio {
-                        "playing it as radio"
-                    } else {
-                        "streaming it"
-                    }
-                );
-                if radio {
-                    match play_radio(session, room, service, &naming, id, title).await {
-                        Ok(()) => return Ok(()),
-                        Err(r) => eprintln!(
-                            "x2rock: {title:?} would not play as radio either ({r:#}); streaming it"
-                        ),
-                    }
-                }
+                let what = match program {
+                    true => "would not play as radio",
+                    false => refusal_was(&e),
+                };
+                eprintln!("x2rock: {title:?} {what} ({e:#}); streaming it");
             }
             Err(e) => return Err(e),
         }
@@ -441,9 +434,11 @@ async fn play_unqueued(
     let streamed = stream_item(session, room, service, token, id, title, StreamStart::Fresh).await;
     // **The last resort, after both of the above said no.** `loadContent` hands
     // the player the service, account and id and lets it resolve the rest, and
-    // it plays what neither path can: an iHeartRadio `artist_radio` is refused
-    // by `AddURIToQueue` (800) and by the service's own `getMediaURI`, and
-    // loads (verified 2026-09-26). Not the first choice: it replaces the queue
+    // it plays what neither path can - an iHeartRadio `artist_radio` loaded
+    // here before the radio route existed (verified 2026-09-26), refused by
+    // `AddURIToQueue` (800) and by the service's own `getMediaURI`; it now plays
+    // as the room's source first, so it reaches this only if that fails too.
+    // Not the first choice: it replaces the queue
     // rather than adding to it, refuses every service the household holds no
     // account for, and takes a pause and a wait to start - see `replay`.
     match streamed {

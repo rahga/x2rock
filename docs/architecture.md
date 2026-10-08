@@ -232,6 +232,9 @@ early claim rather than leaving it standing beside a pointer. (A pass on 2026-09
 whole file: claims wholly overtaken by later testing were removed or rewritten in place, so the
 lines below record the reversals rather than warn about text that still says otherwise.)
 
+- **`artist_radio` does not need `loadContent`.** Recorded as playing only through it, as a last
+  resort (2026-09-26). It plays as the room's source, `x-sonosapi-radio:`, which every `program`
+  now tries first. See "iHeartRadio searched the way the Sonos app shows it" (2026-10-07).
 - **`queueVersion` is not the queue-change signal** *on the firmware this was measured on.* It was
   the intended push trigger; that firmware sent no such field, in status or events, and the
   trigger there is the UPnP `UpdateID` on a `Q:0` browse. See "`queueVersion` does not exist".
@@ -9089,7 +9092,7 @@ The question was whether `loadContent` could replace the hand-built UPnP enqueue
 |---|---|---|
 | tracks: Deezer, YouTube Music, Apple Music, an iHeartRadio podcast episode | ✓, playing in ~2 s | ✓ |
 | albums, playlists, iHeartRadio live stations, Sonos Radio, Sonos playlists | ✓ | ✓ (playlists by their own command) |
-| iHeartRadio `artist_radio` | ✓ | ✗ 800 from the queue, and iHeartRadio's `getMediaURI` refuses the id |
+| iHeartRadio `artist_radio` | ✓ | ✗ 800 from the queue, and iHeartRadio's `getMediaURI` refuses the id - but it plays as the room's source, which is now its first route (see "iHeartRadio searched the way the Sonos app shows it", 2026-10-07) |
 | an **anonymous** service (Audacy `station:5234`) | ✗ `ERROR_ACCOUNT_INVALID_ID` "Could not find default account for serviceId", however no account is written (absent, `""`, `sn_0`, `0`) | ✓, streamed |
 | a service the household holds no account for | ✗ the same | the stream fallback, where the service allows it |
 | **appending** (`queue-item`, `bookmark --next`) | ✗ replace only: `action` `APPEND`/`INSERT_NEXT`, `enqueue`, `queueMode` are all ignored | ✓ |
@@ -9526,6 +9529,39 @@ offset. No place kept means the first chapter from its start; `play-item --from-
 old route on purpose. Verified in the Dining Room: Dune resumed at 756,107 - the saved place to the
 millisecond - in 3.5s, and Audible held 756,530 after the pause. `search`/`browse --play` resume
 too; `queue-item` on a book still adds every chapter, which is what queueing a book means.
+
+## iHeartRadio searched the way the Sonos app shows it, and its stations played as radio (2026-10-07)
+
+Prompted by x2rocktv (`ServiceContent.asSonosShowsThem`, commit 27e2318, office household) and
+re-measured here on the home household's iHeartRadio, sid 6.
+
+**Its search categories do not mean what they say.** The presentation map publishes stations,
+artists, tracks, albums, playlists and podcasts. For "coldplay": `artists` answers *artist
+stations* - `artist_radio.1648` "Coldplay" and its kin, all `program`; `tracks` answers artist
+stations too, its first hit "A COLD PLAY" being `artist_radio.32433934`, which plays The Kid
+LAROI's station rather than a song (the free tier plays no song on demand); `stations` answers
+only live radio ("z100": Z100, Z100 Portland, Z100 Eau Claire, all `stream`) and nothing for an
+artist; `playlists` answers iHeart's own custom radio. The Sonos app offers **Stations** and
+**Podcasts** only, and its Stations for "coldplay" are exactly the `artists` list, in order - so
+it merges the two. (iHeart's totals are not stable between requests: `artists` reported 80 for
+"coldplay" at a count of 4, and the merged list 36 at a count of 6.)
+
+**Built.** `iheart.rs` fixes iHeart's categories at `stations` and `podcasts`, alongside Apple
+Music's, behind one hook - `smapi::fixed_categories` - that the catalogue's cached reads consult
+too, so a list cached from the map is passed over. `smapi::search` runs iHeart's `stations` as
+`search_as_one` over `stations` then `artists`: one list, paged through as a whole, each category
+asked from where the page falls in it, a repeated id dropped. `search -s iHeartRadio -c tracks`
+now says iHeart has no such category, and the merged search draws on Stations and Podcasts only,
+so no station is ever listed as an artist or a song.
+
+**A `program` plays as the room's source first.** `artist_radio` was recorded as playing only
+through `loadContent`, the last resort (2026-09-26, the table under "`loadContent`, and what it
+settles"). `play_radio` - `x-sonosapi-radio:` with the `audioBroadcast` DIDL - arrived on
+2026-09-30 for Radio Paradise and reaches it earlier, but only as a fallback: `play_one` still
+tried `AddURIToQueue` first, which refuses every `program` with 800, and printed the refusal as if
+something had gone wrong. Measured 2026-10-07 in the Kitchen: `artist_radio.1648` went queue (800)
+then radio, 1.6s, playing Coldplay's "Magic". Now a `program` goes to the room's source first and
+the queue is not tried; the same station started in 1.4s with nothing on stderr.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 

@@ -207,7 +207,7 @@ impl Catalogue {
     /// false for a service nobody has looked up yet - unasked is not the same
     /// as answered-no, and only one of them is worth acting on.
     pub fn publishes_no_categories(&self, service_id: &str) -> bool {
-        !crate::itunes::serves(service_id)
+        smapi::fixed_categories(service_id).is_none()
             && self
                 .categories
                 .get(service_id)
@@ -220,7 +220,7 @@ impl Catalogue {
     /// worth writing to disk, and testing `is_empty()` afterwards cannot tell
     /// it from a hit that changed nothing.
     pub fn categories_cached(&self, service_id: &str) -> bool {
-        crate::itunes::serves(service_id) || self.categories.contains_key(service_id)
+        smapi::fixed_categories(service_id).is_some() || self.categories.contains_key(service_id)
     }
 
     /// Whether a service can be walked from `root`: `Some(false)` once it has
@@ -356,8 +356,8 @@ impl Catalogue {
     /// to read many services in one pass, including telling "warmed to nothing"
     /// from "the warm failed and this is still unasked". `None` is the second.
     pub fn cached_categories(&self, service_id: &str) -> Option<&[Category]> {
-        if crate::itunes::serves(service_id) {
-            return Some(crate::itunes::categories());
+        if let Some(fixed) = smapi::fixed_categories(service_id) {
+            return Some(fixed);
         }
         self.categories.get(service_id).map(Vec::as_slice)
     }
