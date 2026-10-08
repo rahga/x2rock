@@ -1096,7 +1096,9 @@ those two apart when telling a user what linking will do.
   this is the household's own account list, which no command can read (see the `accounts --content`
   note above). `browsable` is `null` until the service has been browsed once, then whether its
   `root` had anything to walk: `false` after a refusal (Apple Music always, YouTube Music's 403) or
-  an empty root (Sonos Radio), never after a timeout. Bare `browse` leaves the `false` ones out of
+  an empty root, never after a timeout. (Sonos Radio's SMAPI root is empty, but `browse -s "Sonos
+  Radio"` reads its front page from the service's own endpoint instead: 28 shelves - Trending Now,
+  Sonos Presents, the genres - each opened and played like any other container.) Bare `browse` leaves the `false` ones out of
   its list; `browse -s <service>` still tries one when named.
 - **`unlink` is scoped by what you give it, and never revokes anything.** A service alone forgets it
   in *every* household that holds it ("stop using this service" rather than "on this network");

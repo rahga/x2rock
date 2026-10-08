@@ -418,13 +418,10 @@ pub fn parse_services(descriptor_list: &str, type_list: &str) -> Result<Vec<Serv
     Ok(out)
 }
 
-/// A service's presentation map body, or `None` when it publishes none - a
-/// missing manifest, or a manifest that names no presentation map, both being
-/// facts about the service rather than errors. Shared by [`categories`] and
-/// [`ratings`], which read different elements of the same document: the body
-/// comes back owned, so each caller parses its own copy with no lifetime tying
-/// them together.
-async fn presentation_map(service: &Service) -> Result<Option<String>> {
+/// A service's manifest, or `None` when it has none: the document on Sonos's
+/// CDN that names its presentation map, its strings and any endpoints beside
+/// SMAPI (Sonos Radio's front page - see `sonosradio`).
+pub async fn manifest(service: &Service) -> Result<Option<serde_json::Value>> {
     let Some(manifest_uri) = &service.manifest_uri else {
         return Ok(None);
     };
@@ -432,8 +429,21 @@ async fn presentation_map(service: &Service) -> Result<Option<String>> {
     if status != 200 {
         bail!("{} manifest: HTTP {status}", service.name);
     }
-    let manifest: serde_json::Value =
-        serde_json::from_str(&body).with_context(|| format!("{} manifest", service.name))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .with_context(|| format!("{} manifest", service.name))
+}
+
+/// A service's presentation map body, or `None` when it publishes none - a
+/// missing manifest, or a manifest that names no presentation map, both being
+/// facts about the service rather than errors. Shared by [`categories`] and
+/// [`ratings`], which read different elements of the same document: the body
+/// comes back owned, so each caller parses its own copy with no lifetime tying
+/// them together.
+async fn presentation_map(service: &Service) -> Result<Option<String>> {
+    let Some(manifest) = manifest(service).await? else {
+        return Ok(None);
+    };
     let Some(map_uri) = manifest
         .get("presentationMap")
         .and_then(|m| m.get("uri"))
@@ -696,6 +706,14 @@ pub async fn metadata(
     count: u32,
     refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
+    // Sonos Radio's root is empty over SMAPI; its front page comes from the
+    // service's own browse endpoint, and everything under it from here again.
+    if id == "root" && crate::sonosradio::serves(&service.id) {
+        let shelves = crate::sonosradio::shelves(service).await?;
+        let total = shelves.len() as u32;
+        let page = shelves.into_iter().skip(index as usize).collect();
+        return Ok(at_most((page, total), count));
+    }
     let body = call(
         service,
         token,
