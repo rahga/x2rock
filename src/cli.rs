@@ -1245,7 +1245,7 @@ pub enum RawScope {
 
 /// What `rate` does to the playing track. A heart is an up and a ban a down,
 /// so one word works on a thumbs service and a heart one alike.
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RateDirection {
     /// Thumbs up, or on a heart service (Deezer) add it to the favourites.
     #[value(aliases = ["like", "love", "heart", "favorite", "favourite"])]

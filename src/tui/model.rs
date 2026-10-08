@@ -14,10 +14,10 @@ use zbus::zvariant::OwnedValue;
 // The daemon's own names for its keys, so the two ends of the contract cannot
 // drift apart by a typo in one of them.
 use crate::mpris::{
-    CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, FIXED_VOLUME, HAS_TV_INPUT,
-    INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME, MEMBER_MUTED, MEMBER_VOLUME_LEVELS,
-    MEMBER_VOLUMES, MEMBERS, MUTED, NO_SOURCE, ON_TV_INPUT, STATION_NAME, STREAM_INFO, UPNP_OFF,
-    VOLUME_LEVEL,
+    CAN_CROSSFADE, CAN_REPEAT, CAN_REPEAT_ONE, CAN_SHUFFLE, CROSSFADE, ENHANCE_DIALOG,
+    FIXED_VOLUME, HAS_TRACK_ID, HAS_TV_INPUT, INPUT_FORMAT, LIVE_STREAM, MEMBER_FIXED_VOLUME,
+    MEMBER_MUTED, MEMBER_VOLUME_LEVELS, MEMBER_VOLUMES, MEMBERS, MUTED, NIGHT_MODE, NO_SOURCE,
+    ON_TV_INPUT, STATION_NAME, STREAM_INFO, UPNP_OFF, VOLUME_LEVEL,
 };
 
 /// What the room is doing, as `PlaybackStatus` reports it.
@@ -116,6 +116,13 @@ pub struct RoomSnapshot {
     pub can_repeat_one: bool,
     pub can_shuffle: bool,
     pub can_crossfade: bool,
+    /// The current item has a real service track id - the half of "can this
+    /// be rated" knowable on the LAN; see `mpris::HAS_TRACK_ID`.
+    pub has_track_id: bool,
+    /// Night sound and speech enhancement, published only for a room with a
+    /// soundbar: `None` is "has no such setting", not "off".
+    pub night_mode: Option<bool>,
+    pub enhance_dialog: Option<bool>,
 }
 
 /// `xesam:artist` is an array per the MPRIS spec, and the daemon writes a
@@ -135,6 +142,11 @@ fn first_string(value: Option<&OwnedValue>) -> String {
 
 fn flag(value: Option<&OwnedValue>) -> bool {
     value.and_then(|v| bool::try_from(v).ok()).unwrap_or(false)
+}
+
+/// A flag the daemon sends only where it applies: absent is `None`.
+fn maybe_flag(value: Option<&OwnedValue>) -> Option<bool> {
+    value.and_then(|v| bool::try_from(v).ok())
 }
 
 fn strings(value: Option<&OwnedValue>) -> Vec<String> {
@@ -197,6 +209,9 @@ impl RoomSnapshot {
         self.can_repeat_one = flag(get(CAN_REPEAT_ONE));
         self.can_shuffle = flag(get(CAN_SHUFFLE));
         self.can_crossfade = flag(get(CAN_CROSSFADE));
+        self.has_track_id = flag(get(HAS_TRACK_ID));
+        self.night_mode = maybe_flag(get(NIGHT_MODE));
+        self.enhance_dialog = maybe_flag(get(ENHANCE_DIALOG));
     }
 
     /// Decide where the bar sits, given what MPRIS Volume said - `None` if it

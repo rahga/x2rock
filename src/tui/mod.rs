@@ -27,7 +27,11 @@ mod view;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
+
+use crate::cli::RateDirection;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -146,6 +150,12 @@ async fn drive(
     let (finished, mut finishes) = mpsc::unbounded_channel::<Result<Vec<String>>>();
     let mut in_flight: usize = 0;
     let mut reread_pending = false;
+    // Sleep timers, read off the speakers: every room's at the start, and a
+    // room's again whenever the cursor lands on it. See `App::sleep`.
+    let (slept, mut sleeps) = mpsc::unbounded_channel::<(String, Option<Duration>)>();
+    for room in app.rooms() {
+        read_sleep(speakers, &room.room, &slept);
+    }
 
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
@@ -153,7 +163,16 @@ async fn drive(
             event = keys.next() => match event {
                 // Press only. A terminal that reports releases and repeats
                 // would otherwise act three times on one tap of the volume key.
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    let before = app.selected().map(|room| room.room.clone());
+                    let intent = app.on_key(key);
+                    if let Some(now) = app.selected().map(|room| room.room.clone())
+                        && before.as_ref() != Some(&now)
+                    {
+                        read_sleep(speakers, &now, &slept);
+                    }
+                    intent
+                }
                 // A resize needs no state change: the loop redraws at the top
                 // of every pass, and that is the whole response.
                 Some(Ok(_)) => Intent::Nothing,
@@ -208,6 +227,10 @@ async fn drive(
                 // channel if it answers at all; a read that never comes back is
                 // left to show as age instead.
                 reread(source, &heard);
+                continue;
+            },
+            Some((room, left)) = sleeps.recv() => {
+                app.heard_sleep(room, left);
                 continue;
             },
             refreshed = heartbeats.recv() => {
@@ -293,6 +316,25 @@ fn reread(source: &Source, heard: &mpsc::UnboundedSender<Vec<RoomSnapshot>>) {
     tokio::spawn(async move {
         if let Ok(Ok(rooms)) = tokio::time::timeout(HEARTBEAT, source.snapshot()).await {
             let _ = heard.send(rooms);
+        }
+    });
+}
+
+/// Read one room's sleep timer off the loop, answering on `slept`. A failure
+/// says nothing: the room simply shows no timer, which is also what UPnP off
+/// leaves it with.
+fn read_sleep(
+    speakers: &action::Speakers,
+    room: &str,
+    slept: &mpsc::UnboundedSender<(String, Option<Duration>)>,
+) {
+    let speakers = speakers.clone();
+    let room = room.to_owned();
+    let slept = slept.clone();
+    tokio::spawn(async move {
+        if let Ok(Ok(left)) = tokio::time::timeout(WRITE_TIMEOUT, speakers.sleep_left(&room)).await
+        {
+            let _ = slept.send((room, left));
         }
     });
 }
@@ -407,6 +449,13 @@ pub enum Intent {
     Party(String),
     PartyOff,
     Tv(String),
+    /// Rate what the room plays - the CLI's `rate`.
+    Rate(String, RateDirection),
+    /// Set the room's sleep timer, or with `None` cancel it.
+    Sleep(String, Option<Duration>),
+    /// Night sound (`NightMode`) or speech enhancement (`DialogLevel`) on the
+    /// room's soundbar.
+    HomeTheater(String, &'static str, bool),
 }
 
 impl Intent {
@@ -422,6 +471,7 @@ impl Intent {
             Self::Party(_) => Some("gathering every room…"),
             Self::PartyOff => Some("putting every room on its own…"),
             Self::Tv(_) => Some("switching to the TV input…"),
+            Self::Rate(..) => Some("rating…"),
             _ => None,
         }
     }
@@ -475,6 +525,9 @@ async fn execute(
         Intent::Party(room) => speakers.party(&room).await,
         Intent::PartyOff => speakers.party_off().await,
         Intent::Tv(room) => speakers.tv(&room).await,
+        Intent::Rate(room, direction) => speakers.rate(&room, direction).await,
+        Intent::Sleep(room, after) => speakers.sleep(&room, after).await,
+        Intent::HomeTheater(room, setting, on) => speakers.home_theater(&room, setting, on).await,
     }
 }
 
@@ -591,6 +644,12 @@ pub struct App {
     /// Taken on each snapshot that finds the selection resolved and the overlay
     /// open; read only while [`unresolved`](Self::unresolved).
     shown_group: Option<(String, Vec<GroupRow>)>,
+    /// When each room's sleep timer runs out, by room name: read from the
+    /// coordinator at start and whenever the cursor lands on a room, set by
+    /// `z`, and counted down here in between. MPRIS carries no sleep timer and
+    /// the daemon does not poll for one, so a timer set elsewhere shows once
+    /// the cursor next visits the room.
+    sleep: HashMap<String, Instant>,
 }
 
 impl App {
@@ -606,7 +665,24 @@ impl App {
             following,
             unresolved: false,
             shown_group: None,
+            sleep: HashMap::new(),
         }
+    }
+
+    /// What is left on a room's sleep timer, if one is known to be running.
+    pub fn sleep_left(&self, room: &str) -> Option<Duration> {
+        self.sleep
+            .get(room)
+            .and_then(|end| end.checked_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+    }
+
+    /// A sleep timer read off the speakers.
+    fn heard_sleep(&mut self, room: String, left: Option<Duration>) {
+        match left {
+            Some(left) => self.sleep.insert(room, Instant::now() + left),
+            None => self.sleep.remove(&room),
+        };
     }
 
     /// How long the screen has been unable to confirm what it is showing, once
@@ -902,8 +978,91 @@ impl App {
             }
             KeyCode::Char('t') => self.tv(),
             KeyCode::Char('P') => self.party(),
+            KeyCode::Char('l') => self.rate(RateDirection::Up),
+            KeyCode::Char('L') => self.rate(RateDirection::Unfavorite),
+            KeyCode::Char('b') => self.rate(RateDirection::Down),
+            KeyCode::Char('z') => self.cycle_sleep(),
+            KeyCode::Char('N') => self.home_theater(NIGHT),
+            KeyCode::Char('D') => self.home_theater(SPEECH),
             _ => Intent::Nothing,
         }
+    }
+
+    /// Rate what the selected room plays. Only where there is a track to rate:
+    /// a live broadcast, a URL stream and the TV input carry no id. Down asks
+    /// first - on Deezer it adds the track to the disliked ones and skips it,
+    /// and nothing here takes that back.
+    fn rate(&mut self, direction: RateDirection) -> Intent {
+        let Some(room) = self.selected() else {
+            return Intent::Nothing;
+        };
+        if !room.has_track_id {
+            self.status = Some(Status::note(
+                "nothing rateable is playing (a live broadcast has no track to rate)",
+            ));
+            return Intent::Nothing;
+        }
+        let intent = Intent::Rate(room.room.clone(), direction);
+        if direction == RateDirection::Down {
+            self.overlay = Overlay::Confirm {
+                title: " Rate down ",
+                prompt: format!(
+                    "Rate down what {} is playing? It may be skipped.",
+                    room.room
+                ),
+                intent,
+            };
+            return Intent::Nothing;
+        }
+        intent
+    }
+
+    /// Step the selected room's sleep timer through the Sonos app's choices -
+    /// 15, 30, 45, 60 and 90 minutes - to the first one past what is left, and
+    /// from the last back to off.
+    fn cycle_sleep(&mut self) -> Intent {
+        let Some(room) = self.selected() else {
+            return Intent::Nothing;
+        };
+        if room.upnp_off {
+            self.status = Some(Status::note(
+                "UPnP is off for this household, and the sleep timer is set over it",
+            ));
+            return Intent::Nothing;
+        }
+        let name = room.room.clone();
+        let next = next_sleep(self.sleep_left(&name));
+        self.heard_sleep(name.clone(), next);
+        Intent::Sleep(name, next)
+    }
+
+    /// Toggle night sound or speech enhancement, on a room whose soundbar
+    /// publishes it.
+    fn home_theater(&mut self, (setting, what): (&'static str, &'static str)) -> Intent {
+        let Some(room) = self.selected() else {
+            return Intent::Nothing;
+        };
+        let now = match setting {
+            "NightMode" => room.night_mode,
+            _ => room.enhance_dialog,
+        };
+        let Some(now) = now else {
+            return Intent::Nothing;
+        };
+        if room.upnp_off {
+            self.status = Some(Status::note(format!(
+                "UPnP is off for this household, and {what} is set over it"
+            )));
+            return Intent::Nothing;
+        }
+        let name = room.room.clone();
+        if let Some(room) = self.selected_mut() {
+            match setting {
+                "NightMode" => room.night_mode = Some(!now),
+                _ => room.enhance_dialog = Some(!now),
+            }
+        }
+        Intent::HomeTheater(name, setting, !now)
     }
 
     /// Transport, where the source has any to offer.
@@ -1039,11 +1198,13 @@ impl App {
             self.status = Some(Status::note("already on its TV input"));
             return Intent::Nothing;
         }
-        if room.upnp_off {
-            // The switch goes over UPnP, so it could only be refused - and the
-            // refusal would take a round trip to say what this already knows.
+        if room.upnp_off && room.is_group() {
+            // Handing a group to the TV goes over UPnP, so it could only be
+            // refused - and the refusal would take a round trip to say what
+            // this already knows. A soundbar on its own is switched over the
+            // Control API instead, and goes ahead.
             self.status = Some(Status::note(
-                "UPnP is off for this household, and the TV input switches over it",
+                "UPnP is off for this household, and a group goes to the TV input over it",
             ));
             return Intent::Nothing;
         }
@@ -1170,6 +1331,26 @@ impl App {
 /// An MPRIS volume moved by so many points, snapped to whole percent - the
 /// resolution a speaker actually stores, and the only one at which repeated
 /// steps do not accumulate the error of 0.05 not being representable.
+/// The Sonos app's sleep timer choices, in minutes.
+const SLEEP_STEPS: [u64; 5] = [15, 30, 45, 60, 90];
+
+/// The `UPnP SetEQ` names of the two soundbar settings, and what they are
+/// called on screen.
+const NIGHT: (&str, &str) = ("NightMode", "night sound");
+const SPEECH: (&str, &str) = ("DialogLevel", "speech enhancement");
+
+/// The next sleep timer after `left`: the first step more than a minute past
+/// it, so a press on a timer just set moves on rather than resetting it, and
+/// past the last, off.
+fn next_sleep(left: Option<Duration>) -> Option<Duration> {
+    let left = left.map_or(0, |d| d.as_secs());
+    SLEEP_STEPS
+        .iter()
+        .map(|m| m * 60)
+        .find(|&step| step > left + 60)
+        .map(Duration::from_secs)
+}
+
 fn stepped(volume: f64, by: i16) -> f64 {
     ((volume * 100.0).round() + f64::from(by)).clamp(0.0, 100.0) / 100.0
 }
@@ -1559,15 +1740,98 @@ mod tests {
         );
     }
 
+    /// With UPnP off a group cannot be handed to the TV, and is told why; a
+    /// soundbar on its own goes over the Control API, and is let through.
     #[test]
-    fn tv_says_why_instead_of_switching_with_upnp_off() {
-        let mut app = App::new(vec![RoomSnapshot {
+    fn with_upnp_off_only_a_lone_soundbar_goes_to_tv() {
+        let mut grouped = App::new(vec![RoomSnapshot {
+            has_tv: true,
+            upnp_off: true,
+            members: vec!["Living Room".into(), "Kitchen".into()],
+            member_volumes: vec![50, 50],
+            ..room("Living Room")
+        }]);
+        assert_eq!(press(&mut grouped, 't'), Intent::Nothing);
+        assert_eq!(grouped.status().map(|status| status.kind), Some(Kind::Note));
+
+        let mut alone = App::new(vec![RoomSnapshot {
             has_tv: true,
             upnp_off: true,
             ..room("Living Room")
         }]);
-        assert_eq!(press(&mut app, 't'), Intent::Nothing);
+        assert_eq!(press(&mut alone, 't'), Intent::Tv("Living Room".into()));
+    }
+
+    #[test]
+    fn a_track_is_rated_up_at_once_and_down_only_after_asking() {
+        let mut app = App::new(vec![RoomSnapshot {
+            has_track_id: true,
+            ..room("Kitchen")
+        }]);
+        assert_eq!(
+            press(&mut app, 'l'),
+            Intent::Rate("Kitchen".into(), RateDirection::Up)
+        );
+        assert_eq!(
+            press(&mut app, 'L'),
+            Intent::Rate("Kitchen".into(), RateDirection::Unfavorite)
+        );
+        assert_eq!(press(&mut app, 'b'), Intent::Nothing, "down asks first");
+        assert_eq!(
+            press(&mut app, 'y'),
+            Intent::Rate("Kitchen".into(), RateDirection::Down)
+        );
+    }
+
+    #[test]
+    fn a_live_broadcast_is_not_rated_and_says_why() {
+        let mut app = App::new(vec![room("Kitchen")]);
+        assert_eq!(press(&mut app, 'l'), Intent::Nothing);
         assert_eq!(app.status().map(|status| status.kind), Some(Kind::Note));
+    }
+
+    #[test]
+    fn the_sleep_timer_steps_through_the_app_s_choices_and_back_to_off() {
+        let min = |m: u64| Some(Duration::from_secs(m * 60));
+        assert_eq!(next_sleep(None), min(15));
+        assert_eq!(next_sleep(min(15)), min(30), "one just set moves on");
+        assert_eq!(
+            next_sleep(Some(Duration::from_secs(29 * 60 + 30))),
+            min(45),
+            "a 30 already counting down moves on too"
+        );
+        assert_eq!(next_sleep(min(89)), None, "a 90 just set goes to off");
+        assert_eq!(next_sleep(min(90)), None);
+
+        let mut app = App::new(vec![room("Kitchen")]);
+        assert_eq!(
+            press(&mut app, 'z'),
+            Intent::Sleep("Kitchen".into(), min(15))
+        );
+        assert!(app.sleep_left("Kitchen").is_some(), "shown at once");
+        assert_eq!(
+            press(&mut app, 'z'),
+            Intent::Sleep("Kitchen".into(), min(30))
+        );
+    }
+
+    #[test]
+    fn night_and_speech_toggle_only_on_a_soundbar_that_has_them() {
+        let mut bar = App::new(vec![RoomSnapshot {
+            night_mode: Some(false),
+            enhance_dialog: Some(true),
+            ..room("Living Room")
+        }]);
+        assert_eq!(
+            press(&mut bar, 'N'),
+            Intent::HomeTheater("Living Room".into(), "NightMode", true)
+        );
+        assert_eq!(
+            press(&mut bar, 'D'),
+            Intent::HomeTheater("Living Room".into(), "DialogLevel", false)
+        );
+        let mut speaker = App::new(vec![room("Kitchen")]);
+        assert_eq!(press(&mut speaker, 'N'), Intent::Nothing);
     }
 
     /// A household with Kitchen coordinating Office, and Bedroom on its own.
