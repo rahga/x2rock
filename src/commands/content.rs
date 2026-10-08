@@ -14,7 +14,7 @@ use super::{connect_for_service, find_named, is_refusal, mmss, refreshed_catalog
 use crate::cli::{BookmarksAction, QueueAction};
 use crate::hint;
 use crate::session::{self, Session, Target};
-use crate::sonos::local::{ApiError, Connection};
+use crate::sonos::local::{ApiError, Connection, Unreachable};
 use crate::sonos::proto::{ContentId, Favorite, HistoryItem};
 use crate::sonos::upnp::{self, Upnp};
 use crate::{bookmarks, catalogue, credentials, sonos};
@@ -1249,7 +1249,26 @@ async fn load_and_start(
     // load has been started. Best effort: a room already stopped, or stuck
     // mid-load from an earlier one, refuses the pause, and that is fine.
     let _ = player.playback(&target.group_id, "pause").await;
-    player.load_content(&target.group_id, id, kind).await?;
+    // **PLAYING counts only on what was asked for.** Pausing first was not
+    // enough: the press below can land before the load takes over and resume
+    // what was paused, which reads PLAYING. Measured on Media Room
+    // (2026-10-08): `replay "Happy Radio"` over Sonos Radio's Hit List saw
+    // Hit List play again, reported success, and the Saavn load then settled
+    // at IDLE. So the room must be playing something other than it was - or,
+    // replaying what is already on, the thing named. And a load the player
+    // never answered is not refused but judged the same way: a busy
+    // coordinator can answer late or not at all and still do it (x2rocktv,
+    // e4b2848). A refusal still ends it here.
+    let before = player
+        .metadata(&target.group_id)
+        .await
+        .ok()
+        .map(|m| playing_identity(&m));
+    let lost = match player.load_content(&target.group_id, id, kind).await {
+        Ok(()) => false,
+        Err(e) if Unreachable::of(&e).is_some() => true,
+        Err(e) => return Err(e),
+    };
     // Loaded, not started - and a room that was playing sits at BUFFERING
     // until told to play, so a play is what finishes the job either way. It is
     // pressed until the room is seen playing: once is not enough, because one
@@ -1265,26 +1284,67 @@ async fn load_and_start(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let status = player.playback_status(&target.group_id).await?;
-        match status.state() {
-            Some("PLAYING") => break,
+        let playing = match status.state() {
+            Some("PLAYING") => true,
             // Already asked to play and on its way; give it the time.
             Some("BUFFERING") => {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let again = player.playback_status(&target.group_id).await?;
-                if again.state() == Some("PLAYING") {
-                    break;
-                }
+                again.state() == Some("PLAYING")
             }
-            _ => {}
+            _ => false,
+        };
+        if playing && arrived(player, target, before.as_ref(), name).await? {
+            break;
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
-            "{name:?} loaded in {} but did not start playing. The service may \
-             have withdrawn it.",
-            target.name
+            "{}",
+            match lost {
+                true => format!(
+                    "{name:?} was sent to {} with no answer, and the room did not move on \
+                     to it. Try again.",
+                    target.name
+                ),
+                false => format!(
+                    "{name:?} loaded in {} but did not start playing. The service may \
+                     have withdrawn it.",
+                    target.name
+                ),
+            }
         );
     }
     Ok(())
+}
+
+/// What a room is playing, as far as telling one thing from another goes: the
+/// track's id and the container's name, the pair x2rocktv compares.
+fn playing_identity(meta: &sonos::proto::MetadataStatus) -> (Option<String>, Option<String>) {
+    (
+        meta.track()
+            .and_then(|t| t.id.as_ref())
+            .map(|id| id.object_id.clone()),
+        meta.container.as_ref().and_then(|c| c.name.clone()),
+    )
+}
+
+/// Whether what the room plays now is what `load_and_start` asked for:
+/// something other than `before`, or a container named `name` - the history
+/// item's own name, which is how a replay of what was already on is told from
+/// the paused content coming back. (The ids do not line up to compare: history
+/// says `sonos:2997` where the container says `2997`.) With nothing known
+/// before, anything counts.
+async fn arrived(
+    player: &Connection,
+    target: &Target,
+    before: Option<&(Option<String>, Option<String>)>,
+    name: &str,
+) -> Result<bool> {
+    let Some(before) = before else {
+        return Ok(true);
+    };
+    let now = playing_identity(&player.metadata(&target.group_id).await?);
+    Ok(&now != before || now.1.as_deref() == Some(name))
 }
 
 /// `x2rock keep`: remember what `group` is playing - the track, or with
