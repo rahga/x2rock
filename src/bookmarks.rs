@@ -254,6 +254,23 @@ pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -
     )
 }
 
+/// A container id with the prefix the player writes on it taken back off:
+/// `1004206cALBUM:79488223` is Saavn's `ALBUM:79488223`. The player keeps the
+/// prefix in what it stores - a favorite's `resource.id.objectId` carries it -
+/// and the service does not know the prefixed form (Saavn: "Item not found").
+///
+/// `None` when the id does not start with eight hex digits, the first `0` or
+/// `1`. Not proof of a prefix on its own - an all-digit id such as Apple
+/// Music's `1440857781` passes - so it is applied to ids the player wrote, or
+/// tried after the service refused the id whole, never to every id.
+pub fn without_container_prefix(id: &str) -> Option<&str> {
+    let (prefix, rest) = id.split_at_checked(8)?;
+    let hex = prefix
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (hex && matches!(prefix.as_bytes()[0], b'0' | b'1') && !rest.is_empty()).then_some(rest)
+}
+
 /// The DIDL for a container being enqueued.
 ///
 /// Its `id` carries the same prefix the URI does, and the class says which kind
@@ -627,6 +644,25 @@ impl Bookmarks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_container_prefix_comes_off_what_the_player_wrote() {
+        assert_eq!(
+            without_container_prefix("1004206cALBUM:79488223"),
+            Some("ALBUM:79488223")
+        );
+        assert_eq!(
+            without_container_prefix("1006706cplaylist:109815423"),
+            Some("playlist:109815423")
+        );
+        assert_eq!(without_container_prefix("TRACK_NEW:_Op_JFcG"), None);
+        assert_eq!(without_container_prefix("tr-flac:2386586085"), None);
+        assert_eq!(
+            without_container_prefix("1004206c"),
+            None,
+            "nothing after it"
+        );
+    }
 
     #[test]
     fn only_a_container_of_tracks_can_be_queued() {

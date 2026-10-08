@@ -1281,6 +1281,45 @@ where
     }
 }
 
+/// The service name and container id a favorite opens to: its own object id,
+/// less the container prefix the player wrote on it.
+async fn favorite_container(
+    session: &session::Session,
+    catalogue: &catalogue::Catalogue,
+    query: &str,
+) -> Result<(String, String)> {
+    let household = session.connection.household_id().await?;
+    let favorites = session.connection.favorites(&household).await?.items;
+    let favorite = super::content::find_favorite(&favorites, query)?;
+    // A song or a station has nothing inside to list; the service would only
+    // say "Item not found".
+    ensure!(
+        favorite.kind().is_none_or(
+            |k| bookmarks::container_holds_tracks(k) || bookmarks::container_of_containers(k)
+        ),
+        "{:?} is {} {}, with nothing inside to open. Play it with: x2rock favorite {}",
+        favorite.name,
+        super::article(favorite.category()),
+        favorite.category(),
+        hint::shell_arg(&favorite.name)
+    );
+    let object = favorite
+        .object()
+        .with_context(|| format!("{:?} names nothing to open", favorite.name))?;
+    let service = object
+        .service_id
+        .as_deref()
+        .and_then(|id| catalogue.by_id(id))
+        .with_context(|| {
+            format!(
+                "{:?} is not from a service x2rock can browse",
+                favorite.name
+            )
+        })?;
+    let id = bookmarks::without_container_prefix(&object.object_id).unwrap_or(&object.object_id);
+    Ok((service.name.clone(), id.to_owned()))
+}
+
 /// `x2rock browse`: a music service's own containers, walked one level at a time.
 ///
 /// The half of a linked service that `search` cannot reach. "Play something from
@@ -1296,6 +1335,7 @@ pub async fn run_browse(
     household: Option<&str>,
     room: Option<&str>,
     service: Option<&String>,
+    favorite: Option<&str>,
     container: Option<&str>,
     count: u32,
     index: u32,
@@ -1337,6 +1377,17 @@ pub async fn run_browse(
     // and filtering here would have removed the one route that works for it.
     let usable = catalogue.usable(&linked, &household);
 
+    // A favorite names its service and its container itself, so it stands in
+    // for both: the Sonos app's album page, reached from its favorites.
+    let opened = match favorite {
+        Some(query) => Some(favorite_container(live()?, &catalogue, query).await?),
+        None => None,
+    };
+    let (service, container) = match &opened {
+        Some((name, id)) => (Some(name), Some(id.as_str())),
+        None => (service, container),
+    };
+
     let Some(query) = service else {
         // A service known to have nothing to walk is left out of the list, and
         // only that one: an unasked service stays, since unasked is not no.
@@ -1374,8 +1425,21 @@ pub async fn run_browse(
     // simply what the players ask for.
     let at = container.unwrap_or("root");
     let mut refreshed = None;
-    let answer =
+    let mut answer =
         sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await;
+    // An id copied from what the player stores - a favorite's, a queue row's -
+    // can carry the container prefix the player writes, which the service does
+    // not know. Tried once without it, and only after a refusal, since a
+    // prefix-shaped id can be a real one (see `without_container_prefix`).
+    if let Err(e) = &answer
+        && sonos::smapi::Refused::of(e).is_some()
+        && let Some(bare) = bookmarks::without_container_prefix(at)
+        && let Ok(found) =
+            sonos::smapi::metadata(&chosen, token.as_ref(), bare, index, count, &mut refreshed)
+                .await
+    {
+        answer = Ok(found);
+    }
     // What the first page of `root` came to is remembered, so the listings can
     // leave out a service with nothing to walk. Only an answer counts - a
     // refusal, or a root with nothing in it - never a timeout; see

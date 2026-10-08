@@ -90,10 +90,14 @@ CLI it came from — if the version has moved since you installed the skill, re-
 
 ```json
 [
-  {"id":"3","name":"90s90s - Christmas","service":"TuneIn (New)","type":"STREAM","playable":true,"art_url":"…","description":"…"},
-  {"id":"19","name":"37. 100 Greatest Classic Country Songs","service":null,"type":null,"playable":false,"art_url":"…","description":"Amazon Music Playlist"}
+  {"id":"3","name":"90s90s - Christmas","service":"TuneIn (New)","type":"STREAM","category":"station","playable":true,"art_url":"…","description":"…"},
+  {"id":"19","name":"37. 100 Greatest Classic Country Songs","service":null,"type":null,"category":"other","playable":false,"art_url":"…","description":"Amazon Music Playlist"}
 ]
 ```
+
+`category` is the Sonos app's section: `playlist`, `song`, `album`, `station` or `other`. To see
+what an album or playlist favorite holds before playing it ("what's on that album?"), `x2rock
+browse --favorite "<name>" --json`; a song or station is refused, having nothing inside.
 
 `now --json` is a **single bare object** — one room's *now-playing* fields (room, state, title,
 artist, album, podcast, service, service_id, position_ms, duration_ms, queue_position, next_title,
@@ -394,7 +398,7 @@ rooms; see "Ask before you act".
 | Lock the buttons on the speaker itself | `x2rock -r <Room> buttons [lock\|unlock] [--json]` |
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
-| Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` |
+| Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` / `x2rock browse --favorite "<name>"` (an album's or playlist's tracks) |
 | Search every service at once | `x2rock search "<term>" --json` — no `--service`; `--only-linked` for the good tier, `-c artists,tracks` to choose categories, `--per-service N` to cap each |
 | Search one service | `x2rock search -s <svc> <term> --json` / `x2rock search --json` (lists services) |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |

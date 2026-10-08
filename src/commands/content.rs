@@ -102,6 +102,7 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
                     "description": f.description,
                     "service": f.service(),
                     "type": f.kind(),
+                    "category": f.category(),
                     "art_url": f.image_url,
                     // A heuristic, not a guarantee: false marks an empty shell -
                     // neither a service nor a content type, which is what a
@@ -119,21 +120,48 @@ fn print_favorites(favorites: &[Favorite], json: bool) {
         println!("No favorites.");
         return;
     }
-    for favorite in favorites {
-        let tags: Vec<_> = [
-            favorite.kind().map(str::to_lowercase),
-            favorite.service().map(str::to_string),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let mut line = format!("{:>4}  {}", favorite.id, favorite.name);
-        if !tags.is_empty() {
-            line.push_str(&format!("  [{}]", tags.join(", ")));
+    // Sectioned the way the Sonos app shows them, in its order; the order
+    // within a section is the household's own.
+    let mut first = true;
+    for (category, heading) in FAVORITE_SECTIONS {
+        let section: Vec<_> = favorites
+            .iter()
+            .filter(|f| f.category() == category)
+            .collect();
+        if section.is_empty() {
+            continue;
         }
-        println!("{line}");
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("{heading}");
+        for favorite in section {
+            let tags: Vec<_> = [
+                favorite.kind().map(str::to_lowercase),
+                favorite.service().map(str::to_string),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let mut line = format!("{:>4}  {}", favorite.id, favorite.name);
+            if !tags.is_empty() {
+                line.push_str(&format!("  [{}]", tags.join(", ")));
+            }
+            println!("{line}");
+        }
     }
 }
+
+/// The Sonos app's favorites sections, in its order, keyed by
+/// [`Favorite::category`].
+const FAVORITE_SECTIONS: [(&str, &str); 5] = [
+    ("playlist", "Playlists"),
+    ("song", "Songs"),
+    ("album", "Albums"),
+    ("station", "Stations"),
+    ("other", "Other"),
+];
 
 pub(crate) fn find_favorite<'a>(favorites: &'a [Favorite], query: &str) -> Result<&'a Favorite> {
     find_named(

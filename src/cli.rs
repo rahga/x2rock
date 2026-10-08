@@ -521,6 +521,11 @@ pub enum Command {
         /// Service to browse, by name. Omit to list the ones that can be.
         #[arg(long, short = 's')]
         service: Option<String>,
+        /// Open a favorite - an album or playlist saved in the Sonos app - by
+        /// name or id, to see what is in it before playing it. Names its own
+        /// service and container, so takes neither.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["service", "container"])]
+        favorite: Option<String>,
         /// The container to open. Defaults to `root`, where every service starts.
         container: Option<String>,
         #[arg(long, default_value_t = 50)]
