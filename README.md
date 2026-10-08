@@ -492,6 +492,12 @@ media. Do not trust a service's `canPlay` flag — iHeartRadio marks an `artist_
 playable and refuses to play it; what decides is whether the row is a container, which `browse`
 reports.
 
+**iHeartRadio is searched as the Sonos app shows it**: Stations and Podcasts. Its map also
+publishes artists, tracks, albums and playlists, but what those return are radio stations - an
+"artist" is a station seeded by the artist, and a "track" is that artist's station, not the song -
+so x2rock folds them in: Stations is iHeart's live radio followed by its artist stations, as one
+list. A station, or any radio `program`, plays as the room's source rather than in the queue.
+
 An **audiobook resumes**. A book (`type` `audiobook`, Audible's) is played from where its listener
 left off: the chapter the service names, sought to the offset into it, whichever controller left
 it there - and the speaker reports the new place back to the service as it plays, so the Audible

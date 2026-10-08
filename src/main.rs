@@ -9,6 +9,7 @@ mod credentials;
 mod daemon;
 mod discover;
 mod hint;
+mod iheart;
 mod itunes;
 mod mpris;
 mod netid;
