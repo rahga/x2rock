@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecryptMut, KeyIvInit};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -332,7 +332,12 @@ pub async fn capture_envelope(
         let Ok(Ok((mut socket, _))) = accept else {
             break None;
         };
-        let request = read_http_message(&mut socket).await.unwrap_or_default();
+        // Bounded by the overall deadline too: a peer that connects and then
+        // says nothing must not hold the capture past the time it was given.
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let request = read_http_message(&mut socket, EXCHANGE.min(left))
+            .await
+            .unwrap_or_default();
         // A GENA NOTIFY wants a 200 or the player retries and then drops the sub.
         let _ = socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
@@ -368,11 +373,15 @@ async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String
          Content-Length: 0\r\n\
          Connection: close\r\n\r\n"
     );
-    let mut stream = TcpStream::connect(SocketAddr::new(player, 1400))
+    let mut stream =
+        tokio::time::timeout(EXCHANGE, TcpStream::connect(SocketAddr::new(player, 1400)))
+            .await
+            .map_err(|_| anyhow!("{player} did not answer on port 1400 within {EXCHANGE:?}"))?
+            .context("subscribing to the player's topology events")?;
+    stream.write_all(request.as_bytes()).await?;
+    let response = read_http_message(&mut stream, EXCHANGE)
         .await
         .context("subscribing to the player's topology events")?;
-    stream.write_all(request.as_bytes()).await?;
-    let response = read_http_message(&mut stream).await?;
     http::header(&response, "SID")
         .map(str::to_string)
         .ok_or_else(|| anyhow!("the player accepted the subscription but named no SID"))
@@ -387,24 +396,57 @@ async fn unsubscribe(player: IpAddr, sid: &str) {
          SID: {sid}\r\n\
          Connection: close\r\n\r\n"
     );
-    if let Ok(mut stream) = TcpStream::connect(SocketAddr::new(player, 1400)).await {
-        let _ = stream.write_all(request.as_bytes()).await;
-        let _ = read_http_message(&mut stream).await;
-    }
+    // Bounded as a whole: a speaker that stops answering would otherwise hold
+    // the command until the OS gave up on the connect, minutes later, to save
+    // a subscription that expires in one.
+    let _ = tokio::time::timeout(UNSUBSCRIBE, async {
+        let mut stream = TcpStream::connect(SocketAddr::new(player, 1400)).await?;
+        stream.write_all(request.as_bytes()).await?;
+        read_http_message(&mut stream, UNSUBSCRIBE).await
+    })
+    .await;
 }
 
-/// Read one HTTP message (head plus any `Content-Length` body) to a string.
-async fn read_http_message<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<String> {
+/// How long one HTTP exchange with a player may take - a SUBSCRIBE's answer,
+/// or the NOTIFY it sends back. Each is one small message on a LAN.
+const EXCHANGE: Duration = Duration::from_secs(5);
+
+/// The whole UNSUBSCRIBE, connect to answer. Best effort; see [`unsubscribe`].
+const UNSUBSCRIBE: Duration = Duration::from_secs(3);
+
+/// The most one message may hold. The account event is 10-20 KB; anything near
+/// this is not a player's NOTIFY, and is not read into memory to find out.
+const MAX_MESSAGE: usize = 512 * 1024;
+
+/// Read one HTTP message (head plus any `Content-Length` body) to a string,
+/// giving up after `within` or past [`MAX_MESSAGE`] bytes. The listening port
+/// is open to anything on the network, not only the player it is waiting for.
+async fn read_http_message<S: AsyncReadExt + Unpin>(
+    stream: &mut S,
+    within: Duration,
+) -> Result<String> {
+    tokio::time::timeout(within, read_bounded(stream))
+        .await
+        .map_err(|_| anyhow!("no complete HTTP message within {within:?}"))?
+}
+
+async fn read_bounded<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<String> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
+        ensure!(
+            raw.len() <= MAX_MESSAGE,
+            "an HTTP message ran past {MAX_MESSAGE} bytes"
+        );
         let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
         if let Some(end) = head_end {
             let head = String::from_utf8_lossy(&raw[..end]);
             let want = http::header(&head, "Content-Length")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
-            if raw.len() >= end + 4 + want {
+            // Saturating: the length is the peer's to name, and an absurd one
+            // must run into the cap below rather than overflow the sum.
+            if raw.len() >= (end + 4).saturating_add(want) {
                 break;
             }
         }
@@ -449,6 +491,42 @@ fn xml_unescape(text: &str) -> String {
 mod tests {
     use super::*;
     use aes::cipher::BlockEncryptMut;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_connects_and_says_nothing_is_given_up_on() {
+        let (mut ours, _theirs) = tokio::io::duplex(64);
+        let read = read_http_message(&mut ours, EXCHANGE).await;
+        assert!(read.is_err(), "a silent peer must time out, not hang");
+    }
+
+    #[tokio::test]
+    async fn a_message_past_the_cap_is_refused_rather_than_buffered() {
+        let (mut ours, mut theirs) = tokio::io::duplex(64 * 1024);
+        let writer = tokio::spawn(async move {
+            let head = format!(
+                "NOTIFY / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                usize::MAX
+            );
+            let _ = theirs.write_all(head.as_bytes()).await;
+            let filler = vec![b'x'; 64 * 1024];
+            while theirs.write_all(&filler).await.is_ok() {}
+        });
+        let read = read_http_message(&mut ours, Duration::from_secs(30)).await;
+        assert!(read.is_err(), "an endless body must stop at MAX_MESSAGE");
+        drop(ours);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_whole_message_reads_to_its_content_length() {
+        let (mut ours, mut theirs) = tokio::io::duplex(1024);
+        theirs
+            .write_all(b"HTTP/1.1 200 OK\r\nSID: uuid:1\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+        let read = read_http_message(&mut ours, EXCHANGE).await.unwrap();
+        assert!(read.ends_with("\r\n\r\nok"));
+    }
 
     /// Build a real `2:` envelope from account XML, so the decrypt path can be
     /// tested against its own inverse with no live household and no real token.
