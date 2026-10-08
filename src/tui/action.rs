@@ -26,10 +26,29 @@ use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use tokio::sync::Mutex;
 
-use crate::commands::{Report, household, playback, speaker, volume};
+use std::time::Duration;
+
+use crate::cli::RateDirection;
+use crate::commands::{Report, household, playback, services, speaker, upnp_ip, volume};
 use crate::session::{self, Session};
 use crate::sonos::local::Unreachable;
+use crate::sonos::proto::Player;
+use crate::sonos::upnp::Upnp;
 use crate::state::State;
+
+/// A write whose whole report is what it says on the status line: a rating's
+/// "Added to favorites on Deezer", a sleep timer's new time.
+#[derive(serde::Serialize)]
+struct Said(Vec<String>);
+
+impl Report for Said {
+    fn text(&self) -> String {
+        self.0.join("; ")
+    }
+    fn notes(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// The players, reached the way the CLI reaches them - `--ip` and
 /// `--household` as the TUI was started with them - and held.
@@ -280,6 +299,75 @@ impl Speakers {
         .await
     }
 
+    /// Rate what the room is playing, and say what that did in the service's
+    /// terms - the CLI's `rate`.
+    pub async fn rate(&self, room: &str, direction: RateDirection) -> Result<Vec<String>> {
+        self.write(|s| async move {
+            let target = session::target(&s.groups, Some(room))?;
+            let player = session::coordinator(&s, &target).await?;
+            let rated =
+                services::rate(&player, &target.group_id, &target.name, direction, false).await?;
+            let mut said = vec![rated.text()];
+            said.extend(rated.notes().iter().cloned());
+            Ok(Said(said))
+        })
+        .await
+    }
+
+    /// Set the group's sleep timer, or with `None` cancel it. AVTransport, on
+    /// the coordinator, as `x2rock sleep` does.
+    pub async fn sleep(&self, room: &str, after: Option<Duration>) -> Result<Vec<String>> {
+        self.write(|s| async move {
+            let target = session::target(&s.groups, Some(room))?;
+            Upnp::new(upnp_ip(&target, s.connection.ip()))
+                .set_sleep_timer(after)
+                .await?;
+            Ok(Said(vec![match after {
+                Some(d) => format!("{room} stops in {} min", d.as_secs() / 60),
+                None => format!("{room}: sleep timer off"),
+            }]))
+        })
+        .await
+    }
+
+    /// What is left on the group's sleep timer. A read, so no session is
+    /// dropped over it: a refusal (UPnP off) and a dead socket both just leave
+    /// the screen without a timer, and the next write sorts the socket out.
+    pub async fn sleep_left(&self, room: &str) -> Result<Option<Duration>> {
+        let (_, s) = self.session().await?;
+        let target = session::target(&s.groups, Some(room))?;
+        Upnp::new(upnp_ip(&target, s.connection.ip()))
+            .sleep_timer()
+            .await
+    }
+
+    /// Night sound or speech enhancement on the room's soundbar - `setting`
+    /// is `NightMode` or `DialogLevel`, written over UPnP `SetEQ` as `x2rock
+    /// eq --night/--dialog` does.
+    pub async fn home_theater(
+        &self,
+        room: &str,
+        setting: &'static str,
+        on: bool,
+    ) -> Result<Vec<String>> {
+        self.write(|s| async move {
+            let bar = soundbar(&s, room)?;
+            let ip = bar
+                .ip()
+                .ok_or_else(|| anyhow!("{} did not report an address to reach it on", bar.name))?;
+            Upnp::new(ip).set_eq(setting, on).await?;
+            let what = match setting {
+                "NightMode" => "night sound",
+                _ => "speech enhancement",
+            };
+            Ok(Said(vec![format!(
+                "{what} {}",
+                crate::commands::on_word(on)
+            )]))
+        })
+        .await
+    }
+
     pub async fn tv(&self, room: &str) -> Result<Vec<String>> {
         self.write(|s| async move {
             let target = session::target(&s.groups, Some(room))?;
@@ -288,6 +376,25 @@ impl Speakers {
         })
         .await
     }
+}
+
+/// The soundbar a room's row stands for: the room itself when it is one,
+/// else the member of its group that is - as `tv` finds it.
+fn soundbar<'a>(s: &'a Session, room: &str) -> Result<&'a Player> {
+    let named = s.groups.player_named(room)?;
+    if named.has_tv() {
+        return Ok(named);
+    }
+    let target = session::target(&s.groups, Some(room))?;
+    let group = s
+        .groups
+        .group_of(&target.coordinator_id)
+        .ok_or_else(|| anyhow!("no group for {room}"))?;
+    s.groups
+        .members(group)
+        .into_iter()
+        .find(|p| p.has_tv())
+        .ok_or_else(|| anyhow!("no room in {room} has a soundbar"))
 }
 
 #[cfg(test)]

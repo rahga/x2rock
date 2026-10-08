@@ -122,7 +122,11 @@ fn rooms(frame: &mut Frame, app: &App, area: Rect) {
     // Two columns of highlight marker, and the last column left alone: a line
     // that ends exactly at the edge wraps in some terminals.
     let width = (area.width as usize).saturating_sub(3);
-    let items: Vec<ListItem> = app.rooms().iter().map(|room| item(room, width)).collect();
+    let items: Vec<ListItem> = app
+        .rooms()
+        .iter()
+        .map(|room| item(room, app.sleep_left(&room.room), width))
+        .collect();
     let list = List::new(items)
         .highlight_symbol("▌ ")
         .highlight_style(Style::new().bold());
@@ -131,7 +135,7 @@ fn rooms(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// One room: name and volume, what is playing, and the context line.
-fn item(room: &RoomSnapshot, width: usize) -> ListItem<'static> {
+fn item(room: &RoomSnapshot, sleep: Option<Duration>, width: usize) -> ListItem<'static> {
     let mut lines = Vec::new();
 
     let name = format!("{} {}", glyph(room.state), label(room));
@@ -147,7 +151,7 @@ fn item(room: &RoomSnapshot, width: usize) -> ListItem<'static> {
     }
 
     let context = context(room);
-    let modes = modes(room);
+    let modes = modes(room, sleep);
     if !context.is_empty() || !modes.is_empty() {
         lines.push(shoulders(
             vec![Span::styled(context, Style::new().dim())],
@@ -210,7 +214,7 @@ fn context(room: &RoomSnapshot) -> String {
 /// The badges on the right of the context line. Repeat and shuffle only where
 /// the source can do them, which is also why they are not drawn as off: a radio
 /// stream has no shuffle to be off.
-fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
+fn modes(room: &RoomSnapshot, sleep: Option<Duration>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut badge = |text: &str, style: Style| {
         if !spans.is_empty() {
@@ -231,6 +235,21 @@ fn modes(room: &RoomSnapshot) -> Vec<Span<'static>> {
     }
     if room.crossfade {
         badge("crossfade", Style::new().dim());
+    }
+    // Night sound and speech enhancement only when on: a soundbar is the only
+    // room that has them, and "off" on every other row would be noise.
+    if room.night_mode == Some(true) {
+        badge("night", Style::new().dim());
+    }
+    if room.enhance_dialog == Some(true) {
+        badge("speech", Style::new().dim());
+    }
+    // Rounded up, so the last minute reads "1m" rather than "0m".
+    if let Some(left) = sleep {
+        badge(
+            &format!("sleep {}m", left.as_secs().div_ceil(60)),
+            Style::new().fg(Color::Yellow),
+        );
     }
     spans
 }
@@ -353,6 +372,10 @@ fn help(frame: &mut Frame, area: Rect) {
         ("x", "crossfade"),
         ("g", "grouping, and each speaker's own volume"),
         ("t", "switch a soundbar to its TV input"),
+        ("N / D", "a soundbar's night sound, speech"),
+        ("l / L", "like (heart), take a heart back"),
+        ("b", "rate down (asks first)"),
+        ("z", "sleep timer: 15, 30, 45, 60, 90, off"),
         ("P", "party: the whole house, or end it"),
         ("q", "quit"),
     ];

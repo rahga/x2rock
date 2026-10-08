@@ -10,6 +10,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use serde::Serialize;
 use serde_json::json;
 
 use super::ago;
@@ -451,6 +452,53 @@ pub async fn run_rate(
     refresh: bool,
     json: bool,
 ) -> Result<()> {
+    super::emit(
+        &rate(player, group, room_name, direction, refresh).await?,
+        json,
+    )
+}
+
+/// What `rate` did: `{service, rating, action, should_skip, skipped,
+/// message}` as JSON, and one line of text.
+#[derive(Debug, Serialize)]
+pub struct RateOutcome {
+    pub service: String,
+    pub rating: &'static str,
+    pub action: String,
+    pub should_skip: Option<bool>,
+    pub skipped: bool,
+    pub message: Option<String>,
+    /// What the rating did in the service's terms - "Added to favorites".
+    #[serde(skip)]
+    done: &'static str,
+    #[serde(skip)]
+    notes: Vec<String>,
+}
+
+impl super::Report for RateOutcome {
+    fn text(&self) -> String {
+        let skip_note = if self.skipped {
+            " — skipping"
+        } else if self.should_skip == Some(true) {
+            " (skip requested but failed)"
+        } else {
+            ""
+        };
+        format!("{} on {}{skip_note}", self.done, self.service)
+    }
+    fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+
+/// [`run_rate`]'s work, returned rather than printed, for the TUI's rating keys.
+pub async fn rate(
+    player: &Connection,
+    group: &str,
+    room_name: &str,
+    direction: RateDirection,
+    refresh: bool,
+) -> Result<RateOutcome> {
     // Independent of each other - one is the Control API over the socket that
     // is already open, the other a UPnP `ListAvailableServices` to the same
     // player - so they overlap rather than queue. `refresh` is a no-op when
@@ -575,39 +623,28 @@ pub async fn run_rate(
     // itself having failed, which `?` would do (and which could send a caller
     // that retries on error back to rate the same track twice). Warn and move
     // on; the room simply keeps playing what it was.
+    let mut notes = Vec::new();
     let skipped = result.should_skip == Some(true)
         && match player.playback(group, "skipToNextTrack").await {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("x2rock: rated successfully, but the requested skip failed: {e:#}");
+                notes.push(format!(
+                    "x2rock: rated successfully, but the requested skip failed: {e:#}"
+                ));
                 false
             }
         };
 
-    let word = rate_word(want);
-    if json {
-        println!(
-            "{}",
-            json!({
-                "service": service.name,
-                "rating": word,
-                "action": chosen.string_id,
-                "should_skip": result.should_skip,
-                "skipped": skipped,
-                "message": result.message_string_id,
-            })
-        );
-    } else {
-        let skip_note = if skipped {
-            " — skipping"
-        } else if result.should_skip == Some(true) {
-            " (skip requested but failed; see stderr)"
-        } else {
-            ""
-        };
-        println!("{} on {}{skip_note}", rate_done(chosen), service.name);
-    }
-    Ok(())
+    Ok(RateOutcome {
+        service: service.name.clone(),
+        rating: rate_word(want),
+        action: chosen.string_id.clone(),
+        should_skip: result.should_skip,
+        skipped,
+        message: result.message_string_id,
+        done: rate_done(chosen),
+        notes,
+    })
 }
 
 /// A [`RatingKind`](sonos::smapi::RatingKind) as `rate` spells it.

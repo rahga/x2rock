@@ -9658,6 +9658,18 @@ it can only ever read Off here, and Guest Access touches nothing x2rock does. Th
 answer to "is UPnP on?" without the Sonos app. Media Room: Authentication Off, UPnP On, Guest
 Access On.
 
+**The TUI rates, sets the sleep timer, and toggles night sound and speech.** `l`/`L`/`b` run the
+CLI's `rate` (now `services::rate`, an outcome rather than printed lines), gated on the
+`x2rock:hasTrackId` the daemon already publishes; down asks first, since Deezer's dislike skips and
+nothing here undoes it. `z` steps the sleep timer through the Sonos app's 15/30/45/60/90 minutes to
+off, always to the first step more than a minute past what is left. The sleep timer is not on
+MPRIS, and polling it would break the daemon's no-polling rule, so the TUI reads it over UPnP at
+start and when the cursor lands on a room, and counts down locally. `N`/`D` toggle a soundbar's
+night sound and speech enhancement over `SetEQ`, offered only where the daemon publishes
+`x2rock:nightMode`/`enhanceDialog`. On Media Room: `z` set a timer that `x2rock sleep` read as 14:58,
+a restarted TUI read it back, and `l` on Sonos Radio said the service publishes no ratings. `t` with
+UPnP off is now refused only for a group, after the lone-soundbar fallback above.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail

@@ -409,17 +409,23 @@ front end, on any Linux with systemd and a session D-Bus, with nothing else inst
 `x2rock tui` is the household on one screen, keyboard-driven — the front end for an ssh session, a
 bare console, or a terminal already open. Each room is up to three lines: name and group volume,
 what is playing, and a context line — station, the TV's audio format, who else is in the group,
-repeat/shuffle/crossfade. `space` play/pause, `n`/`p` skip, `←`/`→` volume, `m` mute, `r`/`s`/`x`
-the modes, `g` grouping (each member with its own volume; `enter` joins or leaves), `P` party mode
-(it asks first), `t` TV input, `?` for the rest, `q` to quit.
+repeat/shuffle/crossfade, a soundbar's night sound and speech enhancement, and the sleep timer.
+`space` play/pause, `n`/`p` skip, `←`/`→` volume, `m` mute, `r`/`s`/`x` the modes, `g` grouping
+(each member with its own volume; `enter` joins or leaves), `P` party mode (it asks first), `t` TV
+input, `N`/`D` night sound and speech, `l` like (a heart, on Deezer), `L` take it back, `b` rate
+down (it asks first), `z` the sleep timer (15, 30, 45, 60, 90 minutes, off), `?` for the rest, `q`
+to quit.
 
 It needs the daemon — the only thing here that pushes — and re-reads the daemon every thirty
 seconds on top of the events, so a dropped signal repairs itself; if those reads stop, the header
 says how long it has been. Reads and most writes go over MPRIS; grouping, party, TV input, mute,
 crossfade and one speaker's volume run the CLI's own command code in this process, over a
 connection to the players the screen opens on the first such key and keeps, so each one costs a
-round trip rather than a reconnect. An error there is the CLI's own sentence. Favorites, the queue,
-alarms and tone stay CLI commands: MPRIS carries none of them.
+round trip rather than a reconnect. An error there is the CLI's own sentence. Ratings, the sleep
+timer and night/speech do too. MPRIS carries no sleep timer and the daemon does not poll for one,
+so the screen reads each room's at start and again when the cursor lands on it, and counts down in
+between; a timer set from the Sonos app shows at the next visit. Favorites, the queue, alarms and
+tone stay CLI commands: MPRIS carries none of them.
 
 ### Omarchy bar widget
 

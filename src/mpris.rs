@@ -208,8 +208,8 @@ pub(crate) const HAS_TV_INPUT: &str = "x2rock:hasTvInput";
 /// set - so a client drawing that room needs these two the way it needs
 /// [`CAN_REPEAT`] elsewhere. Writing them is not MPRIS's to do: it has no verb
 /// for either, and `x2rock eq --night/--dialog` is the write path.
-const NIGHT_MODE: &str = "x2rock:nightMode";
-const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
+pub(crate) const NIGHT_MODE: &str = "x2rock:nightMode";
+pub(crate) const ENHANCE_DIALOG: &str = "x2rock:enhanceDialog";
 /// The household has UPnP switched off (Account > Privacy and Security >
 /// Connection Security in the Sonos app), so everything x2rock does over SOAP
 /// on :1400 is refused: the queue, the TV input, night sound and speech
