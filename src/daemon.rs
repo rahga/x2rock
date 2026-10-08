@@ -828,25 +828,54 @@ async fn connection_to(
 /// The initial `groups` snapshot describes what we just published; republishing
 /// for it would flap every bus name once per connection.
 fn same_topology(rooms: &[Server<RoomPlayer>], groups: &Groups) -> bool {
-    // A group `publish` skipped has no server carrying its id, so the `all`
-    // below fails and any groups event republishes - which is the retry for
-    // it. The length check guards the other direction: a server whose group
-    // has gone.
-    rooms.len() == groups.groups.len()
+    let published: Vec<Published> = rooms
+        .iter()
+        .map(|s| Published {
+            group_id: s.imp().group_id.clone(),
+            room: s.imp().room.clone(),
+            members: s.imp().members(),
+        })
+        .collect();
+    still_published(&published, groups)
+}
+
+/// What one published player says about its group: the parts a groups event
+/// can make wrong.
+struct Published {
+    group_id: String,
+    room: String,
+    members: Vec<(String, String)>,
+}
+
+/// Whether `groups` is what is already published.
+///
+/// A group `publish` skipped has no player carrying its id, so the `all`
+/// below fails and any groups event republishes - which is the retry for it.
+/// The length check guards the other direction: a player whose group has gone.
+///
+/// **Names count as well as ids.** A rename moves no id, so comparing ids
+/// alone kept the old name published - in `Identity`, the bus name and the
+/// member list - and the TUI, which addresses rooms by that name, could no
+/// longer find the room. Republishing is the smallest way to put every name
+/// right at once.
+fn still_published(published: &[Published], groups: &Groups) -> bool {
+    published.len() == groups.groups.len()
         && groups.groups.iter().all(|g| {
-            rooms
-                .iter()
-                // Resolved the way `publish` resolved them: a player id the
-                // snapshot cannot name (transiently, while a player rejoins)
-                // is absent from both sides, rather than making every
+            published.iter().any(|p| {
+                // Members resolved the way `publish` resolved them: a player id
+                // the snapshot cannot name (transiently, while a player
+                // rejoins) is absent from both sides, rather than making every
                 // snapshot look like a change.
-                .any(|s| {
-                    s.imp().group_id == g.id
-                        && s.imp()
-                            .member_ids()
+                p.group_id == g.id
+                    && p.room == room_of(groups, g)
+                    && p.members
+                        .iter()
+                        .map(|(id, name)| (id.as_str(), name.as_str()))
+                        .eq(groups
+                            .members(g)
                             .iter()
-                            .eq(groups.members(g).iter().map(|p| &p.id))
-                })
+                            .map(|m| (m.id.as_str(), m.name.as_str())))
+            })
         })
 }
 
@@ -967,6 +996,35 @@ fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rename moves no id and must still republish; an unchanged snapshot
+    /// must not.
+    #[test]
+    fn a_rename_is_a_change_to_what_is_published() {
+        let groups = |room: &str| -> Groups {
+            serde_json::from_value(serde_json::json!({
+                "groups": [{"id": "g", "name": room, "coordinatorId": "p", "playerIds": ["p", "q"]}],
+                "players": [
+                    {"id": "p", "name": room, "websocketUrl": "wss://10.0.0.2:1443/websocket/api"},
+                    {"id": "q", "name": "Kitchen", "websocketUrl": "wss://10.0.0.3:1443/websocket/api"}
+                ]
+            }))
+            .unwrap()
+        };
+        let published = [Published {
+            group_id: "g".into(),
+            room: "Den".into(),
+            members: vec![("p".into(), "Den".into()), ("q".into(), "Kitchen".into())],
+        }];
+        assert!(still_published(&published, &groups("Den")));
+        assert!(
+            !still_published(&published, &groups("Study")),
+            "renamed coordinator"
+        );
+        let mut member = groups("Den");
+        member.players[1].name = "Pantry".into();
+        assert!(!still_published(&published, &member), "renamed member");
+    }
 
     /// The daemon names no room, so on a network with two households it can
     /// never resolve one by itself: it retries on backoff forever and the

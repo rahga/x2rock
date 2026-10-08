@@ -478,14 +478,10 @@ impl RoomPlayer {
     }
 
     /// The players in this group, for deciding whether a republish is due.
-    pub fn member_ids(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .unwrap()
-            .members
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect()
+    /// The members as published: each player's id and the room name it was
+    /// published under.
+    pub fn members(&self) -> Vec<(String, String)> {
+        self.state.lock().unwrap().members.clone()
     }
 
     /// Fold one member's `playerVolume` in; returns the properties to announce,
