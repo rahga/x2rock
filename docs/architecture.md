@@ -3158,7 +3158,9 @@ and - the surprise - an `eq` block (`bass`, `treble`, `loudness`) and a `homeThe
 (`nightMode`, `enhanceDialog`, `enhanceDialogLevel`, `enableTrueRoom`). So the Control API *can*
 read tone and home-theatre state (see the EQ correction below). Writing them is a different story:
 `setPlayerSettings` exists but answers **`ERROR_NO_PERMISSION`** to this anonymous LAN connection -
-the command shape is fine, the authority is not - so configuration writes stay on UPnP.
+the command shape is fine, the authority is not - so configuration writes stay on UPnP. **Not for
+every field (2026-10-08):** `{"volumeScalingFactor": ...}` alone is accepted and takes effect; see
+"The 2026-10-08 review".
 `setSettings` is `ERROR_UNSUPPORTED_COMMAND`.
 
 The target key lives in the **header**, so putting `groupId` in `PARAMS` does nothing; the body is
@@ -9622,6 +9624,13 @@ stations as `program`s (`sonos:2997`, Hit List), and on Browse Radio's `/genres/
 top level was missing, so `sonosradio.rs` builds `root` from `browse/v1`'s views, reading the
 endpoint from the manifest, and `smapi::metadata` walks the rest as for any service. Played from a
 shelf, Smooth Jazz started in Media Room as `program` radio, the route `play_radio` already takes.
+
+**The volume limit is a Control API write.** `settings:1 getPlayerSettings` carries
+`volumeScalingFactor`, the Sonos app's Volume Limit, as 0.0-1.0. `setPlayerSettings
+{"volumeScalingFactor": 0.01}` on Media Room answered `success` and read back as 0.01 - the one
+field of that command this connection may write; night mode and dialog are still
+`ERROR_NO_PERMISSION`. A limit scales rather than clamps: under 0.01, `vol 50` was accepted and read
+back 50. `vol --limit [PCT|off]` reads and sets it per speaker; Media Room was returned to 0.02.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 

@@ -320,6 +320,101 @@ pub async fn apply_vol(
     }))
 }
 
+/// One speaker's volume limit, as `vol --limit` reports it: a percent, 100
+/// meaning none.
+#[derive(Debug, Serialize)]
+pub struct LimitOutcome {
+    pub room: String,
+    pub limit: u8,
+    pub previous_limit: Option<u8>,
+}
+
+impl Report for LimitOutcome {
+    fn text(&self) -> String {
+        let shown = |pct: u8| match pct {
+            100 => "none".to_string(),
+            pct => format!("{pct}%"),
+        };
+        let before = self
+            .previous_limit
+            .map(|b| transition(&shown(b), &shown(self.limit)))
+            .unwrap_or_default();
+        format!(
+            "{:<24} volume limit {before}{}",
+            self.room,
+            shown(self.limit)
+        )
+    }
+}
+
+/// `vol --limit`'s value: a percent, or `off` for none.
+fn parse_limit(text: &str) -> Result<u8> {
+    let text = text.trim().trim_end_matches('%');
+    if text.eq_ignore_ascii_case("off") || text.eq_ignore_ascii_case("none") {
+        return Ok(100);
+    }
+    let pct: u8 = text
+        .parse()
+        .ok()
+        .filter(|p| (1..=100).contains(p))
+        .with_context(|| {
+            format!("a volume limit is a percent from 1 to 100, or off; not {text:?}")
+        })?;
+    Ok(pct)
+}
+
+/// A factor as the percent it reads as. Absent is no limit.
+fn limit_pct(factor: Option<f64>) -> u8 {
+    (factor.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+/// `vol --limit`: read or set the volume limit of each speaker named - every
+/// speaker in the household with `all`, else each `-r`, else the default
+/// group's coordinator. Player-scoped, so each over its own connection.
+pub async fn limit(
+    session: &Session,
+    rooms: &[String],
+    all: bool,
+    value: Option<&str>,
+) -> Result<Vec<LimitOutcome>> {
+    let wanted = value.map(parse_limit).transpose()?;
+    let speakers: Vec<&Player> = if all {
+        session.groups.players.iter().collect()
+    } else if rooms.is_empty() {
+        let target = session::target(&session.groups, None)?;
+        vec![super::speaker::named_speaker(session, &target, None)?.0]
+    } else {
+        rooms
+            .iter()
+            .map(|r| session.groups.player_named(r))
+            .collect::<Result<_>>()?
+    };
+    let mut out = Vec::with_capacity(speakers.len());
+    for speaker in speakers {
+        let ip = speaker.ip().with_context(|| {
+            format!("{} did not report an address to reach it on", speaker.name)
+        })?;
+        let connection = session.player(Some(ip)).await?;
+        let before = limit_pct(
+            connection
+                .player_settings(&speaker.id)
+                .await?
+                .volume_scaling_factor,
+        );
+        if let Some(pct) = wanted {
+            connection
+                .set_volume_limit(&speaker.id, f64::from(pct) / 100.0)
+                .await?;
+        }
+        out.push(LimitOutcome {
+            room: speaker.name.clone(),
+            limit: wanted.unwrap_or(before),
+            previous_limit: wanted.map(|_| before),
+        });
+    }
+    Ok(out)
+}
+
 /// Each speaker in the target's group with its own volume, read in parallel.
 ///
 /// A player-scoped read is refused by any other player, so each member is
@@ -441,6 +536,35 @@ pub async fn each(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_limit_is_a_percent_or_off() {
+        assert_eq!(parse_limit("50").unwrap(), 50);
+        assert_eq!(parse_limit("2%").unwrap(), 2);
+        assert_eq!(parse_limit("off").unwrap(), 100);
+        assert_eq!(parse_limit("100").unwrap(), 100);
+        assert!(parse_limit("0").is_err(), "zero is mute, not a limit");
+        assert!(parse_limit("101").is_err());
+        assert!(parse_limit("loud").is_err());
+        assert_eq!(limit_pct(Some(0.02)), 2);
+        assert_eq!(limit_pct(None), 100, "absent is no limit");
+    }
+
+    #[test]
+    fn a_limit_reads_none_at_one_hundred_and_shows_a_change() {
+        let read = LimitOutcome {
+            room: "Kitchen".into(),
+            limit: 100,
+            previous_limit: None,
+        };
+        assert!(read.text().ends_with("volume limit none"));
+        let set = LimitOutcome {
+            room: "Kitchen".into(),
+            limit: 40,
+            previous_limit: Some(100),
+        };
+        assert!(set.text().ends_with("volume limit none → 40%"));
+    }
 
     /// `normalize` parses as a volume word alongside the levels and `mute`, and
     /// `all_at` - the read that decides whether a group reports "members
