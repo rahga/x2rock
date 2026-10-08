@@ -9643,6 +9643,14 @@ id, which the player wrote, and otherwise only on a retry after the service refu
 song or station is refused. `favorites` lists in the app's sections (Playlists, Songs, Albums,
 Stations), and `--json` adds `category`.
 
+**`tv` with UPnP off, for a soundbar on its own.** `tv` hands a group to the TV over UPnP, which
+is a 403 with the household's UPnP switch off. `homeTheater:1 loadHomeTheaterPlayback` (verified
+2026-09-05, see "Soundbars: the TV input") does the switch over the Control API, but addressed to
+the bar it takes the TV for the bar alone, which for a grouped bar is a different act from the
+handover. So it is the fallback only when the 403 is the switch being off and the bar's group is
+the bar. Not exercised against hardware on 2026-10-08: the office household, the only one reachable,
+has no soundbar.
+
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 
 A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
