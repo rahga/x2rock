@@ -490,12 +490,8 @@ pub enum Command {
         /// `--index 20 --play 1` plays the 21st result overall.
         #[arg(long, default_value_t = 0, value_name = "N")]
         index: u32,
-        /// Play the Nth result, 1-based, in --room. A stream plays in a
-        /// session alongside the queue; anything else is added to the queue and
-        /// played, falling back to a stream if the player refuses it. A
-        /// container is refused: open it with `browse` instead.
-        #[arg(long, value_name = "N")]
-        play: Option<usize>,
+        #[command(flatten)]
+        pick: PickArgs,
         /// Re-read the service catalogue even if its version has not moved.
         #[arg(long)]
         refresh: bool,
@@ -520,10 +516,8 @@ pub enum Command {
         /// `--index 20 --play 1` plays the 21st result overall.
         #[arg(long, default_value_t = 0, value_name = "N")]
         index: u32,
-        /// Play the Nth row, 1-based, in --room. Refused for a container, which
-        /// is something to open rather than something to play.
-        #[arg(long, value_name = "N")]
-        play: Option<usize>,
+        #[command(flatten)]
+        pick: PickArgs,
         /// Re-read the service catalogue even if its version has not moved.
         #[arg(long)]
         refresh: bool,
@@ -645,6 +639,9 @@ pub enum Command {
         /// `stream` is refused; anything else is queued.
         #[arg(long)]
         kind: Option<String>,
+        /// Put it next, after what is playing, rather than at the end.
+        #[arg(long)]
+        next: bool,
     },
     /// Link a music service account, so its catalogue can be searched.
     ///
@@ -1358,6 +1355,40 @@ pub enum AlarmAction {
     },
 }
 
+/// What `search` and `browse` can do with one row of what they list: the Sonos
+/// app's Play Now, Add to End of Queue and Play Next. One at a time.
+#[derive(Debug, Clone, Copy, clap::Args)]
+#[group(multiple = false)]
+pub struct PickArgs {
+    /// Play the Nth row, 1-based, in --room. A stream plays in a session
+    /// alongside the queue; anything else is added to the queue and played,
+    /// falling back to a stream if the player refuses it. A container of
+    /// containers - an artist, a genre - is refused: open it instead.
+    #[arg(long, value_name = "N")]
+    pub play: Option<usize>,
+    /// Add the Nth row, 1-based, to the end of --room's queue without playing
+    /// it. An album or playlist adds every track it holds; a stream is refused.
+    #[arg(long, value_name = "N")]
+    pub queue: Option<usize>,
+    /// Add the Nth row, 1-based, to --room's queue right after what is
+    /// playing - the Sonos app's Play Next.
+    #[arg(long, value_name = "N")]
+    pub next: Option<usize>,
+}
+
+impl PickArgs {
+    pub fn pick(self) -> Option<crate::commands::content::Pick> {
+        use crate::commands::content::{Enqueue, Pick};
+        let (row, how) = match self {
+            Self { play: Some(n), .. } => (n, Enqueue::Play),
+            Self { queue: Some(n), .. } => (n, Enqueue::End),
+            Self { next: Some(n), .. } => (n, Enqueue::Next),
+            _ => return None,
+        };
+        Some(Pick { row, how })
+    }
+}
+
 #[derive(Subcommand)]
 pub enum QueueAction {
     /// Remove one track, or an inclusive range like 4-8.
@@ -1816,5 +1847,35 @@ mod tests {
         // And the old flag spelling is gone rather than quietly meaning the
         // Control API with a stray positional.
         assert!(parse(&["raw", "--upnp", "AVTransport", "GetTransportInfo"]).is_err());
+    }
+
+    /// One row, one action: `--play`, `--queue` and `--next` each name a row,
+    /// and two at once would leave which one ran up to argument order.
+    #[test]
+    fn a_listing_picks_one_row_one_way() {
+        use crate::commands::content::Enqueue;
+        use clap::Parser;
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once(&"x2rock").chain(args));
+        let pick = |args: &[&str]| match parse(args).expect("valid").command {
+            Command::Search { pick, .. } | Command::Browse { pick, .. } => {
+                pick.pick().map(|p| (p.row, p.how))
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            pick(&["search", "x", "--next", "3"]),
+            Some((3, Enqueue::Next))
+        );
+        assert_eq!(
+            pick(&["browse", "-s", "Deezer", "--queue", "2"]),
+            Some((2, Enqueue::End))
+        );
+        assert_eq!(
+            pick(&["search", "x", "--play", "1"]),
+            Some((1, Enqueue::Play))
+        );
+        assert_eq!(pick(&["search", "x"]), None);
+        assert!(parse(&["search", "x", "--play", "1", "--queue", "2"]).is_err());
+        assert!(parse(&["browse", "--queue", "1", "--next", "1"]).is_err());
     }
 }

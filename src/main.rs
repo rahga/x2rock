@@ -291,6 +291,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref id,
             ref title,
             ref kind,
+            next,
         } => {
             return content::run_queue_item(
                 cli.ip,
@@ -300,6 +301,7 @@ async fn run(cli: Cli) -> Result<()> {
                 kind.as_deref(),
                 id,
                 title.as_ref(),
+                next,
             )
             .await;
         }
@@ -308,7 +310,7 @@ async fn run(cli: Cli) -> Result<()> {
             ref container,
             count,
             index,
-            play,
+            pick,
             refresh,
             json,
         } => {
@@ -320,7 +322,7 @@ async fn run(cli: Cli) -> Result<()> {
                 container.as_deref(),
                 count,
                 index,
-                play,
+                pick.pick(),
                 refresh,
                 json,
             )
@@ -400,7 +402,7 @@ async fn run(cli: Cli) -> Result<()> {
             per_service,
             count,
             index,
-            play,
+            pick,
             refresh,
             json,
         } => {
@@ -416,7 +418,7 @@ async fn run(cli: Cli) -> Result<()> {
                 per_service,
                 count,
                 index,
-                play,
+                pick.pick(),
                 refresh,
                 json,
             )
