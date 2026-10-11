@@ -569,8 +569,9 @@ pub enum Command {
         #[arg(long)]
         title: Option<String>,
         /// The item's own kind, as `search`/`browse --json` report it in `type`.
-        /// `stream` plays as a stream; `audiobook` resumes where its listener
-        /// left off; anything else goes in the queue, which is the only way
+        /// `stream` plays as a stream; `program` (a station) as the room's own
+        /// source; `audiobook` resumes where its listener left off; anything
+        /// else goes in the queue, which is the only way
         /// on-demand service content plays. Omitted, the queue is tried first
         /// and a refusal falls back to streaming.
         #[arg(long)]

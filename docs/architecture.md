@@ -160,23 +160,32 @@ local token buys search and browse, and nothing of playback.
 | **Deezer** | device-link | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the file-transport fix | 2026-09-20, home + office |
 | **TIDAL** | device-link (OAuth in fact) | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the fix | 2026-09-19, home |
 | **iHeartRadio** | device-link | ✓ | ✓ | live stations stream ✓; podcasts enqueue ✓; `artist_radio_track` ids are per-listener and stream-only | 2026-09-19, home |
-| **Spotify** | app-link | ✓ browser | ✓ | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-09-10 |
-| **Amazon Music** | app-link | ✓ browser | ✓ | fallback ✓ unregistered (presigned HLS); enqueue untested — Prime-tier "albums" are stations | 2026-09-10 |
-| **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office |
+| **Spotify** | app-link | ✓ browser; ✓ `--from-household` (2026-10-11) | ✓; browse root is 5 SMAPI shelves where the app shows 22 personalised ones from the manifest `browse` endpoint - see "Every household token, imported" | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-10-11, home |
+| **Amazon Music** | app-link | ✓ browser; ✓ `--from-household` | ✓ on a family trial, an album is a real tracklist (`catalog:album:asin:…`), not the Prime-tier station; browse root is only Library and User Playlists, and the app's Home (`api/home`) refuses a bearer token | enqueue ✓ on the household's registration (tracks and albums); the player rewrites a track to `x-sonos-http:<asin>.mpd`, and expands an album as `x-sonosapi-hls-static`. Stations (`catalog:station:`) play as radio | 2026-10-11, home |
+| **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
-| **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 |
-| **Bandcamp** | device-link | ✓ | ✓ | purchased item ✓; no `userIdHashCode` | 2026-08-31 |
+| **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 - not in the home household; **next pass, deferred on 2026-10-11** |
+| **Bandcamp** | device-link | ✓; the home household's token imports but **every call answers `Client.LoginInvalid`** (2026-10-11) | ✓ with an x2rock-minted token; ✗ with the household's | purchased item ✓; no `userIdHashCode` | 2026-08-31; household token 2026-10-11, home |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
 | **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; linked on the second attempt (the first timed out unconfirmed). Sends no `userIdHashCode`, so the household is not matched | browse ✓ with the token - three bitrate tiers (128k, 320k, FLAC), each listing the channels (Main Mix, Mellow Mix, RockIt!, The Globe, Beyond, Serenity, KFAT) as `program`s; still **no search categories** | **✓ as radio, once the household has it** (added in the Sonos app). Its channels are not queue material (`AddURIToQueue` 800) and it has no `getMediaURI`; the app plays one by making it the transport's source, `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20` with an `audioBroadcast` DIDL, and `play-item` now does the same for a `program` the queue refuses. Played with the generic `-0-` cdudn and no `sn`, the household's one account resolved | 2026-09-30, office |
-| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function` | `getMetadata root` answers 200, empty; the front page comes from `browse/v1` (2026-10-08, see "The 2026-10-08 review") | content plays when reached through a favorite or bookmark, or from a shelf | 2026-09-18 |
+| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function`; ✓ `--from-household` | ✓ search with the household token; root from `browse/v1` (2026-10-08, see "The 2026-10-08 review") | ✓ a search hit plays as radio | 2026-10-11, home |
 | **Sonos Backgrounds** | device-link | **✗ no link code** — `getDeviceLinkCode` answers HTTP 200 with an empty `getDeviceLinkCodeResponse`; not in the office household's store, so there is no token to import either. `x2rock link` now says so and names `--from-household` | — | — | 2026-09-30, office |
-| **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — | 2026-09-21 |
-| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token. **Catalogue search ✓ through Apple's public iTunes API instead** (tracks, albums; `src/itunes.rs`) | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home |
-| **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`) | — | — | 2026-09-22 |
+| **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — **won't test** (decided 2026-10-11) | 2026-09-21 |
+| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token. **Catalogue search ✓ through Apple's public iTunes API instead** (tracks, albums; `src/itunes.rs`) | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home; unchanged 2026-10-11, home (manifest `browse/v1` answers 500) |
+| **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`); **✓ `--from-household`**, the only route (2026-10-11) | ✓ search (`all`: artist stations, live channels, talent, Xtra channels); browse root matches the app's `browse/v1` view for view | ✓ live channels (`channel-linear:`, `stream`) as a direct stream - the radio route answers `NO_CONTENT`; artist stations and Xtra channels (`program`) ✓ as radio | 2026-10-11, home |
 | **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
-| **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED` | — | — | 2026-09-10 |
-| **Pandora / CloudCover** | app-link | not attempted — signup declined 2026-09-10 | — | — | — |
+| **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED`; **✓ `--from-household`**, the only route (2026-10-11) | ✓ search and browse (Likes, Playlists, Feed, New & Hot, Following, own uploads). No `all`; a bare single-service search asked `artists` only until 2026-10-11, and now asks tracks, artists and albums. Ignores `index`, so paging repeats page one | ✓ enqueue, `x-sonosapi-hls-static:track-%3esoundcloud…` | 2026-10-11, home |
+| **Pandora** | app-link | ✓ browser (2026-09-10); ✓ `--from-household` (trial tier, 2026-10-11) | ✓ search - every hit a station (`SF:` factory, `program`, `canPlay` true, `canEnumerate` false); browse root is only My Stations | ✓ as radio, both a saved station (`ST:`) and a search hit (`SF:`), from `search --play`, `browse --play` and the widget (fixed 2026-10-11; before, only `play-item --kind program`). Playing an `SF:` hit **adds it to My Stations**, as the app does | 2026-10-11, home |
+| **Pandora CloudCover** | app-link | not attempted — out of scope (decided 2026-10-11) | — | — | — |
+
+**Household import pass (2026-10-11, home).** With trials added in the Sonos app, `link
+--from-household` imported 18 accounts. The rows above for Spotify, Amazon Music, Pandora,
+SiriusXM, SoundCloud, Bandcamp and Sonos Radio come from it. The cross-cutting findings are in
+"Every household token, imported": several services' app front pages come from a manifest `browse` endpoint x2rock reads
+only for Sonos Radio; `search --play`/`browse --play` refused station-shaped `program`s that play
+fine as radio, and a bare single-service search asked the first category rather than the default
+set (both fixed the same day).
 
 Roughly 108 services appear in a household's catalogue; 23 are searchable here today and 15 accept
 `x2rock link`. The live per-household answer is always `x2rock search` (bare) and `x2rock link`
@@ -208,10 +217,13 @@ account and settles whether the money would be wasted (2026-09-22):
 |---|---|---|
 | **Qobuz** | ✓ `qobuz.com/signin/external?linkToken=…` | hi-res FLAC through the new file-transport path, and a classical tier - the work/movement/composer shape that code assuming artist/album/track has never met |
 | **Audible** | ✓ `amazon.com/us/code?cbl-code=…` | chaptered long-form: resume position and multi-hour durations |
-| **SiriusXM** | **✗ `Service Error`** | nothing - **it cannot be linked at all, so a subscription buys no test** |
+| **SiriusXM** | **✗ `Service Error`** | ~~nothing - it cannot be linked at all, so a subscription buys no test~~ - **wrong (2026-10-11)**: the household's own token imports and searches, browses and plays; see "Every household token, imported" |
 
 SiriusXM is therefore struck from the list on evidence rather than on price, and it joins Apple
-Music and SoundCloud as an app-link service that refuses the call outright. Worth doing this probe
+Music and SoundCloud as an app-link service that refuses the call outright. **Overturned
+2026-10-11**: the probe tests x2rock's own flow, and `link --from-household` does not need that
+flow. With a trial added in the Sonos app, SiriusXM and SoundCloud both work fully. See
+"Every household token, imported". Worth doing this probe
 before *any* paid signup: it is free, it takes seconds, and it would have wasted a subscription
 here.
 
@@ -232,6 +244,15 @@ early claim rather than leaving it standing beside a pointer. (A pass on 2026-09
 whole file: claims wholly overtaken by later testing were removed or rewritten in place, so the
 lines below record the reversals rather than warn about text that still says otherwise.)
 
+- **`browse --play` plays an album or a playlist** (2026-10-11), as `search --play` has since
+  2026-09-18. Only a container of containers is refused. See "Every household token, imported".
+- **SiriusXM and SoundCloud can be reached.** Recorded as unlinkable because `getAppLink` refuses.
+  Their household tokens, imported, search, browse and play. A refused `getAppLink` rules out
+  x2rock's own flow, not the service. See "Every household token, imported" (2026-10-11).
+- **Amazon Music's albums are not stations, and its enqueue works**, on a paid (trial) tier with a
+  household registration. The station shape was Prime's. See "Every household token, imported" (2026-10-11).
+- **Pandora's "Unsupported action for account type" is not a tier limit.** A station declares
+  `canEnumerate` false and plays as radio. See "Every household token, imported" (2026-10-11).
 - **`artist_radio` does not need `loadContent`.** Recorded as playing only through it, as a last
   resort (2026-09-26). It plays as the room's source, `x-sonosapi-radio:`, which every `program`
   now tries first. See "iHeartRadio searched the way the Sonos app shows it" (2026-10-07).
@@ -4181,6 +4202,11 @@ default rule (which would silently move iHeartRadio from stations to tracks):
 - The widget grew `searchCategory` in `shell.json`, passed to the CLI as `-c`. A picker pointed at
   Plex wants `"tracks"`; empty keeps the CLI default and every existing config keeps its behaviour.
 
+(2026-10-11: the iHeartRadio reason no longer held, since its categories are fixed at
+`stations`/`podcasts`, so the default rule was changed after all. A bare `search -s plex` now
+asks tracks, artists and albums. Not re-measured on Plex, which is not in the home household. See
+"Every household token, imported".)
+
 ## The YouTube Music `apiKey` is sealed, and that closes the ~~question~~ *key* (2026-09-01)
 
 > **Header amended 2026-09-01.** This section closed the *sealed-key* question — that path is a
@@ -6795,7 +6821,10 @@ through the `getMediaURI` stream fallback, which works today for the reason alre
 way Spotify's was, `AddURIToQueue` might start succeeding under the same wrong generic scheme,
 and nobody yet knows what Amazon Music's real native scheme is - there is no officially-added
 queue item to read it off, the way Spotify's was found. Worth re-checking the moment that
-changes, not before.
+changes, not before. **Settled 2026-10-11** on a family trial added in the Sonos app: enqueue
+works on that registration. The player rewrites x2rock's `x-sonosapi-hls-static` track URI to
+`x-sonos-http:<asin>.mpd` and expands an album into `x-sonosapi-hls-static` rows, and an album is a
+real tracklist. See "Every household token, imported".
 
 **Pandora: blocked one step earlier.** The user signed up for a real (free-tier) Pandora account
 mid-session and linked it through x2rock's own `getAppLink` flow. Search works and returns real
@@ -6805,7 +6834,9 @@ tier the way Amazon Music's station-shaped browsing was suspected to be. Opening
 wrong: `getMetadata` refuses outright with **"Unsupported action for account type"** - the free
 tier cannot browse a station's content via SMAPI at all, so there is no track id to build an
 enqueue URI for in the first place. The scheme question is moot until a paid Pandora account is
-available to test with.
+available to test with. **Corrected 2026-10-11**: a trial tier gets the same refusal, because a
+Pandora station declares `canEnumerate` false. It is not a place to open, and it plays as radio.
+See "Every household token, imported".
 
 **Pandora CloudCover** was started (`x2rock link "Pandora CloudCover"`) and abandoned - the user
 declined a second sign-up mid-session ("not doing CloudCover signup right now"). Left for a later
@@ -9574,7 +9605,9 @@ settles"). `play_radio` - `x-sonosapi-radio:` with the `audioBroadcast` DIDL - a
 tried `AddURIToQueue` first, which refuses every `program` with 800, and printed the refusal as if
 something had gone wrong. Measured 2026-10-07 in the Kitchen: `artist_radio.1648` went queue (800)
 then radio, 1.6s, playing Coldplay's "Magic". Now a `program` goes to the room's source first and
-the queue is not tried; the same station started in 1.4s with nothing on stderr.
+the queue is not tried; the same station started in 1.4s with nothing on stderr. (2026-10-11: this
+held for `play-item` only until the same day's fix: `search --play` and `browse --play` refused a
+`program` that came as a `mediaCollection` before `play_one` was reached. See "Every household token, imported".)
 
 ## The 2026-10-08 review: what was measured and built
 
@@ -9680,6 +9713,168 @@ night sound and speech enhancement over `SetEQ`, offered only where the daemon p
 `x2rock:nightMode`/`enhanceDialog`. On Media Room: `z` set a timer that `x2rock sleep` read as 14:58,
 a restarted TUI read it back, and `l` on Sonos Radio said the service publishes no ratings. `t` with
 UPnP off is now refused only for a group, after the lone-soundbar fallback above.
+
+## Every household token, imported, and Browse checked against each service's own front page (home, 2026-10-11)
+
+The home household had trials added in the Sonos app for most of the paid services, family plans
+where offered (Amazon Music among them). `link --from-household --dry-run` read 18 account
+records, every one `NumAccounts=1`, serials 10 and 23-40; `link --from-household` kept all of
+them. New to x2rock: **Spotify, Bandcamp, SoundCloud, Pandora, SiriusXM**, plus the home
+household's own Saavn, Amazon Music and Qobuz. iHeartRadio still holds two accounts. Classical
+Archives is "won't test" and Pandora CloudCover is out of scope. Plex is not in this household
+and is deferred to a later pass.
+
+Every service was then browsed from `root`, searched for "miles davis", and played in the Kitchen
+at volume 1. The table at the top has the per-service rows. What follows is what the sweep found
+that is not a single row.
+
+### Two services that could not be linked can be imported, and they work
+
+SiriusXM refuses `getAppLink` (`Service Error`, 2026-09-22) and SoundCloud refuses it
+(`Client.NOT_AUTHORIZED`, 2026-09-10). The tokens the Sonos app minted for them, read out of
+`ThirdPartyMediaServersX`, **search, browse and play**. So the 2026-09-22 conclusion that
+SiriusXM "cannot be linked at all, so a subscription buys no test" was wrong in what it
+concluded. The probe answered whether *x2rock's* flow could mint a token. The household import
+needs no flow. `getAppLink` is no longer a reason to skip a paid service. The real question is
+whether the household's token answers, and that costs one trial.
+
+Both SoundCloud and YouTube Music carry a sealed `apiKey.cr` envelope in their manifests (see
+"The YouTube Music `apiKey` is sealed"). SoundCloud's token works without it. Whatever the sealed
+key gates, it is not SMAPI `getMetadata`/`search` for SoundCloud, so it is not evidence about
+YouTube Music either way.
+
+Bandcamp goes the other way. The household's token (32 bytes, an 8-byte key) imports, and every
+call answers `Client.LoginInvalid`. The token x2rock minted itself on 2026-08-31 worked. Not
+chased: `x2rock link Bandcamp` (device-link) needs a person at the browser, and only that run
+would tell whether the household's registration is stale or Bandcamp scopes its tokens per
+device.
+
+### The front page the app shows is often not SMAPI's `root`
+
+The 2026-10-08 review found this for Sonos Radio: the manifest names a `browse` endpoint, and the
+app draws its first page from that, not from `getMetadata root`. The same manifest field was
+read for all seventeen services:
+
+| service | manifest `browse` endpoint | bearer token (the SMAPI `auth_token`) | vs. `getMetadata root` |
+|---|---|---|---|
+| Sonos Radio | `sali.sonos.superhi.fi/browse/v1` | needs none | already built (`sonosradio.rs`) |
+| **Spotify** | `spotify-v5.ws.sonos.com/v1/browse` | **200**, 22 views | root has 5 shelves; the app's 21 personalised ones ("Recommended for today", "Your top mixes", "More like <artist>", ...) are missing |
+| **Deezer** | `platform.deezer.com/api/sonos/browse` | **200**, 9 views | root has 6; Recently played, the Flow moods, Made for you, Recommended playlists and Charts are missing as shelves |
+| SiriusXM | `ce-sonos.siriusxm.com/sonos/v1/browse` | **200**, 9 views | the same 9 ids SMAPI root lists - nothing missing |
+| Amazon Music | `sonos.smapi.amazonmusic.com/api/home` | 401 `{}` | root is Library and User Playlists only, so Amazon's Home is missing |
+| TuneIn (New) | `sonos.tunein.com/browse/v1` | 403 Cloudflare 1010 (it blocks the client's signature; tested only from a Python client) | - |
+| Apple Music | `sonos-music.apple.com/browse/v1` | 500, empty | - |
+
+The rest (Audible, Bandcamp, iHeartRadio, Qobuz, Saavn, SoundCloud, TIDAL, YouTube Music, Radio
+Paradise, Pandora) publish no `browse` endpoint, so SMAPI root *is* their front page.
+
+**A view's id is an ordinary SMAPI container id**, as it was for Sonos Radio. `browse -s Spotify
+spotify:view:section0JQ5DAnM3wGh0gz1MXnu3F` lists "Recommended for today"'s albums, `…nu89` the
+Daily-Mix-style "Your top mixes". Deezer's `flow-multiflow`, `user-smarttracklists-<user>` and
+`charts-worldwide` open the same way. One exception: Deezer's `user-recentlyplayed` is refused by
+`getMetadata` (a bare `getMetadata` fault string). Only the top level is missing, which is exactly the
+shape `sonosradio.rs` already solves. **Not built.** The step is to generalise
+`sonosradio::shelves` to any service whose manifest names a `browse` endpoint, sending the token
+as `Authorization: Bearer` when it holds one, and falling back to SMAPI root on any non-200
+(Amazon, TuneIn, Apple). Spotify's is the shelf set that changes most per listener, which is the
+part of the app a person would miss.
+
+The TuneIn, Amazon and Apple endpoints were only tried with a bearer token and an ordinary client.
+Which header each wants is unexplored.
+
+### A `program` that is a station was refused by `search --play` and `browse --play` (fixed)
+
+**The largest gap this pass found.** The 2026-10-07 change makes `play_one` start a `program` as
+the room's source (`x-sonosapi-radio:`). But `search --play` and `browse --play` refuse any
+container that `container_holds_tracks` does not name, before `play_one` is reached. A program
+returned as a `mediaCollection` is such a container: "is a program, which holds other containers
+rather than tracks". The widget treats the same row as a place to open. Measured refused from
+`search --play`, and each played at once through `play-item --kind program`:
+
+| service | id | as radio |
+|---|---|---|
+| Pandora | `ST:121804999784157021` (My Stations), `SF:16722:17347` (search) | ✓ |
+| iHeartRadio | `artist_radio.37582527` (search) | refused by the gate; the 2026-10-07 measurement went through `play-item` |
+| SiriusXM | `artist-station:3be89098-…` (search), `channel-xtra:62b1ccac-…` | ✓ |
+| Amazon Music | `catalog:station:key:A2JQOZI8G660XB` | ✓ |
+| Deezer | `flow-multiflow-happy` (Flow: Happy) | ✓ |
+
+Opening one instead fails for Pandora: `getMetadata` on any station answers **"Unsupported action
+for account type"**. Read on 2026-09-10 as the free tier being unable to browse a station, it is
+the same answer on the trial tier. The SOAP explains it: every Pandora hit is
+`<canPlay>true</canPlay><canEnumerate>false</canEnumerate>`. A Pandora station is a thing to play
+and, by the service's own declaration, not a place to open. `smapi::Item` keeps neither flag,
+so `container` can only mean "came as a `mediaCollection`". iHeartRadio's artist station *does*
+enumerate, as `artist_radio_track` rows that are per-listener and stream-only, so a person
+drilling in gets a list of songs that do not behave like songs.
+
+**Built the same day.** `Item::opens()` is `container` and not a `program`. It decides both
+`--play` gates, the trailing slash in `browse`, and the JSON `container` field, so the widget
+plays a station row instead of opening it, with no QML change. `queueable` is false for a
+`program`, and `queue-item`/`--queue` refuses one by name ("a station, which plays as the room's
+source and has no queue form") rather than passing on the player's 800/804. Carrying
+`canEnumerate` into `Item` would be the more literal rule. It was not used, because the `program`
+kind alone covers every case measured, and Plex shows that a service's flags are not always
+trustworthy (see "Plex wraps playable tracks"). Verified in the Kitchen: `search --play` played
+a Pandora `SF:` hit, an iHeartRadio artist station and a SiriusXM artist station. `browse --play`
+played a Pandora My Stations entry and Deezer's Flow from root. An artist is still refused, a
+Spotify album still queues, and TuneIn still streams.
+
+**`browse --play` caught up with `search --play` on containers, the same day.** It still refused
+*every* container, citing "A service container cannot be played over the LAN at all"
+(2026-09-11), which "An album is queued by a different scheme from a track" overtook a week
+later. `search --play` had been changed then, but `browse --play` had not. It now refuses only
+what `opens()` and that holds no tracks. Verified in the Kitchen: an Amazon library album, a
+Spotify featured playlist and a Pandora station all played from `browse --play`, and Spotify's
+`playlists` collection was still refused. One side effect, measured: playing a Pandora `SF:` hit **creates a station**
+("Miles Davis Radio" appeared in My Stations), as the Sonos app does when you tap one.
+
+SiriusXM's live channels are the counter-case. A `channel-linear:` is `stream`, plays as a direct
+stream through the session, and refuses the radio route (`playback:1 play` →
+`ERROR_PLAYBACK_NO_CONTENT`). The search path already sends it the right way. A `program` is not
+always radio, so the radio route's stream fallback is still needed.
+
+### Single-service search without `-c` asked the first category, not what `--help` says (fixed)
+
+`search -s SoundCloud "miles davis"` returned one artist. With `-c tracks,artists,albums` it
+returned nine rows across all three. The single-service path picks `all`, else **the service's
+first category** (`commands/services.rs`, the `None =>` arm after `pick_categories`). The merged
+path uses `pick_categories`, which falls to `DEFAULT_CATEGORIES`. `--category`'s own help
+describes the merged rule ("else `tracks`, `artists` and `albums` where it has them"), so the CLI
+contradicts itself. Every service here with no `all` lists `artists` first: SoundCloud, TIDAL,
+Deezer, Qobuz, Bandcamp. A bare single-service search on any of them answers artists only.
+
+The divergence was deliberate on 2026-09-01 ("The default category, and the widget's new
+`searchCategory`"): changing it "would silently move iHeartRadio from stations to tracks". That
+reason has lapsed. Since 2026-10-07 iHeart's categories are fixed at `stations` and `podcasts`,
+none of the three defaults, so `pick_categories` already lands on `stations` for it. **Built the same day**: the single-service
+path now uses `pick_categories` too. When that picks several categories, they go through the
+path `-c tracks,artists,albums` already took. Each category is asked for its share of `--count`,
+from its share of `--index`, and the interleave is capped at `--count`, so a page is still
+`--count` rows and the next page continues each category where the last stopped. Verified:
+TIDAL at `--count 6` gives two tracks, two artists and two albums, and `--index 6` continues
+with tracks 3-4. iHeartRadio still defaults to stations, and Spotify, which has `all`, is
+unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, albums".
+**SoundCloud ignores SMAPI `index`**: `-c tracks --index 2` returns the same rows as
+`--index 0`, so its second page repeats the first. That is the service, not this.
+
+### Smaller things the sweep turned up
+
+- **Amazon Music's library returns a sentinel row.** `library:albums` ends with an item of id
+  `unauthorized`, no type, titled "Content Unavailable", and `browse` lists it as if it were an
+  album.
+- **SiriusXM's `talent:` hits carry a whole biography as their description.** The CLI prints it
+  in full on one line. The widget caps descriptions; the CLI does not.
+- **Audible's root is seven marketplaces** (`.com`, `.co.uk`, `.de`, ...). Only the account's own
+  holds the library. The app likely opens straight into it. Not compared.
+- **Sonos Radio searches with the household token** - the first token x2rock has held for it.
+- **iHeartRadio's merged Stations list puts live stations before artist stations.** For "miles
+  davis" it led with KOST 103.5. 2026-10-07 says the app's Stations for "coldplay" were the
+  `artists` list in order. If the app also leads with artists, the order in `search_as_one`
+  (`stations` then `artists`) is backwards. That needs looking at in the app.
+- **Spotify, SoundCloud, TIDAL, Deezer, Saavn, Qobuz, Amazon Music and TuneIn (New)** all played a
+  search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
+  played in the office before.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 

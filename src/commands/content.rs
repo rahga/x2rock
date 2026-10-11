@@ -403,7 +403,7 @@ async fn play_one(
     // room's source, so that is its first route, not a fallback reached after
     // a refusal that was certain (and printed as if something had gone wrong).
     // Measured on iHeart's `artist_radio.1648`, 2026-10-07.
-    let program = kind.is_some_and(|k| k.eq_ignore_ascii_case("program"));
+    let program = kind.is_some_and(sonos::smapi::is_program);
     let mut upnp_off = false;
     if !streamish && let Some(naming) = Naming::of(service, token) {
         let first = match program {
@@ -803,6 +803,14 @@ pub async fn queue_item(
              Play it with `x2rock play-item` instead."
         );
     }
+    // A station is played as the room's source, never queued: the player
+    // refuses one with 800 or 804, neither of which says that.
+    if kind.is_some_and(sonos::smapi::is_program) {
+        bail!(
+            "{title:?} is a station, which plays as the room's source and has no \
+             queue form. Play it with `x2rock play-item` instead."
+        );
+    }
     // A place rather than a thing. The player refuses it with a bare UPnP 804,
     // which says the URI was malformed and not that an artist has no tracks of
     // its own to add - so this says the second, where every other refusal here
@@ -877,7 +885,10 @@ impl Naming {
 /// its id with a grammar error - see `browse` - so it is somewhere to go rather
 /// than something to add.
 pub fn queueable(item: &sonos::smapi::Item, service: &sonos::smapi::Service) -> bool {
-    if item.item_type.eq_ignore_ascii_case("stream") || service.cdudn().is_none() {
+    if item.item_type.eq_ignore_ascii_case("stream")
+        || sonos::smapi::is_program(&item.item_type)
+        || service.cdudn().is_none()
+    {
         return false;
     }
     // A container qualifies when what it holds is tracks - an album or a

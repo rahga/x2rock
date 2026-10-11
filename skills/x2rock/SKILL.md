@@ -480,15 +480,15 @@ so more - run both rather than assuming they match. A service that answers `no_s
 browse-only, not broken: walk it with `x2rock browse -s "<service>"` rather than reporting it as
 unavailable.
 
-**A container cannot be played whole, and this is a limit of Sonos rather than of x2rock.** An album,
-a playlist, a show - anything `browse` marks `"container": true` - can be *opened* and its tracks
-played one at a time, and `--play N` on the container itself is refused. Do not go looking for a
-flag that plays it: there is no way to do it over the local network at all. Four routes were tried
-against real hardware and all four fail, including replaying a player's own stored favorite URI back
-to it verbatim (see docs/architecture.md). **The way through is to say so and name the workaround:
-saved in the Sonos app as a favorite, the same container plays fine with `x2rock favorite "<name>"`,
-because that hands the player an id and lets it resolve the thing itself.** The error message says
-this too; do not promise to find a way round it.
+**An album, a playlist or a book plays whole; a container of containers does not.** `--play N` on
+an album or playlist row - from `search` or `browse` - queues every track and starts the first; a
+book resumes where it was left off. An artist, a genre or a collection (`"type"` of `artist`,
+`genre`, `collection`, `container`, `albumList`) holds other containers, has nothing to play, and
+`--play` refuses it: open it with `x2rock browse` and play what is inside.
+
+**A station is not a container.** A `"type": "program"` row - a Pandora station, an iHeartRadio or
+SiriusXM artist station, an Amazon station, Deezer's Flow - is reported `"container": false` and
+plays with `--play N` as the room's source. It cannot be queued; `--queue` says so.
 
 Two shapes worth noting because they are inconsistent: **`favorite` is name/id-addressed**
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).
@@ -1077,7 +1077,7 @@ those two apart when telling a user what linking will do.
   the Control API carries none for a transport-set URI) while `status --json` leaves it null - the
   sweep does not make that extra call. **A fallback that "started" is still not a fallback that played**:
   confirm with `now --json` twice and require `position_ms` to have moved. A service container
-  (album, playlist) cannot be played whole either way; see "A container cannot be played whole".
+  (album, playlist) is queued rather than streamed: `--play N` on it expands it into the queue.
 - **Read `link`'s last line for which case you are in.** `The household knows this account as
   sn_22` means the household already holds this very account, so on-demand playback works. `did not
   match` or `sent no userIdHashCode` means only that this account was not matched; the household may
