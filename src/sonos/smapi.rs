@@ -354,6 +354,32 @@ pub struct Item {
     pub container: bool,
 }
 
+impl Item {
+    /// Whether this is a place to open rather than a thing to play: a
+    /// [`container`](Item::container) that is not a [`program`](is_program).
+    ///
+    /// What `--play` refuses, what `browse` marks with a slash, and what the
+    /// JSON calls `container`, which is how the widget decides between opening a
+    /// row and playing it. `container` alone said "came as a `mediaCollection`",
+    /// and a station comes as one: every Pandora station, iHeartRadio and
+    /// SiriusXM artist stations, Amazon stations, Deezer's Flow. Opened, Pandora's
+    /// refuses outright ("Unsupported action for account type" - it declares
+    /// `canEnumerate` false) and iHeart's lists per-listener tracks that will
+    /// only stream. Played, each starts as the room's source. Measured
+    /// 2026-10-11, home; see "Every household token, imported" in
+    /// docs/architecture.md.
+    pub fn opens(&self) -> bool {
+        self.container && !is_program(&self.item_type)
+    }
+}
+
+/// Whether a kind is a radio program (a station, an artist station, a
+/// channel), which plays as the room's own source and is never queue
+/// material: `AddURIToQueue` refuses one with 800 or 804.
+pub fn is_program(item_type: &str) -> bool {
+    item_type.eq_ignore_ascii_case("program")
+}
+
 /// A searchable category, from the service's presentation map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
@@ -1711,6 +1737,25 @@ mod tests {
         }
         let (items, total) = pager.finish();
         (items.into_iter().map(|i| i.id).collect(), total)
+    }
+
+    /// A station arrives as a `mediaCollection` and is still a thing to play:
+    /// Pandora's, measured 2026-10-11, refuses to be opened at all.
+    #[test]
+    fn a_program_is_played_rather_than_opened() {
+        let row = |item_type: &str, container| Item {
+            id: "x".into(),
+            title: String::new(),
+            item_type: item_type.into(),
+            summary: None,
+            art_url: None,
+            container,
+        };
+        assert!(!row("program", true).opens());
+        assert!(!row("Program", true).opens());
+        assert!(row("album", true).opens());
+        assert!(row("artist", true).opens());
+        assert!(!row("track", false).opens());
     }
 
     #[test]

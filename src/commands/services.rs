@@ -210,7 +210,8 @@ fn item_json(i: &sonos::smapi::Item, service: &sonos::smapi::Service) -> serde_j
         "description": i.summary,
         "service": service.name,
         "art_url": i.art_url,
-        "container": i.container,
+        // A place to open, not merely a `mediaCollection`: a station is played.
+        "container": i.opens(),
         "queueable": queueable(i, service),
     })
 }
@@ -1510,25 +1511,25 @@ pub async fn run_browse(
             )
             .await;
         }
-        // A container is a place, and refusing here is kinder than letting
-        // getMediaURI refuse it with a grammar error about ids.
+        // A container of containers is a place, and refusing here is kinder
+        // than letting getMediaURI refuse it with a grammar error about ids.
         //
-        // The second sentence is the one that matters: playing a container is
-        // not something x2rock has yet to implement, it is not reachable over
-        // the LAN at all - four routes were tried and all four fail, see "A
-        // service container cannot be played over the LAN at all" in
-        // docs/architecture.md. Saving it in the Sonos app is genuinely the way
-        // through, because `favorite` hands the player an id and lets it
-        // resolve the container itself.
+        // One holding tracks is not: the player expands an album or a playlist
+        // into the queue (verified 2026-09-18, "An album is queued by a
+        // different scheme from a track"), and a book resumes. This gate used
+        // to refuse every container, on the 2026-09-11 finding that a container
+        // cannot be played over the LAN - true of the routes tried then, and
+        // overtaken a week later. `search --play` had already moved on; this
+        // caught up on 2026-10-11.
         ensure!(
-            !item.container,
-            "{:?} is a container. Open it with: x2rock browse -s {} {}\n\
-             To play the whole thing, save it as a favorite in the Sonos app - \
-             then: x2rock favorite {}",
+            !item.opens() || bookmarks::container_holds_tracks(&item.item_type),
+            "{:?} is {} {}, which holds other containers rather than tracks. \
+             Open it with: x2rock browse -s {} {}",
             item.title,
+            super::article(&item.item_type),
+            item.item_type,
             hint::shell_arg(&chosen.name),
-            hint::shell_arg(&item.id),
-            hint::shell_arg(&item.title)
+            hint::shell_arg(&item.id)
         );
         return play_item(
             live()?,
@@ -1580,7 +1581,7 @@ pub async fn run_browse(
             .unwrap_or_default();
         // A trailing slash for somewhere to go, the way a directory listing
         // marks one. Cheaper to read than a column.
-        let name = if item.container {
+        let name = if item.opens() {
             format!("{}/", item.title)
         } else {
             item.title.clone()
@@ -1808,6 +1809,43 @@ pub async fn run_search(
     //
     // A term is required: with none, the listing of what this service can search
     // is still the right answer and is printed below.
+    //
+    // **Unnamed, the same choice a merged search makes** - `all`, else tracks,
+    // artists and albums where the service has them, else its first - which is
+    // what `--category` has always said. This path used to take the first
+    // category outright, so SoundCloud, TIDAL, Deezer, Qobuz and Bandcamp, which
+    // all list `artists` first, answered a song title with artists only. Kept
+    // apart on 2026-09-01 so iHeartRadio would not move from stations to
+    // tracks; its categories are fixed at stations and podcasts since, so
+    // `pick_categories` lands on stations anyway. Several picked are asked as
+    // `-c` would ask them, on the merged path below.
+    let defaulted: Option<String> = match category {
+        None if !all_categories => {
+            let picked = pick_categories(&categories, None, false);
+            (picked.len() > 1).then(|| {
+                picked
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+        }
+        _ => None,
+    };
+    let category = defaulted.as_ref().or(category);
+    // **A page is still `--count` rows.** Named categories are asked for
+    // `--count` each, which is what someone listing them asked to see; a
+    // default nobody chose would triple every page, the widget's included. So
+    // each category is asked for its share, from its share of `--index`, and
+    // the interleave is capped at `--count`: page two starts in every category
+    // where page one stopped.
+    let (per_category_count, per_category_index, cap) = match &defaulted {
+        Some(ids) => {
+            let n = ids.split(',').count() as u32;
+            (count.div_ceil(n), index / n, count as usize)
+        }
+        None => (count, index, 0),
+    };
     if let Some(term) = term
         && (all_categories || asked_for_several(category.map(String::as_str)))
     {
@@ -1823,9 +1861,9 @@ pub async fn run_search(
             all_categories,
             // Everything by default: the caller named one service and several
             // categories, which is a request to see them rather than a sample.
-            per_service.unwrap_or(0),
-            count,
-            index,
+            per_service.unwrap_or(cap),
+            per_category_count,
+            per_category_index,
             pick,
             json,
         )
@@ -1847,16 +1885,20 @@ pub async fn run_search(
                     known.join(", ")
                 )
             })?,
-        None => categories
-            .iter()
-            .find(|c| c.id.eq_ignore_ascii_case("all"))
+        None => pick_categories(&categories, None, false)
+            .first()
+            .copied()
             .unwrap_or(&categories[0]),
     };
 
     let Some(term) = term else {
         let known: Vec<_> = categories.iter().map(|c| c.id.as_str()).collect();
         println!("{} can search: {}", chosen.name, known.join(", "));
-        println!("Default is {}. Give a term to search.", picked.id);
+        let default = defaulted
+            .as_deref()
+            .unwrap_or(&picked.id)
+            .replace(',', ", ");
+        println!("Default is {default}. Give a term to search.");
         return Ok(());
     };
 
@@ -1887,7 +1929,7 @@ pub async fn run_search(
         // the player expands it into the queue. Only a container of *containers*
         // has nothing to play.
         ensure!(
-            !item.container || bookmarks::container_holds_tracks(&item.item_type),
+            !item.opens() || bookmarks::container_holds_tracks(&item.item_type),
             "{:?} is {} {}, which holds other containers rather than tracks. \
              Open it with: x2rock browse -s {} {}",
             item.title,
@@ -1968,7 +2010,7 @@ pub async fn run_search(
             .unwrap_or_default();
         // The same trailing slash `browse` uses, and for the same reason: some
         // services answer a search entirely in collections.
-        let name = if item.container {
+        let name = if item.opens() {
             format!("{}/", item.title)
         } else {
             item.title.clone()
@@ -2323,7 +2365,7 @@ async fn search_everywhere(
         let row = nth(&rows, n)
             .ok_or_else(|| anyhow!("no result {n}; the search returned {}", rows.len()))?;
         ensure!(
-            !row.item.container || bookmarks::container_holds_tracks(&row.item.item_type),
+            !row.item.opens() || bookmarks::container_holds_tracks(&row.item.item_type),
             "{:?} is {} {}, which holds other containers rather than tracks. \
              Open it with: x2rock browse -s {} {}",
             row.item.title,
@@ -2415,7 +2457,7 @@ async fn search_everywhere(
     let names: Vec<String> = rows
         .iter()
         .map(|r| {
-            let name = match r.item.container {
+            let name = match r.item.opens() {
                 true => format!("{}/", r.item.title),
                 false => r.item.title.clone(),
             };

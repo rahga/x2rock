@@ -481,11 +481,9 @@ says so and points at `browse`. `browse` therefore reaches more services than `s
 
 `search` takes a word; `browse` takes a *place* — a personal library, a "For You", a genre tree.
 Every service starts at `root`; a row marked as a container can be opened, everything else can be
-played. **A container cannot be played whole** — an album, a playlist, a show. This is a limit of
-the local API rather than of x2rock: four routes were tried against real hardware and all four
-fail, including replaying a player's own stored favorite URI back to it. Saved as a favorite in
-the Sonos app, the same container plays fine with `x2rock favorite`, because that hands the player
-an id and lets it resolve the thing itself.
+played. An album or a playlist can be opened *or* played: `--play N` queues every track and starts
+the first. A station (`program`) plays as the room's source. Only a container of containers - an
+artist, a genre, a collection - is refused, since it has nothing of its own to play.
 
 Both page. `--count` is the page size and `--index` the 0-based start; `--json` answers
 `{total, index, items}`, and there is more whenever `index + items.len() < total`. `--play N`
