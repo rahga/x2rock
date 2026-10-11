@@ -253,6 +253,9 @@ lines below record the reversals rather than warn about text that still says oth
   household registration. The station shape was Prime's. See "Every household token, imported" (2026-10-11).
 - **Pandora's "Unsupported action for account type" is not a tier limit.** A station declares
   `canEnumerate` false and plays as radio. See "Every household token, imported" (2026-10-11).
+- **`replay` does not use `loadContent`** (except for a Sonos playlist). It was built on it on
+  2026-09-26; on Mixcloud it restarts the speaker. See "Replay queues, because `loadContent`
+  restarts a speaker on Mixcloud" (2026-10-11).
 - **`artist_radio` does not need `loadContent`.** Recorded as playing only through it, as a last
   resort (2026-09-26). It plays as the room's source, `x-sonosapi-radio:`, which every `program`
   now tries first. See "iHeartRadio searched the way the Sonos app shows it" (2026-10-07).
@@ -9095,7 +9098,10 @@ with their channels; `devices:1` is a richer `system` than UPnP gives.
 ### Recently played, and `loadContent` (home, 2026-09-26)
 
 `history:1 getHistory` became `x2rock recent`, `x2rock replay`, and a **Recently played** door in
-the widget. Playing an item back goes through **`playback:1 loadContent`** (group-scoped), which
+the widget. (**2026-10-11: `replay` no longer loads, except a Sonos playlist.** `loadContent` on a
+Mixcloud item restarts the coordinator, so a replay now takes `play_item`'s routes. See "Replay
+queues, because `loadContent` restarts a speaker on Mixcloud". What follows is still true of
+`loadContent` itself.) Playing an item back went through **`playback:1 loadContent`** (group-scoped), which
 takes the item's own `{serviceId, accountId, objectId}` and its `type` - no DIDL, no cdudn, no
 queue arithmetic; the player resolves it. Found by the same probe: `loadContent` exists and wanted
 `id` (`Parsing terminated:[1].id`), where `loadItem`, `playContent` and every `history:1` verb do
@@ -9875,6 +9881,48 @@ unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, a
 - **Spotify, SoundCloud, TIDAL, Deezer, Saavn, Qobuz, Amazon Music and TuneIn (New)** all played a
   search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
   played in the office before.
+
+## Replay queues, because `loadContent` restarts a speaker on Mixcloud (home, 2026-10-11)
+
+Found by x2rocktv (its P-21). It started Mixcloud with `loadContent`, and the Dining Room
+coordinator hung and restarted. That happened on both of the household's Mixcloud accounts, and
+the speaker dropped off the network for a while: it answered ping but nothing on 1400 or 1443,
+which this session saw from x2rock as "Dining Room unreachable" right after a daemon restart.
+The Sonos app, playing the same content in the same room, **queued** it: the Bass category went
+in as 100 mixes, each `x-sonosapi-hls-static:cloudcast%3a<id>?sid=181&flags=8232&sn=41`, played
+from the queue. Queueing one mix from x2rocktv played, and the speaker stayed up.
+
+**x2rock's exposure was `replay`.** `play-item`, `search --play` and `browse --play` already queue
+Mixcloud (verified 2026-09-08). `loadContent` is their last resort, after the queue and the stream
+both refuse, and Mixcloud's queue add does not refuse. But `replay`, and the widget's Recently
+played door that runs it, sent *every* history row through `loadContent`, which was the design
+of "Recently played, and `loadContent`" (2026-09-26). The Bass row was unplayable here only
+because this machine held no Mixcloud token for the home household. One `link --from-household
+Mixcloud` made it playable, and replaying it would have restarted whichever room it was sent to.
+
+**Built.** `replay` resolves the row's service and plays it through `play_item`: the queue, a
+`program` as the room's source, a `stream` through the session, an `audiobook` resumed. It keeps
+the history item's own account (by `sn_N`, via `token_by_serial`) after `replayable` has swapped
+a dead one, so an iHeartRadio custom station still plays as the listener who made it. A Sonos
+playlist (`65435`) has no service to ask and still loads. `play_unqueued` never reaches
+`loadContent` for Mixcloud, whatever fails first. That matches by service name, since a service
+id is not a constant (see "A service id is not a constant").
+
+**Verified in the Kitchen**, every playable row of the home household's history replayed through
+the new path:
+
+| row | route taken |
+|---|---|
+| Mixcloud `categories:music:bass` (`playlist`) | queue: the player expanded it into 100 mixes, the first row the app's own URI above, on `sn=41`; position advanced and the speaker stayed up |
+| iHeartRadio live station | stream |
+| Sonos Radio, SiriusXM artist station, Radio Paradise, Pandora (`SF:` and `ST:`), Amazon station | radio (`program`) |
+| YouTube Music, Spotify, Apple Music, TIDAL, Deezer and Amazon albums; a Spotify playlist | queue |
+
+**The UPnP switch now matters to `replay`.** It used to be unaffected, as `loadContent` is a
+Control API command. Now a queued replay with UPnP off is refused and falls through to
+`play_item`'s stream and load fallbacks, so it still plays where those can. Mixcloud is the
+exception: no load is allowed, so with UPnP off a Mixcloud replay is refused. Not measured: the
+home household's UPnP is on.
 
 ## Review pass (2026-09-18/19): decisions challenged and upheld
 

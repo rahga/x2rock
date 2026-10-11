@@ -459,9 +459,10 @@ pub enum Command {
         json: bool,
     },
     /// Play something from `x2rock recent` again, by name or by the id
-    /// `recent --json` gives. Replaces what the room is playing, like a
-    /// favorite, and plays it from the account the household uses for that
-    /// service now, whichever one it was first played from.
+    /// `recent --json` gives. It plays the way `play-item` would: an album or
+    /// track goes in the queue and starts, a station becomes the room's
+    /// source, a stream streams, a book resumes. It plays from the account it
+    /// was played from, or the household's current one if that account is gone.
     Replay { query: String },
     /// Search music services. A term with no `--service` asks every service
     /// that can answer, at once, and merges the results; `--service` asks one.

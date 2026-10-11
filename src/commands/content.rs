@@ -496,6 +496,9 @@ async fn play_unqueued(
     // rather than adding to it, refuses every service the household holds no
     // account for, and takes a pause and a wait to start - see `replay`.
     match streamed {
+        // Never for Mixcloud: `loadContent` on one of its items hangs the
+        // coordinator until it restarts (x2rocktv P-21, 2026-10-11).
+        Err(e) if service.name.eq_ignore_ascii_case("Mixcloud") => Err(e),
         Err(e) if sonos::smapi::Refused::of(&e).is_some() => {
             let (Some(kind), Some(serial)) = (kind, token.and_then(|t| t.serial)) else {
                 return Err(e);
@@ -1258,10 +1261,21 @@ const LOAD_SETTLE: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// `x2rock replay`: play something from the household's recently played, by
 /// name or by the id `recent --json` gives.
+///
+/// **By `play_item`'s routes, not by `loadContent`.** A history row names its
+/// service, account and object id, which is exactly what `loadContent` takes,
+/// so that is what this sent - and `loadContent` on a Mixcloud item hangs the
+/// coordinator until it restarts, on either of the household's accounts
+/// (x2rocktv P-21, 2026-10-11), where the Sonos app plays the same mix by
+/// queueing it. `play_item` queues what the queue takes, starts a station as
+/// the room's source, streams a stream and resumes a book, and keeps
+/// `loadContent` as its last resort. Only a Sonos playlist, which no service
+/// serves, still loads directly.
 pub async fn replay(
     session: &Session,
     player: &Connection,
     target: &Target,
+    room: Option<&str>,
     query: &str,
 ) -> Result<()> {
     let household = session.connection.household_id().await?;
@@ -1286,9 +1300,38 @@ pub async fn replay(
             .as_deref()
             .unwrap_or("a service x2rock does not know")
     );
-    load_and_start(player, target, &r.id, &item.kind, &item.name).await?;
-    println!("{:<24} {}", target.name, item.name);
-    Ok(())
+    let service =
+        r.id.service_id
+            .as_deref()
+            .filter(|id| *id != SONOS_PLAYLISTS)
+            .and_then(|id| catalogue.by_id(id));
+    let Some(service) = service else {
+        load_and_start(player, target, &r.id, &item.kind, &item.name).await?;
+        println!("{:<24} {}", target.name, item.name);
+        return Ok(());
+    };
+    // The account the row was played from, which `replayable` has already
+    // swapped for the household's current one if it is gone: an iHeartRadio
+    // custom station belongs to the listener who made it.
+    let serial =
+        r.id.account_id
+            .as_deref()
+            .and_then(|a| a.strip_prefix("sn_"))
+            .and_then(|n| n.parse::<u32>().ok());
+    let token = serial
+        .and_then(|n| linked.token_by_serial(&household, &service.id, n))
+        .or_else(|| linked.token_for(&household, &service.id));
+    play_item(
+        session,
+        room,
+        service,
+        token.as_ref(),
+        Some(&item.kind),
+        &r.id.object_id,
+        &item.name,
+        false,
+    )
+    .await
 }
 
 /// Replace what `target` plays with one piece of content and see it start: the
