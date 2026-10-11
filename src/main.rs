@@ -676,7 +676,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             content::favorite(session, &player, &target, &query).await?;
         }
         Command::Replay { query } => {
-            content::replay(session, &player, &target, &query).await?;
+            content::replay(session, &player, &target, room, &query).await?;
         }
         Command::Playlist { query } => {
             content::playlist(session, &player, &target, &query).await?;
