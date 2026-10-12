@@ -1966,7 +1966,27 @@ impl Upnp {
     /// The metadata is what the room displays. Without it a Sonos shows the
     /// URL's hostname, which is how `f-cdnt-stream.dzcdn.net` ended up as a
     /// now-playing title during the test that found this.
-    pub async fn play_url_as_track(&self, url: &str, title: &str) -> Result<()> {
+    ///
+    /// `mime` is the file's type where its server said, declared in a `<res>`.
+    /// **Without it the player guesses from the URL's extension**, which a
+    /// signed CDN URL need not have: Bandcamp's ends `/mp3-v0/<id>?…`, and the
+    /// player refused it with UPnP 714, illegal MIME type (2026-10-11), where
+    /// Deezer's `.flac` and TIDAL's `/0.flac?…` had always been read correctly.
+    pub async fn play_url_as_track(
+        &self,
+        url: &str,
+        title: &str,
+        mime: Option<&str>,
+    ) -> Result<()> {
+        let res = mime
+            .map(|m| {
+                format!(
+                    r#"<res protocolInfo="http-get:*:{}:*">{}</res>"#,
+                    xml_escape(m),
+                    xml_escape(url)
+                )
+            })
+            .unwrap_or_default();
         let didl = format!(
             concat!(
                 r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
@@ -1975,9 +1995,10 @@ impl Upnp {
                 r#"<item id="-1" parentID="-1" restricted="true">"#,
                 "<dc:title>{title}</dc:title>",
                 "<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
-                "</item></DIDL-Lite>"
+                "{res}</item></DIDL-Lite>"
             ),
-            title = xml_escape(title)
+            title = xml_escape(title),
+            res = res
         );
         self.set_transport_uri(url, &didl).await
     }
