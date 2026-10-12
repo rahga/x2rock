@@ -165,7 +165,7 @@ local token buys search and browse, and nothing of playback.
 | **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 - not in the home household; **next pass, deferred on 2026-10-11** |
-| **Bandcamp** | device-link | ✓, re-linked 2026-10-11; the home household's own token imports but **every call answers `Client.LoginInvalid`**, so the household's registration is stale | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | the queue refuses (800; the household's registration is dead); **the file fallback plays it** once the DIDL declares the MIME type (it was UPnP 714) | 2026-10-11, home |
+| **Bandcamp** | device-link | ✓, re-linked 2026-10-11; **a household token never answers x2rock** (`Client.LoginInvalid`, even freshly minted after a re-add, 2026-10-12), so x2rock's own link must be the preferred account | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | ✓ through the queue once the household re-added Bandcamp (`sn_43`; the link account's dead serial resolves to it). Before that, the file fallback, once the DIDL declared the MIME type (it was UPnP 714) | 2026-10-12, home |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
 | **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; linked on the second attempt (the first timed out unconfirmed). Sends no `userIdHashCode`, so the household is not matched | browse ✓ with the token - three bitrate tiers (128k, 320k, FLAC), each listing the channels (Main Mix, Mellow Mix, RockIt!, The Globe, Beyond, Serenity, KFAT) as `program`s; still **no search categories** | **✓ as radio, once the household has it** (added in the Sonos app). Its channels are not queue material (`AddURIToQueue` 800) and it has no `getMediaURI`; the app plays one by making it the transport's source, `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20` with an `audioBroadcast` DIDL, and `play-item` now does the same for a `program` the queue refuses. Played with the generic `-0-` cdudn and no `sn`, the household's one account resolved | 2026-09-30, office |
@@ -9756,10 +9756,31 @@ Bandcamp goes the other way. The household's token (32 bytes, an 8-byte key) imp
 call answers `Client.LoginInvalid`. The token x2rock minted itself on 2026-08-31 worked.
 
 **Re-linked the same evening** (`x2rock link Bandcamp`, the owner at the browser). The fresh token
-browses and searches, so **the household's registration is stale**, and Bandcamp does not scope
-tokens per device. It sends no `userIdHashCode`, so the household was not matched, and the queue
-still refuses the track with 800: the registration it would play through is the dead one.
-Removing and re-adding Bandcamp in the Sonos app is the fix for that.
+browses and searches. It sends no `userIdHashCode`, so the household was not matched, and the queue
+still refused the track with 800: the registration it would play through was dead. The owner
+confirmed it: Bandcamp "wasn't working properly" in the Sonos app either, until it was removed and
+re-added there (2026-10-12).
+
+**Two things were wrong, not one (2026-10-12).** After the re-add the household holds Bandcamp as
+`sn_43`, and the queue plays the track: `x-sonos-http:t%3a807797106.mp3?sid=157&flags=8232&sn=43`,
+30:38 long. So the registration had been stale. **But the new household token is refused from
+x2rock as well** (`Client.LoginInvalid` on search and browse), minted minutes earlier and working
+for the speakers. So Bandcamp accepts the household's token only from a speaker, and x2rock's
+own link token only from x2rock. What it keys on was not found:
+
+- `deviceId` in the credentials header was tried (the field "`deviceId`: a header field x2rock has
+  never sent" anticipated) and changed nothing. Its value, `R_TrialZPSerial`, is
+  **household-wide**: all seven players read outside the Living Room answer the same
+  `78-28-CA-9C-45-B8:G`, not a per-player id as that section implied.
+- The `householdId` is already sent.
+
+**The working arrangement is both accounts, with x2rock's preferred** (`accounts --prefer Bandcamp
+"x2rock on x2lap"`). Its token searches and browses. Its serial, 31, belongs to the deleted
+registration, so the player resolves it to the household's live account: the enqueue went out with
+`sn=31`, and the queued row reads `sn=43`. This is the fallback "A stored bookmark serial cannot go
+stale in a way that matters" describes. Played from `browse --play` in the Kitchen, from the queue,
+with its full duration, so it pauses and resumes. With the household's account preferred instead,
+the track plays but can never be found, because search and browse are refused.
 
 **The fallback found a bug of its own: an extensionless file URL.** Bandcamp's `getMediaURI` is an
 https MP3 at `t4.bcbits.com/stream/<hash>/mp3-v0/<id>?p=0&ts=…&t=…`, with no extension. The probe
