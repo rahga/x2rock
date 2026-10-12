@@ -1,0 +1,8 @@
+{"id":{"objectId":"browse:page:home"},"total":9,"views":[
+{"id":{"objectId":"mylibrary"},"items":[{"id":{"objectId":"user-tracks-1"},"content":{"container":{"name":"Tracks","type":"trackList","imageUrl":"https://example.invalid/a.jpg"}},"displayType":"BrowseTrackList","browsePolicies":{"canPlay":true,"canEnumerate":true}}],"total":4,"content":{"container":{"name":"Favorites","type":"container"}},"displayType":"LIST"},
+{"id":{"objectId":"user-recentlyplayed"},"items":[
+{"id":{"objectId":"playlist-1"},"content":{"container":{"name":"Favorite tracks","type":"playlist","imageUrl":"https://example.invalid/b.jpg"}},"displayType":"BrowsePlaylist","browsePolicies":{"canPlay":true,"canEnumerate":true}},
+{"id":{"objectId":"album-2"},"content":{"container":{"name":"Some Album","type":"album","imageUrl":"https://example.invalid/c.jpg","artist":{"name":"Some Artist"}}},"displayType":"BrowseAlbum","browsePolicies":{"canPlay":true,"canEnumerate":true}},
+{"id":{"objectId":"flow-mood"},"content":{"container":{"name":"Flow","type":"program","imageUrl":"https://example.invalid/d.jpg","summary":"Your personal mix"}},"displayType":"BrowseProgram","browsePolicies":{"canPlay":true,"canEnumerate":false}}
+],"total":7,"content":{"container":{"name":"Recently played","type":"container"}},"displayType":"GRID"}
+]}
