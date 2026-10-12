@@ -9812,7 +9812,20 @@ Measured against the home household after the change:
 | Sonos Radio | 28 | 28 |
 | Amazon Music, Apple Music | unchanged; the page refuses (401, 500) | |
 
-Opened and played: a Spotify shelf ("Recommended for today") lists albums; Deezer's
+**Spotify's shelves, played in the Kitchen the same day.** All 26 root rows opened. From them,
+`--play` played the following:
+
+- an album ("Recommended for today")
+- a Daily-Mix playlist ("Your top mixes")
+- a station-style playlist ("Recommended Stations": Nirvana Radio)
+- an album out of a mixed shelf ("Metal of the 90s")
+- the first row of Charts and of New Releases
+
+An artist ("Your favorite artists") was refused as a container of containers. Opened, it lists
+`spotify:artistRadio:<id>` as a `program`, which played as radio; then Top Tracks (`trackList`),
+which played; then the albums. `--queue` of an album from "Album picks" added its 16 tracks without
+interrupting playback. An artist radio's track list is reshuffled on every read, so `--play N`
+inside one plays whatever is N-th on that read. Then: Deezer's
 `user-recentlyplayed` lists its ten items from the page, and `--play 2` on it played *Kind Of
 Blue*; TuneIn's Most Popular Stations listed 24 streams, and the first played. Spotify's page
 **changes between requests** ("Your top mixes" one time, "Based on your recent listening" the
