@@ -939,10 +939,11 @@ fn at_most((mut items, total): (Vec<Item>, u32), count: u32) -> (Vec<Item>, u32)
 fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
     let body = declare_xsi(body);
     let doc = Document::parse(&body).with_context(|| format!("parsing {what} response"))?;
-    let total = element_text(&doc, "total")
+    let total: u32 = element_text(&doc, "total")
         .and_then(|t| t.parse().ok())
         .unwrap_or(0);
-    let items = doc
+    let mut dropped: u32 = 0;
+    let items: Vec<Item> = doc
         .descendants()
         .filter(|n| n.has_tag_name("mediaMetadata") || n.has_tag_name("mediaCollection"))
         .filter_map(|n| {
@@ -959,6 +960,20 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
                     .and_then(|g| g.text())
                     .map(str::to_string)
             };
+            // **A row that says it can be neither played nor opened is
+            // nothing to offer.** Amazon Music ends its library's albums with
+            // one - id `unauthorized`, "Content Unavailable", no type,
+            // `canPlay` and `canEnumerate` both false (2026-10-12, office) -
+            // and it listed as an album to open. Only both, and only said: a
+            // Pandora station is `canPlay` true and `canEnumerate` false, and
+            // most services send neither flag. Counted, so the total the
+            // service reported does not promise a row that is not there.
+            if child("canPlay").as_deref() == Some("false")
+                && child("canEnumerate").as_deref() == Some("false")
+            {
+                dropped += 1;
+                return None;
+            }
             let item_type = child("itemType").unwrap_or_default();
             // The element decides - except when the declared type is itself a
             // playable leaf. Plex answers a *tracks* search with
@@ -994,7 +1009,7 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
             })
         })
         .collect();
-    Ok((items, total))
+    Ok((items, total.saturating_sub(dropped)))
 }
 
 /// `getMediaURI`, turning a search hit into something a player can be handed.
@@ -1833,6 +1848,16 @@ mod tests {
         }
         let (items, total) = pager.finish();
         (items.into_iter().map(|i| i.id).collect(), total)
+    }
+
+    /// Amazon Music's sentinel, verbatim (2026-10-12, office), after an album.
+    #[test]
+    fn a_row_that_can_be_neither_played_nor_opened_is_dropped() {
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><getMetadataResponse xmlns="http://www.sonos.com/Services/1.1"><getMetadataResult><index>0</index><count>2</count><total>2</total><mediaCollection><id>catalog:album:asin:B00BK5D95C</id><itemType>album</itemType><title>An Awesome Wave</title><canPlay>true</canPlay><canEnumerate>true</canEnumerate></mediaCollection><mediaCollection readOnly="true" renameable="false"><id>unauthorized</id><title>Content Unavailable</title><isEphemeral>true</isEphemeral><canPlay>false</canPlay><canEnumerate>false</canEnumerate><canAddToFavorites>false</canAddToFavorites></mediaCollection></getMetadataResult></getMetadataResponse></s:Body></s:Envelope>"#;
+        let (items, total) = parse_items(body, "getMetadata").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "catalog:album:asin:B00BK5D95C");
+        assert_eq!(total, 1);
     }
 
     /// A station arrives as a `mediaCollection` and is still a thing to play:
