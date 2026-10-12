@@ -261,11 +261,35 @@ fn report_started_json(room: &str, title: &str, url: &str, started: &Started) ->
 /// the behaviour exactly as it was. Guessing "file" wrongly replaces a room's
 /// queue for nothing; guessing "stream" wrongly costs the silent stall that is
 /// already documented and already the status quo.
-async fn finite_file(url: &str) -> bool {
+///
+/// A file comes back with its `audio/*` `Content-Type`, where the server named
+/// one, for [`Upnp::play_url_as_track`] to declare.
+async fn finite_file(url: &str) -> Option<File> {
     match sonos::http::probe(url, PROBE).await {
-        Ok((status, head)) => shaped_like_file(status, &head),
-        Err(_) => false,
+        Ok((status, head)) if shaped_like_file(status, &head) => Some(File {
+            mime: audio_type(&head),
+        }),
+        _ => None,
     }
+}
+
+/// What [`finite_file`] learned about a URL it judged to be a file.
+struct File {
+    mime: Option<String>,
+}
+
+/// The `Content-Type`, when it is an audio type - the only kind worth telling
+/// the player, which otherwise guesses from the URL's extension. Parameters
+/// (`; charset=…`) are dropped.
+fn audio_type(head: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (name, value) = l.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("content-type") {
+            return None;
+        }
+        let kind = value.split(';').next()?.trim().to_ascii_lowercase();
+        kind.starts_with("audio/").then_some(kind)
+    })
 }
 
 /// The verdict itself, given what the server said. Pure, because the rule is
@@ -349,9 +373,10 @@ async fn stream_url(
 ) -> Result<Started> {
     let coordinator = session::coordinator(session, target).await?;
 
-    if finite_file(url).await {
+    if let Some(file) = finite_file(url).await {
         let upnp = Upnp::new(upnp_ip(target, session.connection.ip()));
-        upnp.play_url_as_track(url, title).await?;
+        upnp.play_url_as_track(url, title, file.mime.as_deref())
+            .await?;
         coordinator.playback(&target.group_id, "play").await?;
     } else {
         let opened = coordinator
@@ -802,6 +827,23 @@ mod tests {
             "HTTP/1.1 200 OK\r\nETag: \"x\"\r\nContent-Length: 0"
         ));
         assert!(!shaped_like_file(500, DEEZER_FILE));
+    }
+
+    #[test]
+    fn a_file_declares_its_audio_type_and_nothing_else() {
+        assert_eq!(
+            audio_type("HTTP/2 206\r\ncontent-type: audio/mpeg\r\n").as_deref(),
+            Some("audio/mpeg")
+        );
+        assert_eq!(
+            audio_type("HTTP/1.1 200 OK\r\nContent-Type: Audio/FLAC; charset=x\r\n").as_deref(),
+            Some("audio/flac")
+        );
+        assert_eq!(
+            audio_type("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"),
+            None
+        );
+        assert_eq!(audio_type("HTTP/1.1 200 OK\r\n"), None);
     }
 
     #[test]

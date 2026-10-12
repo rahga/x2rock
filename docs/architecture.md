@@ -165,7 +165,7 @@ local token buys search and browse, and nothing of playback.
 | **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
 | **Plex** | own PIN flow | ✓ | ✓ | ✓ | 2026-09-09 - not in the home household; **next pass, deferred on 2026-10-11** |
-| **Bandcamp** | device-link | ✓; the home household's token imports but **every call answers `Client.LoginInvalid`** (2026-10-11) | ✓ with an x2rock-minted token; ✗ with the household's | purchased item ✓; no `userIdHashCode` | 2026-08-31; household token 2026-10-11, home |
+| **Bandcamp** | device-link | ✓, re-linked 2026-10-11; the home household's own token imports but **every call answers `Client.LoginInvalid`**, so the household's registration is stale | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | the queue refuses (800; the household's registration is dead); **the file fallback plays it** once the DIDL declares the MIME type (it was UPnP 714) | 2026-10-11, home |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
 | **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; linked on the second attempt (the first timed out unconfirmed). Sends no `userIdHashCode`, so the household is not matched | browse ✓ with the token - three bitrate tiers (128k, 320k, FLAC), each listing the channels (Main Mix, Mellow Mix, RockIt!, The Globe, Beyond, Serenity, KFAT) as `program`s; still **no search categories** | **✓ as radio, once the household has it** (added in the Sonos app). Its channels are not queue material (`AddURIToQueue` 800) and it has no `getMediaURI`; the app plays one by making it the transport's source, `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20` with an `audioBroadcast` DIDL, and `play-item` now does the same for a `program` the queue refuses. Played with the generic `-0-` cdudn and no `sn`, the household's one account resolved | 2026-09-30, office |
@@ -246,6 +246,9 @@ lines below record the reversals rather than warn about text that still says oth
 
 - **`browse --play` plays an album or a playlist** (2026-10-11), as `search --play` has since
   2026-09-18. Only a container of containers is refused. See "Every household token, imported".
+- **A file fallback declares its type.** `play_url_as_track` sent a bare DIDL, and the player
+  refused an extensionless URL (Bandcamp's) with UPnP 714. See "Every household token, imported"
+  (2026-10-11).
 - **SiriusXM and SoundCloud can be reached.** Recorded as unlinkable because `getAppLink` refuses.
   Their household tokens, imported, search, browse and play. A refused `getAppLink` rules out
   x2rock's own flow, not the service. See "Every household token, imported" (2026-10-11).
@@ -9750,10 +9753,23 @@ key gates, it is not SMAPI `getMetadata`/`search` for SoundCloud, so it is not e
 YouTube Music either way.
 
 Bandcamp goes the other way. The household's token (32 bytes, an 8-byte key) imports, and every
-call answers `Client.LoginInvalid`. The token x2rock minted itself on 2026-08-31 worked. Not
-chased: `x2rock link Bandcamp` (device-link) needs a person at the browser, and only that run
-would tell whether the household's registration is stale or Bandcamp scopes its tokens per
-device.
+call answers `Client.LoginInvalid`. The token x2rock minted itself on 2026-08-31 worked.
+
+**Re-linked the same evening** (`x2rock link Bandcamp`, the owner at the browser). The fresh token
+browses and searches, so **the household's registration is stale**, and Bandcamp does not scope
+tokens per device. It sends no `userIdHashCode`, so the household was not matched, and the queue
+still refuses the track with 800: the registration it would play through is the dead one.
+Removing and re-adding Bandcamp in the Sonos app is the fix for that.
+
+**The fallback found a bug of its own: an extensionless file URL.** Bandcamp's `getMediaURI` is an
+https MP3 at `t4.bcbits.com/stream/<hash>/mp3-v0/<id>?p=0&ts=…&t=…`, with no extension. The probe
+judged it a file correctly (206, `Last-Modified`, 48,184,203 bytes, `audio/mpeg`), and
+`play_url_as_track` sent it as the transport URI with a DIDL carrying no `<res>`. The player
+answered **UPnP 714, illegal MIME type**: it was guessing the type from the URL. Deezer's `.flac`
+and TIDAL's `/0.flac?…` had always been guessed right. Now the probe keeps the file's `audio/*`
+`Content-Type`, and the DIDL declares it as `<res protocolInfo="http-get:*:audio/mpeg:*">`.
+Verified in the Kitchen: the Kid Koala track played and its position advanced. Deezer's and
+TIDAL's files (forced down the same path with `--kind stream`) still played, positions advancing.
 
 ### The front page the app shows is often not SMAPI's `root`
 
