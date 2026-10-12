@@ -2081,6 +2081,13 @@ fn pick_categories<'a>(
             .filter_map(by_name)
             .collect();
     }
+    // A service whose categories x2rock fixes may say which go together -
+    // iHeartRadio's stations, live radio and podcasts, which the Sonos app
+    // shows as three sections of one answer.
+    let marked: Vec<_> = categories.iter().filter(|c| c.default).collect();
+    if !marked.is_empty() {
+        return marked;
+    }
     if let Some(all) = by_name("all") {
         return vec![all];
     }
@@ -3213,6 +3220,7 @@ mod tests {
     fn cats(ids: &[&str]) -> Vec<Category> {
         ids.iter()
             .map(|id| Category {
+                default: false,
                 id: (*id).to_string(),
                 mapped_id: format!("search:{id}"),
             })
@@ -3244,6 +3252,7 @@ mod tests {
         // list written here could name "Blogs", so this is the only way to it.
         let mut hype = cats(&["artists", "tracks"]);
         hype.push(Category {
+            default: false,
             id: "Blogs".into(),
             mapped_id: "SBLG".into(),
         });
@@ -3364,6 +3373,22 @@ mod tests {
         // One request that already means "anything", so nothing else is asked.
         let with_all = cats(&["artists", "all", "tracks"]);
         assert_eq!(ids(&pick_categories(&with_all, None, false)), ["all"]);
+        // iHeartRadio's three, which the Sonos app shows together, are all
+        // asked - stations-only as they are, the first-listed arm would have
+        // asked one and left live radio out.
+        assert_eq!(
+            ids(&pick_categories(crate::iheart::categories(), None, false)),
+            ["stations", "live", "podcasts"]
+        );
+        // Named, the caller's choice stands.
+        assert_eq!(
+            ids(&pick_categories(
+                crate::iheart::categories(),
+                Some("live"),
+                false
+            )),
+            ["live"]
+        );
         assert!(
             pick_categories(&[], None, false).is_empty(),
             "nothing to pick"

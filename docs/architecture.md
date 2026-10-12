@@ -9605,7 +9605,9 @@ too, so a list cached from the map is passed over. `smapi::search` runs iHeart's
 `search_as_one` over `stations` then `artists`: one list, paged through as a whole, each category
 asked from where the page falls in it, a repeated id dropped. `search -s iHeartRadio -c tracks`
 now says iHeart has no such category, and the merged search draws on Stations and Podcasts only,
-so no station is ever listed as an artist or a song.
+so no station is ever listed as an artist or a song. (**Superseded 2026-10-12**: the app shows
+three sections, not two, and the merged list is gone. See "iHeartRadio's three sections, as the
+app shows them".)
 
 **A `program` plays as the room's source first.** `artist_radio` was recorded as playing only
 through `loadContent`, the last resort (2026-09-26, the table under "`loadContent`, and what it
@@ -9964,13 +9966,38 @@ unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, a
 - **Audible's root is seven marketplaces** (`.com`, `.co.uk`, `.de`, ...). Only the account's own
   holds the library. The app likely opens straight into it. Not compared.
 - **Sonos Radio searches with the household token** - the first token x2rock has held for it.
-- **iHeartRadio's merged Stations list puts live stations before artist stations.** For "miles
-  davis" it led with KOST 103.5. 2026-10-07 says the app's Stations for "coldplay" were the
-  `artists` list in order. If the app also leads with artists, the order in `search_as_one`
-  (`stations` then `artists`) is backwards. That needs looking at in the app.
+- **iHeartRadio's merged Stations list put live stations before artist stations.** For "miles
+  davis" it led with KOST 103.5. Looked at in the app the next day: neither order is right. See
+  "iHeartRadio's three sections, as the app shows them" below (2026-10-12).
 - **Spotify, SoundCloud, TIDAL, Deezer, Saavn, Qobuz, Amazon Music and TuneIn (New)** all played a
   search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
   played in the office before.
+
+## iHeartRadio's three sections, as the app shows them (office, 2026-10-12)
+
+Read off the Sonos app (Android, app 90) on a phone driven over adb, searching iHeartRadio from its
+own page. The app shows **three** sections, three rows each, in this order:
+
+| term | Stations (`artists`) | Live stations (`stations`) | Podcasts |
+|---|---|---|---|
+| miles davis | Miles Davis; Miles Davis Quintet; Cannonball Adderley, Miles Davis | KOST 103.5; La Mezcla Fuego; ShaqFu Radio | The Miles Davis Podcast |
+| z100 | Z100wave; Z1K0; ZC100 | Z100; Z100 Portland; Z100 Eau Claire | Z100 New York Secret Sound |
+
+So the 2026-10-07 reading, "Stations and Podcasts only, Stations merging live and artist", was
+wrong for app 90. Live radio is its own section. And **no single list can copy this in either
+order**. iHeart matches loosely: "z100" answers dozens of artist stations (Z100wave, Z1K0, ...)
+before Z100 itself, and "miles davis" puts KOST 103.5 among live radio. Live-first buried the
+artist under KOST; artist-first, tried here and measured, buried Z100 under 47 artist stations.
+The app keeps both visible by showing three of each.
+
+**Built.** iHeart's categories are now `stations` (sent as `artists`), `live` (sent as `stations`)
+and `podcasts`, each marked `default` - a new `Category` field that `pick_categories` honours
+before `all`, set only by a service whose categories x2rock fixes. A bare search asks all three
+through the several-categories path, which takes one row from each in turn and labels it. `-c
+live` asks live radio alone. `search_as_one` and its pager are gone, with nothing left to use them.
+Measured on the office household: "miles davis" gives Miles Davis, KOST 103.5, The Miles Davis
+Podcast, Miles Davis Quintet, La Mezcla Fuego, and on; "z100" gives Z100wave, then **Z100 second**.
+From that search, Z100 played as a stream and Z100wave as radio, in Media Room at volume 1.
 
 ## Replay queues, because `loadContent` restarts a speaker on Mixcloud (home, 2026-10-11)
 
