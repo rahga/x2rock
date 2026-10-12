@@ -160,7 +160,7 @@ local token buys search and browse, and nothing of playback.
 | **Deezer** | device-link | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the file-transport fix | 2026-09-20, home + office |
 | **TIDAL** | device-link (OAuth in fact) | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the fix | 2026-09-19, home |
 | **iHeartRadio** | device-link | ✓ | ✓ | live stations stream ✓; podcasts enqueue ✓; `artist_radio_track` ids are per-listener and stream-only | 2026-09-19, home |
-| **Spotify** | app-link | ✓ browser; ✓ `--from-household` (2026-10-11) | ✓; browse root is 5 SMAPI shelves where the app shows 22 personalised ones from the manifest `browse` endpoint - see "Every household token, imported" | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-10-11, home |
+| **Spotify** | app-link | ✓ browser; ✓ `--from-household` (2026-10-11) | ✓; browse root is the app's front page (manifest `browse` endpoint), 21 personal shelves before SMAPI's 5 - see "Every household token, imported" | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-10-11, home |
 | **Amazon Music** | app-link | ✓ browser; ✓ `--from-household` | ✓ on a family trial, an album is a real tracklist (`catalog:album:asin:…`), not the Prime-tier station; browse root is only Library and User Playlists, and the app's Home (`api/home`) refuses a bearer token | enqueue ✓ on the household's registration (tracks and albums); the player rewrites a track to `x-sonos-http:<asin>.mpd`, and expands an album as `x-sonosapi-hls-static`. Stations (`catalog:station:`) play as radio | 2026-10-11, home |
 | **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
@@ -9671,7 +9671,7 @@ Season, ..., Browse Radio), 216 items inline. The shelf ids it hands out - `/sta
 c2Q6VVM6dHJlbmRpbmctbm93` - are ordinary SMAPI container ids: `getMetadata` on one lists its
 stations as `program`s (`sonos:2997`, Hit List), and on Browse Radio's `/genres/en-US/US` and
 `/stations/en-US/US/EgdVUzpHOjIy` (News & Talk) the genres and the stations under them. Only the
-top level was missing, so `sonosradio.rs` builds `root` from `browse/v1`'s views, reading the
+top level was missing, so `sonosradio.rs` (now `frontpage.rs`, 2026-10-11) builds `root` from `browse/v1`'s views, reading the
 endpoint from the manifest, and `smapi::metadata` walks the rest as for any service. Played from a
 shelf, Smooth Jazz started in Media Room as `program` radio, the route `play_radio` already takes.
 
@@ -9763,12 +9763,12 @@ read for all seventeen services:
 
 | service | manifest `browse` endpoint | bearer token (the SMAPI `auth_token`) | vs. `getMetadata root` |
 |---|---|---|---|
-| Sonos Radio | `sali.sonos.superhi.fi/browse/v1` | needs none | already built (`sonosradio.rs`) |
+| Sonos Radio | `sali.sonos.superhi.fi/browse/v1` | needs none | already built (`sonosradio.rs`, now `frontpage.rs`); refuses a bearer, so it is read bare |
 | **Spotify** | `spotify-v5.ws.sonos.com/v1/browse` | **200**, 22 views | root has 5 shelves; the app's 21 personalised ones ("Recommended for today", "Your top mixes", "More like <artist>", ...) are missing |
 | **Deezer** | `platform.deezer.com/api/sonos/browse` | **200**, 9 views | root has 6; Recently played, the Flow moods, Made for you, Recommended playlists and Charts are missing as shelves |
 | SiriusXM | `ce-sonos.siriusxm.com/sonos/v1/browse` | **200**, 9 views | the same 9 ids SMAPI root lists - nothing missing |
 | Amazon Music | `sonos.smapi.amazonmusic.com/api/home` | 401 `{}` | root is Library and User Playlists only, so Amazon's Home is missing |
-| TuneIn (New) | `sonos.tunein.com/browse/v1` | 403 Cloudflare 1010 (it blocks the client's signature; tested only from a Python client) | - |
+| **TuneIn (New)** | `sonos.tunein.com/browse/v1` | 403 Cloudflare 1010 from a Python client, which Cloudflare blocks by signature; **200 from x2rock's own client**, 27 views | root had 9; Recents, Most Popular Stations, Featured Collections, Browse Genres and the rest are new |
 | Apple Music | `sonos-music.apple.com/browse/v1` | 500, empty | - |
 
 The rest (Audible, Bandcamp, iHeartRadio, Qobuz, Saavn, SoundCloud, TIDAL, YouTube Music, Radio
@@ -9779,14 +9779,48 @@ spotify:view:section0JQ5DAnM3wGh0gz1MXnu3F` lists "Recommended for today"'s albu
 Daily-Mix-style "Your top mixes". Deezer's `flow-multiflow`, `user-smarttracklists-<user>` and
 `charts-worldwide` open the same way. One exception: Deezer's `user-recentlyplayed` is refused by
 `getMetadata` (a bare `getMetadata` fault string). Only the top level is missing, which is exactly the
-shape `sonosradio.rs` already solves. **Not built.** The step is to generalise
-`sonosradio::shelves` to any service whose manifest names a `browse` endpoint, sending the token
-as `Authorization: Bearer` when it holds one, and falling back to SMAPI root on any non-200
-(Amazon, TuneIn, Apple). Spotify's is the shelf set that changes most per listener, which is the
-part of the app a person would miss.
+shape `sonosradio.rs` already solved.
 
-The TuneIn, Amazon and Apple endpoints were only tried with a bearer token and an ordinary client.
-Which header each wants is unexplored.
+**Built the same day: `sonosradio.rs` became `frontpage.rs`**, for any service whose manifest
+names an https `browse` endpoint.
+
+- **`root` is the page's shelves, in its order, then whatever SMAPI's root lists that the page
+  does not.** Spotify's page has no Charts, New Releases, Genres or Popular Playlists. Replacing
+  root would have traded one gap for another.
+- **SMAPI's root is read first, because that call refreshes the token.** Spotify's had lapsed
+  within hours of the morning's probe, and the endpoint answers a stale one with a bare 401, not
+  SMAPI's refresh fault. After a `browse` refreshed it, the same GET answered 200. A page that
+  cannot be read leaves SMAPI's root standing, unremarked.
+- **A bearer refused with 401 or 403 is retried bare.** Sonos Radio's page, which needs no
+  credential, refused the household's Sonos Radio token. The first build, which always sent it,
+  showed Sonos Radio's root as empty again. That was caught by testing every service's root, and
+  fixed before commit.
+- **A shelf `getMetadata` refuses is answered from the page's inline items.** Deezer's
+  endpoint takes no parameter that would serve one view; `/browse/<id>` is a 404 and
+  `?objectId=` is ignored. So a refused id that names a shelf is answered from the items the page
+  carries for it, with its types mapped onto SMAPI's (`station` to `stream`, `*program` to
+  `program`, `track` content to a leaf).
+
+Measured against the home household after the change:
+
+| service | `root` rows before | after |
+|---|---|---|
+| Spotify | 5 | 26: 21 personal shelves, then Your Library, Popular Playlists, Charts, New Releases, Genres and Moods |
+| Deezer | 6 | 13: the page's 9, then Flow, Popular, Picked for you, Favorite Tracks |
+| TuneIn (New) | 9 | 27 |
+| SiriusXM | 9 | 10 (one shelf root had and the page did not) |
+| Sonos Radio | 28 | 28 |
+| Amazon Music, Apple Music | unchanged; the page refuses (401, 500) | |
+
+Opened and played: a Spotify shelf ("Recommended for today") lists albums; Deezer's
+`user-recentlyplayed` lists its ten items from the page, and `--play 2` on it played *Kind Of
+Blue*; TuneIn's Most Popular Stations listed 24 streams, and the first played. Spotify's page
+**changes between requests** ("Your top mixes" one time, "Based on your recent listening" the
+next), as its app does. Root browsing costs one manifest GET and one page GET more, about a
+second, on the services that have one.
+
+Amazon's and Apple's endpoints were only tried with a bearer token. Which header each wants is
+unexplored.
 
 ### A `program` that is a station was refused by `search --play` and `browse --play` (fixed)
 

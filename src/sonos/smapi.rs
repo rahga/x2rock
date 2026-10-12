@@ -446,7 +446,7 @@ pub fn parse_services(descriptor_list: &str, type_list: &str) -> Result<Vec<Serv
 
 /// A service's manifest, or `None` when it has none: the document on Sonos's
 /// CDN that names its presentation map, its strings and any endpoints beside
-/// SMAPI (Sonos Radio's front page - see `sonosradio`).
+/// SMAPI (a front page - see `frontpage`).
 pub async fn manifest(service: &Service) -> Result<Option<serde_json::Value>> {
     let Some(manifest_uri) = &service.manifest_uri else {
         return Ok(None);
@@ -732,14 +732,39 @@ pub async fn metadata(
     count: u32,
     refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
-    // Sonos Radio's root is empty over SMAPI; its front page comes from the
-    // service's own browse endpoint, and everything under it from here again.
-    if id == "root" && crate::sonosradio::serves(&service.id) {
-        let shelves = crate::sonosradio::shelves(service).await?;
-        let total = shelves.len() as u32;
-        let page = shelves.into_iter().skip(index as usize).collect();
-        return Ok(at_most((page, total), count));
+    // Where the service publishes the page the Sonos app draws, `root` is
+    // that page - see `frontpage`.
+    if id == "root"
+        && let Some(uri) = crate::frontpage::endpoint(service).await.ok().flatten()
+    {
+        return front_root(service, token, &uri, index, count, refreshed).await;
     }
+    match get_metadata(service, token, id, index, count, refreshed).await {
+        // A shelf `getMetadata` will not open - Deezer's Recently played - is
+        // answered from what the front page carries for it inline.
+        Err(e) if Refused::of(&e).is_some() => {
+            match shelf_from_front_page(service, token, id, refreshed).await {
+                Some(items) => {
+                    let total = items.len() as u32;
+                    let page = items.into_iter().skip(index as usize).collect();
+                    Ok(at_most((page, total), count))
+                }
+                None => Err(e),
+            }
+        }
+        other => other,
+    }
+}
+
+/// `getMetadata` itself.
+async fn get_metadata(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    index: u32,
+    count: u32,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<(Vec<Item>, u32)> {
     let body = call(
         service,
         token,
@@ -752,6 +777,77 @@ pub async fn metadata(
     )
     .await?;
     parse_items(&body, "getMetadata").map(|page| at_most(page, count))
+}
+
+/// The most of SMAPI's `root` read alongside a front page. Roots are a handful
+/// of rows; this only has to be more than any of them.
+const ROOT_MAX: u32 = 100;
+
+/// `root` for a service with a front page: the page's shelves, in its order,
+/// then whatever SMAPI's root lists that the page does not - Spotify's Charts,
+/// New Releases and Genres are not on its page, and dropping them would trade
+/// one gap for another.
+///
+/// **SMAPI first, because it refreshes the token** the page is then read with:
+/// the endpoint answers a lapsed one with a bare 401. A page that cannot be
+/// read - Amazon Music's 401, TuneIn's 403, Apple Music's 500 - leaves SMAPI's
+/// root standing, unremarked; it is what the service has always shown here.
+async fn front_root(
+    service: &Service,
+    token: Option<&Token>,
+    uri: &str,
+    index: u32,
+    count: u32,
+    refreshed: &mut Option<RefreshedToken>,
+) -> Result<(Vec<Item>, u32)> {
+    let root = get_metadata(service, token, "root", 0, ROOT_MAX, refreshed).await;
+    let bearer = fresh_token(token, refreshed);
+    let items = match crate::frontpage::page(service, uri, bearer.as_deref()).await {
+        Ok(page) => {
+            let mut items = page.shelves();
+            match root {
+                Ok((rows, _)) => {
+                    let rest: Vec<_> = rows
+                        .into_iter()
+                        .filter(|row| items.iter().all(|shelf| shelf.id != row.id))
+                        .collect();
+                    items.extend(rest);
+                }
+                Err(e) if items.is_empty() => return Err(e),
+                Err(_) => {}
+            }
+            items
+        }
+        Err(_) => root?.0,
+    };
+    let total = items.len() as u32;
+    let page = items.into_iter().skip(index as usize).collect();
+    Ok(at_most((page, total), count))
+}
+
+/// The front page's inline items for shelf `id`, when the service has a page
+/// and `id` is one of its shelves. Best effort: any failure is `None`, and the
+/// caller's own refusal stands.
+async fn shelf_from_front_page(
+    service: &Service,
+    token: Option<&Token>,
+    id: &str,
+    refreshed: &Option<RefreshedToken>,
+) -> Option<Vec<Item>> {
+    let uri = crate::frontpage::endpoint(service).await.ok().flatten()?;
+    let bearer = fresh_token(token, refreshed);
+    crate::frontpage::page(service, &uri, bearer.as_deref())
+        .await
+        .ok()?
+        .shelf(id)
+}
+
+/// The token to send outside SMAPI: the one a call just refreshed, if any.
+fn fresh_token(token: Option<&Token>, refreshed: &Option<RefreshedToken>) -> Option<String> {
+    refreshed
+        .as_ref()
+        .map(|r| r.auth_token.clone())
+        .or_else(|| token.map(|t| t.token.clone()))
 }
 
 /// Where a listener left off in something the service keeps a place in - an
