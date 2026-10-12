@@ -52,6 +52,7 @@ pub fn categories() -> &'static [Category] {
         [("tracks", "song"), ("albums", "album")]
             .into_iter()
             .map(|(id, mapped)| Category {
+                default: false,
                 id: id.into(),
                 mapped_id: mapped.into(),
             })

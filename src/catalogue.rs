@@ -587,6 +587,7 @@ mod tests {
         warm.categories.insert(
             "1".into(),
             vec![Category {
+                default: false,
                 id: "stations".into(),
                 mapped_id: "STATIONS".into(),
             }],

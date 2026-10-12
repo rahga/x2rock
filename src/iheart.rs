@@ -16,12 +16,21 @@
 //!   namesakes - and nothing for an artist.
 //! - `albums` answered nothing; `playlists` answers iHeart's own custom radio.
 //!
-//! The Sonos app offers iHeart as **Stations** and **Podcasts** only, and its
-//! Stations for "coldplay" are exactly the `artists` list - so it must merge
-//! the live stations with the artist stations. This does the same: two
-//! categories, with Stations searching `stations` then `artists` as one list
-//! ([`STATIONS`]), so nothing is ever presented as an artist or a song that
-//! is a station.
+//! The Sonos app shows iHeart's results as three sections - app 90, read off
+//! a phone on 2026-10-12: **Stations**, the `artists` list ("miles davis":
+//! Miles Davis, Miles Davis Quintet, Cannonball Adderley & Miles Davis);
+//! **Live stations**, the `stations` list (KOST 103.5, La Mezcla Fuego,
+//! ShaqFu Radio); and **Podcasts**. Three rows each.
+//!
+//! So x2rock offers the same three, under its own names: `stations` (sent as
+//! `artists`), `live` (sent as `stations`) and `podcasts`, all asked when no
+//! category is named. They are not one list, either order: iHeart matches
+//! loosely, so "z100" finds "Z100wave", "Z1K0" and dozens more artist
+//! stations before Z100 itself, and "miles davis" finds KOST 103.5 among live
+//! radio. The app keeps both kinds visible by showing three of each; asked
+//! together, the several-categories search does it by taking one row from each
+//! in turn, each labelled with its category. Nothing is ever presented as an
+//! artist or a song that is a station.
 
 use std::sync::LazyLock;
 
@@ -35,23 +44,22 @@ pub fn serves(service_id: &str) -> bool {
     service_id == SERVICE_ID
 }
 
-/// The id - and, for iHeart, the mapped id - of the merged Stations category.
-pub const STATIONS_ID: &str = "stations";
-
-/// What Stations searches, in the order its rows appear: live radio first,
-/// then the artist stations iHeart files under `artists`.
-pub const STATIONS: [&str; 2] = ["stations", "artists"];
-
-/// What can be searched: what the Sonos app offers, and no more.
+/// What can be searched: what the Sonos app offers, under the app's
+/// headings, each sent as the category iHeart actually files it under.
 pub fn categories() -> &'static [Category] {
     static CATEGORIES: LazyLock<Vec<Category>> = LazyLock::new(|| {
-        [STATIONS_ID, "podcasts"]
-            .into_iter()
-            .map(|id| Category {
-                id: id.into(),
-                mapped_id: id.into(),
-            })
-            .collect()
+        [
+            ("stations", "artists"),
+            ("live", "stations"),
+            ("podcasts", "podcasts"),
+        ]
+        .into_iter()
+        .map(|(id, mapped)| Category {
+            id: id.into(),
+            mapped_id: mapped.into(),
+            default: true,
+        })
+        .collect()
     });
     &CATEGORIES
 }
