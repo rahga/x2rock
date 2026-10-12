@@ -9951,10 +9951,16 @@ unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, a
 ### Smaller things the sweep turned up
 
 - **Amazon Music's library returns a sentinel row.** `library:albums` ends with an item of id
-  `unauthorized`, no type, titled "Content Unavailable", and `browse` lists it as if it were an
-  album.
-- **SiriusXM's `talent:` hits carry a whole biography as their description.** The CLI prints it
-  in full on one line. The widget caps descriptions; the CLI does not.
+  `unauthorized`, no type, titled "Content Unavailable", and `browse` listed it as if it were an
+  album. **Fixed 2026-10-12**: it is `<canPlay>false</canPlay><canEnumerate>false</canEnumerate>`,
+  and `parse_items` now drops a row that says both, taking it out of the reported total too. Only
+  both, and only when said: a Pandora station is `canPlay` true and `canEnumerate` false. This is
+  the rule x2rocktv took the same day (its T-18). Verified on the office household: four albums,
+  total 4.
+- **SiriusXM's `talent:` hits carry a whole biography as their description.** The CLI printed
+  it in full on one line. **Fixed 2026-10-12**: plain `search` and `browse` listings collapse a
+  second line to one line of at most 80 characters (`one_line`), as the merged list already capped
+  its own. `--json` keeps the whole text (706 characters for Miles Davis).
 - **Audible's root is seven marketplaces** (`.com`, `.co.uk`, `.de`, ...). Only the account's own
   holds the library. The app likely opens straight into it. Not compared.
 - **Sonos Radio searches with the household token** - the first token x2rock has held for it.

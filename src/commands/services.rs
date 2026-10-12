@@ -1577,7 +1577,7 @@ pub async fn run_browse(
         let summary = item
             .summary
             .as_deref()
-            .map(|s| format!("  {s}"))
+            .map(|s| format!("  {}", one_line(s, SUMMARY_MAX)))
             .unwrap_or_default();
         // A trailing slash for somewhere to go, the way a directory listing
         // marks one. Cheaper to read than a column.
@@ -2006,7 +2006,7 @@ pub async fn run_search(
         let summary = item
             .summary
             .as_deref()
-            .map(|s| format!("  {s}"))
+            .map(|s| format!("  {}", one_line(s, SUMMARY_MAX)))
             .unwrap_or_default();
         // The same trailing slash `browse` uses, and for the same reason: some
         // services answer a search entirely in collections.
@@ -2021,6 +2021,22 @@ pub async fn run_search(
         println!("\n{} of {total} on {}.", items.len(), chosen.name);
     }
     Ok(())
+}
+
+/// How much of a row's second line a plain listing prints. The JSON keeps it all.
+const SUMMARY_MAX: usize = 80;
+
+/// A service's second line as one line of at most `max` characters: runs of
+/// whitespace, newlines included, become one space, and an overlong one ends in
+/// an ellipsis. Services put whatever they like there - SiriusXM a whole artist
+/// biography, several hundred characters (2026-10-11) - and a listing is one
+/// row per item.
+fn one_line(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.chars().count() > max {
+        true => flat.chars().take(max - 1).chain("…".chars()).collect(),
+        false => flat,
+    }
 }
 
 /// What a merged search asks for when the caller names no category.
@@ -3037,6 +3053,16 @@ pub async fn accounts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_line_is_one_line_and_capped() {
+        assert_eq!(one_line("Miles  Davis\nquintet", 80), "Miles Davis quintet");
+        let long = "x".repeat(200);
+        let cut = one_line(&long, 80);
+        assert_eq!(cut.chars().count(), 80);
+        assert!(cut.ends_with('…'));
+        assert_eq!(one_line("short", 80), "short");
+    }
     use crate::sonos::smapi::Category;
 
     #[test]
