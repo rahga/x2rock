@@ -478,12 +478,7 @@ impl Credentials {
         used: &Account,
         refreshed: crate::sonos::smapi::RefreshedToken,
     ) -> bool {
-        let current = match account {
-            Some(key) => self
-                .accounts_for(household, service_id)
-                .and_then(|held| held.accounts.get(key)),
-            None => self.get(household, service_id),
-        };
+        let current = self.account(household, service_id, account);
         if current.is_none_or(|c| c.auth_token != used.auth_token) {
             return false;
         }
@@ -528,6 +523,20 @@ impl Credentials {
     /// two accounts, and there is exactly one place where which-one is decided.
     pub fn get(&self, household: &str, service_id: &str) -> Option<&Account> {
         self.chosen(household, service_id).map(|(_, a)| a)
+    }
+
+    /// The account filed under `key`, or with no key the one [`get`](Self::get)
+    /// resolves to.
+    pub fn account(
+        &self,
+        household: &str,
+        service_id: &str,
+        key: Option<&str>,
+    ) -> Option<&Account> {
+        match key {
+            Some(key) => self.accounts_for(household, service_id)?.accounts.get(key),
+            None => self.get(household, service_id),
+        }
     }
 
     /// As [`get`](Self::get), and says which key it landed on.
