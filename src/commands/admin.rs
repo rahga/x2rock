@@ -115,14 +115,48 @@ fn detect_shell() -> Option<clap_complete::Shell> {
     }
 }
 
-/// `systemctl --user <args>`, and whether it said yes: false for a non-zero
-/// exit and for a `systemctl` that could not be run at all.
-fn systemctl_ok(args: &[&str]) -> bool {
+/// The unit's name, as `systemctl` and the unit directory both know it.
+const UNIT: &str = "x2rock.service";
+
+/// Where the unit and its `--headless` drop-in live, worked out once for
+/// `install`, `status` and `uninstall` alike.
+struct UnitPaths {
+    unit: PathBuf,
+    dropin_dir: PathBuf,
+    dropin: PathBuf,
+}
+
+fn unit_paths() -> Result<UnitPaths> {
+    let dir = service::user_unit_dir()?;
+    let dropin_dir = dir.join(format!("{UNIT}.d"));
+    Ok(UnitPaths {
+        unit: dir.join(UNIT),
+        dropin: dropin_dir.join("headless.conf"),
+        dropin_dir,
+    })
+}
+
+/// `systemctl --user <args>`, run to completion.
+fn systemctl(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
     std::process::Command::new("systemctl")
         .arg("--user")
         .args(args)
         .status()
-        .is_ok_and(|s| s.success())
+}
+
+/// [`systemctl`], and whether it said yes: false for a non-zero exit and for
+/// a `systemctl` that could not be run at all.
+fn systemctl_ok(args: &[&str]) -> bool {
+    systemctl(args).is_ok_and(|s| s.success())
+}
+
+/// [`systemctl`] where a refusal is the command's failure, naming the line
+/// that was refused.
+fn systemctl_must(args: &[&str]) -> Result<()> {
+    let line = format!("systemctl --user {}", args.join(" "));
+    let status = systemctl(args).with_context(|| format!("running {line}"))?;
+    ensure!(status.success(), "`{line}` exited {status}");
+    Ok(())
 }
 
 /// The pid of the daemon systemd is running, or `None` when it is not running
@@ -130,14 +164,7 @@ fn systemctl_ok(args: &[&str]) -> bool {
 /// which is no process, so it is folded into `None` rather than handed on.
 fn main_pid() -> Option<u32> {
     let out = std::process::Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            "x2rock.service",
-            "-p",
-            "MainPID",
-            "--value",
-        ])
+        .args(["--user", "show", UNIT, "-p", "MainPID", "--value"])
         .output()
         .ok()?;
     String::from_utf8_lossy(&out.stdout)
@@ -257,13 +284,13 @@ fn install_service(
     // network with several Sonos systems dropping the one set earlier leaves
     // the daemon asking which household forever. So an existing one is kept
     // unless `--household` replaces it or `--no-household` drops it.
-    let dir = service::user_unit_dir()?;
+    let paths = unit_paths()?;
     let household = match (household, no_household) {
         (Some(_), true) => bail!("--household and --no-household contradict each other"),
         (Some(given), false) => Some(given.to_owned()),
         (None, true) => None,
         (None, false) => {
-            let kept = store::read_optional(&dir.join("x2rock.service"))?
+            let kept = store::read_optional(&paths.unit)?
                 .as_deref()
                 .and_then(service::existing_household);
             if let Some(kept) = &kept {
@@ -291,19 +318,18 @@ fn install_service(
     // already active, so a daemon that was running keeps running the *old*
     // binary unless it is restarted - and "Enabled and started" would then be
     // a lie about which build is up.
-    let was_active = systemctl_ok(&["is-active", "--quiet", "x2rock.service"]);
+    let was_active = systemctl_ok(&["is-active", "--quiet", UNIT]);
     // An upgrade in place leaves the unit identical, so "changed" alone misses
     // the commonest reinstall; ask the running process what it is running.
     let stale = was_active && main_pid().is_some_and(|pid| daemon_runs_stale_binary(&exe, pid));
 
-    let mut changed = place_generated(&dir.join("x2rock.service"), &unit, force)?;
-    let dropin = dir.join("x2rock.service.d").join("headless.conf");
+    let mut changed = place_generated(&paths.unit, &unit, force)?;
     if headless {
-        changed |= place_generated(&dropin, &service::render_headless(), force)?;
-    } else if dropin.exists() {
+        changed |= place_generated(&paths.dropin, &service::render_headless(), force)?;
+    } else if paths.dropin.exists() {
         println!(
             "Note: {} is present from an earlier --headless install and was left in place.",
-            dropin.display()
+            paths.dropin.display()
         );
     }
     if !headless {
@@ -316,10 +342,7 @@ fn install_service(
     // A reload is what makes systemd read the new file; failing here is worth
     // saying but not worth failing over, since the file is written and a later
     // `daemon-reload` fixes it.
-    let reload = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-    match reload {
+    match systemctl(&["daemon-reload"]) {
         Ok(status) if status.success() => {}
         Ok(status) => {
             eprintln!("x2rock: `systemctl --user daemon-reload` exited {status}; run it yourself")
@@ -330,25 +353,11 @@ fn install_service(
     }
 
     if enable {
-        let status = std::process::Command::new("systemctl")
-            .args(["--user", "enable", "--now", "x2rock.service"])
-            .status()
-            .context("running systemctl --user enable --now x2rock.service")?;
-        ensure!(
-            status.success(),
-            "`systemctl --user enable --now x2rock.service` exited {status}"
-        );
+        systemctl_must(&["enable", "--now", UNIT])?;
         // A restart only when a running daemon is on an old unit or an old
         // binary; `enable --now` already started one that was not running.
         if was_active && (changed || stale) {
-            let status = std::process::Command::new("systemctl")
-                .args(["--user", "restart", "x2rock.service"])
-                .status()
-                .context("running systemctl --user restart x2rock.service")?;
-            ensure!(
-                status.success(),
-                "`systemctl --user restart x2rock.service` exited {status}"
-            );
+            systemctl_must(&["restart", UNIT])?;
             println!(
                 "Restarted x2rock.service so it runs this binary. `journalctl --user -u x2rock` names the binary it came up on."
             );
@@ -419,26 +428,24 @@ struct ServiceStatusJson {
 }
 
 fn status_service(json: bool) -> Result<()> {
-    let dir = service::user_unit_dir()?;
-    let unit_path = dir.join("x2rock.service");
-    let installed = unit_path.exists();
-    let unit_content = if installed {
-        store::read_optional(&unit_path)?
-    } else {
-        None
-    };
+    let UnitPaths {
+        unit: unit_path,
+        dropin: dropin_path,
+        ..
+    } = unit_paths()?;
+    let unit_content = store::read_optional(&unit_path)?;
+    let installed = unit_content.is_some();
 
     let exec = unit_content.as_deref().and_then(service::existing_exec);
     let household = unit_content
         .as_deref()
         .and_then(service::existing_household);
 
-    let dropin_path = dir.join("x2rock.service.d").join("headless.conf");
     let headless_installed = dropin_path.exists();
 
-    let active = systemctl_ok(&["is-active", "--quiet", "x2rock.service"]);
+    let active = systemctl_ok(&["is-active", "--quiet", UNIT]);
 
-    let enabled = systemctl_ok(&["is-enabled", "--quiet", "x2rock.service"]);
+    let enabled = systemctl_ok(&["is-enabled", "--quiet", UNIT]);
 
     let pid = if active { main_pid() } else { None };
 
@@ -531,15 +538,16 @@ fn status_service(json: bool) -> Result<()> {
 }
 
 fn uninstall_service(desktop: bool) -> Result<()> {
-    let dir = service::user_unit_dir()?;
-    let unit_path = dir.join("x2rock.service");
-    let dropin = dir.join("x2rock.service.d").join("headless.conf");
-    let dropin_dir = dir.join("x2rock.service.d");
+    let UnitPaths {
+        unit: unit_path,
+        dropin_dir,
+        dropin,
+    } = unit_paths()?;
 
     // Read before the disable, which does not change it, so that a failure can
     // be told from "there was nothing to disable".
     let unit_existed = unit_path.exists();
-    let disabled = systemctl_ok(&["disable", "--now", "x2rock.service"]);
+    let disabled = systemctl_ok(&["disable", "--now", UNIT]);
     // A disable that failed while there *was* a unit to disable is worth
     // saying: the file is removed either way, so a daemon still running from it
     // would otherwise be a surprise with nothing left on disk to explain it.
