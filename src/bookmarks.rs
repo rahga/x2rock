@@ -14,12 +14,12 @@
 //! catalogue. Regenerable in principle - everything here can be re-kept from the
 //! app - but losing it would be a real annoyance, so it is written atomically.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::sonos::http;
 use crate::sonos::proto::MusicObjectId;
 use crate::sonos::xml_escape;
 use crate::store;
@@ -128,28 +128,32 @@ impl Bookmark {
     /// accepts the item and then has nothing to show, for the whole queue rather
     /// than just the new row.
     pub fn didl(&self, cdudn: &str) -> String {
-        let artist = self
-            .artist
-            .as_deref()
-            .map(|a| format!("<dc:creator>{}</dc:creator>", xml_escape(a)))
-            .unwrap_or_default();
-        didl(
-            &format!("00032020{}", encode_object_id(&self.object_id)),
+        item_didl(
+            &prefixed_id(TRACK_PREFIX, &self.object_id),
             "-1",
-            &format!(
-                "<dc:title>{}</dc:title>{artist}<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
-                xml_escape(&self.name)
-            ),
+            &self.name,
+            self.artist.as_deref(),
+            TRACK_CLASS,
             cdudn,
         )
     }
 }
 
 /// The DIDL-Lite envelope every item here travels in: the namespaces, one
-/// `<item>` with `id` and `parentID`, the caller's elements, and the cdudn that
-/// tells the player whose item it is. `item_id` is unescaped; `inner` is
-/// already-escaped markup.
-fn didl(item_id: &str, parent: &str, inner: &str, cdudn: &str) -> String {
+/// `<item>` with `id` and `parentID`, its title, creator if any, and class,
+/// and the cdudn that tells the player whose item it is. Everything is passed
+/// unescaped; `item_id` is already [`prefixed_id`]'s percent-encoded form.
+fn item_didl(
+    item_id: &str,
+    parent: &str,
+    title: &str,
+    creator: Option<&str>,
+    class: &str,
+    cdudn: &str,
+) -> String {
+    let creator = creator
+        .map(|a| format!("<dc:creator>{}</dc:creator>", xml_escape(a)))
+        .unwrap_or_default();
     format!(
         concat!(
             r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
@@ -157,14 +161,63 @@ fn didl(item_id: &str, parent: &str, inner: &str, cdudn: &str) -> String {
             r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
             r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
             r#"<item id="{id}" parentID="{parent}" restricted="true">"#,
-            "{inner}",
+            "<dc:title>{title}</dc:title>{creator}<upnp:class>{class}</upnp:class>",
             r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
             "{cdudn}</desc></item></DIDL-Lite>"
         ),
         id = xml_escape(item_id),
         parent = parent,
-        inner = inner,
+        title = xml_escape(title),
+        creator = creator,
+        class = class,
         cdudn = xml_escape(cdudn),
+    )
+}
+
+/// The item-id prefix the player writes on a track.
+const TRACK_PREFIX: &str = "00032020";
+
+/// The item-id prefix the player writes on a container, in its URI and its
+/// DIDL alike. See [`container_uri`].
+const CONTAINER_PREFIX: &str = "1004206c";
+
+/// The item-id prefix the Sonos app writes on a radio program. See [`radio_didl`].
+const RADIO_PREFIX: &str = "000c0000";
+
+/// The DIDL class of a queue row.
+const TRACK_CLASS: &str = "object.item.audioItem.musicTrack";
+
+/// An object id percent-encoded, lowercase hex, as the player does, behind one
+/// of the prefixes above.
+///
+/// **This is what UPnP 800 was.** The id sits between the scheme and the `?`, so
+/// anything meaning something to a URI parser has to be escaped - and a colon is
+/// exactly that. Every id this was ever tested against came from YouTube Music,
+/// whose ids are alphanumeric with `_` and `-`, so the encoding was a no-op and
+/// its absence invisible. Mixcloud names its shows `cloudcast:2191051074`, and
+/// `AddURIToQueue` refused every such URI with UPnP 800 until the colon was
+/// escaped. Verified by isolating it: with the colon encoded, both `flags`
+/// values are accepted and play; with it raw, both are refused.
+///
+/// The escape set is RFC 3986's unreserved characters ([`http::urlencode`]),
+/// which is stricter than strictly required and cannot break an id that needed
+/// no escaping.
+fn prefixed_id(prefix: &str, object_id: &str) -> String {
+    format!("{prefix}{}", http::urlencode(object_id))
+}
+
+/// A playback URI: `<scheme>:<id>?sid=<service>&flags=<flags>`, then the
+/// account's `&sn=` if one is named. `id` is [`prefixed_id`]'s encoded form.
+fn playback_uri(
+    scheme: &str,
+    id: &str,
+    service_id: &str,
+    flags: u32,
+    account: Option<&str>,
+) -> String {
+    format!(
+        "{scheme}:{id}?sid={service_id}&flags={flags}{}",
+        sn_param(account)
     )
 }
 
@@ -247,10 +300,12 @@ fn container_class(item_type: &str) -> &'static str {
 /// player resolves the service from the cdudn in the DIDL - but both are sent,
 /// because that is what the player writes for itself.
 pub fn container_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = sn_param(account);
-    format!(
-        "x-rincon-cpcontainer:1004206c{}?sid={service_id}&flags=8300{sn}",
-        encode_object_id(object_id)
+    playback_uri(
+        "x-rincon-cpcontainer",
+        &prefixed_id(CONTAINER_PREFIX, object_id),
+        service_id,
+        8300,
+        account,
     )
 }
 
@@ -276,14 +331,12 @@ pub fn without_container_prefix(id: &str) -> Option<&str> {
 /// Its `id` carries the same prefix the URI does, and the class says which kind
 /// of container it is; the cdudn is what tells the player whose it is.
 pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str) -> String {
-    didl(
-        &format!("1004206c{}", encode_object_id(object_id)),
+    item_didl(
+        &prefixed_id(CONTAINER_PREFIX, object_id),
         "0",
-        &format!(
-            "<dc:title>{}</dc:title><upnp:class>{}</upnp:class>",
-            xml_escape(title),
-            container_class(item_type)
-        ),
+        title,
+        None,
+        container_class(item_type),
         cdudn,
     )
 }
@@ -306,11 +359,12 @@ pub fn container_didl(object_id: &str, title: &str, item_type: &str, cdudn: &str
 /// every future service this constant might reach, only that it is not a
 /// coincidence limited to the two it was first checked against.
 pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = sn_param(account);
-    let scheme = native_scheme(service_id);
-    format!(
-        "{scheme}:{}?sid={service_id}&flags=65544{sn}",
-        encode_object_id(object_id)
+    playback_uri(
+        native_scheme(service_id),
+        &prefixed_id("", object_id),
+        service_id,
+        65544,
+        account,
     )
 }
 
@@ -322,10 +376,12 @@ pub fn service_uri(object_id: &str, service_id: &str, account: Option<&str>) -> 
 /// channels are `program`s that `AddURIToQueue` refuses with 800 and that it
 /// has no `getMediaURI` to stream, so this is the only way they play.
 pub fn radio_uri(object_id: &str, service_id: &str, account: Option<&str>) -> String {
-    let sn = sn_param(account);
-    format!(
-        "x-sonosapi-radio:{}?sid={service_id}&flags=0{sn}",
-        encode_object_id(object_id)
+    playback_uri(
+        "x-sonosapi-radio",
+        &prefixed_id("", object_id),
+        service_id,
+        0,
+        account,
     )
 }
 
@@ -333,13 +389,12 @@ pub fn radio_uri(object_id: &str, service_id: &str, account: Option<&str>) -> St
 /// broadcast (`audioBroadcast`) under the `000c0000` item prefix, rather than
 /// the `musicTrack` a queue row is.
 pub fn radio_didl(object_id: &str, title: &str, cdudn: &str) -> String {
-    didl(
-        &format!("000c0000{}", encode_object_id(object_id)),
+    item_didl(
+        &prefixed_id(RADIO_PREFIX, object_id),
         "-1",
-        &format!(
-            "<dc:title>{}</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class>",
-            xml_escape(title)
-        ),
+        title,
+        None,
+        "object.item.audioItem.audioBroadcast",
         cdudn,
     )
 }
@@ -349,45 +404,14 @@ pub fn radio_didl(object_id: &str, title: &str, cdudn: &str) -> String {
 /// Built from the same pieces [`Bookmark::didl`] uses, because a search hit and
 /// a kept item are the same thing to a player.
 pub fn service_didl(object_id: &str, title: &str, cdudn: &str) -> String {
-    didl(
-        &format!("00032020{}", encode_object_id(object_id)),
+    item_didl(
+        &prefixed_id(TRACK_PREFIX, object_id),
         "-1",
-        &format!(
-            "<dc:title>{}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>",
-            xml_escape(title)
-        ),
+        title,
+        None,
+        TRACK_CLASS,
         cdudn,
     )
-}
-
-/// Percent-encode an object id for a playback URI, lowercase hex, as the player
-/// does.
-///
-/// **This is what UPnP 800 was.** The id sits between the scheme and the `?`, so
-/// anything meaning something to a URI parser has to be escaped - and a colon is
-/// exactly that. Every id this was ever tested against came from YouTube Music,
-/// whose ids are alphanumeric with `_` and `-`, so the encoding was a no-op and
-/// its absence invisible. Mixcloud names its shows `cloudcast:2191051074`, and
-/// `AddURIToQueue` refused every such URI with UPnP 800 until the colon was
-/// escaped. Verified by isolating it: with the colon encoded, both `flags`
-/// values are accepted and play; with it raw, both are refused.
-///
-/// The escape set is RFC 3986's unreserved characters, which is stricter than
-/// strictly required and cannot break an id that needed no escaping.
-fn encode_object_id(id: &str) -> String {
-    let mut out = String::with_capacity(id.len());
-    for byte in id.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            // Lowercase, matching the `%3a` the player itself writes.
-            _ => {
-                let _ = write!(out, "%{byte:02x}");
-            }
-        }
-    }
-    out
 }
 
 pub fn path() -> Result<PathBuf> {
@@ -856,18 +880,49 @@ mod tests {
         );
     }
 
+    /// The whole envelope, byte for byte: what a player was verified to
+    /// accept, pinned so that rearranging the builders cannot move a byte.
+    #[test]
+    fn a_kept_track_didl_is_exactly_the_envelope_the_player_accepts() {
+        let mut b =
+            Bookmark::from_id("Rock & <Roll>", &id("a:b", Some("284"), Some("sn_3"))).unwrap();
+        b.artist = Some("A & B".into());
+        assert_eq!(
+            b.didl("SA_X_#1"),
+            concat!(
+                r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+                r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+                r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" "#,
+                r#"xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#,
+                r#"<item id="00032020a%3ab" parentID="-1" restricted="true">"#,
+                "<dc:title>Rock &amp; &lt;Roll&gt;</dc:title>",
+                "<dc:creator>A &amp; B</dc:creator>",
+                "<upnp:class>object.item.audioItem.musicTrack</upnp:class>",
+                r#"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+                "SA_X_#1</desc></item></DIDL-Lite>"
+            )
+        );
+        // With no artist, a kept track and a search hit are the same item.
+        b.artist = None;
+        assert_eq!(b.didl("cd"), service_didl("a:b", "Rock & <Roll>", "cd"));
+        assert_eq!(
+            container_uri("a:b", "2", Some("10")),
+            "x-rincon-cpcontainer:1004206ca%3ab?sid=2&flags=8300&sn=10"
+        );
+    }
+
     #[test]
     fn an_id_needing_no_escaping_is_left_exactly_as_it_was() {
         // The regression that matters: every YouTube Music id is alphanumeric
         // with `_` and `-`, which is why the missing encoding went unnoticed,
         // and encoding must remain a no-op for them.
         assert_eq!(
-            encode_object_id("ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H"),
+            http::urlencode("ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H"),
             "ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H"
         );
-        assert_eq!(encode_object_id("a-b.c~d"), "a-b.c~d");
+        assert_eq!(http::urlencode("a-b.c~d"), "a-b.c~d");
         // Lowercase hex, as the player writes it.
-        assert_eq!(encode_object_id("a:b/c?d&e"), "a%3ab%2fc%3fd%26e");
+        assert_eq!(http::urlencode("a:b/c?d&e"), "a%3ab%2fc%3fd%26e");
     }
 
     #[test]
