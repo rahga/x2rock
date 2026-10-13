@@ -1984,6 +1984,12 @@ pub async fn run_search(
                     .await
                     .ok()
                     .filter(|(items, _)| !items.is_empty())
+                    .map(|(items, total)| {
+                        // Handed back whole, so paged here; the API's own
+                        // count can run past the rows it sent.
+                        let (page, sent) = page_of(items, index, count);
+                        (page, total.max(sent))
+                    })
             } else {
                 None
             };
