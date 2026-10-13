@@ -24,21 +24,29 @@ pub const PLAIN: u32 = 0o644;
 /// A secret: the owner alone.
 pub const SECRET: u32 = 0o600;
 
+/// x2rock's own directories under each XDG base.
+fn dirs() -> Result<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "", "x2rock").ok_or_else(|| anyhow!("no home directory"))
+}
+
 /// `$XDG_STATE_HOME/x2rock/<file>`.
 pub fn path(file: &str) -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
+    let dirs = dirs()?;
     let dir = dirs
         .state_dir()
         .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
     Ok(dir.join(file))
 }
 
+/// `$XDG_CONFIG_HOME/x2rock/<file>`: configuration the person writes, not
+/// state x2rock learns.
+pub fn config_path(file: &str) -> Result<PathBuf> {
+    Ok(dirs()?.config_dir().join(file))
+}
+
 /// `$XDG_CACHE_HOME/x2rock/<sub>`: regenerable files, named for what fills them.
 pub fn cache_dir(sub: &str) -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    Ok(dirs.cache_dir().join(sub))
+    Ok(dirs()?.cache_dir().join(sub))
 }
 
 /// `<file>.<ext>` beside `path`.
