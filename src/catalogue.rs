@@ -110,6 +110,18 @@ impl Catalogue {
         store::write_atomically(&path()?, &serde_json::to_string_pretty(self)?, store::PLAIN)
     }
 
+    /// [`refresh`](Self::refresh), and the catalogue saved when that changed
+    /// anything - for the commands that have no reason to put the write off.
+    /// Dropping the flag instead leaves the descriptors to be parsed again by
+    /// every run until something else happens to save.
+    pub async fn refresh_and_save(&mut self, upnp: &Upnp, force: bool) -> Result<bool> {
+        let changed = self.refresh(upnp, force).await?;
+        if changed {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
     /// Every service the player knows about, from cache where the version agrees.
     ///
     /// `force` has the descriptors re-parsed and every cached category

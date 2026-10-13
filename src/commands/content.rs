@@ -1491,7 +1491,7 @@ pub async fn keep(
     // that cannot be read costs a label, not the bookmark.
     let mut catalogue = catalogue::Catalogue::load();
     let _ = catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
+        .refresh_and_save(&Upnp::new(session.connection.ip()), false)
         .await;
     bookmark.service_name = catalogue.name_of(&bookmark.service_id).map(str::to_string);
 

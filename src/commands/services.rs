@@ -680,12 +680,9 @@ pub async fn run_link(
     let mut state = State::load()?;
     let session = session::connect(ip, &mut state, household, None).await?;
     let mut catalogue = catalogue::Catalogue::load();
-    if catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await?
-    {
-        catalogue.save()?;
-    }
+    catalogue
+        .refresh_and_save(&Upnp::new(session.connection.ip()), false)
+        .await?;
     // Which household these tokens belong to - resolved once, up front, because
     // even the "what is linked?" listing is now a per-household question.
     let household = session.connection.household_id().await?;
@@ -1353,12 +1350,9 @@ pub async fn run_browse(
     let mut catalogue = catalogue::Catalogue::load();
     match &reached {
         Ok(session) => {
-            if catalogue
-                .refresh(&Upnp::new(session.connection.ip()), refresh)
-                .await?
-            {
-                catalogue.save()?;
-            }
+            catalogue
+                .refresh_and_save(&Upnp::new(session.connection.ip()), refresh)
+                .await?;
         }
         // Re-wrapped so the message is this command's, but with the code kept:
         // a `--json` caller branches on `no_player`, and a plain string would
