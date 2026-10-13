@@ -19,6 +19,7 @@ use zbus::{Connection, MatchRule, MessageStream, fdo};
 use super::model::RoomSnapshot;
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
+const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 
 /// A burst of events is one change: regrouping republishes every player, and a
 /// track change arrives as several property signals at once. Reading once after
@@ -51,28 +52,11 @@ pub trait Player {
     fn previous(&self) -> zbus::Result<()>;
     fn play_pause(&self) -> zbus::Result<()>;
 
-    #[zbus(property)]
-    fn metadata(&self) -> zbus::Result<HashMap<String, OwnedValue>>;
-    #[zbus(property)]
-    fn playback_status(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn volume(&self) -> zbus::Result<f64>;
-    #[zbus(property)]
-    fn loop_status(&self) -> zbus::Result<String>;
+    // Read all at once by `read_one`'s `GetAll`; only the writes are here.
     #[zbus(property)]
     fn set_loop_status(&self, status: &str) -> zbus::Result<()>;
     #[zbus(property)]
-    fn shuffle(&self) -> zbus::Result<bool>;
-    #[zbus(property)]
     fn set_shuffle(&self, on: bool) -> zbus::Result<()>;
-    #[zbus(property)]
-    fn can_go_next(&self) -> zbus::Result<bool>;
-    #[zbus(property)]
-    fn can_go_previous(&self) -> zbus::Result<bool>;
-    #[zbus(property)]
-    fn can_pause(&self) -> zbus::Result<bool>;
-    #[zbus(property)]
-    fn can_play(&self) -> zbus::Result<bool>;
 }
 
 /// Cloning shares the connection rather than opening a second one - a zbus
@@ -147,34 +131,52 @@ impl Source {
     /// fetch every property, and the drop would remove the rule again - per
     /// player, per snapshot, every heartbeat - which is exactly the per-player
     /// bookkeeping the single rule in [`Self::watch`] exists to avoid.
+    ///
+    /// The player's properties come in one `GetAll` rather than a round trip
+    /// each - eleven of them per player, per snapshot, on every heartbeat.
     async fn read_one(&self, bus_name: &str) -> Result<RoomSnapshot> {
         let app = MediaPlayer2Proxy::builder(&self.connection)
             .destination(bus_name.to_owned())?
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
-        let player = PlayerProxy::builder(&self.connection)
+        let properties = fdo::PropertiesProxy::builder(&self.connection)
             .destination(bus_name.to_owned())?
+            .path(PATH)?
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
+        let (identity, mut all) = tokio::try_join!(
+            async { Ok::<_, anyhow::Error>(app.identity().await?) },
+            async { Ok(properties.get_all(PLAYER.try_into()?).await?) },
+        )?;
+        // Taken by name and converted; a property missing or of the wrong
+        // type reads as its default, as the separate reads did.
+        let mut take = |name: &str| all.remove(name);
+        let flag = |value: Option<OwnedValue>| value.and_then(|v| bool::try_from(&v).ok());
+        let text = |value: Option<OwnedValue>| value.and_then(|v| String::try_from(v).ok());
 
+        let metadata: HashMap<String, OwnedValue> = take("Metadata")
+            .context("the player published no Metadata")?
+            .try_into()?;
+        let status =
+            text(take("PlaybackStatus")).context("the player published no PlaybackStatus")?;
         let mut room = RoomSnapshot {
             bus_name: bus_name.to_owned(),
-            room: app.identity().await?,
+            room: identity,
             ..RoomSnapshot::default()
         };
-        room.apply_metadata(&player.metadata().await?);
-        room.set_playback_state(&player.playback_status().await?);
+        room.apply_metadata(&metadata);
+        room.set_playback_state(&status);
         // After the metadata, which may carry the level mute is holding; the
         // Volume property alone reads zero on a muted room.
-        room.settle_volume(player.volume().await.ok());
-        room.loop_status = player.loop_status().await.unwrap_or_default();
-        room.shuffle = player.shuffle().await.unwrap_or(false);
-        room.can_go_next = player.can_go_next().await.unwrap_or(false);
-        room.can_go_previous = player.can_go_previous().await.unwrap_or(false);
-        room.can_pause = player.can_pause().await.unwrap_or(false);
-        room.can_play = player.can_play().await.unwrap_or(false);
+        room.settle_volume(take("Volume").and_then(|v| f64::try_from(&v).ok()));
+        room.loop_status = text(take("LoopStatus")).unwrap_or_default();
+        room.shuffle = flag(take("Shuffle")).unwrap_or(false);
+        room.can_go_next = flag(take("CanGoNext")).unwrap_or(false);
+        room.can_go_previous = flag(take("CanGoPrevious")).unwrap_or(false);
+        room.can_pause = flag(take("CanPause")).unwrap_or(false);
+        room.can_play = flag(take("CanPlay")).unwrap_or(false);
         Ok(room)
     }
 
