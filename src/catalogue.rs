@@ -294,15 +294,22 @@ impl Catalogue {
     /// service that needs an account gets the advice for getting one instead.
     pub fn find_usable<'a>(&self, usable: &[&'a Service], query: &str) -> Result<&'a Service> {
         Self::find_in(usable, query, "usable service", "browse").map_err(|e| {
-            match self
-                .services
-                .iter()
-                .find(|s| s.name.eq_ignore_ascii_case(query))
-            {
+            match self.named(query) {
                 Some(s) if s.auth != smapi::Auth::Anonymous => s.needs_link_hint().into(),
                 _ => e,
             }
         })
+    }
+
+    /// The service whose whole name is `query`, ignoring case, across the
+    /// whole catalogue - for explaining why a name that missed a narrower set
+    /// missed it, which is a different answer for a real service than for a
+    /// typo.
+    pub fn named(&self, query: &str) -> Option<&Service> {
+        let needle = query.to_lowercase();
+        self.services
+            .iter()
+            .find(|s| s.name.to_lowercase() == needle)
     }
 
     /// [`find`] over any candidate set, naming what was searched and the

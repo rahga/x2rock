@@ -1458,9 +1458,7 @@ pub async fn run_browse(
         .find_usable(&usable, query)
         .map_err(|e| {
             catalogue
-                .services()
-                .iter()
-                .find(|s| s.name.eq_ignore_ascii_case(query))
+                .named(query)
                 .and_then(|s| offline_choice(&linked, &household, &rooms, s))
                 .unwrap_or(e)
         })?
@@ -1789,11 +1787,7 @@ pub async fn run_search(
     // would answer a question nobody asked.
     let chosen = catalogue::Catalogue::find(&usable, query)
         .map_err(|e| {
-            match catalogue
-                .services()
-                .iter()
-                .find(|s| s.name.to_lowercase() == query.to_lowercase())
-            {
+            match catalogue.named(query) {
                 Some(s) if s.auth != sonos::smapi::Auth::Anonymous => {
                     offline_choice(&linked, &household, &rooms, s)
                         .unwrap_or_else(|| s.needs_link_hint().into())
