@@ -1023,6 +1023,11 @@ those two apart when telling a user what linking will do.
   (the failure names it, `--callback-port N` moves it, and `0` takes an ephemeral one where there
   is nothing to open); and it does **not** get past YouTube Music, whose block is the caller key
   rather than the account — the token imports and search still 403s.
+- **An imported token that goes stale is re-read on its own.** When a service refuses one,
+  x2rock reads the household's current token for that account (same port 3401), saves it, and
+  retries, so a search or browse just works, a second or so slower. Pandora's went stale in a day.
+  At most one read per household every 10 minutes. Re-running `link --from-household` is only
+  needed when that read cannot happen: a firewall, or no player reachable.
 - **Apple Music searches Apple's public catalogue, not the household's account.** Its imported
   token cannot search or browse (Apple never provisions a usable one), so `search -s "Apple Music"`
   and the merged search ask the public iTunes catalogue instead, and the ids it returns

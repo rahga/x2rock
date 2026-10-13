@@ -9995,9 +9995,29 @@ shelf as well as one whose id does. TuneIn's root is 24 rows, down from 27.
 **Found the same day: a household token can go stale under x2rock.** Pandora's, imported on
 2026-10-11, was refused a day later with **"Failed to reauth device id"**: it had expired, and the
 refresh SMAPI offers failed for x2rock. The Sonos app was working, so the household had a fresh one;
-`link --from-household Pandora` read it and browse worked again. Not built yet: re-reading the
-household's token when an imported one is refused (it needs the event callback, and a decision
-about doing that inside an ordinary command).
+`link --from-household Pandora` read it and browse worked again. Built the next day; see below.
+
+## A refused imported token is re-read from the household (2026-10-13)
+
+When a service refuses a token that came from the household and offers no refreshed one, x2rock
+reads the household's store once and, if it now holds a **different** token for the same account
+(same service, same `sn_N`), saves it and retries the call (`rereads`, called from `smapi::call`).
+Every command gets it, since every SMAPI call goes through there.
+
+- **Imported accounts only**: a record carrying the `serial` that only an import reads. A browser
+  link's token is never swapped for the household's, which for Bandcamp would not work off a speaker.
+- **Any refusal, not worded ones.** The plan was to filter for refusals that sound like a credential
+  problem. A garbled Pandora token is refused with ``TypeError: Cannot read properties of null
+  (reading 'getListenerId')``, which no filter would recognise. The real signal is a different token
+  on the household, and only a read can tell that.
+- **Bounded cost**: one read per household per 10 minutes per process, failures included, so a
+  firewall that drops the callback costs one 5-second wait, not one per call. Reads are serialized,
+  so a search across many services refused at once reads once. The player is any one this process
+  reached; one from another household fails the integrity check and the next is tried.
+
+Measured at home with the stored Pandora token garbled before each command: `browse` recovered in
+1.3 s, `search` in 1.6 s, and `search --play` started the station in the Kitchen. Each time the
+store held the household's token afterwards.
 
 ## Plex on the home household: a VPN on the server's PC, then a reauthorization (2026-10-12)
 
