@@ -36,7 +36,7 @@ const TV_ASK: Duration = Duration::from_secs(3);
 const TV_POLL: Duration = Duration::from_millis(500);
 const TV_BUDGET: Duration = Duration::from_secs(25);
 /// Queues can hold tens of thousands of tracks; listing stops here and says so.
-pub const MAX_QUEUE_ITEMS: u32 = 1000;
+const MAX_QUEUE_ITEMS: u32 = 1000;
 const PAGE: u32 = 100;
 
 #[derive(Clone, Copy)]
@@ -775,7 +775,7 @@ impl Upnp {
     ///
     /// The same string the HTTP `SERVER` header carries, read from the
     /// description because `soap` hands back a body and not the headers.
-    pub async fn firmware_version(&self) -> Result<String> {
+    async fn firmware_version(&self) -> Result<String> {
         Ok(self.device_info().await?.software_version)
     }
 
@@ -2106,7 +2106,7 @@ impl Upnp {
 
     /// What this player is currently playing from: its own queue, a stream, its
     /// TV input, or the room it is following.
-    pub async fn current_uri(&self) -> Result<String> {
+    async fn current_uri(&self) -> Result<String> {
         self.one_value(
             Service::AvTransport,
             "GetMediaInfo",
@@ -2191,7 +2191,9 @@ fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
         out.push(SystemPlayer {
             uuid: uuid.to_owned(),
             room: attr("ZoneName").to_owned(),
-            ip: ip_in_location(attr("Location")),
+            // `Location` is where a player's own IP is published -
+            // `http://192.168.86.26:1400/xml/device_description.xml`.
+            ip: super::host_ip(attr("Location")),
             channels: channels_for(uuid, map),
             invisible: attr("Invisible") == "1",
             satellite,
@@ -2221,12 +2223,6 @@ fn players_in(xml: &str) -> Result<Vec<SystemPlayer>> {
         }
     }
     Ok(merged)
-}
-
-/// The address out of a `Location` URL, which is where a player's own IP is
-/// published - `http://192.168.86.26:1400/xml/device_description.xml`.
-fn ip_in_location(location: &str) -> Option<IpAddr> {
-    super::host_ip(location)
 }
 
 /// An `<UpdateItem>` document, leaving `installed` for the caller to fill.
@@ -2444,7 +2440,7 @@ pub fn format_hms(d: Duration) -> String {
 }
 
 /// `H:MM:SS` or `H:MM:SS.mmm`, as UPnP reports durations.
-pub fn parse_hms(text: &str) -> Option<Duration> {
+fn parse_hms(text: &str) -> Option<Duration> {
     let mut parts = text.split(':');
     let h: u64 = parts.next()?.parse().ok()?;
     let m: u64 = parts.next()?.parse().ok()?;
@@ -2771,12 +2767,12 @@ mod tests {
     #[test]
     fn an_address_comes_off_the_location_url() {
         assert_eq!(
-            ip_in_location("http://192.168.86.26:1400/xml/device_description.xml")
+            crate::sonos::host_ip("http://192.168.86.26:1400/xml/device_description.xml")
                 .map(|ip| ip.to_string()),
             Some("192.168.86.26".to_owned())
         );
-        assert_eq!(ip_in_location(""), None);
-        assert_eq!(ip_in_location("not a url"), None);
+        assert_eq!(crate::sonos::host_ip(""), None);
+        assert_eq!(crate::sonos::host_ip("not a url"), None);
     }
 
     /// The apps print `18.7 (build 96179270)`; the build is the wire version
