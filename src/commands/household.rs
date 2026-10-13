@@ -300,17 +300,35 @@ fn print_system(
     }
 }
 
-/// Every household a subnet sweep found, remembered. The `discover` and
-/// `households` half of what `session::connect`'s rescan also does; the
-/// discovering, the "found devices but none would talk" error and the
-/// remembering all live in `session::discover_households`, so the three
-/// callers cannot drift - which they had, once.
-async fn discover_and_remember_households(
-    scan: &discover::Scan,
-) -> Result<Vec<session::Discovered>> {
+/// Sweep the subnet and remember every household found, or `None` when no
+/// player answered at all. The `discover` and `households` half of what
+/// `session::connect`'s rescan also does; the discovering, the "found
+/// devices but none would talk" error and the remembering all live in
+/// `session::discover_households`, so the three callers cannot drift - which
+/// they had, once.
+///
+/// Sweeps it all: the point of stopping early was to avoid opening a session
+/// per responder, not to stop looking. Stopping at the first hit made a
+/// player that answers on 1400 but will not complete a WebSocket - mid
+/// reboot, host firewall - the end of the whole command.
+async fn sweep_and_remember() -> Result<Option<Vec<session::Discovered>>> {
+    let scan = discover::scan_local_subnet().await?;
+    // On a /16 only the local /24 was swept, and a household outside it is
+    // missing from what follows, not absent.
+    if let Some(prefix) = scan.narrowed_from {
+        eprintln!(
+            "Network is a /{prefix}, too large to sweep; scanned {} addresses in the local /24 only.",
+            scan.scanned
+        );
+    }
+    if scan.found.is_empty() {
+        return Ok(None);
+    }
     let mut state = State::load()?;
     let fingerprint = netid::network_fingerprint();
-    session::discover_households(&scan.found, &mut state, fingerprint.as_deref()).await
+    session::discover_households(&scan.found, &mut state, fingerprint.as_deref())
+        .await
+        .map(Some)
 }
 
 /// `x2rock discover`: sweep the network, and print (and remember) every
@@ -326,23 +344,10 @@ async fn discover_and_remember_households(
 pub async fn discover_and_remember() -> Result<()> {
     let network = discover::local_network()?;
     eprintln!("Scanning {}/{} ...", network.ip, network.prefix_len());
-    // Sweep it all: the point of stopping early was to avoid opening a session
-    // per responder, not to stop looking. Stopping at the first hit made a
-    // player that answers on 1400 but will not complete a WebSocket - mid
-    // reboot, host firewall - the end of the whole command.
-    let scan = discover::scan_local_subnet().await?;
-    if let Some(prefix) = scan.narrowed_from {
-        eprintln!(
-            "Network is a /{prefix}, too large to sweep; scanned {} addresses in the local /24 only.",
-            scan.scanned
-        );
-    }
-    if scan.found.is_empty() {
+    let Some(discovered) = sweep_and_remember().await? else {
         println!("No Sonos players found.");
         return Ok(());
-    }
-
-    let discovered = discover_and_remember_households(&scan).await?;
+    };
 
     let several = discovered.len() > 1;
     if several {
@@ -375,16 +380,7 @@ pub async fn discover_and_remember() -> Result<()> {
 /// this command has is telling two households apart *right now*; a cached
 /// answer could be the reason someone is confused in the first place.
 pub async fn run_households(json: bool, redact: bool) -> Result<()> {
-    let scan = discover::scan_local_subnet().await?;
-    // The same honesty `discover` has: on a /16 only the local /24 was swept,
-    // and a household outside it is missing from this list, not absent.
-    if let Some(prefix) = scan.narrowed_from {
-        eprintln!(
-            "Network is a /{prefix}, too large to sweep; scanned {} addresses in the local /24 only.",
-            scan.scanned
-        );
-    }
-    if scan.found.is_empty() {
+    let Some(discovered) = sweep_and_remember().await? else {
         println!(
             "{}",
             if json {
@@ -394,9 +390,7 @@ pub async fn run_households(json: bool, redact: bool) -> Result<()> {
             }
         );
         return Ok(());
-    }
-
-    let discovered = discover_and_remember_households(&scan).await?;
+    };
 
     // `masked`, not `masked_uuid`: a household id (`Sonos_…​.Zv1xanSF--vUn91aMpBs`,
     // a real one observed 2026-09-12) has real separators, unlike the bare hex
