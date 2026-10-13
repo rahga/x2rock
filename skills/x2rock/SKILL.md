@@ -1028,16 +1028,19 @@ those two apart when telling a user what linking will do.
   retries, so a search or browse just works, a second or so slower. Pandora's went stale in a day.
   At most one read per household every 10 minutes. Re-running `link --from-household` is only
   needed when that read cannot happen: a firewall, or no player reachable.
-- **Cloud browse/search fills the front-page gaps, but only if the person opted in.** When they
-  have their own Sonos integration set up and have run `x2rock login`, `browse` and `search` fall
-  back to Sonos's cloud content API for the pages the direct path cannot serve: **Amazon Music**'s
-  full Home, **Apple Music**'s shelves, and **YouTube Music**'s library *and search* (which its own
-  endpoint refuses, HTTP 403). It rides the person's own Sonos developer registration, so it is off
-  unless they set it up — x2rock ships no Sonos key. Nothing to pass: `browse`/`search` use it by
-  themselves when the direct answer is thin or refused. Services that already match the app
-  (Spotify, Deezer, TuneIn) are untouched. A row to descend carries a `cloud:…` id; pass it back to
-  `browse` as the container, same as any id. Playback is through the household registration as
-  usual, so a cloud-found track plays even for YouTube Music. CLI only; x2rocktv does not have this.
+- **Cloud browse/search fills the front-page gaps — but only for registered Sonos developers.**
+  It rides a Sonos account OAuth token minted against the person's *own* registered Sonos developer
+  integration, so it is available only to someone who has registered with Sonos's developer program,
+  saved their integration, and run `x2rock login`; x2rock ships no Sonos key, and for anyone who has
+  not done this it is simply off. For those who have, `browse` and `search` fall back to Sonos's
+  cloud content API for the pages the direct path cannot serve: **Amazon Music**'s full Home,
+  **Apple Music**'s shelves, and **YouTube Music**'s library *and search* (which its own endpoint
+  refuses, HTTP 403). Nothing to pass: `browse`/`search` use it by themselves when the direct answer
+  is thin or refused. Services that already match the app (Spotify, Deezer, TuneIn) are untouched. A
+  row to descend carries a `cloud:…` id; pass it back to `browse` as the container, same as any id.
+  Playback is through the household registration as usual, so a cloud-found track plays even for
+  YouTube Music. Do not present this as a feature a typical user can turn on — it needs a Sonos
+  developer registration. CLI only; x2rocktv does not have this.
 - **Apple Music searches Apple's public catalogue, not the household's account.** Its imported
   token cannot search or browse (Apple never provisions a usable one), so `search -s "Apple Music"`
   and the merged search ask the public iTunes catalogue instead, and the ids it returns

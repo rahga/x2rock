@@ -10049,10 +10049,12 @@ and OAuths under their own Sonos developer agreement — opt-in, only the most d
 
 ## Cloud browse and search, opt-in (2026-10-13)
 
-Built in the x2rock **CLI** (x2rocktv deliberately untouched) on exactly that shape. It reuses the
-existing account-OAuth layer (`sonos::login`, which already reads the person's own
-`sonos-integration.json`), so it is live only when they have set up their own Sonos integration and
-run `x2rock login`; otherwise `cloud::available()` is false and nothing here runs. `src/sonos/cloud.rs`:
+Built in the x2rock **CLI** (x2rocktv deliberately untouched) on exactly that shape, and available
+**only to registered Sonos developers**: it reuses the existing account-OAuth layer
+(`sonos::login`, which already reads the person's own `sonos-integration.json`), so it is live only
+for someone who has registered with Sonos's developer program, saved their own integration, and run
+`x2rock login`; otherwise `cloud::available()` is false and nothing here runs. Not a toggle a
+typical user can flip. `src/sonos/cloud.rs`:
 
 - **`serviceId = service_type` (`smapiId*256+schemaRev`), `accountId = sn_N` serial** — both already
   held, so no id is harvested. When the preferred account is a browser link with no serial, any
