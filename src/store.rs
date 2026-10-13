@@ -14,7 +14,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -48,6 +48,24 @@ pub fn config_path(file: &str) -> Result<PathBuf> {
 /// `$XDG_CACHE_HOME/x2rock/<sub>`: regenerable files, named for what fills them.
 pub fn cache_dir(sub: &str) -> Result<PathBuf> {
     Ok(dirs()?.cache_dir().join(sub))
+}
+
+/// Create a cache directory owner-only, tightening one that already exists:
+/// what is cached here came off the network on the owner's behalf - covers,
+/// spoken clips - and is nobody else's to read.
+pub fn owner_only_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restricting {}", dir.display()))
+}
+
+/// Mark a cached file as just used, by its modification time: access times
+/// are not reliable under `relatime` or `noatime`, and a cache pruned
+/// least-recently-used needs to know.
+pub fn touch(path: &Path) {
+    if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 /// `<file>.<ext>` beside `path`.
