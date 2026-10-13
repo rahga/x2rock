@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::sonos::http;
-use crate::sonos::smapi::{Category, Item, TIMEOUT};
+use crate::sonos::smapi::{self, Category, Item, TIMEOUT};
 
 /// Apple Music's service id in Sonos's catalogue.
 pub const SERVICE_ID: &str = "204";
@@ -96,14 +96,7 @@ pub async fn search(
     if status != 200 {
         bail!("Apple's catalogue answered HTTP {status}");
     }
-    let items = parse(&body)?;
-    let total = items.len() as u32;
-    let page = items
-        .into_iter()
-        .skip(index as usize)
-        .take(count as usize)
-        .collect();
-    Ok((page, total))
+    Ok(smapi::page(parse(&body)?, index, count))
 }
 
 /// The storefront to search: the region of the locale, else the US.
