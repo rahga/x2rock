@@ -532,25 +532,33 @@ impl Bookmarks {
         self.items.push(bookmark);
 
         // Evict the oldest unpinned beyond the cap. Anything with no timestamp
-        // predates the history and is treated as oldest.
-        let mut unpinned: Vec<usize> = self
+        // predates the history and is treated as oldest. Everything older than
+        // the cutoff goes; of those stamped exactly at it, the earliest in the
+        // list go first, until the cap is met.
+        let played = |b: &Bookmark| b.last_played.unwrap_or(0);
+        let mut stamps: Vec<u64> = self
             .items
             .iter()
-            .enumerate()
-            .filter(|(_, b)| !b.pinned)
-            .map(|(i, _)| i)
+            .filter(|b| !b.pinned)
+            .map(played)
             .collect();
-        if unpinned.len() > RECENT_CAP {
-            unpinned.sort_by_key(|&i| self.items[i].last_played.unwrap_or(0));
-            let doomed: std::collections::HashSet<usize> = unpinned[..unpinned.len() - RECENT_CAP]
-                .iter()
-                .copied()
-                .collect();
-            let mut i = 0;
-            self.items.retain(|_| {
-                let keep = !doomed.contains(&i);
-                i += 1;
-                keep
+        if stamps.len() > RECENT_CAP {
+            let excess = stamps.len() - RECENT_CAP;
+            stamps.sort_unstable();
+            let cutoff = stamps[excess - 1];
+            let mut at_cutoff = excess - stamps.iter().filter(|&&t| t < cutoff).count();
+            self.items.retain(|b| {
+                let t = played(b);
+                if b.pinned || t > cutoff {
+                    true
+                } else if t < cutoff {
+                    false
+                } else if at_cutoff > 0 {
+                    at_cutoff -= 1;
+                    false
+                } else {
+                    true
+                }
             });
         }
         true
@@ -1014,6 +1022,21 @@ mod tests {
         // The five oldest went, the newest stayed.
         assert!(!list.items.iter().any(|b| b.object_id == "o0"));
         assert!(list.items.iter().any(|b| b.object_id == "o54"));
+    }
+
+    #[test]
+    fn history_evicts_untimed_entries_earliest_in_the_list_first() {
+        // Entries from before the history have no timestamp and tie as oldest;
+        // the tie goes to list order.
+        let mut list = Bookmarks::default();
+        for i in 0..RECENT_CAP {
+            list.items.push(bm(&format!("t{i}"), &format!("o{i}")));
+        }
+        list.note(bm("new", "fresh"), 7);
+        assert_eq!(list.items.len(), RECENT_CAP);
+        assert!(!list.items.iter().any(|b| b.object_id == "o0"));
+        assert!(list.items.iter().any(|b| b.object_id == "o1"));
+        assert!(list.items.iter().any(|b| b.object_id == "fresh"));
     }
 
     #[test]
