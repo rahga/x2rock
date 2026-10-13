@@ -181,13 +181,20 @@ impl Config {
 
     /// Written at 0600 whatever is in it: the file exists to hold a key.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let copy = Config {
+        /// The file as written: the config borrowed, stamped with [`SCHEMA`].
+        #[derive(Serialize)]
+        struct OnDisk<'a> {
+            schema: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            provider: Option<&'a str>,
+            providers: &'a BTreeMap<String, ProviderConfig>,
+        }
+        let file = OnDisk {
             schema: SCHEMA,
-            changed: false,
-            provider: self.provider.clone(),
-            providers: self.providers.clone(),
+            provider: self.provider.as_deref(),
+            providers: &self.providers,
         };
-        store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
+        store::write_atomically(path, &serde_json::to_string_pretty(&file)?, store::SECRET)
     }
 
     /// The provider's entry, for writing; marks the config as changed.
@@ -300,28 +307,30 @@ impl Synth {
         model: Option<&str>,
     ) -> Result<Synth> {
         let kind = config.kind(provider)?;
-        let saved = config.providers.get(kind.id()).cloned().unwrap_or_default();
+        let saved = config.providers.get(kind.id());
+        // One setting as saved, if it was.
+        let stored = |field: fn(&ProviderConfig) -> &Option<String>| {
+            saved.and_then(|s| field(s).as_deref()).map(str::to_string)
+        };
         let key = std::env::var(kind.env_key())
             .ok()
             .filter(|k| !k.trim().is_empty())
-            .or(saved.api_key)
+            .or_else(|| stored(|s| &s.api_key))
             .ok_or_else(|| not_configured(kind))?;
         Ok(Synth {
             kind,
             key,
-            base_url: saved
-                .base_url
-                .unwrap_or_else(|| kind.base_url().to_string()),
+            base_url: stored(|s| &s.base_url).unwrap_or_else(|| kind.base_url().to_string()),
             voice: voice
                 .map(str::to_string)
-                .or(saved.voice)
+                .or_else(|| stored(|s| &s.voice))
                 .unwrap_or_else(|| kind.default_voice().to_string()),
             model: model
                 .map(str::to_string)
-                .or(saved.model)
+                .or_else(|| stored(|s| &s.model))
                 .unwrap_or_else(|| kind.default_model().to_string()),
-            remembered: saved.voices,
-            remembered_at: saved.voices_at,
+            remembered: saved.map(|s| s.voices.clone()).unwrap_or_default(),
+            remembered_at: saved.and_then(|s| s.voices_at),
         })
     }
 
@@ -338,13 +347,10 @@ impl Synth {
         format!("{:x}", hasher.finalize())
     }
 
-    fn headers(&self) -> Vec<(&str, &str)> {
+    /// The provider's auth header, and `Accept` for what is wanted back.
+    fn headers<'a>(&'a self, accept: &'a str) -> Vec<(&'a str, &'a str)> {
         match self.kind {
-            Kind::ElevenLabs => vec![
-                ("xi-api-key", self.key.as_str()),
-                ("Content-Type", "application/json"),
-                ("Accept", "audio/mpeg"),
-            ],
+            Kind::ElevenLabs => vec![("xi-api-key", self.key.as_str()), ("Accept", accept)],
         }
     }
 
@@ -360,8 +366,10 @@ impl Synth {
                 json!({ "text": text, "model_id": self.model }).to_string(),
             ),
         };
+        let mut headers = self.headers("audio/mpeg");
+        headers.push(("Content-Type", "application/json"));
         let (status, head, bytes) =
-            http::post_bytes(&url, &self.headers(), &body, TIMEOUT, MAX_BYTES).await?;
+            http::post_bytes(&url, &headers, &body, TIMEOUT, MAX_BYTES).await?;
         if status != 200 {
             return Err(self.refusal(status, &bytes, "making the clip"));
         }
@@ -388,10 +396,7 @@ impl Synth {
                 let url = format!("{}/v2/voices?page_size=100", self.base_url);
                 let (status, _head, bytes) = http::get_bytes_with(
                     &url,
-                    &[
-                        ("xi-api-key", self.key.as_str()),
-                        ("Accept", "application/json"),
-                    ],
+                    &self.headers("application/json"),
                     TIMEOUT,
                     MAX_BYTES,
                 )
