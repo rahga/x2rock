@@ -45,7 +45,7 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::hint::{Code, Hint};
+use crate::hint::{self, Code, Hint, Match};
 use crate::sonos::http;
 use crate::store;
 
@@ -501,18 +501,10 @@ fn looks_like_voice_id(kind: Kind, value: &str) -> bool {
 /// matches are an error naming them, since guessing between voices is worse
 /// than asking.
 fn find_voice(voices: &[Voice], query: &str) -> Result<Option<String>> {
-    let wanted = query.to_lowercase();
-    if let Some(v) = voices.iter().find(|v| v.name.to_lowercase() == wanted) {
-        return Ok(Some(v.id.clone()));
-    }
-    let partial: Vec<_> = voices
-        .iter()
-        .filter(|v| v.name.to_lowercase().contains(&wanted))
-        .collect();
-    match partial.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some(one.id.clone())),
-        several => bail!(
+    match hint::pick_unique(voices, |v| v.name.as_str(), query, |n, q| n.contains(q)) {
+        Match::None => Ok(None),
+        Match::One(v) => Ok(Some(v.id.clone())),
+        Match::Several(several) => bail!(
             "{query:?} matches several voices: {} - name one in full, or give its id",
             several
                 .iter()
