@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::RateDirection;
+use crate::commands::speaker::HomeTheater;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -453,9 +454,8 @@ pub enum Intent {
     Rate(String, RateDirection),
     /// Set the room's sleep timer, or with `None` cancel it.
     Sleep(String, Option<Duration>),
-    /// Night sound (`NightMode`) or speech enhancement (`DialogLevel`) on the
-    /// room's soundbar.
-    HomeTheater(String, &'static str, bool),
+    /// Night sound or speech enhancement on the room's soundbar.
+    HomeTheater(String, HomeTheater, bool),
 }
 
 impl Intent {
@@ -982,8 +982,8 @@ impl App {
             KeyCode::Char('L') => self.rate(RateDirection::Unfavorite),
             KeyCode::Char('b') => self.rate(RateDirection::Down),
             KeyCode::Char('z') => self.cycle_sleep(),
-            KeyCode::Char('N') => self.home_theater(NIGHT),
-            KeyCode::Char('D') => self.home_theater(SPEECH),
+            KeyCode::Char('N') => self.home_theater(HomeTheater::Night),
+            KeyCode::Char('D') => self.home_theater(HomeTheater::Speech),
             _ => Intent::Nothing,
         }
     }
@@ -1038,29 +1038,23 @@ impl App {
 
     /// Toggle night sound or speech enhancement, on a room whose soundbar
     /// publishes it.
-    fn home_theater(&mut self, (setting, what): (&'static str, &'static str)) -> Intent {
+    fn home_theater(&mut self, setting: HomeTheater) -> Intent {
         let Some(room) = self.selected() else {
             return Intent::Nothing;
         };
-        let now = match setting {
-            "NightMode" => room.night_mode,
-            _ => room.enhance_dialog,
-        };
-        let Some(now) = now else {
+        let Some(now) = setting_of(room, setting) else {
             return Intent::Nothing;
         };
         if room.upnp_off {
             self.status = Some(Status::note(format!(
-                "UPnP is off for this household, and {what} is set over it"
+                "UPnP is off for this household, and {} is set over it",
+                setting.label()
             )));
             return Intent::Nothing;
         }
         let name = room.room.clone();
         if let Some(room) = self.selected_mut() {
-            match setting {
-                "NightMode" => room.night_mode = Some(!now),
-                _ => room.enhance_dialog = Some(!now),
-            }
+            *setting_of_mut(room, setting) = Some(!now);
         }
         Intent::HomeTheater(name, setting, !now)
     }
@@ -1331,10 +1325,22 @@ impl App {
 /// The Sonos app's sleep timer choices, in minutes.
 const SLEEP_STEPS: [u64; 5] = [15, 30, 45, 60, 90];
 
-/// The `UPnP SetEQ` names of the two soundbar settings, and what they are
-/// called on screen.
-const NIGHT: (&str, &str) = ("NightMode", "night sound");
-const SPEECH: (&str, &str) = ("DialogLevel", "speech enhancement");
+/// Where a room's row keeps a soundbar setting, as the daemon last published
+/// it - `None` for a room with no soundbar to have it.
+fn setting_of(room: &RoomSnapshot, setting: HomeTheater) -> Option<bool> {
+    match setting {
+        HomeTheater::Night => room.night_mode,
+        HomeTheater::Speech => room.enhance_dialog,
+    }
+}
+
+/// [`setting_of`], to change it ahead of the daemon's word.
+fn setting_of_mut(room: &mut RoomSnapshot, setting: HomeTheater) -> &mut Option<bool> {
+    match setting {
+        HomeTheater::Night => &mut room.night_mode,
+        HomeTheater::Speech => &mut room.enhance_dialog,
+    }
+}
 
 /// The next sleep timer after `left`: the first step more than a minute past
 /// it, so a press on a timer just set moves on rather than resetting it, and
@@ -1824,11 +1830,11 @@ mod tests {
         }]);
         assert_eq!(
             press(&mut bar, 'N'),
-            Intent::HomeTheater("Living Room".into(), "NightMode", true)
+            Intent::HomeTheater("Living Room".into(), HomeTheater::Night, true)
         );
         assert_eq!(
             press(&mut bar, 'D'),
-            Intent::HomeTheater("Living Room".into(), "DialogLevel", false)
+            Intent::HomeTheater("Living Room".into(), HomeTheater::Speech, false)
         );
         let mut speaker = App::new(vec![room("Kitchen")]);
         assert_eq!(press(&mut speaker, 'N'), Intent::Nothing);
