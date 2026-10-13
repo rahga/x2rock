@@ -729,9 +729,17 @@ async fn front_root(
             let mut items = page.shelves();
             match root {
                 Ok((rows, _)) => {
+                    // Dropped by id, and by title: TuneIn's page and its root
+                    // both have Music, News & Talk and Sports, under different
+                    // ids, and listing each twice reads as a bug (2026-10-12).
                     let rest: Vec<_> = rows
                         .into_iter()
-                        .filter(|row| items.iter().all(|shelf| shelf.id != row.id))
+                        .filter(|row| {
+                            items.iter().all(|shelf| {
+                                shelf.id != row.id
+                                    && !shelf.title.trim().eq_ignore_ascii_case(row.title.trim())
+                            })
+                        })
                         .collect();
                     items.extend(rest);
                 }

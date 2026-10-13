@@ -9973,6 +9973,32 @@ unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, a
   search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
   played in the office before.
 
+## Every service's front page, against the Sonos app on a phone (home, 2026-10-12)
+
+The Sonos app (Android, app 90) was driven over adb on a phone and each service's page read from
+the UI tree, scrolled to its end, then compared with `x2rock browse -s <service>` (root). Eighteen
+services:
+
+| service | app's page | x2rock |
+|---|---|---|
+| TIDAL, Qobuz, SoundCloud, Saavn, iHeartRadio, Plex, Radio Paradise, Bandcamp, Audible | the SMAPI root's own entries | **identical**, entry for entry. Audible's app page is the same seven marketplaces |
+| Spotify, Deezer, TuneIn (New), Sonos Radio, SiriusXM | the manifest `browse` page's shelves | **every shelf**, in the app's order, then SMAPI root's extras (Spotify's Charts, Genres and Moods; Deezer's Flow, Popular, …). Spotify's page has two shelves both titled "More like Tyler, The Creator", in the app too |
+| Pandora | My Stations | My Stations - after re-importing the token (below) |
+| **Amazon Music** | Collections (Library, *Explore Podcasts*, User Playlists), then *Followed Playlists, Songs for You, Your Frequent Plays, Hot Playlists, Podcasts You May Like, Albums for You, New Releases for You, Pop, Trending Songs, Playlists for You* | Library and User Playlists only. The rest is Amazon's Home endpoint (`sonos.smapi.amazonmusic.com/api/home`), which refuses a bearer token (401) |
+| **Apple Music** | 22 shelves: Library, Top Picks for You, Playlists Made for You, Stations for You, Daily Top 100, Radio Shows, Stations by Genre, … | nothing: the household's Apple token is refused for browse (`InvalidTokenException`) |
+| **YouTube Music** | Home, Library, My Supermix | nothing: Google's project gate (HTTP 403) |
+
+**Fixed the same day: TuneIn listed Music, News & Talk and Sports twice**, once from the page and
+once from SMAPI's root, under different ids. The merge now drops a root entry whose title matches a
+shelf as well as one whose id does. TuneIn's root is 24 rows, down from 27.
+
+**Found the same day: a household token can go stale under x2rock.** Pandora's, imported on
+2026-10-11, was refused a day later with **"Failed to reauth device id"**: it had expired, and the
+refresh SMAPI offers failed for x2rock. The Sonos app was working, so the household had a fresh one;
+`link --from-household Pandora` read it and browse worked again. Not built yet: re-reading the
+household's token when an imported one is refused (it needs the event callback, and a decision
+about doing that inside an ordinary command).
+
 ## Plex on the home household: a VPN on the server's PC, then a reauthorization (2026-10-12)
 
 Linked with `x2rock link plex` before Plex was in the household, as a "before" picture. Then the
