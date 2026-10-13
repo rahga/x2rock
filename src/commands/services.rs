@@ -1319,6 +1319,69 @@ async fn favorite_container(
     Ok((service.name.clone(), id.to_owned()))
 }
 
+/// What `browse` and `search` both start from: a player if one answers, the
+/// catalogue brought up to date against it, the store, and which household's
+/// tokens apply.
+struct Opening {
+    reached: Result<session::Session>,
+    catalogue: catalogue::Catalogue,
+    /// Whether the refresh changed the catalogue and it is not yet saved.
+    dirty: bool,
+    linked: credentials::Credentials,
+    rooms: BTreeMap<String, Vec<String>>,
+    household: String,
+}
+
+impl Opening {
+    /// Connect, refresh the catalogue - saving it at once when `save_now`,
+    /// else leaving that to the caller through `dirty` - and resolve the
+    /// household.
+    ///
+    /// A player is wanted but not required: with none, the cached catalogue
+    /// serves. Nothing cached and nothing to ask is the one case with no useful
+    /// answer, so it gives the connection's own error rather than a
+    /// second-hand one about an empty catalogue - re-wrapped so the message is
+    /// this command's, but with the code kept: a `--json` caller branches on
+    /// `no_player`, and a plain string would degrade it to `unknown`.
+    async fn open(
+        ip: Option<IpAddr>,
+        household: Option<&str>,
+        room: Option<&str>,
+        refresh: bool,
+        save_now: bool,
+    ) -> Result<Self> {
+        let mut state = State::load()?;
+        let reached = session::connect(ip, &mut state, household, room).await;
+        let mut catalogue = catalogue::Catalogue::load();
+        let mut dirty = false;
+        match &reached {
+            Ok(session) => {
+                let upnp = Upnp::new(session.connection.ip());
+                if save_now {
+                    catalogue.refresh_and_save(&upnp, refresh).await?;
+                } else {
+                    dirty = catalogue.refresh(&upnp, refresh).await?;
+                }
+            }
+            Err(e) if catalogue.services().is_empty() => {
+                return Err(hint::no_player(e, format!("{e:#}")));
+            }
+            Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
+        }
+        let linked = credentials::Credentials::load()?;
+        let rooms = state.household_rooms();
+        let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
+        Ok(Self {
+            reached,
+            catalogue,
+            dirty,
+            linked,
+            rooms,
+            household,
+        })
+    }
+}
+
 /// `x2rock browse`: a music service's own containers, walked one level at a time.
 ///
 /// The half of a linked service that `search` cannot reach. "Play something from
@@ -1342,30 +1405,16 @@ pub async fn run_browse(
     refresh: bool,
     json: bool,
 ) -> Result<()> {
-    let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state, household, room).await;
+    let Opening {
+        reached,
+        mut catalogue,
+        mut linked,
+        rooms,
+        household,
+        ..
+    } = Opening::open(ip, household, room, refresh, true).await?;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
-
-    let mut catalogue = catalogue::Catalogue::load();
-    match &reached {
-        Ok(session) => {
-            catalogue
-                .refresh_and_save(&Upnp::new(session.connection.ip()), refresh)
-                .await?;
-        }
-        // Re-wrapped so the message is this command's, but with the code kept:
-        // a `--json` caller branches on `no_player`, and a plain string would
-        // degrade it to `unknown`.
-        Err(e) if catalogue.services().is_empty() => {
-            return Err(hint::no_player(e, format!("{e:#}")));
-        }
-        Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
-    }
-
-    let mut linked = credentials::Credentials::load()?;
-    let rooms = state.household_rooms();
-    let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
     // Everything reachable, which is wider than what `search` offers. Browsing
     // needs an endpoint and, for a linked service, a token; searching needs a
     // published search category on top of that. This comment used to say the
@@ -1642,32 +1691,18 @@ pub async fn run_search(
     refresh: bool,
     json: bool,
 ) -> Result<()> {
-    let mut state = State::load()?;
-    let reached = session::connect(ip, &mut state, household, room).await;
+    // Saved once, at the end of whichever path is taken, rather than for the
+    // refresh and again for what the search itself learns.
+    let Opening {
+        reached,
+        mut catalogue,
+        mut dirty,
+        mut linked,
+        rooms,
+        household,
+    } = Opening::open(ip, household, room, refresh, false).await?;
     let live =
         || -> Result<&session::Session> { reached.as_ref().map_err(hint::no_player_to_play) };
-
-    let mut catalogue = catalogue::Catalogue::load();
-    let mut dirty = false;
-    match &reached {
-        Ok(session) => {
-            dirty = catalogue
-                .refresh(&Upnp::new(session.connection.ip()), refresh)
-                .await?;
-        }
-        Err(e) if catalogue.services().is_empty() => {
-            // Nothing cached and nothing to ask: this is the one case with no
-            // useful answer, so give the connection's own error rather than a
-            // second-hand one about an empty catalogue - with its code kept, so
-            // `--json` still says `no_player`.
-            return Err(hint::no_player(e, format!("{e:#}")));
-        }
-        Err(e) => eprintln!("x2rock: no player reached, using the cached catalogue ({e:#})"),
-    }
-
-    let mut linked = credentials::Credentials::load()?;
-    let rooms = state.household_rooms();
-    let household = current_household(reached.as_ref().ok(), &linked, household, &rooms).await;
 
     // A term with no service is the merged search. Checked before the listing
     // below, which is what a bare term used to fall into: it printed the
