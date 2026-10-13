@@ -1242,22 +1242,7 @@ pub async fn device_link_code(service: &Service, household: &str) -> Result<Link
         service.name,
         service.auth
     );
-    let body = match call_soap(
-        service,
-        None,
-        "getDeviceLinkCode",
-        &format!("<householdId>{}</householdId>", xml_escape(household)),
-    )
-    .await?
-    {
-        Ok(body) => body,
-        Err(fault) => bail!(
-            "{} refused getDeviceLinkCode: {}",
-            service.name,
-            fault.message
-        ),
-    };
-    parse_link_code(&service.name, "getDeviceLinkCode", &body)
+    link_code(service, None, "getDeviceLinkCode", household, |_| "").await
 }
 
 /// Ask an app-link service where to send the person.
@@ -1291,23 +1276,36 @@ pub async fn app_link_code(service: &Service, household: &str) -> Result<LinkCod
         // asking for the link in the first place.
         ..Default::default()
     };
-    let body = match call_soap(
+    link_code(
         service,
         Some(&empty),
         "getAppLink",
-        &format!("<householdId>{}</householdId>", xml_escape(household)),
+        household,
+        sealed_key_note,
     )
-    .await?
-    {
-        Ok(body) => body,
+    .await
+}
+
+/// Ask for a link code with `action`, which both flows send the household id
+/// to: a fault is an error, with whatever `note` adds to it, and a reply is
+/// read by [`parse_link_code`].
+async fn link_code(
+    service: &Service,
+    token: Option<&Token>,
+    action: &str,
+    household: &str,
+    note: fn(&Fault) -> &'static str,
+) -> Result<LinkCode> {
+    let params = format!("<householdId>{}</householdId>", xml_escape(household));
+    match call_soap(service, token, action, &params).await? {
+        Ok(body) => parse_link_code(&service.name, action, &body),
         Err(fault) => bail!(
-            "{} refused getAppLink: {}{}",
+            "{} refused {action}: {}{}",
             service.name,
             fault.message,
-            sealed_key_note(&fault)
+            note(&fault)
         ),
-    };
-    parse_link_code(&service.name, "getAppLink", &body)
+    }
 }
 
 /// The sentence to add when a service refuses the *caller* rather than the
