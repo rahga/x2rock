@@ -274,18 +274,7 @@ impl Connection {
             .map_err(|e| Unreachable::error(format!("connecting to player at {ip}:{PORT}: {e}")))?;
         let (sink, stream) = socket.split();
 
-        let (events, _) = broadcast::channel(256);
-        let inner = Arc::new(Inner {
-            ip,
-            sink: tokio::sync::Mutex::new(Some(sink)),
-            pending: Mutex::new(Pending::default()),
-            events,
-            next_id: AtomicU64::new(1),
-            household_id: Mutex::new(None),
-            last_rx: Mutex::new(Instant::now()),
-            alive: AtomicBool::new(true),
-            shutdown: Notify::new(),
-        });
+        let inner = Arc::new(Inner::new(ip, sink));
         tokio::spawn(read_loop(inner.clone(), stream));
         tokio::spawn(keepalive(inner.clone()));
         Ok(Self { inner })
@@ -432,6 +421,23 @@ impl Connection {
 }
 
 impl Inner {
+    /// A fresh connection's state around its write half: nothing pending,
+    /// alive, and heard from just now.
+    fn new(ip: IpAddr, sink: SplitSink<Socket, Message>) -> Self {
+        let (events, _) = broadcast::channel(256);
+        Self {
+            ip,
+            sink: tokio::sync::Mutex::new(Some(sink)),
+            pending: Mutex::new(Pending::default()),
+            events,
+            next_id: AtomicU64::new(1),
+            household_id: Mutex::new(None),
+            last_rx: Mutex::new(Instant::now()),
+            alive: AtomicBool::new(true),
+            shutdown: Notify::new(),
+        }
+    }
+
     /// Route one incoming frame: a reply to whoever is waiting for it, anything
     /// else out as an event.
     fn dispatch(&self, text: &str) {
@@ -557,18 +563,7 @@ mod tests {
         )
         .await;
         let (sink, _stream) = socket.split();
-        let (events, _) = broadcast::channel(16);
-        let inner = Arc::new(Inner {
-            ip: "127.0.0.1".parse().unwrap(),
-            sink: tokio::sync::Mutex::new(Some(sink)),
-            pending: Mutex::new(Pending::default()),
-            events,
-            next_id: AtomicU64::new(1),
-            household_id: Mutex::new(None),
-            last_rx: Mutex::new(Instant::now()),
-            alive: AtomicBool::new(true),
-            shutdown: Notify::new(),
-        });
+        let inner = Arc::new(Inner::new("127.0.0.1".parse().unwrap(), sink));
         (Connection { inner }, theirs)
     }
 
