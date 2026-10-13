@@ -48,18 +48,14 @@ pub fn serves(service_id: &str) -> bool {
 /// headings, each sent as the category iHeart actually files it under.
 pub fn categories() -> &'static [Category] {
     static CATEGORIES: LazyLock<Vec<Category>> = LazyLock::new(|| {
-        [
-            ("stations", "artists"),
-            ("live", "stations"),
-            ("podcasts", "podcasts"),
-        ]
-        .into_iter()
-        .map(|(id, mapped)| Category {
-            id: id.into(),
-            mapped_id: mapped.into(),
-            default: true,
-        })
-        .collect()
+        Category::fixed(
+            &[
+                ("stations", "artists"),
+                ("live", "stations"),
+                ("podcasts", "podcasts"),
+            ],
+            true,
+        )
     });
     &CATEGORIES
 }

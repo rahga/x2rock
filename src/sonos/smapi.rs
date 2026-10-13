@@ -395,6 +395,21 @@ pub struct Category {
     pub default: bool,
 }
 
+impl Category {
+    /// A category list x2rock fixes itself rather than reading off a
+    /// presentation map: `(id, mapped_id)` pairs, all `default` or none.
+    pub fn fixed(pairs: &[(&str, &str)], default: bool) -> Vec<Category> {
+        pairs
+            .iter()
+            .map(|&(id, mapped)| Category {
+                id: id.into(),
+                mapped_id: mapped.into(),
+                default,
+            })
+            .collect()
+    }
+}
+
 /// Parse the descriptor list `MusicServices ListAvailableServices` returns.
 ///
 /// The list is every service Sonos knows about, not the household's - there is

@@ -48,16 +48,8 @@ const MAX_LIMIT: u32 = 200;
 /// same thing. Artists are left out: an `artist:` id is a container of albums,
 /// and opening one takes the SMAPI `getMetadata` that Apple refuses.
 pub fn categories() -> &'static [Category] {
-    static CATEGORIES: LazyLock<Vec<Category>> = LazyLock::new(|| {
-        [("tracks", "song"), ("albums", "album")]
-            .into_iter()
-            .map(|(id, mapped)| Category {
-                default: false,
-                id: id.into(),
-                mapped_id: mapped.into(),
-            })
-            .collect()
-    });
+    static CATEGORIES: LazyLock<Vec<Category>> =
+        LazyLock::new(|| Category::fixed(&[("tracks", "song"), ("albums", "album")], false));
     &CATEGORIES
 }
 
