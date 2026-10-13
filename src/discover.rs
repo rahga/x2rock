@@ -44,14 +44,8 @@ impl LocalNetwork {
 
     /// Addresses in the subnet, excluding network, broadcast and ourselves.
     fn hosts(&self) -> Vec<Ipv4Addr> {
-        let mask = u32::from(self.netmask);
-        let base = u32::from(self.ip) & mask;
-        let total = (!mask).wrapping_add(1);
-
-        if self.host_count() == 0 {
-            return vec![];
-        }
-        (1..total - 1)
+        let base = u32::from(self.ip) & u32::from(self.netmask);
+        (1..=self.host_count())
             .map(|offset| Ipv4Addr::from(base + offset))
             .filter(|&ip| ip != self.ip)
             .collect()
@@ -68,9 +62,8 @@ impl LocalNetwork {
 
 /// Our address on the network we are attached to, learned without sending anything.
 fn local_ipv4() -> Result<Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect("203.0.113.1:80")?;
-    match socket.local_addr()?.ip() {
+    // Toward a documentation address (TEST-NET-3): only the route matters.
+    match crate::netid::local_ip_toward(Ipv4Addr::new(203, 0, 113, 1).into())? {
         IpAddr::V4(v4) => Ok(v4),
         IpAddr::V6(_) => Err(anyhow!("no IPv4 address on this network")),
     }
