@@ -50,6 +50,11 @@ const STEP: i16 = 5;
 /// short enough that a single tap still feels like it landed. The bar moves on
 /// the keypress regardless; this is only about what is sent.
 const COALESCE: Duration = Duration::from_millis(120);
+/// How long the cursor has to rest on a room before its sleep timer is read.
+/// Each read re-reads the topology and asks a speaker over SOAP, so holding an
+/// arrow key down the list sent one per row passed; this way only the row it
+/// stops on is asked.
+const SETTLE: Duration = Duration::from_millis(150);
 /// How long an error stays up whatever is pressed. Keys typed while a slow
 /// action ran are delivered the instant it returns, and without this they would
 /// wipe the message before anyone had read it.
@@ -152,11 +157,13 @@ async fn drive(
     let mut in_flight: usize = 0;
     let mut reread_pending = false;
     // Sleep timers, read off the speakers: every room's at the start, and a
-    // room's again whenever the cursor lands on it. See `App::sleep`.
+    // room's again whenever the cursor settles on it. See `App::sleep`.
     let (slept, mut sleeps) = mpsc::unbounded_channel::<(String, Option<Duration>)>();
     for room in app.rooms() {
         read_sleep(speakers, &room.room, &slept);
     }
+    // The room the cursor last landed on, and when its read is due. See SETTLE.
+    let mut landed: Option<(String, tokio::time::Instant)> = None;
 
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
@@ -170,7 +177,7 @@ async fn drive(
                     if let Some(now) = app.selected().map(|room| room.room.clone())
                         && before.as_ref() != Some(&now)
                     {
-                        read_sleep(speakers, &now, &slept);
+                        landed = Some((now, tokio::time::Instant::now() + SETTLE));
                     }
                     intent
                 }
@@ -184,6 +191,12 @@ async fn drive(
             _ = tokio::time::sleep_until(pending.as_ref().map_or_else(tokio::time::Instant::now, |p| p.1)), if pending.is_some() => {
                 if let Some((nudge, _)) = pending.take() {
                     flush(source, speakers, nudge, &mut in_flight, &finished);
+                }
+                continue;
+            },
+            _ = tokio::time::sleep_until(landed.as_ref().map_or_else(tokio::time::Instant::now, |l| l.1)), if landed.is_some() => {
+                if let Some((room, _)) = landed.take() {
+                    read_sleep(speakers, &room, &slept);
                 }
                 continue;
             },
