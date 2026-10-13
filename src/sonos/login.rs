@@ -251,7 +251,7 @@ pub async fn catch_redirect(
              <title>x2rock: {title}</title></head><body style=\"font:16px system-ui;\
              max-width:40em;margin:4em auto;padding:0 1em\"><h1>{title}</h1><p>{}</p>\
              </body></html>",
-            line.replace('&', "&amp;").replace('<', "&lt;")
+            super::xml_escape(&line)
         );
         let _ = socket
             .write_all(
