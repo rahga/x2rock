@@ -702,7 +702,7 @@ async fn publish(wiring: &mut Wiring<'_>, groups: &Groups) -> Result<Vec<Server<
     for group in &groups.groups {
         let room = room_of(groups, group);
         let suffix = bus_suffix_among(&room, &names);
-        match publish_group(wiring, groups, group, &suffix).await {
+        match publish_group(wiring, groups, group, &room, &suffix).await {
             Ok(server) => {
                 log(&format!("{room} -> {}{suffix}", crate::mpris::BUS_PREFIX));
                 names.insert(suffix);
@@ -739,12 +739,14 @@ struct Wiring<'a> {
     forwarders: &'a mut Vec<JoinHandle<()>>,
 }
 
-/// One group's player: seeded from its coordinator, named `suffix` on the bus,
-/// subscribed to what keeps it current.
+/// One group's player: seeded from its coordinator, named `room` (as
+/// [`room_of`] has it) and `suffix` on the bus, subscribed to what keeps it
+/// current.
 async fn publish_group(
     wiring: &mut Wiring<'_>,
     groups: &Groups,
     group: &proto::Group,
+    room: &str,
     suffix: &str,
 ) -> Result<Server<RoomPlayer>> {
     let coordinator_ip = groups.player(&group.coordinator_id).and_then(Player::ip);
@@ -762,7 +764,7 @@ async fn publish_group(
     let player = RoomPlayer::new(
         conn.clone(),
         group.id.clone(),
-        room_of(groups, group),
+        room.to_owned(),
         members.clone(),
         has_tv_input,
     );
@@ -815,9 +817,7 @@ async fn publish_group(
                             if let Some(options) = settings.home_theater {
                                 let properties =
                                     server.imp().apply_home_theater(id, &(&options).into());
-                                if let Err(e) = server.properties_changed(properties).await {
-                                    log(&format!("{name}: {e:#}"));
-                                }
+                                announce(&server, properties).await;
                             }
                         }
                         Err(e) => log(&format!("{name}: no night/dialog state ({e:#})")),
