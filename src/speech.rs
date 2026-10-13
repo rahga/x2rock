@@ -81,7 +81,7 @@ impl Kind {
     }
 
     /// The vendor's own environment variable for its key; set, it wins.
-    pub fn env_key(self) -> &'static str {
+    fn env_key(self) -> &'static str {
         match self {
             Kind::ElevenLabs => "ELEVENLABS_API_KEY",
         }
@@ -201,7 +201,7 @@ impl Config {
     }
 
     /// Keep a freshly listed voice list for `kind`, replacing the last.
-    pub fn remember_voices(&mut self, kind: Kind, voices: Vec<Voice>) {
+    fn remember_voices(&mut self, kind: Kind, voices: Vec<Voice>) {
         let entry = self.provider_mut(kind);
         entry.voices = voices;
         entry.voices_at = Some(crate::credentials::now());
@@ -499,7 +499,7 @@ fn looks_like_voice_id(kind: Kind, value: &str) -> bool {
 /// unique partial match. `Ok(None)` when nothing matches; several partial
 /// matches are an error naming them, since guessing between voices is worse
 /// than asking.
-pub fn find_voice(voices: &[Voice], query: &str) -> Result<Option<String>> {
+fn find_voice(voices: &[Voice], query: &str) -> Result<Option<String>> {
     let wanted = query.to_lowercase();
     if let Some(v) = voices.iter().find(|v| v.name.to_lowercase() == wanted) {
         return Ok(Some(v.id.clone()));
