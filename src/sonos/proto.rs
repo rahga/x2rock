@@ -112,6 +112,15 @@ impl Player {
         super::host_ip(&self.websocket_url)
     }
 
+    /// [`ip`](Self::ip), or the error every per-speaker path gives when the
+    /// player reported no address - a speaker-scoped call must go to that
+    /// speaker, so there is nothing to fall back to.
+    pub fn reach_ip(&self) -> anyhow::Result<IpAddr> {
+        self.ip().ok_or_else(|| {
+            anyhow::anyhow!("{} did not report an address to reach it on", self.name)
+        })
+    }
+
     /// Whether this speaker has a TV input - a soundbar.
     ///
     /// The capability string was written out at six call sites across three

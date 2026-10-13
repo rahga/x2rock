@@ -352,10 +352,7 @@ impl Speakers {
     ) -> Result<Vec<String>> {
         self.write(|s| async move {
             let bar = soundbar(&s, room)?;
-            let ip = bar
-                .ip()
-                .ok_or_else(|| anyhow!("{} did not report an address to reach it on", bar.name))?;
-            Upnp::new(ip).set_eq(setting, on).await?;
+            Upnp::new(bar.reach_ip()?).set_eq(setting, on).await?;
             let what = match setting {
                 "NightMode" => "night sound",
                 _ => "speech enhancement",
