@@ -43,7 +43,7 @@ use crate::{bookmarks, catalogue, credentials, hint, sonos};
 /// for this call, in memory, whether or not it reaches disk, and a link that
 /// predates this feature (or was somehow removed mid-command) is nothing to
 /// report - there is no account left to attach the refresh to.
-pub fn save_refreshed_token(
+fn save_refreshed_token(
     creds: &mut credentials::Credentials,
     household: &str,
     service_id: &str,
@@ -54,14 +54,7 @@ pub fn save_refreshed_token(
     // resolve to now: with two accounts for one service, writing the refresh to
     // the preferred one would overwrite a token that was never stale and leave
     // the stale one in place.
-    let existing = match account {
-        Some(key) => creds
-            .accounts_for(household, service_id)
-            .and_then(|held| held.accounts.get(key))
-            .cloned(),
-        None => creds.get(household, service_id).cloned(),
-    };
-    let Some(existing) = existing else {
+    let Some(existing) = creds.account(household, service_id, account).cloned() else {
         return;
     };
     let _ = creds.update(|now| {
@@ -83,28 +76,35 @@ pub fn after_refresh(
     let Some(new_token) = refreshed else {
         return token.cloned();
     };
-    let old = token.cloned().unwrap_or_default();
-    let fresh = sonos::smapi::Token {
-        token: new_token.auth_token.clone(),
-        key: if new_token.private_key.is_empty() {
-            old.key.clone()
-        } else {
-            new_token.private_key.clone()
-        },
-        ..old.clone()
-    };
-    if let Some(household) = old.household.as_deref()
+    let fresh = merged(token.cloned().unwrap_or_default(), &new_token);
+    if let Some(household) = fresh.household.as_deref()
         && let Ok(mut creds) = credentials::Credentials::load()
     {
         save_refreshed_token(
             &mut creds,
             household,
             service_id,
-            old.account.as_deref(),
+            fresh.account.as_deref(),
             new_token,
         );
     }
     Some(fresh)
+}
+
+/// `old` with a refresh applied: the new token, and the new private key
+/// unless the refresh sent none (see [`save_refreshed_token`] on why a blank
+/// one is not trusted). Household, account, serial and selector are the
+/// token's own and do not change.
+fn merged(old: sonos::smapi::Token, new: &sonos::smapi::RefreshedToken) -> sonos::smapi::Token {
+    sonos::smapi::Token {
+        token: new.auth_token.clone(),
+        key: if new.private_key.is_empty() {
+            old.key
+        } else {
+            new.private_key.clone()
+        },
+        ..old
+    }
 }
 
 /// The token to use for whatever comes right after a call that may have
@@ -126,27 +126,14 @@ fn use_refreshed_token(
     let Some(new_token) = refreshed else {
         return token;
     };
-    let key = if new_token.private_key.is_empty() {
-        token.as_ref().map(|t| t.key.clone()).unwrap_or_default()
-    } else {
-        new_token.private_key.clone()
-    };
-    let token = token.unwrap_or_default();
-    let (household, account) = (token.household, token.account);
+    let fresh = merged(token.unwrap_or_default(), &new_token);
     // The refresh can only be persisted against the household the token names;
     // a token without one (there should be none from the store) is used for
     // this call and simply not written back.
-    if let Some(hh) = &household {
-        save_refreshed_token(creds, hh, service_id, account.as_deref(), new_token.clone());
+    if let Some(hh) = fresh.household.as_deref() {
+        save_refreshed_token(creds, hh, service_id, fresh.account.as_deref(), new_token);
     }
-    Some(sonos::smapi::Token {
-        token: new_token.auth_token,
-        key,
-        household,
-        account,
-        serial: token.serial,
-        selector: token.selector,
-    })
+    Some(fresh)
 }
 
 /// Which household's tokens apply for this command right now.
