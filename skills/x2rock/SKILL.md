@@ -1,14 +1,15 @@
 ---
 name: x2rock
-description: Control Sonos speakers from the command line with the `x2rock` CLI — play, pause, skip, per-room and whole-house volume, evening out a group's volume, mute, shuffle and repeat, the queue, favorites, music-service search, browse and account linking, rating a track, internet radio by URL, grouping and party mode, soundbar TV input, alarms and snooze, the sleep timer, per-speaker tone controls (bass, treble, loudness, TruePlay), saved playlists, and a one-call JSON snapshot of the whole household. Use whenever the user wants to control Sonos or speakers — "play/put on <something> in <room>", "pause", "skip", "turn it up/down", "quieter/louder everywhere", "even out the volume", "mute the kitchen", "shuffle", "what's playing / what's on", "group these rooms", "play this stream/radio URL", "find me a country/jazz/ambient station", "put on some free radio", "play everywhere / party", "thumbs up this song", "link my Spotify / can you search Amazon Music", "set an alarm", "snooze / turn off my alarm", "sleep timer / stop in 30 minutes", "turn up the bass", "is loudness on", or switch a soundbar to TV.
+description: Control Sonos speakers with the x2rock CLI and its JSON status and error contracts. Use for Sonos playback, volume, grouping, queues, favorites, bookmarks, music-service search and linking, ratings, internet radio, TV input, announcements, alarms, sleep timers, and speaker settings, or to diagnose missing rooms and check what is playing. Also use for ordinary music or speaker requests when the context identifies a Sonos household.
 ---
 
 # Driving Sonos with the `x2rock` CLI
 
-`x2rock` controls Sonos speakers on the local network, with **no Sonos account**. Control never
-leaves the LAN; `search`, `browse`, `link`, `rate`, `play-item` and `stations` do reach out to music
-services and a radio directory, none of which want a Sonos login. Every command is a one-shot
-subprocess.
+`x2rock` controls Sonos speakers on the local network. **Ordinary control needs no Sonos login
+unless the household has Authentication on.** Control stays on the LAN; music-service commands,
+radio directories and speech generation use internet services. An optional Sonos sign-in also
+enables cloud search and browse for registered Sonos developers (see "Linking a music service").
+Run CLI commands as one-shot subprocesses; the daemon is a separate long-running command.
 
 When speakers seem missing, `x2rock status` diagnoses it (see "When no speakers are available"). 
 Two contracts hold everything together:
@@ -589,7 +590,7 @@ lands well, **searching for its neighbours is the obvious next move**: `x2rock s
   means "not yet".
 - **`hls: true` is the directory's claim, not a verdict.** Some HLS stations play and some do not.
   Treat it as one more thing to try, not a reason to skip a row.
-- **It needs the internet**, not just the LAN - unlike the rest of x2rock. A `stations` failure on a
+- **It needs the internet**, not just the LAN. A `stations` failure on a
   network with working speakers usually means no route out.
 - **A stream plays alongside the queue and leaves it alone**, so putting radio on does not disturb
   what was queued. Stopping the radio is `x2rock pause`.
@@ -957,14 +958,16 @@ room (code `unknown`); `next`/`prev` advance each call.
 **`x2rock search` (no term) lists what *this machine* can search — the anonymous radio-style
 services plus whatever has been linked here with `x2rock link`. It is not the household's list of
 services**, and a service the household uses in the Sonos app is not searchable from here until it
-is linked (search fails with `needs_link`). Many can be linked; YouTube Music cannot (see "Linking a
-music service"). Whether or not a service is linked, four routes reach what the household plays:
+is linked (search fails with `needs_link`). YouTube Music needs a household account import and the
+optional Sonos cloud fallback to search (see "Linking a music service"). Whether or not a service
+is linked, four routes reach what the household plays:
 
 - **`favorites`** — what the household saved in the Sonos app; `favorite "<name-or-id>"` plays one.
 - **`recent`** — what the household played lately, newest first, from any controller (the Sonos
   app's "Recently played"); `replay "<name-or-id>" -r <room>` plays one again, replacing what the
   room plays. The answer to "put that thing from yesterday back on", including YouTube Music and
-  Apple Music, which cannot be searched. `recent --json` is a bare array in the favorites shape,
+  Apple Music, without needing to find the item through search. `recent --json` is a bare array
+  in the favorites shape,
   `[{id, name, type, service, service_id, description, art_url, playable}]`; `id` is what `replay`
   takes, and two items can share a name (pass the id then). `playable: false` is an item from a
   service this machine holds no account for — do not offer it. An item played from an account the
@@ -1021,8 +1024,8 @@ those two apart when telling a user what linking will do.
   added or changed there, and the app keeps working); it **needs the player to open a connection
   back to this machine**, TCP **3401** by default, so a host firewall must allow that inbound port
   (the failure names it, `--callback-port N` moves it, and `0` takes an ephemeral one where there
-  is nothing to open); and it does **not** get past YouTube Music, whose block is the caller key
-  rather than the account — the token imports and search still 403s.
+  is nothing to open); and it does **not by itself** get past YouTube Music's direct SMAPI refusal
+  — the token imports but direct search still 403s. The cloud fallback below is a separate route.
 - **An imported token that goes stale is re-read on its own.** When a service refuses one,
   x2rock reads the household's current token for that account (same port 3401), saves it, and
   retries, so a search or browse just works, a second or so slower. Pandora's went stale in a day.
@@ -1035,9 +1038,11 @@ those two apart when telling a user what linking will do.
   not done this it is simply off. For those who have, `browse` and `search` fall back to Sonos's
   cloud content API for the pages the direct path cannot serve: **Amazon Music**'s full Home,
   **Apple Music**'s shelves, and **YouTube Music**'s library *and search* (which its own endpoint
-  refuses, HTTP 403). Nothing to pass: `browse`/`search` use it by themselves when the direct answer
-  is thin or refused. Services that already match the app (Spotify, Deezer, TuneIn) are untouched. A
-  row to descend carries a `cloud:…` id; pass it back to `browse` as the container, same as any id.
+  refuses, HTTP 403). Cloud browse also needs an account serial, normally retained by
+  `link --from-household`. Search falls back on an empty or failed direct result; browse can use a
+  richer cloud root when the direct front page is thin, or a cloud container when direct browse
+  fails. A failed fallback leaves the direct result or error in place. A row to descend can carry
+  a `cloud:…` id; pass its id back to `browse` as the container, same as any other id.
   Playback is through the household registration as usual, so a cloud-found track plays even for
   YouTube Music. Do not present this as a feature a typical user can turn on — it needs a Sonos
   developer registration. CLI only; x2rocktv does not have this.
@@ -1046,9 +1051,10 @@ those two apart when telling a user what linking will do.
   and the merged search ask the public iTunes catalogue instead, and the ids it returns
   (`song:<n>`, `album:<n>`) play through the household's own Apple Music registration. Two
   categories only, `-c tracks` and `-c albums`: no artists, no playlists, and **not the person's
-  library** — say so if asked for "my Apple Music playlist", and offer `favorites`/`bookmarks`
-  instead. `browse -s "Apple Music"` still fails. The import is still required: without it search
-  fails `needs_link`, whose fix is `x2rock link --from-household "Apple Music"`.
+  library**. Without the optional cloud setup above, offer `favorites`/`bookmarks` for a personal
+  playlist. With that setup, `browse -s "Apple Music"` can expose Apple's shelves; do not promise
+  a particular playlist until it appears in the results. The import is still required: without it
+  search fails `needs_link`, whose fix is `x2rock link --from-household "Apple Music"`.
 - **A household can hold two accounts for one service, and both are kept.** The Sonos app numbers
   the second in its nickname — `iHeartRadio 885ebbcc` beside plain `iHeartRadio`, observed in a real
   household 2026-09-22 — and the import keeps each one. **One of them is what search and playback
@@ -1119,8 +1125,8 @@ those two apart when telling a user what linking will do.
   it is filed under — a token is used on that household's network and not on another's. None of
   this is the household's own account list, which no command can read (see the `accounts --content`
   note above). `browsable` is `null` until the service has been browsed once, then whether its
-  `root` had anything to walk: `false` after a refusal (Apple Music always, YouTube Music's 403) or
-  an empty root, never after a timeout. (Sonos Radio's SMAPI root is empty, but `browse -s "Sonos
+  `root` had anything to walk after any available fallback: `false` after a refusal or an empty
+  root, never after a timeout. (Sonos Radio's SMAPI root is empty, but `browse -s "Sonos
   Radio"` reads its front page from the service's own endpoint instead: 28 shelves - Trending Now,
   Sonos Presents, the genres - each opened and played like any other container.) Bare `browse` leaves the `false` ones out of
   its list; `browse -s <service>` still tries one when named.

@@ -4,7 +4,8 @@ Local-first Sonos control for Linux: a daemon that publishes every room as a sta
 media player, and a CLI that reaches everything the speakers will answer to on the LAN — playback,
 volume, grouping, the queue, favorites, music services, alarms, tone, and the physical speaker.
 
-**No Sonos login** — unless your household has switched Authentication on. x2rock talks to the
+**No Sonos login required for ordinary control** — unless your household has switched
+Authentication on. x2rock talks to the
 speakers directly, the way the Sonos app itself does on your network. Control never leaves the LAN.
 
 **Every Sonos room is a Linux media player.** Media keys, the lock screen, GNOME and KDE media
@@ -30,7 +31,7 @@ the whole surface.
 ## Quick start
 
 ```sh
-cargo install --git https://github.com/rahga/x2rock --root ~/.local   # the binary, into ~/.local/bin
+cargo install --locked --git https://github.com/rahga/x2rock --root ~/.local   # into ~/.local/bin
 x2rock discover                     # once per network; everything else reconnects to what this remembers
 x2rock service install --enable     # the daemon as a user service - every room is now an MPRIS player
 ```
@@ -42,7 +43,7 @@ to check on it. Cloning instead gets you the source and the bar widget:
 
 ```sh
 git clone https://github.com/rahga/x2rock && cd x2rock
-cargo build --release && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
+cargo build --release --locked && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
 ```
 
 ## Why local-first
@@ -53,14 +54,16 @@ official Sonos mobile app has used since 2024. x2rock is built on it directly:
 
 - **No Sonos account — unless your household has Authentication on.** That is the line, and it is
   narrower than "no cloud": searching a music service talks to that service, and `x2rock stations`
-  talks to a radio directory, because neither wants a Sonos login. What x2rock will not do is
-  depend on signing in to Sonos — a speaker on the LAN answers to whoever is on the LAN. The one
-  exception is a household that has switched Authentication on, where the speakers answer only to
-  a signed-in client; see [Households with Authentication on](#households-with-authentication-on).
+  talks to a radio directory, because neither wants a Sonos login. Local control requires signing
+  in only when the household has switched Authentication on and the speakers answer only to a
+  signed-in client; see [Households with Authentication on](#households-with-authentication-on).
+  Signing in also enables an optional [cloud search and browse fallback](#optional-sonos-cloud-search-and-browse)
+  for content a service's direct interface cannot return. Playback control still stays on the LAN.
 - **Push events, not polling.** The LAN API supports real subscriptions; the daemon never polls.
-- **Outbound connections only**, which matters on a Linux box with a default-deny firewall and on
-  a locked-down office network. That is also why discovery does not use SSDP or mDNS, whose
-  multicast replies a default-deny policy silently drops.
+- **Ordinary control needs only outbound connections**, which matters on a Linux box with a
+  default-deny firewall and on a locked-down office network. That is also why discovery does not
+  use SSDP or mDNS, whose multicast replies a default-deny policy silently drops. Account import
+  and speech announcements need a player to connect back; see [Requirements](#requirements).
 
 Where the Control API stops, x2rock speaks UPnP/SOAP to the same speaker on port 1400: the queue,
 alarms, the sleep timer, tone controls, the status light and button lock, room renaming,
@@ -571,15 +574,16 @@ household has — encrypted, with the household id as the key — and this reads
 keeps them: Qobuz, and everything else the household already holds, in one command. Name a service
 to take only that one; `--dry-run` shows every record without keeping any. Two things to know: the
 player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
-change it), so a host firewall needs that one inbound rule; and it does not get past YouTube
-Music, whose token imports cleanly and still answers 403 — that block is a key Sonos seals inside
-its own apps, not the account.
+change it), so a host firewall needs that one inbound rule; and it does not by itself get past
+YouTube Music's direct search refusal. Its token imports cleanly but SMAPI still answers 403;
+the optional [Sonos cloud fallback](#optional-sonos-cloud-search-and-browse) provides another route.
 
 **Apple Music is searched through Apple's public catalogue.** Its imported token cannot search, but
 the iTunes Search API needs no account and names the same ids the player plays, so `x2rock search
 -s "Apple Music"` finds tracks and albums there and the household's own Apple Music account plays
 them. It needs the import all the same, which is how x2rock knows the household has Apple Music and
-which account plays. Your library and Apple's playlists are out of its reach.
+which account plays. Your library and Apple's playlists are out of that public catalogue's reach;
+the optional cloud browse path below can expose additional shelves.
 
 Tokens are kept **per household**, so a laptop that moves between two Sonos systems holds a
 separate account for each and uses the right one wherever it is. A household can also hold two
@@ -601,14 +605,34 @@ in a tool expected to work over ssh and inside a widget's subprocess. `unlink` f
 service's own site. An expired token usually heals itself: when a service answers with a
 replacement, x2rock retries once and stores it.
 
-**Talking to a music service is the only thing x2rock does that leaves the LAN, and it is confined
-to the CLI.** The daemon speaks to nothing but the local network, so a slow or unreachable service
-cannot delay play, pause or volume.
+**Search, browse, radio directories and speech generation use internet services from the CLI.**
+The daemon does not make those calls. Its speaker control stays on the LAN; when you have signed
+in to Sonos, refreshing that sign-in is its one cloud exception.
+
+### Optional Sonos cloud search and browse
+
+`x2rock login` also enables a fallback through Sonos's cloud content API, even in a household
+with Authentication off. It uses your own developer integration and Sonos sign-in; follow the
+setup under [Households with Authentication on](#households-with-authentication-on). x2rock ships
+no integration key or secret. Import the household's service accounts with
+`x2rock link --from-household` as well: cloud browse needs the account serial that import retains.
+
+Search tries the cloud when direct SMAPI search fails or returns no items. Browse can use it for
+a richer front page when the direct root has few entries, or to open a container the direct
+interface refuses. This provides a route to YouTube Music search and library browsing, and to
+Amazon and Apple shelves. Availability still depends on the household's accounts and what Sonos
+returns; a failed fallback leaves the direct result or error in place.
+
+The same `search` and `browse` commands use it automatically after sign-in, and playback still
+goes to the speakers over the LAN. Without a saved Sonos sign-in, these fallbacks make no cloud
+request. `x2rock logout` removes that sign-in locally, which also disables authenticated LAN
+control for a household with Authentication on.
 
 ### Keeping things you cannot search for
 
-For what you cannot search — YouTube Music, or your Apple Music library — *replaying* something needs no
-credential at all: the id is enough, and the player resolves the account it already holds.
+For anything search or browse cannot reach, or when you want to keep an item without setting up
+search credentials, *replaying* it needs no music-service credential here: the id is enough, and
+the player resolves the account it already holds.
 
 ```sh
 x2rock keep                  # remember what is playing
@@ -700,7 +724,10 @@ systemctl --user daemon-reload && systemctl --user restart x2rock.service
   would be refused.
 - **logind and NetworkManager are optional** — they are how the daemon learns it woke or moved
   networks. Without them it says so once at startup and recovers a little more slowly.
-- **No inbound connections.** Everything is outbound TCP, so a default-deny firewall needs no rule.
+- **Ordinary control and discovery need no inbound firewall rule.** `say` and
+  `link --from-household` are the exceptions: a player connects back to this machine on TCP 3401
+  by default. Allow that port from your speakers' network to use either feature; account import
+  also accepts `--callback-port`. Sonos browser sign-in uses a separate loopback-only listener.
 
 ### On Ubuntu
 
@@ -752,8 +779,9 @@ off, or sign x2rock in to your Sonos account:
 That is all: every command, and the daemon, then present the sign-in to the speakers — on the LAN,
 as before; the sign-in only proves who is asking — and x2rock refreshes it itself, once a day, which
 is the one call to Sonos's cloud the daemon ever makes. `x2rock logout` forgets it on this machine;
-revoke it for good in your Sonos account. A household with Authentication off never needs any of
-this, and x2rock never asks.
+revoke it for good in your Sonos account. A running daemon reads the saved sign-in before each
+command, so login, logout and replacement take effect on subsequent commands without a restart.
+A household with Authentication off never needs any of this, and x2rock never asks.
 
 ### More than one Sonos household
 
@@ -831,7 +859,8 @@ x2rock a server.
 ## Non-goals
 
 - **Android.** [`x2rocktv`](https://github.com/rahga/x2rocktv) is the Kotlin Android TV app.
-- **Cloud OAuth, or control from outside the LAN.** Deliberately cut; the transport seam remains.
+- **Control from outside the LAN.** Speaker control stays local. Optional Sonos OAuth supports
+  authenticated households and the cloud content fallback described above.
 - **Sonos S1.** Every supported device runs S2, and no S1 accommodation is carried anywhere.
 - **A GUI of its own.** The daemon is the product; front ends are consumers of it.
 
@@ -842,6 +871,9 @@ default-deny firewall, the protocol facts verified against real hardware and the
 out to be wrong — is in [docs/architecture.md](docs/architecture.md). It is a dated engineering
 log rather than a reference; its *Superseded claims* index at the top says which early findings
 later ones overturned.
+
+For the source map, local checks and hardware-test boundaries, see
+[Contributing](CONTRIBUTING.md).
 
 ## Credits
 

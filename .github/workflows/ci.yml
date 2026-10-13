@@ -39,6 +39,9 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
+      - name: Volume bridge tests (no speakers required)
+        run: python3 scripts/test-follow-sink.py
+
   msrv:
     name: builds on 1.89
     runs-on: ubuntu-latest

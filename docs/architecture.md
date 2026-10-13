@@ -78,6 +78,37 @@ moved, with the sink's 100% landing on a cap (50 by default) and mute following 
 `vol unmute`. One direction only: the speaker never moves the computer. Several events arrive per
 keypress, so the dedupe is what keeps it to one command each. `X2ROCK=echo` dry-runs it.
 
+**Mute and retry correction (2026-10-13).** A Sonos volume set also unmutes the group, so the
+bridge now defers volume writes while the computer is muted and applies the latest level on
+unmute. Sending mute and then volume could make the room audible. Only successful commands update
+the dedupe state, so a failed write is retried on the next sink/server event. The cap is validated
+as 0–100, and `pactl` runs in the C locale for consistent parsing. The mock-command regression
+suite is `python3 scripts/test-follow-sink.py`; it needs neither an audio server nor speakers.
+
+## Concurrent file writes and Sonos sign-in changes (2026-10-13)
+
+Two reliability gaps reproduced with local tests, without a Sonos account or live speakers:
+
+- **A process id did not give each writer its own scratch file.** Eight threads writing one
+  destination through `store::write_bytes_atomically` collided at the shared `<file>.<pid>.tmp`:
+  one removed or renamed another's file, and a save failed with `No such file or directory`.
+  Every write now creates its own PID-and-counter name with `create_new`, skips occupied names,
+  and removes its own scratch file on failure. A separate regression checks cleanup after a
+  failed rename. Atomic replacement still does not merge competing updates; callers doing
+  read/modify/write need the store's transaction lock.
+- **The Sonos token cache lived longer than the sign-in it described.** Caching `None` forever
+  meant a running client missed a later login; caching a token forever meant it missed logout
+  or replacement. Clients now read the small saved token before each command. Concurrent stale
+  callers in one process share a refresh and wait one minute before retrying a failed endpoint.
+  The network request holds no file lock. Its result is committed under a short writer lock
+  only if the original token is still current, so a late refresh cannot restore a logged-out
+  account or overwrite a replacement. Separate processes can still make concurrent refresh
+  requests, but only a result for the current token can be saved.
+
+The token tests exercise login/logout/replacement, refresh completing after logout or a new
+login, competing refresh results, shared requests and failure cooldowns with temporary files
+and dummy responses. This checks client lifecycle behavior, not Sonos's live token endpoint.
+
 ## Reading the household's own tokens: the `ThirdPartyMediaServersX` decrypt
 
 *Written to be followed without a networking or cryptography background; the measured detail, the
