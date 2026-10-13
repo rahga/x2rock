@@ -164,7 +164,7 @@ local token buys search and browse, and nothing of playback.
 | **Amazon Music** | app-link | ✓ browser; ✓ `--from-household` | ✓ on a family trial, an album is a real tracklist (`catalog:album:asin:…`), not the Prime-tier station; browse root is only Library and User Playlists, and the app's Home (`api/home`) refuses a bearer token | enqueue ✓ on the household's registration (tracks and albums); the player rewrites a track to `x-sonos-http:<asin>.mpd`, and expands an album as `x-sonosapi-hls-static`. Stations (`catalog:station:`) play as radio | 2026-10-11, home |
 | **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
-| **Plex** | own PIN flow | ✓ | ✓ 2026-09-09; **✗ 2026-10-12, home: `sonos.plex.tv` answers "No available servers. Add a server to your Plex account to continue."** to root browse, and search finds nothing - with x2rock's PIN token, and with the household's own token minutes after the owner added Plex in the Sonos app. The app fails the same way ("An error occurred with Plex. Try again later."). Not the account or the server: the PIN account owns "Prime Plex Media Server" (the LAN's `192.168.86.36:32400`, claimed, Remote Access "Internet"), and `plex.tv/api/v2/resources` lists it present, with local, public (`:13502`) and relay connections. Plex's Sonos bridge is what cannot see it | ✓ 2026-09-09; not testable 2026-10-12 | 2026-10-12, home |
+| **Plex** | own PIN flow; ✓ `--from-household` (`sn_45`, 2026-10-12) | ✓ 2026-10-12, home, once two things outside x2rock were fixed - see "Plex on the home household" (2026-10-12). Now the 2026-09-01 split again: **the household's token** browses root (Discover, Playlists, By Artist, By Album, Shuffle All, hubs) and searches; **x2rock's PIN token** searches but root is refused ("Unexpected error."). So the household's account is preferred | ✓ 2026-09-09; 2026-10-12 not yet played by x2rock (every room in use); the Sonos app queued `x-sonos-http:<server>%3a63%3a<track>%3atrack.mp3?sid=212&flags=24616&sn=45` | 2026-10-12, home |
 | **Bandcamp** | device-link | ✓, re-linked 2026-10-11; **a household token never answers x2rock** (`Client.LoginInvalid`, even freshly minted after a re-add, 2026-10-12), so x2rock's own link must be the preferred account | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | ✓ through the queue once the household re-added Bandcamp (`sn_43`; the link account's dead serial resolves to it). Before that, the file fallback, once the DIDL declared the MIME type (it was UPnP 714) | 2026-10-12, home |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
@@ -9972,6 +9972,38 @@ unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, a
 - **Spotify, SoundCloud, TIDAL, Deezer, Saavn, Qobuz, Amazon Music and TuneIn (New)** all played a
   search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
   played in the office before.
+
+## Plex on the home household: a VPN on the server's PC, then a reauthorization (2026-10-12)
+
+Linked with `x2rock link plex` before Plex was in the household, as a "before" picture. Then the
+owner added it in the Sonos app, which failed too. The steps, each measured:
+
+1. **x2rock's PIN token alone, and then the household's own token** (imported minutes after the
+   app added Plex), both got `sonos.plex.tv`'s **"No available servers. Add a server to your Plex
+   account to continue."** for root, and nothing from search. The Sonos app said "An error occurred
+   with Plex. Try again later." The account was not the problem: `plex.tv/api/v2/resources`
+   with the PIN token listed "Prime Plex Media Server" owned, present, and the same machine the
+   LAN answers for (`/identity` at `192.168.86.36:32400`, machine `c69ee188…`).
+2. **The tell was `publicAddressMatches: false`.** The server advertised its public address as
+   `104.243.245.172:13502`; this laptop and the speakers reach the internet as `70.122.115.65`.
+   The PC running Plex had a VPN on, so Plex's cloud saw the server at the VPN's exit and did not
+   place it on the speakers' network. The owner turned the VPN off. Within a minute the
+   resources call read `publicAddressMatches: true`, public address `70.122.115.65`.
+3. **Then `sonos.plex.tv` timed out** (x2rock's 6s), and an untimed call got HTTP 500 "Unexpected
+   error." The household's registration still pointed at the old state. The owner **reauthorized
+   Plex in the Sonos app**, and the app worked.
+4. **After that, the household token works fully, and the PIN token is back to the 2026-09-01
+   split**: search yes, root no ("Unexpected error." now, `ServiceUnknownError` then). The
+   household's account (`rahga`, `sn_45`) is preferred.
+
+So a VPN on the PC that hosts Plex silently breaks Plex on Sonos, for the app and x2rock alike,
+while every Plex-side page reads healthy. The check is `publicAddressMatches` in the resources call.
+
+**How the app queues Plex**, read off the Kitchen while it played a Plex playlist: 100 rows, each
+`x-sonos-http:<server>%3a63%3a<track id>%3atrack.mp3?sid=212&flags=24616&sn=45` - the library
+section (63) inside the id, `.mp3`, `flags=24616`. x2rock's search hits carry no section
+(`<server>::69294:track`), and x2rock enqueues under `x-sonosapi-hls-static`. On 2026-09-09 the
+player accepted that form and played it. Not re-played on 2026-10-12: every room was in use.
 
 ## iHeartRadio's three sections, as the app shows them (office, 2026-10-12)
 
