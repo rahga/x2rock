@@ -164,7 +164,7 @@ local token buys search and browse, and nothing of playback.
 | **Amazon Music** | app-link | ✓ browser; ✓ `--from-household` | ✓ on a family trial, an album is a real tracklist (`catalog:album:asin:…`), not the Prime-tier station; browse root is only Library and User Playlists, and the app's Home (`api/home`) refuses a bearer token | enqueue ✓ on the household's registration (tracks and albums); the player rewrites a track to `x-sonos-http:<asin>.mpd`, and expands an album as `x-sonosapi-hls-static`. Stations (`catalog:station:`) play as radio | 2026-10-11, home |
 | **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
 | **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
-| **Plex** | own PIN flow; ✓ `--from-household` (`sn_45`, 2026-10-12) | ✓ 2026-10-12, home, once two things outside x2rock were fixed - see "Plex on the home household" (2026-10-12). Now the 2026-09-01 split again: **the household's token** browses root (Discover, Playlists, By Artist, By Album, Shuffle All, hubs) and searches; **x2rock's PIN token** searches but root is refused ("Unexpected error."). So the household's account is preferred | ✓ 2026-09-09; 2026-10-12 not yet played by x2rock (every room in use); the Sonos app queued `x-sonos-http:<server>%3a63%3a<track>%3atrack.mp3?sid=212&flags=24616&sn=45` | 2026-10-12, home |
+| **Plex** | own PIN flow; ✓ `--from-household` (`sn_45`, 2026-10-12) | ✓ 2026-10-12, home, once two things outside x2rock were fixed - see "Plex on the home household" (2026-10-12). Now the 2026-09-01 split again: **the household's token** browses root (Discover, Playlists, By Artist, By Album, Shuffle All, hubs) and searches; **x2rock's PIN token** searches but root is refused ("Unexpected error."). So the household's account is preferred | ✓ 2026-10-12, Kitchen + Dining Room: a searched track, an album from a library hub (30 FLAC rows) and an album from search (100 rows) queued and played; Shuffle All (`program`) played as radio. The player rewrites x2rock's enqueue to the app's `x-sonos-http:…track.mp3`/`.flac` form, `sn=45` | 2026-10-12, home |
 | **Bandcamp** | device-link | ✓, re-linked 2026-10-11; **a household token never answers x2rock** (`Client.LoginInvalid`, even freshly minted after a re-add, 2026-10-12), so x2rock's own link must be the preferred account | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | ✓ through the queue once the household re-added Bandcamp (`sn_43`; the link account's dead serial resolves to it). Before that, the file fallback, once the DIDL declared the MIME type (it was UPnP 714) | 2026-10-12, home |
 | **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
 | **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
@@ -10002,8 +10002,15 @@ while every Plex-side page reads healthy. The check is `publicAddressMatches` in
 **How the app queues Plex**, read off the Kitchen while it played a Plex playlist: 100 rows, each
 `x-sonos-http:<server>%3a63%3a<track id>%3atrack.mp3?sid=212&flags=24616&sn=45` - the library
 section (63) inside the id, `.mp3`, `flags=24616`. x2rock's search hits carry no section
-(`<server>::69294:track`), and x2rock enqueues under `x-sonosapi-hls-static`. On 2026-09-09 the
-player accepted that form and played it. Not re-played on 2026-10-12: every room was in use.
+(`<server>::69294:track`), and x2rock enqueues under `x-sonosapi-hls-static`.
+
+**Played by x2rock the same evening**, in the Kitchen + Dining Room group the owner was using. A
+searched track ("Yellow") queued and played; **the player rewrote x2rock's URI to the app's form**,
+`x-sonos-http:<server>%3a%3a66244%3atrack.mp3?…&sn=45`, with the empty section kept and harmless.
+An album from the Recently Added hub expanded to 30 rows, each `…%3atrack.flac` (a FLAC library
+file played as FLAC). An album from search (`<server>::66140:album`, no section) expanded to 100
+rows and played. "Shuffle All", a `program` at root, played as radio, not from the queue. Nothing
+x2rock sends had to change.
 
 ## iHeartRadio's three sections, as the app shows them (office, 2026-10-12)
 
