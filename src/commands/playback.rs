@@ -142,19 +142,10 @@ pub async fn apply_transport(
     target: &session::Target,
     verb: &str,
 ) -> Result<()> {
-    let coordinator = session::coordinator(session, target).await?;
-    transport(&coordinator, &target.group_id, verb).await
-}
-
-/// One transport verb, to a group whose coordinator the caller already holds.
-///
-/// The bottom of both paths: [`apply_transport`] resolves a coordinator and
-/// calls this, and `run` calls it directly for the four bare transport
-/// commands, which reach it with the coordinator already open. Routing those
-/// through `apply_transport` instead would resolve the same coordinator a
-/// second time, and on a grouped room that is a second socket.
-pub async fn transport(player: &Connection, group: &str, verb: &str) -> Result<()> {
-    player.playback(group, verb).await
+    session::coordinator(session, target)
+        .await?
+        .playback(&target.group_id, verb)
+        .await
 }
 
 /// Ask a room to play, then confirm it actually did.

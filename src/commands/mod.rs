@@ -280,39 +280,55 @@ pub(crate) async fn fan_out_as(
 ) -> Result<()> {
     for name in rooms {
         let target = session::target(&session.groups, Some(name))?;
-        let outcome = match action {
-            PerRoom::Vol {
-                change,
-                one_room,
-                ramp,
-                json,
-            } => apply_vol(session, &target, Some(name), change.clone(), one_room, ramp)
-                .await
-                .and_then(|o| emit(&o, json)),
-            PerRoom::Repeat { mode, json } => apply_repeat(session, &target, mode.clone())
-                .await
-                .and_then(|o| emit(&o, json)),
-            PerRoom::Shuffle { mode, json } => apply_shuffle(session, &target, mode.clone())
-                .await
-                .and_then(|o| emit(&o, json)),
-            PerRoom::Crossfade { mode, json } => apply_crossfade(session, &target, mode.clone())
-                .await
-                .and_then(|o| emit(&o, json)),
-            // `play` alone confirms and resumes; the other verbs have nothing
-            // to confirm against, and `pause` on an idle room is a no-op that
-            // must not spend the failure budget.
-            PerRoom::Transport("play") => match session::coordinator(session, &target).await {
-                Ok(player) => play_or_resume(session, &player, &target).await,
-                Err(e) => Err(e),
-            },
-            PerRoom::Transport(verb) => apply_transport(session, &target, verb).await,
-        };
         // Name the room the batch stopped on: a fan-out that halts silently on
         // the third of five rooms is a debugging puzzle. The rooms before it
         // already applied; the ones after did not.
-        outcome.with_context(|| format!("on room {name:?}"))?;
+        apply_per_room(session, &target, Some(name), action)
+            .await
+            .with_context(|| format!("on room {name:?}"))?;
     }
     Ok(())
+}
+
+/// One per-room command, applied to one resolved room. The bottom of both
+/// paths: [`fan_out_as`] calls it for each room in turn, and `run` calls it
+/// once for a single `--room` (or none), so the per-room verbs are written
+/// down once. `room` is the name the user gave, if any, for the messages that
+/// echo it.
+pub(crate) async fn apply_per_room(
+    session: &session::Session,
+    target: &session::Target,
+    room: Option<&str>,
+    action: PerRoom<'_>,
+) -> Result<()> {
+    match action {
+        PerRoom::Vol {
+            change,
+            one_room,
+            ramp,
+            json,
+        } => emit(
+            &apply_vol(session, target, room, change.clone(), one_room, ramp).await?,
+            json,
+        ),
+        PerRoom::Repeat { mode, json } => {
+            emit(&apply_repeat(session, target, mode.clone()).await?, json)
+        }
+        PerRoom::Shuffle { mode, json } => {
+            emit(&apply_shuffle(session, target, mode.clone()).await?, json)
+        }
+        PerRoom::Crossfade { mode, json } => {
+            emit(&apply_crossfade(session, target, mode.clone()).await?, json)
+        }
+        // `play` alone confirms and resumes; the other verbs have nothing
+        // to confirm against, and `pause` on an idle room is a no-op that
+        // must not spend the failure budget.
+        PerRoom::Transport("play") => {
+            let player = session::coordinator(session, target).await?;
+            play_or_resume(session, &player, target).await
+        }
+        PerRoom::Transport(verb) => apply_transport(session, target, verb).await,
+    }
 }
 
 /// Several `--room` on a command that takes one. Its own code, not the generic
@@ -360,7 +376,7 @@ pub(crate) enum PerRoom<'a> {
 /// what it finds, so a command cannot be admitted by one and missed by the
 /// other - which is how `--all crossfade on` came to fail with "several --room
 /// were given" on a command line that gave none.
-fn per_room(command: &Command) -> Option<PerRoom<'_>> {
+pub(crate) fn per_room(command: &Command) -> Option<PerRoom<'_>> {
     Some(match command {
         Command::Vol {
             change,

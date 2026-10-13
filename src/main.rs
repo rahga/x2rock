@@ -32,14 +32,13 @@ use anyhow::{Result, ensure};
 use clap::{CommandFactory, FromArgMatches};
 
 use cli::{Cli, Command, RawTransport, SceneAction};
-use commands::playback::{apply_crossfade, apply_repeat, apply_shuffle, play_or_resume};
 use commands::speaker::{
     ToneRequest, apply_buttons, apply_eq, apply_led, apply_remote, apply_rename, apply_sleep,
     apply_snooze,
 };
 use commands::{
-    admin, content, emit, fan_out, fans_out, household, playback, raw, scene, services, speaker,
-    status, stream, too_many_rooms, volume,
+    admin, apply_per_room, content, emit, fan_out, fans_out, household, per_room, playback, raw,
+    scene, services, speaker, status, stream, too_many_rooms, volume,
 };
 use state::State;
 
@@ -655,6 +654,11 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
     }
 
     let target = session::target(&session.groups, room)?;
+    // A single room's per-room command goes the way each room of a fan-out
+    // does, so the two cannot drift apart.
+    if let Some(action) = per_room(&cli.command) {
+        return apply_per_room(session, &target, room, action).await;
+    }
     let player = session::coordinator(session, &target).await?;
     let group = target.group_id.as_str();
 
@@ -665,7 +669,6 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             refresh,
             json,
         } => services::run_rate(&player, group, &target.name, direction, refresh, json).await?,
-        Command::Play { track: None } => play_or_resume(session, &player, &target).await?,
         Command::Play { track: Some(n) } => playback::play_track(&player, &target, n).await?,
         Command::Keep { name, container } => {
             content::keep(session, &player, group, name, container).await?;
@@ -710,13 +713,6 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             apply_eq(session, &target, room, want, json).await?;
         }
         Command::Queue { action, json } => content::queue(&player, &target, action, json).await?,
-        Command::Repeat { mode, json } => emit(&apply_repeat(session, &target, mode).await?, json)?,
-        Command::Shuffle { mode, json } => {
-            emit(&apply_shuffle(session, &target, mode).await?, json)?
-        }
-        Command::Crossfade { mode, json } => {
-            emit(&apply_crossfade(session, &target, mode).await?, json)?
-        }
         Command::Remote {
             feedback,
             repeater,
@@ -735,21 +731,16 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Snooze { duration, json } => {
             apply_snooze(&target, player.ip(), duration, json).await?;
         }
-        Command::Pause => playback::transport(&player, group, "pause").await?,
-        Command::Toggle => playback::transport(&player, group, "togglePlayPause").await?,
-        Command::Next => playback::transport(&player, group, "skipToNextTrack").await?,
-        Command::Prev => playback::transport(&player, group, "skipToPreviousTrack").await?,
-        Command::Vol {
-            change,
-            player: one_room,
-            ramp,
-            json,
-            ..
-        } => emit(
-            &volume::apply_vol(session, &target, room, change, one_room, ramp).await?,
-            json,
-        )?,
-        Command::Rooms { .. }
+        Command::Play { track: None }
+        | Command::Repeat { .. }
+        | Command::Shuffle { .. }
+        | Command::Crossfade { .. }
+        | Command::Pause
+        | Command::Toggle
+        | Command::Next
+        | Command::Prev
+        | Command::Vol { .. }
+        | Command::Rooms { .. }
         | Command::Status { .. }
         | Command::Favorites { .. }
         | Command::Recent { .. }
