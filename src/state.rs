@@ -121,7 +121,7 @@ impl State {
     }
 
     /// Every player remembered on a network, across households.
-    pub fn players_on(&self, fingerprint: &str) -> Vec<KnownPlayer> {
+    fn players_on(&self, fingerprint: &str) -> Vec<KnownPlayer> {
         self.networks
             .get(fingerprint)
             .map(|households| households.values().flatten().cloned().collect())
