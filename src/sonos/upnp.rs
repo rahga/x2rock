@@ -857,8 +857,8 @@ impl Upnp {
     pub async fn household_time(&self) -> Result<(String, i32)> {
         // Two independent reads, so they go out together.
         let (local, index) = tokio::try_join!(
-            self.one_value(Service::AlarmClock, "GetTimeNow", "CurrentLocalTime"),
-            self.one_value(Service::AlarmClock, "GetTimeZone", "Index"),
+            self.one_value(Service::AlarmClock, "GetTimeNow", &[], "CurrentLocalTime"),
+            self.one_value(Service::AlarmClock, "GetTimeZone", &[], "Index"),
         )?;
         let index = index.trim().parse().unwrap_or(-1);
         Ok((local, index))
@@ -907,13 +907,20 @@ impl Upnp {
         Ok(())
     }
 
-    /// One element's text from a no-argument action.
+    /// One element's text from an action's reply, empty when it is absent.
     ///
     /// The shape every On/Off getter here had written out longhand: send, parse,
-    /// pull one tag. Sibling of `tone_number`, which is the same helper for the
-    /// `i8` controls.
-    async fn one_value(&self, service: Service, action: &str, tag: &str) -> Result<String> {
-        let text = self.soap(service, action, &[]).await?;
+    /// pull one tag - and the transport getters too, which differ only in
+    /// carrying `InstanceID`. Sibling of `tone_number`, which is the same helper
+    /// for the `i8` controls.
+    async fn one_value(
+        &self,
+        service: Service,
+        action: &str,
+        args: &[(&str, &str)],
+        tag: &str,
+    ) -> Result<String> {
+        let text = self.soap(service, action, args).await?;
         let doc = Document::parse(&text).with_context(|| format!("parsing {action} response"))?;
         Ok(text_of(&doc, tag).unwrap_or("").to_owned())
     }
@@ -942,14 +949,21 @@ impl Upnp {
             self.one_value(
                 Service::HtControl,
                 "GetLEDFeedbackState",
+                &[],
                 "LEDFeedbackState"
             ),
             self.one_value(
                 Service::HtControl,
                 "GetIRRepeaterState",
+                &[],
                 "CurrentIRRepeaterState"
             ),
-            self.one_value(Service::HtControl, "IsRemoteConfigured", "RemoteConfigured"),
+            self.one_value(
+                Service::HtControl,
+                "IsRemoteConfigured",
+                &[],
+                "RemoteConfigured"
+            ),
         )?;
         Ok(RemoteSettings {
             feedback: feedback.eq_ignore_ascii_case("On"),
@@ -1044,7 +1058,12 @@ impl Upnp {
     /// answers for the one addressed.
     pub async fn led(&self) -> Result<bool> {
         Ok(self
-            .one_value(Service::DeviceProperties, "GetLEDState", "CurrentLEDState")
+            .one_value(
+                Service::DeviceProperties,
+                "GetLEDState",
+                &[],
+                "CurrentLEDState",
+            )
             .await?
             .eq_ignore_ascii_case("On"))
     }
@@ -1076,6 +1095,7 @@ impl Upnp {
             .one_value(
                 Service::DeviceProperties,
                 "GetButtonLockState",
+                &[],
                 "CurrentButtonLockState",
             )
             .await?
@@ -1219,17 +1239,16 @@ impl Upnp {
     /// and the generation counter reads 0 - either is the signal, and the empty
     /// element is the one that cannot be confused with a timer about to fire.
     pub async fn sleep_timer(&self) -> Result<Option<Duration>> {
-        let text = self
-            .soap(
+        let raw = self
+            .one_value(
                 Service::AvTransport,
                 "GetRemainingSleepTimerDuration",
                 &[("InstanceID", "0")],
+                "RemainingSleepTimerDuration",
             )
             .await?;
-        let doc = Document::parse(&text)?;
-        Ok(text_of(&doc, "RemainingSleepTimerDuration")
-            .filter(|raw| !raw.trim().is_empty())
-            .and_then(parse_hms))
+        // An empty or blank duration does not parse, which is the `None`.
+        Ok(parse_hms(&raw))
     }
 
     /// Arm the sleep timer, or cancel it with `None`.
@@ -1902,32 +1921,28 @@ impl Upnp {
     /// and has no duration to report - and for `NOT_IMPLEMENTED`, which some
     /// players answer with instead.
     pub async fn track_duration(&self) -> Result<Option<Duration>> {
-        let text = self
-            .soap(
+        let raw = self
+            .one_value(
                 Service::AvTransport,
                 "GetPositionInfo",
                 &[("InstanceID", "0")],
+                "TrackDuration",
             )
             .await?;
-        let doc = Document::parse(&text).context("parsing GetPositionInfo response")?;
-        Ok(text_of(&doc, "TrackDuration")
-            .and_then(parse_hms)
-            .filter(|d| !d.is_zero()))
+        Ok(parse_hms(&raw).filter(|d| !d.is_zero()))
     }
 
     /// 1-based queue index of the current track; 0 when nothing is loaded.
     pub async fn current_track(&self) -> Result<u32> {
-        let text = self
-            .soap(
+        let raw = self
+            .one_value(
                 Service::AvTransport,
                 "GetPositionInfo",
                 &[("InstanceID", "0")],
+                "Track",
             )
             .await?;
-        let doc = Document::parse(&text).context("parsing GetPositionInfo response")?;
-        Ok(text_of(&doc, "Track")
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(0))
+        Ok(raw.parse().unwrap_or(0))
     }
 
     /// Whether the group is currently playing from its queue rather than, say, a
@@ -2109,11 +2124,13 @@ impl Upnp {
     /// What this player is currently playing from: its own queue, a stream, its
     /// TV input, or the room it is following.
     pub async fn current_uri(&self) -> Result<String> {
-        let text = self
-            .soap(Service::AvTransport, "GetMediaInfo", &[("InstanceID", "0")])
-            .await?;
-        let doc = Document::parse(&text).context("parsing GetMediaInfo response")?;
-        Ok(text_of(&doc, "CurrentURI").unwrap_or_default().to_owned())
+        self.one_value(
+            Service::AvTransport,
+            "GetMediaInfo",
+            &[("InstanceID", "0")],
+            "CurrentURI",
+        )
+        .await
     }
 
     /// Jump to a 1-based queue position. Does not change the transport state.
