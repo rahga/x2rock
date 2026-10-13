@@ -115,6 +115,11 @@ async fn store_of(household: &str) -> Option<Vec<StoredAccount>> {
     }
     let short = household.split('.').next().unwrap_or(household);
     let players = PLAYERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // Nowhere to read from yet is not a failed read: nothing cost a wait, and
+    // a player reached later should still get its try.
+    if players.is_empty() {
+        return None;
+    }
     let mut read = None;
     for player in players {
         let Ok(encoded) = stored::capture_envelope(player, crate::netid::INBOUND_PORT, WAIT).await

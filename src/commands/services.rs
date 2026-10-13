@@ -1470,10 +1470,9 @@ pub async fn run_browse(
     let mut refreshed = None;
     let mut answer = if sonos::cloud::is_cloud(at) {
         // A cloud container carries its own browse URL; follow it, no SMAPI.
-        sonos::cloud::browse(at).await.map(|items| {
-            let total = items.len() as u32;
-            (items, total)
-        })
+        sonos::cloud::browse(at)
+            .await
+            .map(|rows| page_of(rows, index, count))
     } else {
         sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await
     };
@@ -1505,8 +1504,7 @@ pub async fn run_browse(
         && let Ok(rows) = sonos::cloud::browse_object(&household, service_type, serial, at).await
         && !rows.is_empty()
     {
-        let total = rows.len() as u32;
-        answer = Ok((rows, total));
+        answer = Ok(page_of(rows, index, count));
     }
     // A service whose own `root` is empty or refused, but whose front page the
     // cloud can serve (Amazon, Apple, YouTube Music), falls back to the cloud
@@ -1528,8 +1526,7 @@ pub async fn run_browse(
             && let Ok(home) = sonos::cloud::home(&household, service_type, serial).await
             && home.len() > direct_len
         {
-            let total = home.len() as u32;
-            answer = Ok((home, total));
+            answer = Ok(page_of(home, index, count));
         }
     }
 
@@ -2107,6 +2104,23 @@ pub async fn run_search(
 
 /// How much of a row's second line a plain listing prints. The JSON keeps it all.
 const SUMMARY_MAX: usize = 80;
+
+/// One `index`/`count` page of rows the cloud hands back whole, with the
+/// whole count as the total - so `--index` steps through a cloud listing the
+/// same as an SMAPI one.
+fn page_of(
+    rows: Vec<sonos::smapi::Item>,
+    index: u32,
+    count: u32,
+) -> (Vec<sonos::smapi::Item>, u32) {
+    let total = rows.len() as u32;
+    let page = rows
+        .into_iter()
+        .skip(index as usize)
+        .take(count as usize)
+        .collect();
+    (page, total)
+}
 
 /// Below this many rows, a service's own `root` is a bare SMAPI root rather
 /// than a front page, so the cloud home (opt-in) is worth a look. A real front
