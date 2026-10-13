@@ -1730,12 +1730,10 @@ async fn call(
     let retry_token = Token {
         token: new.auth_token.clone(),
         key: new.private_key.clone(),
-        household: token.and_then(|t| t.household.clone()),
-        // Carried through the retry so the caller can write the refreshed token
-        // back to the account it belongs to and not merely to the service.
-        account: token.and_then(|t| t.account.clone()),
-        serial: token.and_then(|t| t.serial),
-        selector: token.and_then(|t| t.selector.clone()),
+        // Everything else carried through the retry, so the caller can write
+        // the refreshed token back to the account it belongs to and not merely
+        // to the service.
+        ..token.cloned().unwrap_or_default()
     };
     match call_soap(service, Some(&retry_token), action, params).await? {
         Ok(body) => {
