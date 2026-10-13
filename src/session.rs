@@ -357,35 +357,55 @@ pub async fn discover_households(
         }
     }
 
-    let mut discovered = Vec::new();
-    for (household_id, connections) in by_household {
-        let mut connections = connections.into_iter();
-        for connection in connections.by_ref() {
-            match connection.groups().await {
-                Ok(groups) => {
-                    discovered.push(Discovered {
-                        household_id,
-                        session: Session::new(connection, groups),
-                    });
-                    break;
-                }
-                Err(e) => {
-                    progress(&format!("{}: {e:#}", connection.ip()));
-                    if crate::hint::is_permission_refusal(&e) {
-                        refused = Some(crate::hint::authentication_required(&e));
+    // Every household at once - one with a member mid-reboot must not hold up
+    // the rest - while each one's own members are still tried in order.
+    let fetches = by_household
+        .into_iter()
+        .map(|(household_id, connections)| async move {
+            let mut found = None;
+            let mut refused = None;
+            let mut last_error = None;
+            let mut connections = connections.into_iter();
+            for connection in connections.by_ref() {
+                match connection.groups().await {
+                    Ok(groups) => {
+                        found = Some(Discovered {
+                            household_id,
+                            session: Session::new(connection, groups),
+                        });
+                        break;
                     }
-                    last_error = Some(e);
-                    connection.close();
+                    Err(e) => {
+                        progress(&format!("{}: {e:#}", connection.ip()));
+                        if crate::hint::is_permission_refusal(&e) {
+                            refused = Some(crate::hint::authentication_required(&e));
+                        }
+                        last_error = Some(e);
+                        connection.close();
+                    }
                 }
             }
+            // One session per household is kept; every other connection opened
+            // by the probe is closed rather than dropped. `Connection` has no
+            // `Drop` - `open` spawns a read loop and a keepalive holding strong
+            // `Arc`s, and a healthy socket refreshes its own liveness on every
+            // pong - so a dropped one lives, and pings, for the rest of the
+            // process. The daemon rescans on every reconnect, which made this
+            // unbounded.
+            connections.for_each(|spare| spare.close());
+            (found, refused, last_error)
+        });
+    // Folded in household order, so the refusal and the last failure kept are
+    // the ones a sequential pass would have ended on.
+    let mut discovered = Vec::new();
+    for (found, was_refused, failed) in futures_util::future::join_all(fetches).await {
+        discovered.extend(found);
+        if was_refused.is_some() {
+            refused = was_refused;
         }
-        // One session per household is kept; every other connection opened by
-        // the probe is closed rather than dropped. `Connection` has no `Drop`
-        // - `open` spawns a read loop and a keepalive holding strong `Arc`s,
-        // and a healthy socket refreshes its own liveness on every pong - so a
-        // dropped one lives, and pings, for the rest of the process. The
-        // daemon rescans on every reconnect, which made this unbounded.
-        connections.for_each(|spare| spare.close());
+        if failed.is_some() {
+            last_error = failed;
+        }
     }
 
     if discovered.is_empty() {
