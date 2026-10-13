@@ -220,12 +220,12 @@ pub fn upnp_ip(target: &Target, fallback: IpAddr) -> IpAddr {
 /// The service catalogue, brought up to date against the player the session
 /// reached. Every by-id lookup wants this before it trusts an id: a cleared or
 /// schema-bumped cache would otherwise make a bookmark or a remembered stream
-/// look unknown until some `search` happened to rebuild it. Not saved here -
-/// the callers that care whether anything changed refresh for themselves.
+/// look unknown until some `search` happened to rebuild it. Saved when the
+/// refresh changed it, so the next run need not parse the descriptors again.
 pub async fn refreshed_catalogue(session: &Session) -> Result<catalogue::Catalogue> {
     let mut catalogue = catalogue::Catalogue::load();
     catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
+        .refresh_and_save(&Upnp::new(session.connection.ip()), false)
         .await?;
     Ok(catalogue)
 }
