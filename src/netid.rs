@@ -69,11 +69,12 @@ fn default_gateway() -> Result<Ipv4Addr> {
 pub fn network_fingerprint() -> Option<String> {
     let gateway = default_gateway().ok()?;
     let arp = fs::read_to_string("/proc/net/arp").ok()?;
+    let gateway = gateway.to_string();
 
     for line in arp.lines().skip(1) {
         let fields: Vec<_> = line.split_whitespace().collect();
         // IP address, HW type, flags, HW address, ...
-        if fields.len() >= 4 && fields[0] == gateway.to_string() {
+        if fields.len() >= 4 && fields[0] == gateway {
             let mac = fields[3];
             if mac != "00:00:00:00:00:00" {
                 return Some(mac.to_ascii_lowercase());
