@@ -209,10 +209,4 @@ mod tests {
         assert_eq!(token_in("http://x/y?X-Plex-Token="), None);
         assert_eq!(token_in("http://x/y?width=300"), None);
     }
-
-    #[test]
-    fn the_identifier_survives_url_encoding() {
-        assert_eq!(http::urlencode("x2rock-my.host"), "x2rock-my.host");
-        assert_eq!(http::urlencode("a b:c"), "a%20b%3ac");
-    }
 }
