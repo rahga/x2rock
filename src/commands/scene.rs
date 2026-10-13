@@ -22,6 +22,7 @@
 //! room the scene names that is not in the household now is skipped and said.
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use super::content::{find_favorite, start_bookmark};
@@ -29,7 +30,8 @@ use super::household::change_group;
 use super::{Report, emit};
 use crate::bookmarks;
 use crate::session::{self, Session};
-use crate::sonos::proto::{Group, Groups};
+use crate::sonos::local::Connection;
+use crate::sonos::proto::{Group, Groups, Player};
 use crate::store;
 
 /// One room in a scene, by id with its name beside it.
@@ -199,18 +201,55 @@ fn present(now: &Groups, group: &SceneGroup) -> (Vec<String>, Vec<String>) {
     let mut ids = Vec::new();
     let mut missing = Vec::new();
     for room in &group.rooms {
-        let found = now.player(&room.id).or_else(|| {
-            now.players
-                .iter()
-                .find(|p| p.name.eq_ignore_ascii_case(&room.name))
-        });
-        match found {
+        match find_room(now, room) {
             Some(p) if !ids.contains(&p.id) => ids.push(p.id.clone()),
             Some(_) => {}
             None => missing.push(room.name.clone()),
         }
     }
     (ids, missing)
+}
+
+/// The player a scene room names, by id, else by name - so a room that was
+/// re-added under a new id but kept its name still matches.
+fn find_room<'a>(now: &'a Groups, room: &SceneRoom) -> Option<&'a Player> {
+    now.player(&room.id).or_else(|| {
+        now.players
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&room.name))
+    })
+}
+
+/// The connection to one speaker, by its own address. A player-scoped call
+/// is refused by any other player, so a speaker with no address is an error
+/// rather than a fall back to the session's own socket.
+async fn speaker(session: &Session, player: &Player) -> Result<Connection> {
+    session.player(Some(player.reach_ip()?)).await
+}
+
+/// One room as `save` keeps it: its own level, or `None` for a fixed-volume
+/// room or one that could not be read, with the note saying which.
+async fn read_room(session: &Session, player: &Player) -> (SceneRoom, Option<String>) {
+    let (volume, note) = match speaker(session, player).await {
+        Ok(conn) => match conn.player_volume(&player.id).await {
+            Ok(v) if v.fixed => (None, None),
+            Ok(v) => (Some(v.volume), None),
+            Err(e) => (
+                None,
+                Some(format!("note: {}: volume not read ({e:#})", player.name)),
+            ),
+        },
+        Err(e) => (
+            None,
+            Some(format!("note: {}: not reached ({e:#})", player.name)),
+        ),
+    };
+    let room = SceneRoom {
+        id: player.id.clone(),
+        name: player.name.clone(),
+        volume,
+    };
+    (room, note)
 }
 
 fn room_names(scene_group: &SceneGroup) -> String {
@@ -359,50 +398,40 @@ pub async fn save(
     let mut notes = Vec::new();
     // Which group the soundtrack is for, settled before anything is read, so
     // a household with several groups and no --room fails at once.
-    let playing_group = match play {
-        Some(_) => Some(groups.resolve(room)?.id.clone()),
-        None => None,
-    };
     let track = match play {
-        Some(query) => Some(soundtrack(session, &household, query).await?),
+        Some(query) => {
+            let group = groups.resolve(room)?.id.clone();
+            Some((group, soundtrack(session, &household, query).await?))
+        }
         None => None,
     };
 
-    let mut scene_groups = Vec::new();
-    for group in &groups.groups {
+    // Every speaker read at once, as `member_volumes` does: one at a time, an
+    // unreachable speaker stacked its timeout onto all the others. Gathered
+    // in household order, so the notes read as they always did.
+    let reads = groups.groups.iter().map(|group| async move {
         // Coordinator first: it is who the group is built around.
         let mut members = groups.members(group);
         members.sort_by_key(|p| p.id != group.coordinator_id);
-        let mut rooms = Vec::new();
-        for player in members {
-            let volume = match session.player(player.ip()).await {
-                Ok(conn) => match conn.player_volume(&player.id).await {
-                    Ok(v) if v.fixed => None,
-                    Ok(v) => Some(v.volume),
-                    Err(e) => {
-                        notes.push(format!("note: {}: volume not read ({e:#})", player.name));
-                        None
-                    }
-                },
-                Err(e) => {
-                    notes.push(format!("note: {}: not reached ({e:#})", player.name));
-                    None
-                }
-            };
-            rooms.push(SceneRoom {
-                id: player.id.clone(),
-                name: player.name.clone(),
-                volume,
-            });
-        }
+        let rooms = join_all(members.into_iter().map(|p| read_room(session, p))).await;
         let target = session::target_for(groups, group);
         let muted = match session::coordinator(session, &target).await {
             Ok(conn) => conn.group_volume(&group.id).await.is_ok_and(|v| v.muted),
             Err(_) => false,
         };
-        let play = (playing_group.as_deref() == Some(group.id.as_str()))
-            .then(|| track.clone())
-            .flatten();
+        (group, rooms, muted)
+    });
+    let mut scene_groups = Vec::new();
+    for (group, read, muted) in join_all(reads).await {
+        let mut rooms = Vec::with_capacity(read.len());
+        for (room, note) in read {
+            notes.extend(note);
+            rooms.push(room);
+        }
+        let play = track
+            .as_ref()
+            .filter(|(id, _)| *id == group.id)
+            .map(|(_, soundtrack)| soundtrack.clone());
         scene_groups.push(SceneGroup { rooms, muted, play });
     }
 
@@ -506,26 +535,28 @@ pub async fn apply(session: &Session, name: &str, json: bool) -> Result<()> {
         }
     }
 
-    for group in &scene.groups {
-        for room in &group.rooms {
-            let Some(level) = room.volume else { continue };
-            let Some(player) = now.player(&room.id).or_else(|| {
-                now.players
-                    .iter()
-                    .find(|p| p.name.eq_ignore_ascii_case(&room.name))
-            }) else {
-                continue;
-            };
-            let set = match session.player(player.ip()).await {
-                Ok(conn) => conn.set_player_volume(&player.id, level).await,
-                Err(e) => Err(e),
-            };
-            if let Err(e) = set {
-                notes.push(format!("note: {}: volume not set ({e:#})", room.name));
-            }
-        }
-    }
+    // Every level set at once, for the reason `save` reads them that way; the
+    // notes still come out in the scene's order.
+    let sets = scene
+        .groups
+        .iter()
+        .flat_map(|g| &g.rooms)
+        .filter_map(|room| {
+            let level = room.volume?;
+            let player = find_room(&now, room)?;
+            Some(async move {
+                let set = match speaker(session, player).await {
+                    Ok(conn) => conn.set_player_volume(&player.id, level).await,
+                    Err(e) => Err(e),
+                };
+                set.err()
+                    .map(|e| format!("note: {}: volume not set ({e:#})", room.name))
+            })
+        });
+    notes.extend(join_all(sets).await.into_iter().flatten());
 
+    // Read once, and only if a soundtrack is a favorite.
+    let mut favorites = None;
     let mut playing = Vec::new();
     for group in &scene.groups {
         let (ids, _) = present(&now, group);
@@ -548,8 +579,10 @@ pub async fn apply(session: &Session, name: &str, json: bool) -> Result<()> {
         let Some(play) = &group.play else { continue };
         let started = match play {
             Soundtrack::Favorite { name } => {
-                let favorites = session.connection.favorites(&household).await?;
-                match find_favorite(&favorites.items, name) {
+                if favorites.is_none() {
+                    favorites = Some(session.connection.favorites(&household).await?.items);
+                }
+                match find_favorite(favorites.as_deref().unwrap_or_default(), name) {
                     Ok(favorite) => conn
                         .load_favorite(&live.id, &favorite.id)
                         .await
