@@ -5,17 +5,16 @@
 //! own copy of the same two steps: find the directory, and write by renaming a
 //! temporary over the real file. This is the one copy.
 //!
-//! The temporary is named for the writing *process*, not just the file. The
-//! daemon and the CLI both write these files, and a shared `x.json.tmp` had
-//! them opening the same inode with `O_TRUNC` when they overlapped: a file
-//! with both writers' bytes in it, which one of them then renamed into place,
-//! and which `load` thereafter refused for good. A rename is atomic; two
-//! writers sharing one scratch file was the part that was not.
+//! Each write owns a newly created temporary file. A process id alone is not
+//! enough: overlapping tasks in the same daemon otherwise remove or rename
+//! each other's scratch file. Atomic replacement protects readers from partial
+//! files; read/modify/write transactions still need [`Lock`] as well.
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
@@ -77,9 +76,38 @@ fn sibling(path: &Path, ext: &str) -> PathBuf {
     path.with_file_name(format!("{name}.{ext}"))
 }
 
-/// `<file>.<pid>.tmp` beside `path`: this process's scratch file, and no other's.
-fn scratch(path: &Path) -> PathBuf {
-    sibling(path, &format!("{}.tmp", std::process::id()))
+/// One write's scratch file, removed on any exit that did not rename it away.
+struct Scratch {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl Scratch {
+    fn create(path: &Path, mode: u32) -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let tmp = sibling(path, &format!("{}.{serial}.tmp", std::process::id()));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(mode)
+                .open(&tmp)
+            {
+                Ok(file) => return Ok(Self { path: tmp, file }),
+                // A crash followed by PID reuse can leave this name occupied.
+                // Never truncate or remove a file this write did not create.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
+            }
+        }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// The file's text, or `None` for a file that does not exist yet. Every
@@ -121,8 +149,7 @@ pub fn load_json_lenient<T: DeserializeOwned>(path: &Path) -> Option<T> {
 /// written - a `chmod` afterwards leaves a window in which the contents sit at
 /// the umask's mercy, which matters for the one file here that holds a secret.
 /// `create_new` is what makes the mode stick: an existing file keeps its own
-/// bits whatever `mode` asks, so a leftover is removed first. It can only be
-/// this process's own name reused after a crash; nobody is mid-write in it.
+/// bits whatever `mode` asks. Occupied scratch names are skipped, never reused.
 pub fn write_atomically(path: &Path, text: &str, mode: u32) -> Result<()> {
     write_bytes_atomically(path, text.as_bytes(), mode)
 }
@@ -132,21 +159,12 @@ pub fn write_bytes_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let tmp = scratch(path);
-    let _ = fs::remove_file(&tmp);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    if let Err(e) = file.write_all(bytes) {
-        drop(file);
-        let _ = fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {}", tmp.display()));
-    }
-    drop(file);
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    let mut scratch = Scratch::create(path, mode)?;
+    scratch
+        .file
+        .write_all(bytes)
+        .with_context(|| format!("writing {}", scratch.path.display()))?;
+    fs::rename(&scratch.path, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// An exclusive lock over a file's writers, held while the guard lives.
@@ -190,6 +208,53 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn overlapping_writes_publish_only_complete_files() {
+        let dir = TempDir::new("store-overlap");
+        let path = dir.path().join("shared.json");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..8)
+                .map(|id| {
+                    let path = &path;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let bytes = vec![b'a' + id; 256 * 1024];
+                        barrier.wait();
+                        for _ in 0..8 {
+                            write_bytes_atomically(path, &bytes, SECRET)?;
+                            let seen = fs::read(path)?;
+                            anyhow::ensure!(
+                                seen.len() == bytes.len(),
+                                "a partial write was visible"
+                            );
+                            anyhow::ensure!(
+                                seen.iter().all(|b| *b == seen[0]),
+                                "mixed writers' bytes"
+                            );
+                        }
+                        anyhow::Ok(())
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_publish_cleans_up_its_scratch_file() {
+        let dir = TempDir::new("store-publish-failed");
+        let path = dir.path().join("occupied");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), "original").unwrap();
+        assert!(write_atomically(&path, "new", SECRET).is_err());
+        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn a_leftover_scratch_file_does_not_loosen_the_mode() {
         // `mode` on open applies only to a file being created. A leftover from a
         // crashed writer at the umask's default used to keep its 0644 through
@@ -197,7 +262,7 @@ mod tests {
         // the doc comment on `Credentials::save` promised did not exist.
         let dir = TempDir::new("store-mode");
         let path = dir.path().join("credentials.json");
-        let leftover = scratch(&path);
+        let leftover = sibling(&path, &format!("{}.tmp", std::process::id()));
         fs::write(&leftover, "stale").unwrap();
         fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -206,18 +271,21 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "got {mode:04o}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"secret\":1}");
-        assert!(!leftover.exists(), "the scratch file was renamed away");
+        assert_eq!(fs::read_to_string(leftover).unwrap(), "stale");
     }
 
     #[test]
-    fn the_scratch_name_is_per_process() {
-        let path = Path::new("/state/x2rock/bookmarks.json");
-        let tmp = scratch(path);
-        assert_eq!(tmp.parent(), path.parent());
-        assert_eq!(
-            tmp.file_name().unwrap().to_str().unwrap(),
-            format!("bookmarks.json.{}.tmp", std::process::id())
-        );
+    fn overlapping_scratch_files_have_separate_ownership() {
+        let dir = TempDir::new("store-scratch");
+        let path = dir.path().join("bookmarks.json");
+        let mut first = Scratch::create(&path, SECRET).unwrap();
+        first.file.write_all(b"first writer").unwrap();
+        let second = Scratch::create(&path, SECRET).unwrap();
+        assert_ne!(first.path, second.path);
+        drop(second);
+        assert_eq!(fs::read_to_string(&first.path).unwrap(), "first writer");
+        drop(first);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

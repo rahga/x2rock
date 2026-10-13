@@ -20,12 +20,19 @@
 # the sink, the card - so every event just re-reads the sink and nothing is
 # sent unless the level or the mute actually changed. Set X2ROCK=echo to watch
 # what it would send without touching a speaker.
-set -u
+set -uo pipefail
+# pactl's labels and event descriptions are parsed below.
+export LC_ALL=C
 
 ROOM=${1:-${X2ROCK_ROOM:-}}
 MAX=${2:-50}
 X2ROCK=${X2ROCK:-x2rock}
 [ -n "$ROOM" ] || { echo "usage: $0 <room> [max]   (or export X2ROCK_ROOM)" >&2; exit 2; }
+if [[ ! "$MAX" =~ ^[0-9]{1,3}$ ]] || (( 10#$MAX > 100 )); then
+    echo "$0: max must be a whole number from 0 to 100" >&2
+    exit 2
+fi
+MAX=$((10#$MAX))
 command -v pactl >/dev/null || { echo "$0: pactl not found - PipeWire's pipewire-pulse or PulseAudio is needed" >&2; exit 2; }
 
 sink_level() {
@@ -37,21 +44,32 @@ sink_muted() { pactl get-sink-mute @DEFAULT_SINK@ | sed 's/^Mute: //'; }
 
 last_level=; last_muted=
 apply() {
-    level=$(sink_level); muted=$(sink_muted)
-    [ -n "$level" ] || return
-    if [ "$muted" != "$last_muted" ]; then
-        case $muted in
-            yes) "$X2ROCK" -r "$ROOM" vol mute ;;
-            no)  "$X2ROCK" -r "$ROOM" vol unmute ;;
-        esac
-        last_muted=$muted
+    local level muted target
+    level=$(sink_level) || return
+    muted=$(sink_muted) || return
+    [[ "$level" =~ ^[0-9]+$ ]] || return
+    case $muted in yes|no) ;; *) return ;; esac
+
+    # Setting Sonos volume unmutes it. While the sink is muted, defer its
+    # level until unmute rather than briefly making the room audible.
+    if [ "$muted" = yes ]; then
+        if [ "$last_muted" != yes ]; then
+            "$X2ROCK" -r "$ROOM" vol mute || return
+            last_muted=yes
+        fi
+        return
     fi
     # Over 100% (PipeWire allows it) still caps at max.
     [ "$level" -gt 100 ] && level=100
-    target=$(( (level * MAX + 50) / 100 ))
+    target=$(( (10#$level * MAX + 50) / 100 ))
     if [ "$target" != "$last_level" ]; then
-        "$X2ROCK" -r "$ROOM" vol "$target"
+        # Remember only successful writes, so the next event retries failures.
+        "$X2ROCK" -r "$ROOM" vol "$target" || return
         last_level=$target
+        last_muted=no
+    elif [ "$last_muted" != no ]; then
+        "$X2ROCK" -r "$ROOM" vol unmute || return
+        last_muted=no
     fi
 }
 
