@@ -5,7 +5,7 @@
 //! network fingerprint, because this laptop moves and a player address is only
 //! meaningful on the network it was found on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -187,19 +187,20 @@ impl State {
     /// every network - what lets `--household <room>` resolve with no speaker
     /// in reach.
     pub fn household_rooms(&self) -> BTreeMap<String, Vec<String>> {
-        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for households in self.networks.values() {
-            for (id, players) in households {
-                let rooms = out.entry(id.clone()).or_default();
-                for p in players {
-                    if !rooms.contains(&p.name) {
-                        rooms.push(p.name.clone());
-                    }
-                }
-                rooms.sort();
-            }
+        let mut out: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (id, players) in self.networks.values().flatten() {
+            out.entry(id)
+                .or_default()
+                .extend(players.iter().map(|p| p.name.as_str()));
         }
-        out
+        out.into_iter()
+            .map(|(id, rooms)| {
+                (
+                    id.to_string(),
+                    rooms.into_iter().map(String::from).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Room / player names remembered for this machine, deduplicated and sorted.
