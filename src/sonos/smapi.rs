@@ -683,18 +683,17 @@ async fn get_metadata(
     count: u32,
     refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Vec<Item>, u32)> {
-    let body = call(
-        service,
-        token,
-        "getMetadata",
-        &format!(
-            "<id>{}</id><index>{index}</index><count>{count}</count>",
-            xml_escape(id)
-        ),
-        refreshed,
-    )
-    .await?;
+    let params = metadata_params(id, index, count);
+    let body = call(service, token, "getMetadata", &params, refreshed).await?;
     parse_items(&body, "getMetadata").map(|page| at_most(page, count))
+}
+
+/// The `getMetadata` parameters: which item, and which page of its children.
+fn metadata_params(id: &str, index: u32, count: u32) -> String {
+    format!(
+        "<id>{}</id><index>{index}</index><count>{count}</count>",
+        xml_escape(id)
+    )
 }
 
 /// The most of SMAPI's `root` read alongside a front page. Roots are a handful
@@ -803,44 +802,35 @@ pub async fn resume_point(
     id: &str,
     refreshed: &mut Option<RefreshedToken>,
 ) -> Result<(Option<ResumePoint>, Option<Item>)> {
-    let body = call(
-        service,
-        token,
-        "getMetadata",
-        &format!(
-            "<id>{}</id><index>0</index><count>1</count>",
-            xml_escape(id)
-        ),
-        refreshed,
-    )
-    .await?;
-    let first = parse_items(&body, "getMetadata")?
-        .0
-        .into_iter()
-        .find(|item| !item.container);
-    Ok((parse_resume_point(&body)?, first))
+    let params = metadata_params(id, 0, 1);
+    let body = call(service, token, "getMetadata", &params, refreshed).await?;
+    parse_resume(&body)
+}
+
+/// A resumable item's `getMetadata` reply, read once for both halves: its
+/// resume point and its first playable leaf.
+fn parse_resume(body: &str) -> Result<(Option<ResumePoint>, Option<Item>)> {
+    let body = declare_xsi(body);
+    let doc = Document::parse(&body).context("parsing getMetadata response")?;
+    let first = items_in(&doc).0.into_iter().find(|item| !item.container);
+    Ok((resume_point_in(&doc), first))
 }
 
 /// The `positionInformation` in a `getMetadata` reply, or `None` when there is
 /// none - a book never started, or anything that is not resumable at all.
-fn parse_resume_point(body: &str) -> Result<Option<ResumePoint>> {
-    let body = declare_xsi(body);
-    let doc = Document::parse(&body).context("parsing getMetadata response")?;
-    let Some(node) = doc
+fn resume_point_in(doc: &Document) -> Option<ResumePoint> {
+    let node = doc
         .descendants()
-        .find(|n| n.has_tag_name("positionInformation"))
-    else {
-        return Ok(None);
-    };
+        .find(|n| n.has_tag_name("positionInformation"))?;
     let text = |tag: &str| child_text(node, tag).map(str::trim);
-    Ok(text("id")
+    text("id")
         .filter(|id| !id.is_empty())
         .map(|id| ResumePoint {
             id: id.to_string(),
             offset_millis: text("offsetMillis")
                 .and_then(|t| t.parse().ok())
                 .unwrap_or(0),
-        }))
+        })
 }
 
 /// One `index`/`count` page of rows that arrived whole, with the whole count
@@ -870,7 +860,12 @@ fn at_most((mut items, total): (Vec<Item>, u32), count: u32) -> (Vec<Item>, u32)
 fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
     let body = declare_xsi(body);
     let doc = Document::parse(&body).with_context(|| format!("parsing {what} response"))?;
-    let total: u32 = element_text(&doc, "total")
+    Ok(items_in(&doc))
+}
+
+/// [`parse_items`] over a reply already parsed.
+fn items_in(doc: &Document) -> (Vec<Item>, u32) {
+    let total: u32 = element_text(doc, "total")
         .and_then(|t| t.parse().ok())
         .unwrap_or(0);
     let mut dropped: u32 = 0;
@@ -934,7 +929,7 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
             })
         })
         .collect();
-    Ok((items, total.saturating_sub(dropped)))
+    (items, total.saturating_sub(dropped))
 }
 
 /// `getMediaURI`, turning a search hit into something a player can be handed.
@@ -1807,7 +1802,8 @@ mod tests {
 
     #[test]
     fn a_books_resume_point_is_the_chapter_and_its_offset() {
-        let resume = parse_resume_point(DUNE).unwrap().unwrap();
+        let (resume, first) = parse_resume(DUNE).unwrap();
+        let resume = resume.unwrap();
         assert_eq!(
             resume.id,
             "refchapter:B002V1OF70_119953071_com_119000_1795000"
@@ -1818,6 +1814,7 @@ mod tests {
         assert_eq!(total, 53);
         assert_eq!(items[0].title, "Opening Credits");
         assert!(!items[0].container);
+        assert_eq!(first.unwrap().title, "Opening Credits");
     }
 
     #[test]
@@ -1826,14 +1823,14 @@ mod tests {
             "<positionInformation><id>refchapter:B002V1OF70_119953071_com_119000_1795000</id><index>0</index><offsetMillis>756107</offsetMillis></positionInformation>",
             "",
         );
-        assert_eq!(parse_resume_point(&none).unwrap(), None);
+        assert_eq!(parse_resume(&none).unwrap().0, None);
         let bare = DUNE.replace("<offsetMillis>756107</offsetMillis>", "");
-        assert_eq!(parse_resume_point(&bare).unwrap().unwrap().offset_millis, 0);
+        assert_eq!(parse_resume(&bare).unwrap().0.unwrap().offset_millis, 0);
         let empty = DUNE.replace(
             "<id>refchapter:B002V1OF70_119953071_com_119000_1795000</id>",
             "<id></id>",
         );
-        assert_eq!(parse_resume_point(&empty).unwrap(), None);
+        assert_eq!(parse_resume(&empty).unwrap().0, None);
     }
 
     #[test]
