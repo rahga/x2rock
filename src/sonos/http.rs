@@ -457,10 +457,8 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     if head_only {
         return Ok((status, head.into_owned(), Vec::new()));
     }
-    let chunked = head.lines().any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("transfer-encoding:") && l.contains("chunked")
-    });
+    let chunked = header(&head, "Transfer-Encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     let body = if chunked {
         // Chunked framing wins over any Content-Length, and `dechunk` checks
         // its own end.
@@ -492,19 +490,19 @@ fn text(head: &str, body: Vec<u8>, authority: &str) -> Result<String> {
     // acceptable rather than none. Deezer takes it at its word and gzips, and
     // ignores an explicit `Accept-Encoding: identity` too, so declining is not
     // on offer: the only way to read the reply is to be able to decompress it.
-    let encoded = head.lines().any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("content-encoding:") && (l.contains("gzip") || l.contains("x-gzip"))
-    });
+    // `x-gzip` included, since it contains `gzip`.
+    let encoded =
+        header(head, "Content-Encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
     let body = if encoded {
         gunzip(&body).with_context(|| format!("gzip body from {authority}"))?
     } else {
         body
     };
     // Services answer UTF-8 and some of them lead with a BOM, which every XML
-    // parser then refuses as content before the declaration.
-    let text = String::from_utf8_lossy(&body).into_owned();
-    Ok(text.trim_start_matches('\u{feff}').to_string())
+    // parser then refuses as content before the declaration. Its bytes are
+    // dropped before decoding, so the text is built once.
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&body);
+    Ok(String::from_utf8_lossy(body).into_owned())
 }
 
 /// Unwrap one gzip member (RFC 1952) into the deflate stream inside it.
