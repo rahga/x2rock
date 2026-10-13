@@ -117,7 +117,7 @@ async fn main() {
     // An exported-but-empty `X2ROCK_ROOM=` is no default, not a room named "".
     cli.room.retain(|room| !room.is_empty());
     // Decided before the command runs, so a failure knows how to report itself.
-    let json = cli.command.json();
+    let json = cli::wants_json(&matches);
     if let Err(e) = run(cli).await {
         // The same answer the panic hook gives, for the paths that return a
         // broken pipe rather than panicking on it - `completions`, which writes
