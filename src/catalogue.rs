@@ -27,6 +27,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::Credentials;
+use crate::hint::{self, Match};
 use crate::sonos::smapi::{self, Category, Service};
 use crate::sonos::upnp::Upnp;
 use crate::store;
@@ -321,20 +322,18 @@ impl Catalogue {
         what: &str,
         lists: &str,
     ) -> Result<&'a Service> {
-        let needle = query.to_lowercase();
-        if let Some(exact) = candidates.iter().find(|s| s.name.to_lowercase() == needle) {
-            return Ok(exact);
-        }
-        let matches: Vec<_> = candidates
-            .iter()
-            .filter(|s| s.name.to_lowercase().starts_with(&needle))
-            .collect();
-        match matches.as_slice() {
-            [only] => Ok(only),
-            [] => Err(anyhow!(
+        let candidates = candidates.iter().copied();
+        match hint::pick_unique(
+            candidates,
+            |s| s.name.as_str(),
+            query,
+            |n, q| n.starts_with(q),
+        ) {
+            Match::One(only) => Ok(only),
+            Match::None => Err(anyhow!(
                 "no {what} matching {query:?}. Run `x2rock {lists}` to list them."
             )),
-            several => {
+            Match::Several(several) => {
                 let names: Vec<_> = several.iter().map(|s| s.name.as_str()).collect();
                 Err(anyhow!(
                     "{query:?} matches {} services: {}",

@@ -32,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::hint::{self, Match};
 use crate::sonos::smapi::{DeviceAuth, Token};
 use crate::store;
 
@@ -620,31 +621,25 @@ impl Credentials {
         if let Some(account) = by_id.get(query) {
             return Ok((query.to_string(), account.service_name.clone()));
         }
-        if let Some((id, account)) = by_id
-            .iter()
-            .find(|(_, a)| a.service_name.eq_ignore_ascii_case(query))
-        {
-            return Ok((id.to_string(), account.service_name.clone()));
-        }
-        let needle = query.to_lowercase();
-        let matches: Vec<_> = by_id
-            .iter()
-            .filter(|(_, a)| a.service_name.to_lowercase().starts_with(&needle))
-            .collect();
-        match matches.len() {
-            0 => bail!("no account linked for {query:?}. Run `x2rock accounts` to see them."),
-            1 => {
-                let (id, account) = matches[0];
-                Ok((id.to_string(), account.service_name.clone()))
+        match hint::pick_unique(
+            &by_id,
+            |(_, a)| a.service_name.as_str(),
+            query,
+            |n, q| n.starts_with(q),
+        ) {
+            Match::None => {
+                bail!("no account linked for {query:?}. Run `x2rock accounts` to see them.")
             }
-            several => {
-                let shown: Vec<_> = matches
+            Match::One((id, account)) => Ok((id.to_string(), account.service_name.clone())),
+            Match::Several(several) => {
+                let shown: Vec<_> = several
                     .iter()
                     .map(|(id, a)| format!("{} (id {id})", a.service_name))
                     .collect();
                 bail!(
-                    "{several} linked services start with {query:?}: {}. \
+                    "{} linked services start with {query:?}: {}. \
                      Give the id, or the whole name.",
+                    several.len(),
                     shown.join(", ")
                 )
             }

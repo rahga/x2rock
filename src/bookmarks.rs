@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::hint::{self, Match};
 use crate::sonos::http;
 use crate::sonos::proto::MusicObjectId;
 use crate::sonos::xml_escape;
@@ -584,29 +585,17 @@ impl Bookmarks {
     /// could drift apart is precisely the bug this avoids - the answer to
     /// "which will play?" and "which will be removed?" must be the same answer.
     fn position(&self, query: &str) -> Result<usize> {
-        let needle = query.to_lowercase();
-        if let Some(exact) = self
-            .items
-            .iter()
-            .position(|b| b.name.to_lowercase() == needle)
-        {
-            return Ok(exact);
-        }
-        let matches: Vec<usize> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.name.to_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect();
-        match matches.as_slice() {
-            [only] => Ok(*only),
-            [] => bail!("nothing kept matches {query:?}. `x2rock bookmarks` lists them."),
-            several => {
-                let names: Vec<_> = several
-                    .iter()
-                    .map(|&i| self.items[i].name.as_str())
-                    .collect();
+        let candidates = self.items.iter().enumerate();
+        match hint::pick_unique(
+            candidates,
+            |(_, b)| b.name.as_str(),
+            query,
+            |n, q| n.contains(q),
+        ) {
+            Match::One((i, _)) => Ok(i),
+            Match::None => bail!("nothing kept matches {query:?}. `x2rock bookmarks` lists them."),
+            Match::Several(several) => {
+                let names: Vec<_> = several.iter().map(|(_, b)| b.name.as_str()).collect();
                 bail!("{query:?} matches {}: {}", several.len(), names.join(", "))
             }
         }

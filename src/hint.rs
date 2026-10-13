@@ -161,6 +161,45 @@ pub fn shell_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// What a name query came to among some candidates: see [`pick_unique`].
+#[derive(Debug)]
+pub enum Match<T> {
+    One(T),
+    None,
+    /// Every partial match, for the caller to list in its own words.
+    Several(Vec<T>),
+}
+
+/// The ladder every "which one did you mean" climbs: a whole name, ignoring
+/// case, wins outright - the first, in order - so a name that is a prefix of
+/// another still resolves; failing that, the one candidate whose name matches
+/// `partial` (given the name and the query, both lowercased), and never one of
+/// several, since silently taking whichever sorted first would be worse than
+/// saying so. What a miss or an ambiguity says is each caller's own.
+pub fn pick_unique<T>(
+    candidates: impl IntoIterator<Item = T>,
+    name: impl Fn(&T) -> &str,
+    query: &str,
+    partial: impl Fn(&str, &str) -> bool,
+) -> Match<T> {
+    let needle = query.to_lowercase();
+    let mut found = Vec::new();
+    for candidate in candidates {
+        let lower = name(&candidate).to_lowercase();
+        if lower == needle {
+            return Match::One(candidate);
+        }
+        if partial(&lower, &needle) {
+            found.push(candidate);
+        }
+    }
+    match found.len() {
+        0 => Match::None,
+        1 => Match::One(found.remove(0)),
+        _ => Match::Several(found),
+    }
+}
+
 /// The `(code, fix)` an error carries, reading the first [`Hint`] in its chain.
 /// A plain error - most of them - is `(Code::Unknown, None)`.
 ///
