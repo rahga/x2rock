@@ -1145,21 +1145,14 @@ fn replayable<'a>(
         };
     }
     let service = catalogue.name_of(service_id).map(str::to_string);
-    let still_held = |account: &str| {
-        let serial = account
-            .strip_prefix("sn_")
-            .and_then(|n| n.parse::<u32>().ok());
+    let still_held = |serial: u32| {
         linked
             .accounts_for(household, service_id)
-            .is_some_and(|held| {
-                held.accounts
-                    .values()
-                    .any(|a| a.serial.is_some() && a.serial == serial)
-            })
+            .is_some_and(|held| held.accounts.values().any(|a| a.serial == Some(serial)))
     };
     let playable = match linked.token_for(household, service_id) {
         Some(token) => {
-            let kept = item.id.account_id.as_deref().is_some_and(still_held);
+            let kept = item.id.serial().is_some_and(still_held);
             if !kept && let Some(serial) = token.serial {
                 id.account_id = Some(format!("sn_{serial}"));
             }
@@ -1322,14 +1315,10 @@ pub async fn replay(
     // The account the row was played from, which `replayable` has already
     // swapped for the household's current one if it is gone: an iHeartRadio
     // custom station belongs to the listener who made it.
-    let serial =
-        r.id.account_id
-            .as_deref()
-            .and_then(|a| a.strip_prefix("sn_"))
-            .and_then(|n| n.parse::<u32>().ok());
-    let token = serial
-        .and_then(|n| linked.token_by_serial(&household, &service.id, n))
-        .or_else(|| linked.token_for(&household, &service.id));
+    let token =
+        r.id.serial()
+            .and_then(|n| linked.token_by_serial(&household, &service.id, n))
+            .or_else(|| linked.token_for(&household, &service.id));
     play_item(
         session,
         room,

@@ -845,6 +845,18 @@ pub struct ContentId {
     pub object_id: String,
 }
 
+impl ContentId {
+    /// The account serial from `sn_3`, as a number - what the store files an
+    /// account's household serial as. Mirrors [`MusicObjectId::account_serial`].
+    pub fn serial(&self) -> Option<u32> {
+        self.account_id
+            .as_deref()?
+            .strip_prefix("sn_")?
+            .parse()
+            .ok()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
