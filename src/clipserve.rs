@@ -22,11 +22,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::hint::{Code, Hint};
 use crate::netid::local_ip_toward;
+use crate::sonos::http;
 
 /// After the clip has been fetched, how much longer to stay up for a second
 /// request. The player made exactly one in testing; this is for the day it
@@ -132,20 +133,8 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
     mime: &str,
     bytes: &[u8],
 ) -> Result<bool> {
-    let mut raw = Vec::new();
-    let mut chunk = [0u8; 1024];
-    while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        raw.extend_from_slice(&chunk[..n]);
-        if raw.len() > MAX_REQUEST {
-            break;
-        }
-    }
-    let head = String::from_utf8_lossy(&raw);
-    let sent = match parse_request(&head) {
+    let head = http::read_message(&mut stream, REQUEST_TIMEOUT, MAX_REQUEST).await?;
+    let sent = match http::parse_request(&head) {
         Some((method, asked)) if asked == path && matches!(method, "GET" | "HEAD") => {
             stream
                 .write_all(ok_head(mime, bytes.len()).as_bytes())
@@ -158,11 +147,7 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
             }
         }
         _ => {
-            stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await?;
+            stream.write_all(http::NOT_FOUND).await?;
             false
         }
     };
@@ -176,21 +161,6 @@ fn ok_head(mime: &str, len: usize) -> String {
         "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {len}\r\n\
          Cache-Control: no-store\r\nConnection: close\r\n\r\n"
     )
-}
-
-/// The method and the path (query stripped) off a request line, or `None` for
-/// anything that is not one.
-fn parse_request(head: &str) -> Option<(&str, &str)> {
-    let line = head.lines().next()?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next()?;
-    let target = parts.next()?;
-    let version = parts.next()?;
-    if !version.starts_with("HTTP/") {
-        return None;
-    }
-    let path = target.split(['?', '#']).next().unwrap_or(target);
-    Some((method, path))
 }
 
 /// The player took the clip and never came for it. No `fix`: the remedy is a
@@ -224,20 +194,7 @@ fn not_fetched(url: &str, speaker: IpAddr, port: u16, wait: Duration) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_request_line_yields_method_and_path_without_the_query() {
-        assert_eq!(
-            parse_request("GET /a.mp3?x=1 HTTP/1.1\r\nHost: h\r\n\r\n"),
-            Some(("GET", "/a.mp3"))
-        );
-        assert_eq!(
-            parse_request("HEAD /a.mp3 HTTP/1.0\r\n\r\n"),
-            Some(("HEAD", "/a.mp3"))
-        );
-        assert_eq!(parse_request("nonsense\r\n\r\n"), None);
-        assert_eq!(parse_request(""), None);
-    }
+    use tokio::io::AsyncReadExt;
 
     /// One request against `answer`, as a client would send it: whether the
     /// clip was counted as sent, and everything the client read back.

@@ -289,6 +289,72 @@ pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
     Ok((status, head))
 }
 
+/// The answer to any inbound request for something not served here - a
+/// favicon, a stray prefetch, a wrong path.
+pub const NOT_FOUND: &[u8] =
+    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// Read one inbound HTTP message - the head plus any `Content-Length` body - to
+/// a string, giving up after `within` or once it runs past `cap` bytes.
+///
+/// For the few listeners this tool opens (the GENA callback, the sign-in
+/// redirect, the clip server), each on a port open to anything on the network,
+/// not only the peer it is waiting for: a peer that connects and says nothing,
+/// or never stops talking, costs a bounded wait and a bounded buffer. A read
+/// error ends the message where it stands.
+pub async fn read_message<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    within: Duration,
+    cap: usize,
+) -> Result<String> {
+    tokio::time::timeout(within, read_bounded(stream, cap))
+        .await
+        .map_err(|_| anyhow!("no complete HTTP message within {within:?}"))?
+}
+
+async fn read_bounded<S: AsyncRead + Unpin>(stream: &mut S, cap: usize) -> Result<String> {
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if raw.len() > cap {
+            bail!("an HTTP message ran past {cap} bytes");
+        }
+        let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
+        if let Some(end) = head_end {
+            let head = String::from_utf8_lossy(&raw[..end]);
+            let want = header(&head, "Content-Length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            // Saturating: the length is the peer's to name, and an absurd one
+            // must run into the cap above rather than overflow the sum.
+            if raw.len() >= (end + 4).saturating_add(want) {
+                break;
+            }
+        }
+        match stream.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    Ok(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// The method and the path (query stripped) off a request line, or `None` for
+/// anything that is not one.
+pub fn parse_request(head: &str) -> Option<(&str, &str)> {
+    let line = head.lines().next()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?;
+    let target = parts.next()?;
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    Some((method, path))
+}
+
 /// Percent-encode one value for a URL: everything unreserved passes through,
 /// everything else becomes `%xx` in lowercase hex.
 ///
@@ -585,6 +651,60 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_line_yields_method_and_path_without_the_query() {
+        assert_eq!(
+            parse_request("GET /a.mp3?x=1 HTTP/1.1\r\nHost: h\r\n\r\n"),
+            Some(("GET", "/a.mp3"))
+        );
+        assert_eq!(
+            parse_request("HEAD /a.mp3 HTTP/1.0\r\n\r\n"),
+            Some(("HEAD", "/a.mp3"))
+        );
+        assert_eq!(parse_request("nonsense\r\n\r\n"), None);
+        assert_eq!(parse_request(""), None);
+    }
+
+    const CAP: usize = 512 * 1024;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_connects_and_says_nothing_is_given_up_on() {
+        let (mut ours, _theirs) = tokio::io::duplex(64);
+        let read = read_message(&mut ours, Duration::from_secs(5), CAP).await;
+        assert!(read.is_err(), "a silent peer must time out, not hang");
+    }
+
+    #[tokio::test]
+    async fn a_message_past_the_cap_is_refused_rather_than_buffered() {
+        let (mut ours, mut theirs) = tokio::io::duplex(64 * 1024);
+        let writer = tokio::spawn(async move {
+            let head = format!(
+                "NOTIFY / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                usize::MAX
+            );
+            let _ = theirs.write_all(head.as_bytes()).await;
+            let filler = vec![b'x'; 64 * 1024];
+            while theirs.write_all(&filler).await.is_ok() {}
+        });
+        let read = read_message(&mut ours, Duration::from_secs(30), CAP).await;
+        assert!(read.is_err(), "an endless body must stop at the cap");
+        drop(ours);
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_whole_message_reads_to_its_content_length() {
+        let (mut ours, mut theirs) = tokio::io::duplex(1024);
+        theirs
+            .write_all(b"HTTP/1.1 200 OK\r\nSID: uuid:1\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+        let read = read_message(&mut ours, Duration::from_secs(5), CAP)
+            .await
+            .unwrap();
+        assert!(read.ends_with("\r\n\r\nok"));
+    }
 
     #[test]
     fn urldecode_leaves_a_stray_percent_alone() {
