@@ -1328,9 +1328,6 @@ impl App {
     }
 }
 
-/// An MPRIS volume moved by so many points, snapped to whole percent - the
-/// resolution a speaker actually stores, and the only one at which repeated
-/// steps do not accumulate the error of 0.05 not being representable.
 /// The Sonos app's sleep timer choices, in minutes.
 const SLEEP_STEPS: [u64; 5] = [15, 30, 45, 60, 90];
 
@@ -1351,6 +1348,9 @@ fn next_sleep(left: Option<Duration>) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// An MPRIS volume moved by so many points, snapped to whole percent - the
+/// resolution a speaker actually stores, and the only one at which repeated
+/// steps do not accumulate the error of 0.05 not being representable.
 fn stepped(volume: f64, by: i16) -> f64 {
     ((volume * 100.0).round() + f64::from(by)).clamp(0.0, 100.0) / 100.0
 }

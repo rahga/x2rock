@@ -685,8 +685,6 @@ pub async fn apply_snooze(
     Ok(())
 }
 
-/// `x2rock tv`: switch the soundbar in `room`'s group to its TV input. The
-/// soundbar is whichever member has one, not necessarily the coordinator.
 /// A soundbar switched to its TV input.
 #[derive(Debug, Serialize)]
 pub struct TvOutcome {
@@ -699,6 +697,8 @@ impl Report for TvOutcome {
     }
 }
 
+/// `x2rock tv`: switch the soundbar in `room`'s group to its TV input. The
+/// soundbar is whichever member has one, not necessarily the coordinator.
 pub async fn tv(
     session: &Session,
     player: &Connection,

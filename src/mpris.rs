@@ -691,15 +691,15 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     metadata
 }
 
-/// The same test `run_rate` makes before anything else: a track, with an id,
-/// that names real content rather than the `-1` a player uses for "nothing
-/// to say".
 /// Per-member values as the strings MPRIS publishes them - deliberately
 /// string-typed, see the key's own documentation.
 fn strings<T: ToString>(values: &[T]) -> Vec<String> {
     values.iter().map(T::to_string).collect()
 }
 
+/// The same test `run_rate` makes before anything else: a track, with an id,
+/// that names real content rather than the `-1` a player uses for "nothing
+/// to say".
 fn has_track_id(meta: &MetadataStatus) -> bool {
     meta.track()
         .and_then(|t| t.id.as_ref())
@@ -960,12 +960,6 @@ mod tests {
         assert_eq!(get(&state.with_hints()), Some(Some(true)));
     }
 
-    /// The bug the raw-event capture of 2026-09-03/04 turned up. A body that
-    /// carries no `availablePlaybackActions` and no `playModes` used to be read
-    /// as a source that allows *nothing* - because both fields defaulted to
-    /// all-false and were assigned unconditionally. Every failed stream sent
-    /// one, so a `playbackError` blanked the room's capabilities and reported
-    /// its queue as neither repeating nor shuffling.
     /// The pushed `queueVersion` is never published: writing it beside the
     /// fetched `UpdateID` made the property alternate between the two on
     /// every event.
@@ -981,6 +975,12 @@ mod tests {
         assert_eq!(state.queue_version, "164");
     }
 
+    /// The bug the raw-event capture of 2026-09-03/04 turned up. A body that
+    /// carries no `availablePlaybackActions` and no `playModes` used to be read
+    /// as a source that allows *nothing* - because both fields defaulted to
+    /// all-false and were assigned unconditionally. Every failed stream sent
+    /// one, so a `playbackError` blanked the room's capabilities and reported
+    /// its queue as neither repeating nor shuffling.
     #[test]
     fn a_body_that_omits_the_actions_leaves_the_capabilities_standing() {
         let mut state = RoomState::default();
