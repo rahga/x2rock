@@ -19,10 +19,28 @@ use crate::sonos::local::Connection;
 use crate::sonos::proto::{self, MetadataStatus, PlayModes, PlaybackActions, Repeat};
 use crate::sonos::upnp::Upnp;
 
+/// What every MPRIS player's bus name starts with; the suffix follows.
+pub(crate) const BUS_PREFIX: &str = "org.mpris.MediaPlayer2.";
+
+/// What every suffix this daemon publishes starts with - and the whole of it
+/// for a room with no ASCII in its name, which [`bus_suffix`] reduces to
+/// nothing more, so no dash can be counted on after it.
+const STEM: &str = "x2rock";
+
+/// Whether a bus name is one of this daemon's players: [`BUS_PREFIX`], the
+/// stem, and then nothing or a dash. The one test, so a reader of the bus
+/// cannot miss the players [`bus_suffix`] names without a dash.
+pub(crate) fn is_ours(bus_name: &str) -> bool {
+    bus_name
+        .strip_prefix(BUS_PREFIX)
+        .and_then(|suffix| suffix.strip_prefix(STEM))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
 /// `org.mpris.MediaPlayer2.<suffix>`. "Media Room" becomes `x2rock-media-room`,
 /// the same convention the Kotlin daemon used, so existing bar configs carry over.
 fn bus_suffix(room: &str) -> String {
-    let mut suffix = String::from("x2rock-");
+    let mut suffix = format!("{STEM}-");
     let mut pending_dash = false;
     for c in room.chars() {
         if c.is_ascii_alphanumeric() {
@@ -1109,8 +1127,20 @@ mod tests {
         ] {
             let suffix = bus_suffix_among(room, &taken);
             assert_eq!(suffix, expected, "{room:?}");
+            // Every name it hands out is one a reader of the bus counts as
+            // ours - the bare stem included, which once had no dash to match.
+            assert!(is_ours(&format!("{BUS_PREFIX}{suffix}")), "{room:?}");
             taken.insert(suffix);
         }
+    }
+
+    #[test]
+    fn only_this_daemons_players_are_ours() {
+        assert!(is_ours("org.mpris.MediaPlayer2.x2rock"));
+        assert!(is_ours("org.mpris.MediaPlayer2.x2rock-kitchen-2"));
+        assert!(!is_ours("org.mpris.MediaPlayer2.x2rockish"));
+        assert!(!is_ours("org.mpris.MediaPlayer2.spotify"));
+        assert!(!is_ours("x2rock-kitchen"));
     }
 
     /// Both shapes are trimmed from real `getMetadataStatus` responses off the

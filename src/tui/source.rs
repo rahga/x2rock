@@ -18,8 +18,6 @@ use zbus::{Connection, MatchRule, MessageStream, fdo};
 
 use super::model::RoomSnapshot;
 
-/// Every player the daemon publishes carries this prefix, one per group.
-const PREFIX: &str = "org.mpris.MediaPlayer2.x2rock-";
 const PATH: &str = "/org/mpris/MediaPlayer2";
 
 /// A burst of events is one change: regrouping republishes every player, and a
@@ -124,7 +122,7 @@ impl Source {
             .await?
             .into_iter()
             .map(|n| n.to_string())
-            .filter(|n| n.starts_with(PREFIX))
+            .filter(|n| crate::mpris::is_ours(n))
             .collect();
         // Stable order, so a repaint never reshuffles the rows under someone
         // about to press a key.
@@ -229,7 +227,7 @@ impl Source {
                     };
                     let matched = owner
                         .args()
-                        .is_ok_and(|a| a.name().starts_with(PREFIX));
+                        .is_ok_and(|a| crate::mpris::is_ours(a.name()));
                     if !matched {
                         continue;
                     }
