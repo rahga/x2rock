@@ -57,10 +57,8 @@ const OLDEST_READABLE: u32 = 2;
 /// somewhere, most likely a hand-edit or a careless copy.
 const LOOSE: u32 = 0o177;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 pub struct Credentials {
-    #[serde(default)]
-    pub schema: u32,
     /// Household id -> (service id -> the accounts held for it there).
     ///
     /// Keyed by household because one machine sees more than one - a laptop that
@@ -74,8 +72,14 @@ pub struct Credentials {
     /// accounts for one service - the Sonos app numbers the second in its
     /// nickname, `iHeartRadio 885ebbcc` beside `iHeartRadio` - and collapsing
     /// them lost a token every import. See [`ServiceAccounts`].
-    #[serde(default)]
     pub households: BTreeMap<String, BTreeMap<String, ServiceAccounts>>,
+}
+
+/// The file as written: [`Credentials`] borrowed, stamped with [`SCHEMA`].
+#[derive(Serialize)]
+struct OnDisk<'a> {
+    schema: u32,
+    households: &'a BTreeMap<String, BTreeMap<String, ServiceAccounts>>,
 }
 
 /// Every account one household holds for one service, and which of them to use.
@@ -411,10 +415,7 @@ impl Credentials {
                 (household, services)
             })
             .collect();
-        Self {
-            schema: SCHEMA,
-            households,
-        }
+        Self { households }
     }
 
     /// Write atomically at 0600.
@@ -505,13 +506,13 @@ impl Credentials {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let copy = Self {
-            schema: SCHEMA,
-            households: self.households.clone(),
-        };
         // Written at SCHEMA whatever was read, which is how a migrated schema-2
         // file becomes a schema-3 one: the first save after the first load.
-        store::write_atomically(path, &serde_json::to_string_pretty(&copy)?, store::SECRET)
+        let file = OnDisk {
+            schema: SCHEMA,
+            households: &self.households,
+        };
+        store::write_atomically(path, &serde_json::to_string_pretty(&file)?, store::SECRET)
     }
 
     /// The accounts held for a service *in one household*, and which is chosen.
@@ -1027,6 +1028,14 @@ pub fn from_device_auth(
 mod tests {
     use super::*;
 
+    /// The schema stamped on a saved file, read straight off the disk.
+    fn written_schema(path: &Path) -> u32 {
+        let text = fs::read_to_string(path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["schema"]
+            .as_u64()
+            .unwrap() as u32
+    }
+
     /// Two commands that each loaded the file before the other saved - two
     /// links, a link and an unlink - each keep what they did.
     #[test]
@@ -1169,7 +1178,7 @@ mod tests {
         assert_eq!(mode, 0o600, "got {mode:04o}");
 
         let back = Credentials::load_from(&path).unwrap();
-        assert_eq!(back.schema, SCHEMA);
+        assert_eq!(written_schema(&path), SCHEMA);
         let got = back.get(HH, "200").unwrap();
         assert_eq!(got.auth_token, "tok");
         assert_eq!(got.private_key, "key");
@@ -1596,7 +1605,7 @@ mod tests {
         // And it is written back at the current schema, readable again.
         creds.save_to(&path).unwrap();
         let back = Credentials::load_from(&path).unwrap();
-        assert_eq!(back.schema, SCHEMA);
+        assert_eq!(written_schema(&path), SCHEMA);
         assert_eq!(
             back.get("Sonos_office", "31").unwrap().auth_token,
             "office-tok"
