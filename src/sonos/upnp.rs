@@ -2063,15 +2063,10 @@ impl Upnp {
     /// Nothing is checked when the soundbar already coordinates: there is then
     /// no group to hand over, no stall, and no answer to lose.
     pub async fn use_tv_input(&self, player_id: &str, bar: IpAddr) -> Result<()> {
-        // Bound rather than inlined: the future holds the arguments by reference
-        // and outlives the statement that builds them.
+        // Bound rather than inlined: the future holds the URI by reference and
+        // outlives the statement that builds it.
         let uri = format!("x-sonos-htastream:{player_id}:spdif");
-        let args = [
-            ("InstanceID", "0"),
-            ("CurrentURI", uri.as_str()),
-            ("CurrentURIMetaData", ""),
-        ];
-        let call = self.soap(Service::AvTransport, "SetAVTransportURI", &args);
+        let call = self.set_transport_uri(&uri, "");
 
         // A soundbar that already coordinates hands nothing over, so its answer
         // is the answer and an error from it is a real one.
