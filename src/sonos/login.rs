@@ -37,6 +37,10 @@ const AUTHORIZE: &str = "https://api.sonos.com/login/v3/oauth";
 const TOKEN: &str = "https://api.sonos.com/login/v3/oauth/access";
 const SCOPE: &str = "playback-control-all";
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the browser gets to send its request once connected, and how much
+/// of one is read.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_REQUEST: usize = 16 * 1024;
 /// Refreshed this long before it runs out, so no command is sent with a token
 /// that expires on its way to the speaker.
 const MARGIN: u64 = 600;
@@ -210,29 +214,21 @@ pub async fn catch_redirect(
     integration: &Integration,
     state: &str,
 ) -> Result<Token> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     loop {
         let (mut socket, _) = listener.accept().await.context("waiting for the browser")?;
-        let mut head = Vec::new();
-        let mut chunk = [0u8; 2048];
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
-            match socket.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => head.extend_from_slice(&chunk[..n]),
-            }
-        }
-        let text = String::from_utf8_lossy(&head);
+        // Bounded, so a browser's speculative connection that never sends a
+        // request is answered 404 and waited past rather than waited on.
+        let text = http::read_message(&mut socket, REQUEST_TIMEOUT, MAX_REQUEST)
+            .await
+            .unwrap_or_default();
         let target = text
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("");
         if !target.starts_with("/callback") {
-            let _ = socket
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await;
+            let _ = socket.write_all(http::NOT_FOUND).await;
             continue;
         }
         let outcome = match code_from(target, state) {
