@@ -120,6 +120,25 @@ pub async fn browse(cloud_id: &str) -> Result<Vec<Item>> {
     Ok(rows_of(&page))
 }
 
+/// Browse a bare object id through the cloud - the fallback for descending a
+/// cloud search result (an album, an artist) whose own SMAPI browse the direct
+/// path refuses. `containers/{id}/browse` serves any object kind: measured
+/// against a YouTube Music album, where the typed `albums/{id}` path returned
+/// nothing (2026-10-13).
+pub async fn browse_object(
+    household: &str,
+    service_type: u32,
+    serial: u32,
+    object_id: &str,
+) -> Result<Vec<Item>> {
+    let url = format!(
+        "{BASE}/households/{household}/services/{service_type}/accounts/{serial}/containers/{}/browse",
+        http::urlencode(object_id)
+    );
+    let page: Value = serde_json::from_str(&get(&url).await?)?;
+    Ok(rows_of(&page))
+}
+
 /// Search one service through the cloud. The content API searches every
 /// configured service at once; this keeps the block whose `serviceId` is this
 /// service's `service_type`, which is the one the caller asked for.
