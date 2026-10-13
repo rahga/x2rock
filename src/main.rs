@@ -674,7 +674,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             content::keep(session, &player, group, name, container).await?;
         }
         Command::Bookmark { query, next } => {
-            content::bookmark(session, &player, &target, room, &query, next).await?;
+            content::bookmark(session, &player, &target, &query, next).await?;
         }
         Command::Favorite { query } => {
             content::favorite(session, &player, &target, &query).await?;

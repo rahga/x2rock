@@ -4,7 +4,7 @@
 //! stream whose signed URL has expired. `fan_out` in `mod.rs` calls the
 //! `apply_*` functions once per group; `run` calls them for a single room.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 
 use super::stream::{STREAM_START, StreamStart, stream_item};
@@ -357,13 +357,7 @@ async fn try_resume_stream(
     }
 
     // The same fallback that started it - a refreshed URL plays exactly as the
-    // first did. Addressed by the coordinator's own room name, since a group's
-    // display name is a composite no player answers to.
-    let coord_room = session
-        .groups
-        .player(&target.coordinator_id)
-        .map(|p| p.name.as_str())
-        .ok_or_else(|| anyhow!("no player for {}", target.name))?;
+    // first did.
     let household = session.connection.household_id().await?;
     let token = credentials::Credentials::load()?.token_for(&household, &service.id);
     eprintln!(
@@ -372,7 +366,7 @@ async fn try_resume_stream(
     );
     stream_item(
         session,
-        Some(coord_room),
+        target,
         &service,
         token.as_ref(),
         &stream.item_id,
@@ -490,7 +484,7 @@ mod tests {
         }
         .into();
         assert!(refused_play(&other).is_none());
-        assert!(refused_play(&anyhow!("connection to player was lost")).is_none());
+        assert!(refused_play(&anyhow::anyhow!("connection to player was lost")).is_none());
         // The sentence reads exactly as the flattened one always did.
         assert_eq!(
             other.to_string(),
