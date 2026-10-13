@@ -704,7 +704,7 @@ async fn publish(wiring: &mut Wiring<'_>, groups: &Groups) -> Result<Vec<Server<
         let suffix = bus_suffix_among(&room, &names);
         match publish_group(wiring, groups, group, &suffix).await {
             Ok(server) => {
-                log(&format!("{room} -> org.mpris.MediaPlayer2.{suffix}"));
+                log(&format!("{room} -> {}{suffix}", crate::mpris::BUS_PREFIX));
                 names.insert(suffix);
                 servers.push(server);
             }
@@ -779,7 +779,7 @@ async fn publish_group(
 
     let server = Server::new(suffix, player)
         .await
-        .with_context(|| format!("publishing org.mpris.MediaPlayer2.{suffix}"))?;
+        .with_context(|| format!("publishing {}{suffix}", crate::mpris::BUS_PREFIX))?;
     tokio::try_join!(
         conn.subscribe_group("playback:1", &group.id),
         conn.subscribe_group("playbackMetadata:1", &group.id),
