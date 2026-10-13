@@ -232,12 +232,18 @@ pub async fn apply_vol(
     // Option and two `ensure!`s that re-derive each other. Both the absolute
     // and relative forms funnel into one call; the clamp is the same one the
     // relative path does, because the player takes an absolute level.
+    // Where a relative change lands, worked out once: a ramp slides to it,
+    // and a plain nudge reports it.
+    let nudged = match &change {
+        Some(VolumeChange::Adjust(delta)) => {
+            (i16::from(before.volume) + i16::from(*delta)).clamp(0, 100) as u8
+        }
+        _ => before.volume,
+    };
     let ramp_to = match (ramp, &change) {
         (false, _) => None,
         (true, Some(VolumeChange::Set(level))) => Some(*level),
-        (true, Some(VolumeChange::Adjust(delta))) => {
-            Some((i16::from(before.volume) + i16::from(*delta)).clamp(0, 100) as u8)
-        }
+        (true, Some(VolumeChange::Adjust(_))) => Some(nudged),
         (true, Some(VolumeChange::Mute(_))) => {
             bail!("--ramp does not apply to mute; there is no level to slide to")
         }
@@ -280,8 +286,7 @@ pub async fn apply_vol(
                 Some(id) => speaker.adjust_player_volume(id, delta).await?,
                 None => speaker.adjust_group_volume(group, delta).await?,
             }
-            let level = (i16::from(before.volume) + i16::from(delta)).clamp(0, 100);
-            (level as u8, false)
+            (nudged, false)
         }
         Some(VolumeChange::Mute(muted)) => {
             // Muting one speaker of a group is not offered: the group mute is
@@ -389,15 +394,23 @@ pub async fn limit(
             .map(|r| session.groups.player_named(r))
             .collect::<Result<_>>()?
     };
-    let mut out = Vec::with_capacity(speakers.len());
-    for speaker in speakers {
+    // Read all at once, so an unreachable speaker does not stack its timeout
+    // onto the rest; set one by one, in order, stopping at the first refusal.
+    let reads = speakers.into_iter().map(|speaker| async move {
         let connection = session.player(Some(speaker.reach_ip()?)).await?;
-        let before = limit_pct(
-            connection
-                .player_settings(&speaker.id)
-                .await?
-                .volume_scaling_factor,
-        );
+        let settings = connection.player_settings(&speaker.id).await?;
+        anyhow::Ok((
+            speaker,
+            connection,
+            limit_pct(settings.volume_scaling_factor),
+        ))
+    });
+    let read: Vec<_> = futures_util::future::join_all(reads)
+        .await
+        .into_iter()
+        .collect::<Result<_>>()?;
+    let mut out = Vec::with_capacity(read.len());
+    for (speaker, connection, before) in read {
         if let Some(pct) = wanted {
             connection
                 .set_volume_limit(&speaker.id, f64::from(pct) / 100.0)
