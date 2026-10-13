@@ -69,6 +69,32 @@ fn print_alarms(alarms: &[upnp::Alarm], groups: &Groups, json: bool) {
     }
 }
 
+/// The two soundbar settings written over UPnP `SetEQ`: `eq --night` and
+/// `eq --dialog` here, `N` and `D` in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeTheater {
+    Night,
+    Speech,
+}
+
+impl HomeTheater {
+    /// The `EQType` `SetEQ` knows it by.
+    pub fn eq_type(self) -> &'static str {
+        match self {
+            HomeTheater::Night => "NightMode",
+            HomeTheater::Speech => "DialogLevel",
+        }
+    }
+
+    /// What it is called on screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            HomeTheater::Night => "night sound",
+            HomeTheater::Speech => "speech enhancement",
+        }
+    }
+}
+
 /// What one `eq` invocation asked to change; `None` means leave it alone.
 ///
 /// A struct rather than four more parameters: they arrive together, are
@@ -405,10 +431,10 @@ pub async fn apply_eq(
     // Night and dialog over UPnP SetEQ - the Control API reads them but refuses
     // to write them. Gated to a soundbar above.
     if let Some(on) = wanted_night {
-        upnp.set_eq("NightMode", on).await?;
+        upnp.set_eq(HomeTheater::Night.eq_type(), on).await?;
     }
     if let Some(on) = wanted_dialog {
-        upnp.set_eq("DialogLevel", on).await?;
+        upnp.set_eq(HomeTheater::Speech.eq_type(), on).await?;
     }
     // Read back rather than echo what was asked for: the setters answer with an
     // empty body, so what the speaker now holds is the only truthful report.
@@ -697,18 +723,16 @@ impl Report for TvOutcome {
     }
 }
 
-/// `x2rock tv`: switch the soundbar in `room`'s group to its TV input. The
-/// soundbar is whichever member has one, not necessarily the coordinator.
-pub async fn tv(
-    session: &Session,
-    player: &Connection,
+/// The soundbar in `target`'s group: the player with the HDMI socket, which is
+/// not necessarily the one coordinating the group it is in. The room named is
+/// asked first; otherwise (or when the widget names the group by its
+/// coordinator) it is whichever member has one. `x2rock tv` and the TUI's
+/// soundbar settings both find it here.
+pub fn soundbar_of<'a>(
+    session: &'a Session,
     target: &Target,
     room: Option<&str>,
-) -> Result<TvOutcome> {
-    // The soundbar is the player with the HDMI socket, which is not
-    // necessarily the one coordinating the group it is in. The room
-    // named is asked first; otherwise (or when the widget names the
-    // group by its coordinator) it is whichever member has one.
+) -> Result<&'a Player> {
     let is_soundbar = |p: &&Player| p.has_tv();
     // The target's own group, not the room resolved a second time: the caller
     // resolved `room` into `target` already, and the coordinator is always a
@@ -717,19 +741,34 @@ pub async fn tv(
         .groups
         .group_of(&target.coordinator_id)
         .ok_or_else(|| anyhow!("no group for {}", target.name))?;
-    let members = session.groups.members(group);
     let named = match room {
         Some(name) => Some(session.groups.player_named(name)?),
         None => session.groups.player(&target.coordinator_id),
     };
-    let room = match named.filter(is_soundbar) {
-        Some(bar) => bar,
-        None => members
-            .iter()
-            .copied()
+    match named.filter(is_soundbar) {
+        Some(bar) => Ok(bar),
+        None => session
+            .groups
+            .members(group)
+            .into_iter()
             .find(is_soundbar)
-            .ok_or_else(|| anyhow!("no room in {} has a TV input", target.name))?,
-    };
+            .ok_or_else(|| anyhow!("no room in {} has a TV input", target.name)),
+    }
+}
+
+/// `x2rock tv`: switch the soundbar in `room`'s group to its TV input. The
+/// soundbar is whichever member has one, not necessarily the coordinator.
+pub async fn tv(
+    session: &Session,
+    player: &Connection,
+    target: &Target,
+    room: Option<&str>,
+) -> Result<TvOutcome> {
+    let room = soundbar_of(session, target, room)?;
+    let alone = session
+        .groups
+        .group_of(&target.coordinator_id)
+        .is_some_and(|g| session.groups.members(g).len() == 1);
     let coordinator_ip = upnp_ip(target, player.ip());
     let upnp = Upnp::new(coordinator_ip);
     // The soundbar's own address, so the switch can be confirmed there
@@ -754,7 +793,7 @@ pub async fn tv(
         // the TV for itself - for a bar in a group that is not the same thing
         // (UPnP hands the group over; this would take the bar out of it), so
         // only a bar alone gets it, and a grouped one still hears why not.
-        Err(e) if upnp_switched_off(&e) && members.len() == 1 => {
+        Err(e) if upnp_switched_off(&e) && alone => {
             session
                 .player(Some(bar))
                 .await?

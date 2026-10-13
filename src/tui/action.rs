@@ -29,10 +29,10 @@ use tokio::sync::Mutex;
 use std::time::Duration;
 
 use crate::cli::RateDirection;
+use crate::commands::speaker::HomeTheater;
 use crate::commands::{Report, household, playback, services, speaker, upnp_ip, volume};
 use crate::session::{self, Session};
 use crate::sonos::local::Unreachable;
-use crate::sonos::proto::Player;
 use crate::sonos::upnp::Upnp;
 use crate::state::State;
 
@@ -224,6 +224,22 @@ impl Speakers {
         }
     }
 
+    /// [`write`](Self::write) for the writes addressed to one room's group:
+    /// `room` resolved against the topology the write just re-read, and handed
+    /// in beside the session.
+    async fn write_target<O, F, Fut>(&self, room: &str, f: F) -> Result<Vec<String>>
+    where
+        O: Report,
+        F: FnOnce(Session, session::Target) -> Fut,
+        Fut: Future<Output = Result<O>>,
+    {
+        self.write(|s| async move {
+            let target = session::target(&s.groups, Some(room))?;
+            f(s, target).await
+        })
+        .await
+    }
+
     /// Join rooms to a coordinator. `group` takes the coordinator as `-r` and
     /// the others positionally - an asymmetry with `ungroup`, which takes its
     /// room positionally and no `-r` at all.
@@ -260,8 +276,7 @@ impl Speakers {
     /// percent and throw away the forty it was holding. MPRIS has no relative
     /// volume, which is why this is a command and not a property write.
     pub async fn nudge(&self, room: &str, by: i16, player: bool) -> Result<Vec<String>> {
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             volume::apply_vol(
                 &s,
                 &target,
@@ -280,8 +295,7 @@ impl Speakers {
     /// thing anyone asks for - so this offers no per-speaker form.
     pub async fn mute(&self, room: &str, on: bool) -> Result<Vec<String>> {
         let word = if on { "mute" } else { "unmute" };
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             volume::apply_vol(&s, &target, Some(room), Some(word.into()), false, false).await
         })
         .await
@@ -292,8 +306,7 @@ impl Speakers {
     /// goes through a command.
     pub async fn crossfade(&self, room: &str, on: bool) -> Result<Vec<String>> {
         let word = crate::commands::on_word(on);
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             playback::apply_crossfade(&s, &target, Some(word.into())).await
         })
         .await
@@ -302,8 +315,7 @@ impl Speakers {
     /// Rate what the room is playing, and say what that did in the service's
     /// terms - the CLI's `rate`.
     pub async fn rate(&self, room: &str, direction: RateDirection) -> Result<Vec<String>> {
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             let player = session::coordinator(&s, &target).await?;
             let rated =
                 services::rate(&player, &target.group_id, &target.name, direction, false).await?;
@@ -317,8 +329,7 @@ impl Speakers {
     /// Set the group's sleep timer, or with `None` cancel it. AVTransport, on
     /// the coordinator, as `x2rock sleep` does.
     pub async fn sleep(&self, room: &str, after: Option<Duration>) -> Result<Vec<String>> {
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             Upnp::new(upnp_ip(&target, s.connection.ip()))
                 .set_sleep_timer(after)
                 .await?;
@@ -341,24 +352,24 @@ impl Speakers {
             .await
     }
 
-    /// Night sound or speech enhancement on the room's soundbar - `setting`
-    /// is `NightMode` or `DialogLevel`, written over UPnP `SetEQ` as `x2rock
-    /// eq --night/--dialog` does.
+    /// Night sound or speech enhancement on the room's soundbar - the room
+    /// itself when it is one, else the member of its group that is, as `tv`
+    /// finds it - written over UPnP `SetEQ` as `x2rock eq --night/--dialog`
+    /// does.
     pub async fn home_theater(
         &self,
         room: &str,
-        setting: &'static str,
+        setting: HomeTheater,
         on: bool,
     ) -> Result<Vec<String>> {
-        self.write(|s| async move {
-            let bar = soundbar(&s, room)?;
-            Upnp::new(bar.reach_ip()?).set_eq(setting, on).await?;
-            let what = match setting {
-                "NightMode" => "night sound",
-                _ => "speech enhancement",
-            };
+        self.write_target(room, |s, target| async move {
+            let bar = speaker::soundbar_of(&s, &target, Some(room))?;
+            Upnp::new(bar.reach_ip()?)
+                .set_eq(setting.eq_type(), on)
+                .await?;
             Ok(Said(vec![format!(
-                "{what} {}",
+                "{} {}",
+                setting.label(),
                 crate::commands::on_word(on)
             )]))
         })
@@ -366,32 +377,12 @@ impl Speakers {
     }
 
     pub async fn tv(&self, room: &str) -> Result<Vec<String>> {
-        self.write(|s| async move {
-            let target = session::target(&s.groups, Some(room))?;
+        self.write_target(room, |s, target| async move {
             let player = session::coordinator(&s, &target).await?;
             speaker::tv(&s, &player, &target, Some(room)).await
         })
         .await
     }
-}
-
-/// The soundbar a room's row stands for: the room itself when it is one,
-/// else the member of its group that is - as `tv` finds it.
-fn soundbar<'a>(s: &'a Session, room: &str) -> Result<&'a Player> {
-    let named = s.groups.player_named(room)?;
-    if named.has_tv() {
-        return Ok(named);
-    }
-    let target = session::target(&s.groups, Some(room))?;
-    let group = s
-        .groups
-        .group_of(&target.coordinator_id)
-        .ok_or_else(|| anyhow!("no group for {room}"))?;
-    s.groups
-        .members(group)
-        .into_iter()
-        .find(|p| p.has_tv())
-        .ok_or_else(|| anyhow!("no room in {room} has a soundbar"))
 }
 
 #[cfg(test)]
