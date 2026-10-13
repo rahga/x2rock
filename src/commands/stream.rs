@@ -370,9 +370,12 @@ async fn stream_url(
     service: Option<&sonos::smapi::Service>,
     wait: Duration,
 ) -> Result<Started> {
-    let coordinator = session::coordinator(session, target).await?;
+    // Together: the probe goes out to the internet and can take its whole
+    // budget, which the coordinator's connection need not wait behind.
+    let (coordinator, file) = tokio::join!(session::coordinator(session, target), finite_file(url));
+    let coordinator = coordinator?;
 
-    if let Some(file) = finite_file(url).await {
+    if let Some(file) = file {
         let upnp = Upnp::new(upnp_ip(target, session.connection.ip()));
         upnp.play_url_as_track(url, title, file.mime.as_deref())
             .await?;
