@@ -483,8 +483,6 @@ pub async fn update(session: &Session, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `x2rock system`: every player with its model, role, bonding and firmware -
-/// the About My System readout. `redact` masks serials, ips and uuids.
 /// `x2rock security`: the Connection Security switches, as the Sonos app
 /// shows them. Each is `true` for the app's "On".
 #[derive(Debug, Serialize)]
@@ -543,6 +541,8 @@ impl From<crate::sonos::proto::SecurityAttributes> for SecurityOutcome {
     }
 }
 
+/// `x2rock system`: every player with its model, role, bonding and firmware -
+/// the About My System readout. `redact` masks serials, ips and uuids.
 pub async fn system(session: &Session, json: bool, redact: bool) -> Result<()> {
     let any = session
         .groups
