@@ -164,11 +164,7 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
-        let Some(text) = store::read_optional(path)? else {
-            return Ok(Self::default());
-        };
-        let config: Config =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let config: Config = store::load_json(path)?;
         if config.schema > SCHEMA {
             bail!(
                 "{} is schema {}, newer than this build understands ({SCHEMA})",

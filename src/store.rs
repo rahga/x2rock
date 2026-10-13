@@ -18,6 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use serde::de::DeserializeOwned;
 
 /// Ordinary state, readable like any file of the user's.
 pub const PLAIN: u32 = 0o644;
@@ -72,6 +73,27 @@ pub fn read_optional(path: &Path) -> Result<Option<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// A JSON file parsed, a missing one as `T::default()`. A *corrupt* one is an
+/// error, for the files that are the only copy of something: what to do
+/// beyond parsing - a schema check, a migration - stays the caller's.
+pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    match read_optional(path)? {
+        Some(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        }
+        None => Ok(T::default()),
+    }
+}
+
+/// A JSON file parsed, or `None` when it is missing, unreadable or corrupt
+/// alike - for a cache, which is rebuilt rather than failed over.
+pub fn load_json_lenient<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    read_optional(path)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok())
 }
 
 /// Write `text` to `path` atomically: a crash mid-write leaves the old file,
