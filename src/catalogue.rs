@@ -207,11 +207,8 @@ impl Catalogue {
     /// false for a service nobody has looked up yet - unasked is not the same
     /// as answered-no, and only one of them is worth acting on.
     pub fn publishes_no_categories(&self, service_id: &str) -> bool {
-        smapi::fixed_categories(service_id).is_none()
-            && self
-                .categories
-                .get(service_id)
-                .is_some_and(|c| c.is_empty())
+        self.cached_categories(service_id)
+            .is_some_and(<[_]>::is_empty)
     }
 
     /// Whether [`categories_for`](Self::categories_for) would be a cache hit.
@@ -220,7 +217,7 @@ impl Catalogue {
     /// worth writing to disk, and testing `is_empty()` afterwards cannot tell
     /// it from a hit that changed nothing.
     pub fn categories_cached(&self, service_id: &str) -> bool {
-        smapi::fixed_categories(service_id).is_some() || self.categories.contains_key(service_id)
+        self.cached_categories(service_id).is_some()
     }
 
     /// Whether a service can be walked from `root`: `Some(false)` once it has
