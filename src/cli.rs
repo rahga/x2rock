@@ -1,5 +1,5 @@
 //! The command line as clap sees it: `Cli`, `Command` and every subcommand
-//! enum, plus the one question `main` asks of a parsed command before running
+//! enum, plus the one question `main` asks of a command line before running
 //! it - whether it was asked for `--json`. Nothing here runs anything; the
 //! dispatcher is `run` in `main.rs` and the handlers live under `commands/`.
 //!
@@ -1524,59 +1524,25 @@ pub struct SayArgs {
     pub json: bool,
 }
 
-impl Command {
-    /// Whether the command was asked for `--json`, so an error can match the
-    /// output the caller expected. Every variant with the flag is here - a test
-    /// walks clap's tree to hold it to that, because the list drifted once and
-    /// `system --json` against a dead address printed a prose error an agent
-    /// branching on `code` could not read.
-    pub fn json(&self) -> bool {
-        match self {
-            Command::Rooms { json, .. }
-            | Command::Now { json, .. }
-            | Command::Status { json, .. }
-            | Command::Vol { json, .. }
-            | Command::Repeat { json, .. }
-            | Command::Shuffle { json, .. }
-            | Command::Update { json, .. }
-            | Command::System { json, .. }
-            | Command::Battery { json, .. }
-            | Command::Alarms { json, .. }
-            | Command::Sleep { json, .. }
-            | Command::Snooze { json, .. }
-            | Command::Crossfade { json, .. }
-            | Command::Remote { json, .. }
-            | Command::Led { json, .. }
-            | Command::Buttons { json, .. }
-            | Command::Eq { json, .. }
-            | Command::Favorites { json, .. }
-            | Command::Recent { json, .. }
-            | Command::Search { json, .. }
-            | Command::Browse { json, .. }
-            | Command::Stations { json, .. }
-            | Command::PlayUrl { json, .. }
-            | Command::Accounts { json, .. }
-            | Command::Link { json, .. }
-            | Command::Bookmarks { json, .. }
-            | Command::Households { json, .. }
-            | Command::Rate { json, .. }
-            | Command::Service { json, .. }
-            | Command::Queue { json, .. }
-            | Command::Say(SayArgs { json, .. })
-            | Command::Group { json, .. }
-            | Command::Ungroup { json, .. }
-            | Command::Party { json, .. }
-            | Command::Art { json, .. }
-            | Command::Scene { json, .. }
-            | Command::Security { json }
-            | Command::Tv { json } => *json,
-            Command::Desktop {
-                action: Some(DesktopAction::Status { json }),
-                ..
-            } => *json,
-            _ => false,
+/// Whether the command line asked for `--json`, so an error can match the
+/// output the caller expected.
+///
+/// Read off clap's matches rather than the parsed [`Command`]: every
+/// subcommand's flag has the id `json`, so walking down the subcommands finds
+/// it wherever it is declared, and a new `--json` is seen without being
+/// listed. A hand-kept list of the variants that carried it drifted once, and
+/// `system --json` against a dead address printed a prose error an agent
+/// branching on `code` could not read.
+pub fn wants_json(matches: &clap::ArgMatches) -> bool {
+    let mut level = Some(matches);
+    while let Some(m) = level {
+        // An `Err` is a level with no `json` at all, which is not a yes.
+        if m.try_get_one::<bool>("json").ok().flatten() == Some(&true) {
+            return true;
         }
+        level = m.subcommand().map(|(_, sub)| sub);
     }
+    false
 }
 
 #[cfg(test)]
@@ -1669,9 +1635,9 @@ mod tests {
     fn every_command_that_takes_json_reports_it() {
         use clap::CommandFactory;
 
-        // Walk clap's own tree, so a `--json` cannot be added to a command
-        // without `Command::json` learning of it: the hand-kept list is what
-        // let `system --json` print its failures as prose.
+        // Walk clap's own tree and give each `--json` it has, wherever the
+        // flag is declared - on the command, global to its subcommands, or on
+        // a subcommand alone - and `wants_json` must see every one.
         fn walk(cmd: &clap::Command, path: &mut Vec<String>) {
             if cmd.get_arguments().any(|a| a.get_id() == "json") {
                 let mut argv = vec!["x2rock".to_string()];
@@ -1688,10 +1654,12 @@ mod tests {
                     argv.push(placeholder);
                 }
                 argv.push("--json".to_string());
-                let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                let matches = Cli::command()
+                    .try_get_matches_from(&argv)
+                    .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
                 assert!(
-                    cli.command.json(),
-                    "{argv:?} takes --json, but Command::json says no"
+                    wants_json(&matches),
+                    "{argv:?} takes --json, but wants_json says no"
                 );
             }
             for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
@@ -1703,6 +1671,15 @@ mod tests {
         let mut root = Cli::command();
         root.build();
         walk(&root, &mut Vec::new());
+
+        // And a command line without it is not taken for one with it.
+        for argv in [
+            &["x2rock", "vol", "10"][..],
+            &["x2rock", "desktop", "status"],
+        ] {
+            let matches = Cli::command().try_get_matches_from(argv).unwrap();
+            assert!(!wants_json(&matches), "{argv:?} did not ask for --json");
+        }
     }
 
     #[test]
