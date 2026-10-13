@@ -27,7 +27,7 @@
 //! otherwise cost [`WAIT`] on every refused call - and the reads are taken one
 //! at a time, so a search across every service refused at once reads once.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -50,12 +50,11 @@ const WAIT: Duration = Duration::from_secs(5);
 static PLAYERS: Mutex<Vec<IpAddr>> = Mutex::new(Vec::new());
 const PLAYERS_KEPT: usize = 4;
 
-/// What each household's store held when it was last read; `None` for a read
-/// that failed.
-static READS: Mutex<Option<Reads>> = Mutex::new(None);
-
-/// One read at a time, across the process.
-static READING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// What each household's store held when it was last read, `None` for a read
+/// that failed. Held across the read itself, so reads are taken one at a time.
+static READS: tokio::sync::Mutex<BTreeMap<String, Read>> =
+    tokio::sync::Mutex::const_new(BTreeMap::new());
+type Read = (Instant, Option<Vec<StoredAccount>>);
 
 /// Remember a player this process reached, as a place to read a store from.
 pub fn reached(ip: IpAddr) {
@@ -66,78 +65,65 @@ pub fn reached(ip: IpAddr) {
 }
 
 /// The household's current token for the account `refused` came from, when it
-/// is an imported account and the household now holds a different one - saved
-/// to the store on the way out. `None` for anything else, which leaves the
-/// refusal standing.
+/// is an imported account and the household now holds a different one. `None`
+/// for anything else, which leaves the refusal standing. Persisting it is the
+/// caller's, the same as a service's own refresh - see `smapi::call`.
 pub async fn reread(service_id: &str, refused: &Token) -> Option<RefreshedToken> {
     let household = refused.household.as_deref()?;
     let serial = refused.serial?;
+    let wanted: u32 = service_id.parse().ok()?;
     let linked = Credentials::load().ok()?;
     let held = linked.accounts_for(household, service_id)?;
-    let (key, used) = match refused.account.as_deref() {
-        Some(key) => (key, held.accounts.get(key)?),
-        None => held.chosen()?,
+    let used = match refused.account.as_deref() {
+        Some(key) => held.accounts.get(key)?,
+        None => held.chosen()?.1,
     };
     if used.serial != Some(serial) {
         return None;
     }
-    let (key, used) = (key.to_string(), used.clone());
 
     let accounts = store_of(household).await?;
     let fresh = accounts
         .iter()
-        .find(|a| a.service_id.to_string() == service_id && a.serial == serial)
+        .find(|a| a.service_id == wanted && a.serial == serial)
         .filter(|a| a.has_token() && a.token != refused.token)?;
-    let refreshed = RefreshedToken {
+    Some(RefreshedToken {
         auth_token: fresh.token.clone(),
         private_key: fresh.key.clone(),
         user_id_hash_code: None,
-    };
-    let mut linked = linked;
-    let _ = linked.update(|now| {
-        now.apply_refresh(household, service_id, Some(&key), &used, refreshed.clone());
-        Ok(())
-    });
-    Some(refreshed)
+    })
 }
 
 /// The household's stored accounts, read at most once per [`KEEP_FOR`].
 async fn store_of(household: &str) -> Option<Vec<StoredAccount>> {
-    let _one = READING.lock().await;
-    let kept = with_reads(|reads| {
-        reads
-            .get(household)
-            .filter(|(at, _)| at.elapsed() < KEEP_FOR)
-            .map(|(_, read)| read.clone())
-    });
-    if let Some(read) = kept {
-        return read;
+    let mut reads = READS.lock().await;
+    if let Some((at, read)) = reads.get(household)
+        && at.elapsed() < KEEP_FOR
+    {
+        return read.clone();
     }
-    let short = household.split('.').next().unwrap_or(household);
     let players = PLAYERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     // Nowhere to read from yet is not a failed read: nothing cost a wait, and
     // a player reached later should still get its try.
     if players.is_empty() {
         return None;
     }
+    let short = stored::short_household(household);
     let mut read = None;
     for player in players {
+        // A callback that never arrives is this machine's firewall or port,
+        // the same for every player, so the first one ends the search; a
+        // store that will not decrypt is another household's, so the next
+        // player gets its try.
         let Ok(encoded) = stored::capture_envelope(player, crate::netid::INBOUND_PORT, WAIT).await
         else {
-            continue;
+            break;
         };
         if let Ok(accounts) = stored::decrypt_accounts(&encoded, short) {
             read = Some(accounts);
             break;
         }
     }
-    with_reads(|reads| reads.insert(household.to_string(), (Instant::now(), read.clone())));
+    reads.insert(household.to_string(), (Instant::now(), read.clone()));
     read
-}
-
-type Reads = HashMap<String, (Instant, Option<Vec<StoredAccount>>)>;
-
-fn with_reads<T>(change: impl FnOnce(&mut Reads) -> T) -> T {
-    let mut reads = READS.lock().unwrap_or_else(|e| e.into_inner());
-    change(reads.get_or_insert_with(HashMap::new))
 }

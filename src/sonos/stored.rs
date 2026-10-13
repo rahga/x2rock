@@ -102,6 +102,13 @@ impl StoredAccount {
     }
 }
 
+/// The short household id the account blob is keyed to: the long one up to its
+/// first dot. The SMAPI header and the credentials record want the long form,
+/// `GetHouseholdID` returns the short one.
+pub fn short_household(long: &str) -> &str {
+    long.split_once('.').map_or(long, |(short, _)| short)
+}
+
 /// Decrypt the `ThirdPartyMediaServersX` envelope into the accounts it holds.
 ///
 /// `household_id` is the short form (`Sonos_...`, no `.suffix`), exactly as
