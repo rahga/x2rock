@@ -1519,52 +1519,7 @@ pub async fn run_browse(
 
     if let Some(Pick { row: n, how }) = pick {
         let item = nth(&items, n).ok_or_else(|| anyhow!("no row {n}; {at} has {}", items.len()))?;
-        // Queueing takes an album or a playlist where playing from here does
-        // not: `queue_item` refuses only what has no tracks of its own.
-        if how != Enqueue::Play {
-            return queue_item(
-                live()?,
-                room,
-                &chosen,
-                token.as_ref(),
-                Some(item.item_type.as_str()),
-                &item.id,
-                &item.title,
-                how,
-            )
-            .await;
-        }
-        // A container of containers is a place, and refusing here is kinder
-        // than letting getMediaURI refuse it with a grammar error about ids.
-        //
-        // One holding tracks is not: the player expands an album or a playlist
-        // into the queue (verified 2026-09-18, "An album is queued by a
-        // different scheme from a track"), and a book resumes. This gate used
-        // to refuse every container, on the 2026-09-11 finding that a container
-        // cannot be played over the LAN - true of the routes tried then, and
-        // overtaken a week later. `search --play` had already moved on; this
-        // caught up on 2026-10-11.
-        ensure!(
-            !item.opens() || bookmarks::container_holds_tracks(&item.item_type),
-            "{:?} is {} {}, which holds other containers rather than tracks. \
-             Open it with: x2rock browse -s {} {}",
-            item.title,
-            super::article(&item.item_type),
-            item.item_type,
-            hint::shell_arg(&chosen.name),
-            hint::shell_arg(&item.id)
-        );
-        return play_item(
-            live()?,
-            room,
-            &chosen,
-            token.as_ref(),
-            Some(item.item_type.as_str()),
-            &item.id,
-            &item.title,
-            false,
-        )
-        .await;
+        return act_on_row(live(), room, &chosen, token.as_ref(), item, how).await;
     }
 
     if json {
@@ -1615,6 +1570,69 @@ pub async fn run_browse(
         println!("\n{} of {total} in {at}.", items.len());
     }
     Ok(())
+}
+
+/// Play or queue one row a `browse` or `search` listed - what `--play`,
+/// `--queue` and the rest do with the row they name.
+///
+/// Queueing takes an album or a playlist as it is: `queue_item` refuses only
+/// what has no tracks of its own, so it is handed anything. Playing refuses a
+/// container of containers here, first: it is a place, not a thing - every
+/// Mixcloud search hit is a `tag:` collection - and refusing here is kinder
+/// than letting getMediaURI refuse it with a grammar error about ids.
+///
+/// A container holding tracks is not refused: the player expands an album or
+/// a playlist into the queue (verified 2026-09-18, "An album is queued by a
+/// different scheme from a track"), and a book resumes. The gate used to
+/// refuse every container, on the 2026-09-11 finding that a container cannot
+/// be played over the LAN - true of the routes tried then, and overtaken a
+/// week later.
+///
+/// `session` is the reached player or why there is none, checked only once
+/// the row itself has passed.
+async fn act_on_row(
+    session: Result<&session::Session>,
+    room: Option<&str>,
+    service: &sonos::smapi::Service,
+    token: Option<&sonos::smapi::Token>,
+    item: &sonos::smapi::Item,
+    how: Enqueue,
+) -> Result<()> {
+    let kind = Some(item.item_type.as_str());
+    if how != Enqueue::Play {
+        return queue_item(
+            session?,
+            room,
+            service,
+            token,
+            kind,
+            &item.id,
+            &item.title,
+            how,
+        )
+        .await;
+    }
+    ensure!(
+        !item.opens() || bookmarks::container_holds_tracks(&item.item_type),
+        "{:?} is {} {}, which holds other containers rather than tracks. \
+         Open it with: x2rock browse -s {} {}",
+        item.title,
+        super::article(&item.item_type),
+        item.item_type,
+        hint::shell_arg(&service.name),
+        hint::shell_arg(&item.id)
+    );
+    play_item(
+        session?,
+        room,
+        service,
+        token,
+        kind,
+        &item.id,
+        &item.title,
+        false,
+    )
+    .await
 }
 
 /// How long one service gets to answer in a merged search.
@@ -1956,47 +1974,7 @@ pub async fn run_search(
     if let Some(Pick { row: n, how }) = pick {
         let item = nth(&items, n)
             .ok_or_else(|| anyhow!("no result {n}; the search returned {}", items.len()))?;
-        // A search can return places rather than things: every Mixcloud hit is a
-        // `tag:` collection, not a track. Refusing here beats letting
-        // getMediaURI refuse it with a grammar error about ids.
-        //
-        // An album or a playlist is not one of those places: it holds tracks, so
-        // the player expands it into the queue. Only a container of *containers*
-        // has nothing to play.
-        ensure!(
-            !item.opens() || bookmarks::container_holds_tracks(&item.item_type),
-            "{:?} is {} {}, which holds other containers rather than tracks. \
-             Open it with: x2rock browse -s {} {}",
-            item.title,
-            super::article(&item.item_type),
-            item.item_type,
-            hint::shell_arg(&chosen.name),
-            hint::shell_arg(&item.id)
-        );
-        if how != Enqueue::Play {
-            return queue_item(
-                live()?,
-                room,
-                chosen,
-                token.as_ref(),
-                Some(item.item_type.as_str()),
-                &item.id,
-                &item.title,
-                how,
-            )
-            .await;
-        }
-        return play_item(
-            live()?,
-            room,
-            chosen,
-            token.as_ref(),
-            Some(item.item_type.as_str()),
-            &item.id,
-            &item.title,
-            false,
-        )
-        .await;
+        return act_on_row(live(), room, chosen, token.as_ref(), item, how).await;
     }
     if json {
         let rows: Vec<_> = items.iter().map(|i| item_json(i, chosen)).collect();
@@ -2433,40 +2411,14 @@ async fn search_everywhere(
     if let Some(Pick { row: n, how }) = pick {
         let row = nth(&rows, n)
             .ok_or_else(|| anyhow!("no result {n}; the search returned {}", rows.len()))?;
-        ensure!(
-            !row.item.opens() || bookmarks::container_holds_tracks(&row.item.item_type),
-            "{:?} is {} {}, which holds other containers rather than tracks. \
-             Open it with: x2rock browse -s {} {}",
-            row.item.title,
-            super::article(&row.item.item_type),
-            row.item.item_type,
-            hint::shell_arg(&row.service.name),
-            hint::shell_arg(&row.item.id)
-        );
-        let session = reached.as_ref().map_err(hint::no_player_to_play)?;
         let token = linked.token_for(household, &row.service.id);
-        if how != Enqueue::Play {
-            return queue_item(
-                session,
-                room,
-                row.service,
-                token.as_ref(),
-                Some(row.item.item_type.as_str()),
-                &row.item.id,
-                &row.item.title,
-                how,
-            )
-            .await;
-        }
-        return play_item(
-            session,
+        return act_on_row(
+            reached.as_ref().map_err(hint::no_player_to_play),
             room,
             row.service,
             token.as_ref(),
-            Some(row.item.item_type.as_str()),
-            &row.item.id,
-            &row.item.title,
-            false,
+            &row.item,
+            how,
         )
         .await;
     }
