@@ -136,6 +136,16 @@ fn use_refreshed_token(
     Some(fresh)
 }
 
+/// A Plex account token as what a link yields: Plex sends no private key and
+/// no user hash, however the token was come by.
+fn plex_auth(token: String) -> sonos::smapi::DeviceAuth {
+    sonos::smapi::DeviceAuth {
+        auth_token: token,
+        private_key: String::new(),
+        user_id_hash_code: None,
+    }
+}
+
 /// Which household's tokens apply for this command right now.
 ///
 /// The reached player's household when one is in hand; otherwise, for a command
@@ -790,22 +800,12 @@ pub async fn run_link(
                  again - or use `x2rock link plex` for the browser flow."
             );
         };
-        let auth = sonos::smapi::DeviceAuth {
-            auth_token: token,
-            private_key: String::new(),
-            user_id_hash_code: None,
-        };
-        (auth, None)
+        (plex_auth(token), None)
     } else if chosen.id == sonos::plex::SERVICE_ID {
         let (pin, url) = sonos::plex::pin().await?;
         announce_link_page(&chosen.name, &url, no_open);
         let token = wait_for_link(&chosen.name, || sonos::plex::poll(&pin)).await?;
-        let auth = sonos::smapi::DeviceAuth {
-            auth_token: token,
-            private_key: String::new(),
-            user_id_hash_code: None,
-        };
-        (auth, None)
+        (plex_auth(token), None)
     } else {
         // Two flavours of the same browser flow. App link is named for handing
         // off to the service's own app, but that is the controller's choice -
