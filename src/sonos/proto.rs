@@ -95,6 +95,16 @@ pub struct Group {
     pub player_ids: Vec<String>,
 }
 
+impl Group {
+    /// `PLAYBACK_STATE_PLAYING` -> `PLAYING`, as [`PlaybackStatus::state`]
+    /// reads it; empty off a `groups` event, which carries no state.
+    pub fn state(&self) -> &str {
+        self.playback_state
+            .strip_prefix("PLAYBACK_STATE_")
+            .unwrap_or(&self.playback_state)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Player {
@@ -554,6 +564,34 @@ impl MetadataStatus {
             .and_then(|t| t.name.as_deref())
             .or_else(|| self.container.as_ref().and_then(|c| c.name.as_deref()))
     }
+
+    /// The current track's artist.
+    pub fn artist(&self) -> Option<&str> {
+        self.track()?.artist_name()
+    }
+
+    /// The track's art, else the container's - a station has art of its own
+    /// and no track to hang it on.
+    pub fn art_url(&self) -> Option<&str> {
+        self.track()
+            .and_then(|t| t.image_url.as_deref())
+            .or_else(|| self.container.as_ref()?.image_url.as_deref())
+    }
+
+    /// What a soundbar is receiving over HDMI - present only on its TV input,
+    /// which makes its presence the answer to "is this the TV?".
+    pub fn input_format(&self) -> Option<&HomeTheaterFormat> {
+        self.container.as_ref()?.ht_input_format.as_ref()
+    }
+
+    /// [`stream_info`](Self::stream_info) trimmed, and `None` when that
+    /// leaves nothing - a station that sends blank text has said nothing.
+    pub fn stream_info(&self) -> Option<&str> {
+        self.stream_info
+            .as_deref()
+            .map(str::trim)
+            .filter(|info| !info.is_empty())
+    }
 }
 
 /// How Sonos names a piece of a service's catalogue: what it is, which service
@@ -687,6 +725,11 @@ impl Track {
             .as_ref()
             .and_then(|v| v.name.as_deref())
             .or_else(|| self.podcast.as_ref().and_then(|v| v.name.as_deref()))
+    }
+
+    /// The artist's name.
+    pub fn artist_name(&self) -> Option<&str> {
+        self.artist.as_ref()?.name.as_deref()
     }
 }
 

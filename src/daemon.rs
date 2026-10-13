@@ -1045,7 +1045,7 @@ fn remember(status: &proto::MetadataStatus, player: &RoomPlayer) {
     if !player.track_changed(&bookmark.object_id) {
         return;
     }
-    bookmark.artist = track.artist.as_ref().and_then(|a| a.name.clone());
+    bookmark.artist = track.artist_name().map(str::to_owned);
     bookmark.art_url = track.image_url.clone();
     bookmark.kind = Some("track".into());
     bookmark.service_name = status
