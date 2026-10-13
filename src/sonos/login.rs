@@ -55,10 +55,8 @@ pub struct Integration {
 
 /// `$XDG_CONFIG_HOME/x2rock/sonos-integration.json`. Configuration the person
 /// writes, not state x2rock learns, hence the config directory.
-pub fn integration_path() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "x2rock")
-        .ok_or_else(|| anyhow!("no home directory"))?;
-    Ok(dirs.config_dir().join("sonos-integration.json"))
+fn integration_path() -> Result<PathBuf> {
+    store::config_path("sonos-integration.json")
 }
 
 pub fn integration() -> Result<Integration> {
