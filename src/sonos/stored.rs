@@ -41,6 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::netid::local_ip_toward;
 use crate::sonos::http;
+use crate::sonos::upnp::PORT;
 
 /// The fixed salt Sonos mixes with the household id to derive the blob key.
 /// A reverse-engineered constant, public in SoCo #1010; a firmware update could
@@ -373,7 +374,7 @@ async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String
     };
     let request = format!(
         "SUBSCRIBE /ZoneGroupTopology/Event HTTP/1.1\r\n\
-         HOST: {player}:1400\r\n\
+         HOST: {player}:{PORT}\r\n\
          CALLBACK: {callback}\r\n\
          NT: upnp:event\r\n\
          TIMEOUT: Second-60\r\n\
@@ -381,9 +382,9 @@ async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String
          Connection: close\r\n\r\n"
     );
     let mut stream =
-        tokio::time::timeout(EXCHANGE, TcpStream::connect(SocketAddr::new(player, 1400)))
+        tokio::time::timeout(EXCHANGE, TcpStream::connect(SocketAddr::new(player, PORT)))
             .await
-            .map_err(|_| anyhow!("{player} did not answer on port 1400 within {EXCHANGE:?}"))?
+            .map_err(|_| anyhow!("{player} did not answer on port {PORT} within {EXCHANGE:?}"))?
             .context("subscribing to the player's topology events")?;
     stream.write_all(request.as_bytes()).await?;
     let response = read_http_message(&mut stream, EXCHANGE)
@@ -399,7 +400,7 @@ async fn subscribe(player: IpAddr, local_ip: IpAddr, port: u16) -> Result<String
 async fn unsubscribe(player: IpAddr, sid: &str) {
     let request = format!(
         "UNSUBSCRIBE /ZoneGroupTopology/Event HTTP/1.1\r\n\
-         HOST: {player}:1400\r\n\
+         HOST: {player}:{PORT}\r\n\
          SID: {sid}\r\n\
          Connection: close\r\n\r\n"
     );
@@ -407,7 +408,7 @@ async fn unsubscribe(player: IpAddr, sid: &str) {
     // the command until the OS gave up on the connect, minutes later, to save
     // a subscription that expires in one.
     let _ = tokio::time::timeout(UNSUBSCRIBE, async {
-        let mut stream = TcpStream::connect(SocketAddr::new(player, 1400)).await?;
+        let mut stream = TcpStream::connect(SocketAddr::new(player, PORT)).await?;
         stream.write_all(request.as_bytes()).await?;
         read_http_message(&mut stream, UNSUBSCRIBE).await
     })

@@ -25,7 +25,7 @@ pub const INBOUND_PORT: u16 = 3401;
 pub fn local_ip_toward(peer: IpAddr) -> Result<IpAddr> {
     let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .context("finding this machine's address toward the player")?;
-    socket.connect(SocketAddr::new(peer, 1400))?;
+    socket.connect(SocketAddr::new(peer, crate::sonos::upnp::PORT))?;
     Ok(socket.local_addr()?.ip())
 }
 
