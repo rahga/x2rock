@@ -491,12 +491,6 @@ impl RoomPlayer {
         let Some(at) = state.members.iter().position(|(id, _)| id == player_id) else {
             return Vec::new();
         };
-        if state.member_muted.get(at) == Some(&volume.muted)
-            && state.member_fixed.get(at) == Some(&volume.fixed)
-            && state.member_levels.get(at) == Some(&volume.volume)
-        {
-            return Vec::new();
-        }
         if let Some(slot) = state.member_muted.get_mut(at) {
             *slot = volume.muted;
         }
@@ -525,13 +519,8 @@ impl RoomPlayer {
         // A field the body did not mention keeps what the room had: see
         // `proto::HomeTheaterUpdate` for the confirmation event that made this
         // the difference between "dialog on" and silently the reverse.
-        let night = update.night_mode.or(state.night_mode);
-        let dialog = update.enhance_dialog.or(state.enhance_dialog);
-        if (night, dialog) == (state.night_mode, state.enhance_dialog) {
-            return Vec::new();
-        }
-        state.night_mode = night;
-        state.enhance_dialog = dialog;
+        state.night_mode = update.night_mode.or(state.night_mode);
+        state.enhance_dialog = update.enhance_dialog.or(state.enhance_dialog);
         state.announce().into_iter().collect()
     }
 
@@ -539,9 +528,6 @@ impl RoomPlayer {
     /// it - announcing only when it moved.
     pub fn apply_upnp(&self, allowed: bool) -> Vec<Property> {
         let mut state = self.state.lock().unwrap();
-        if state.upnp_off == !allowed {
-            return Vec::new();
-        }
         state.upnp_off = !allowed;
         state.announce().into_iter().collect()
     }
@@ -595,9 +581,6 @@ impl RoomPlayer {
     /// announcing only when it moved. Cheap, and run on the event loop.
     pub fn apply_queue_version(&self, version: String) -> Option<Property> {
         let mut state = self.state.lock().unwrap();
-        if state.queue_version == version {
-            return None;
-        }
         state.queue_version = version;
         state.announce()
     }
