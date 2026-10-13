@@ -57,9 +57,9 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use roxmltree::Document;
 use serde::{Deserialize, Serialize};
 
-use super::element_text;
 use super::http;
 use super::xml_escape;
+use super::{child_text, element_text};
 
 /// Short, and deliberately shorter than the LAN's. Search is invoked from a bar
 /// widget as a subprocess; a call that never returns is worse than one that fails.
@@ -829,12 +829,7 @@ fn parse_resume_point(body: &str) -> Result<Option<ResumePoint>> {
     else {
         return Ok(None);
     };
-    let text = |tag: &str| {
-        node.children()
-            .find(|c| c.has_tag_name(tag))
-            .and_then(|c| c.text())
-            .map(str::trim)
-    };
+    let text = |tag: &str| child_text(node, tag).map(str::trim);
     Ok(text("id")
         .filter(|id| !id.is_empty())
         .map(|id| ResumePoint {
@@ -880,17 +875,11 @@ fn parse_items(body: &str, what: &str) -> Result<(Vec<Item>, u32)> {
         .descendants()
         .filter(|n| n.has_tag_name("mediaMetadata") || n.has_tag_name("mediaCollection"))
         .filter_map(|n| {
-            let child = |tag: &str| {
-                n.children()
-                    .find(|c| c.has_tag_name(tag))
-                    .and_then(|c| c.text())
-                    .map(str::to_string)
-            };
+            let child = |tag: &str| child_text(n, tag).map(str::to_string);
             let nested = |parent: &str, tag: &str| {
                 n.children()
                     .find(|c| c.has_tag_name(parent))
-                    .and_then(|c| c.children().find(|g| g.has_tag_name(tag)))
-                    .and_then(|g| g.text())
+                    .and_then(|c| child_text(c, tag))
                     .map(str::to_string)
             };
             // **A row that says it can be neither played nor opened is
@@ -1153,8 +1142,8 @@ fn parse_dynamic_properties(body: &str) -> Result<Vec<(String, String)>> {
         .descendants()
         .filter(|n| n.has_tag_name("property"))
         .filter_map(|p| {
-            let name = p.children().find(|c| c.has_tag_name("name"))?.text()?;
-            let value = p.children().find(|c| c.has_tag_name("value"))?.text()?;
+            let name = child_text(p, "name")?;
+            let value = child_text(p, "value")?;
             Some((name.to_string(), value.to_string()))
         })
         .collect())

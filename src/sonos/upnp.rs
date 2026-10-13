@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
 
+use super::child_text;
 use super::element_text as text_of;
 use super::http;
 use super::xml_escape;
@@ -1603,12 +1604,7 @@ impl Upnp {
             .descendants()
             .filter(|n| n.has_tag_name("item"))
             .map(|item| {
-                let child = |name: &str| {
-                    item.children()
-                        .find(|c| c.tag_name().name() == name)
-                        .and_then(|c| c.text())
-                        .map(str::to_owned)
-                };
+                let child = |name: &str| child_text(item, name).map(str::to_owned);
                 let index = item
                     .attribute("id")
                     .and_then(|id| id.rsplit('/').next())
@@ -1705,11 +1701,7 @@ impl Upnp {
             .descendants()
             .filter(|n| n.has_tag_name("item") || n.has_tag_name("container"))
             .map(|node| {
-                let child = |name: &str| {
-                    node.children()
-                        .find(|c| c.tag_name().name() == name)
-                        .and_then(|c| c.text())
-                };
+                let child = |name: &str| child_text(node, name);
                 BrowseItem {
                     id: node.attribute("id").unwrap_or_default().to_owned(),
                     title: child("title").unwrap_or_default().to_owned(),
