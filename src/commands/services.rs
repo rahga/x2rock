@@ -2086,10 +2086,16 @@ const FRONT_PAGE_FLOOR: usize = 8;
 /// biography, several hundred characters (2026-10-11) - and a listing is one
 /// row per item.
 fn one_line(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.chars().count() > max {
-        true => flat.chars().take(max - 1).chain("…".chars()).collect(),
-        false => flat,
+    ellipsize(text.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+/// `text` cut to at most `max` characters, an overlong one ending in an
+/// ellipsis. Counted in characters, not bytes, so an accented title is not
+/// cut short or split mid-character.
+fn ellipsize(text: String, max: usize) -> String {
+    match text.chars().count() > max {
+        true => text.chars().take(max - 1).chain("…".chars()).collect(),
+        false => text,
     }
 }
 
@@ -2538,10 +2544,7 @@ async fn search_everywhere(
                 true => format!("{}/", r.item.title),
                 false => r.item.title.clone(),
             };
-            match name.chars().count() > NAME_MAX {
-                true => name.chars().take(NAME_MAX - 1).chain("…".chars()).collect(),
-                false => name,
-            }
+            ellipsize(name, NAME_MAX)
         })
         .collect();
     let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(20);
@@ -2585,13 +2588,7 @@ async fn search_everywhere(
     const BY_MAX: usize = 24;
     let artists: Vec<String> = rows
         .iter()
-        .map(|r| {
-            let by = r.item.summary.clone().unwrap_or_default();
-            match by.chars().count() > BY_MAX {
-                true => by.chars().take(BY_MAX - 1).chain("…".chars()).collect(),
-                false => by,
-            }
-        })
+        .map(|r| ellipsize(r.item.summary.clone().unwrap_or_default(), BY_MAX))
         .collect();
     let by_width = artists.iter().map(|a| a.chars().count()).max().unwrap_or(0);
     for (n, ((row, name), by)) in rows.iter().zip(&names).zip(&artists).enumerate() {
