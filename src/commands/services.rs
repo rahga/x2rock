@@ -1161,13 +1161,9 @@ async fn link_from_household(
     // after the writes is the only report that cannot drift from them.
     let services = one_row_per_service(wanted.iter().map(|(n, id, _)| (n, id)));
     for (name, id) in services {
-        // A multi-word name has to be quoted or the shell splits it, so the hint
-        // is copy-pasteable rather than subtly wrong.
-        let quoted = if name.contains(char::is_whitespace) {
-            format!("\"{name}\"")
-        } else {
-            name.clone()
-        };
+        // Quoted for the shell where it has to be, so the hint is
+        // copy-pasteable rather than subtly wrong.
+        let quoted = hint::shell_arg(name);
         let Some(held) = linked.accounts_for(long_household, id) else {
             continue;
         };
