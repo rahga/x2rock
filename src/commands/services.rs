@@ -964,20 +964,18 @@ fn report_stored_accounts(
         records.len(),
         if records.len() == 1 { "" } else { "s" }
     );
+    // One attribute of a record, by name.
+    fn named<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        attrs
+            .iter()
+            .find(|(n, _)| n == key)
+            .map(|(_, v)| v.as_str())
+    }
     for (tag, attrs) in &records {
-        let named = |key: &str| {
-            attrs
-                .iter()
-                .find(|(n, _)| n == key)
-                .map(|(_, v)| v.as_str())
-                .unwrap_or_default()
-        };
         // The service id is the same arithmetic the modelled parser does, and
         // worth printing because the UDN states it only in encoded form.
-        let service = named("UDN")
-            .strip_prefix("SA_RINCON")
-            .and_then(|rest| rest.split('_').next())
-            .and_then(|digits| digits.parse::<u32>().ok())
+        let service = named(attrs, "UDN")
+            .and_then(sonos::stored::encoded_type)
             .map(|encoded_type| {
                 let id = (encoded_type / 256).to_string();
                 let name = catalogue.name_of(&id).unwrap_or("not in this catalogue");
@@ -1007,17 +1005,9 @@ fn report_stored_accounts(
     let packed: Vec<&str> = records
         .iter()
         .filter(|(_, attrs)| {
-            attrs
-                .iter()
-                .any(|(n, v)| n == "NumAccounts" && v.parse::<u32>().unwrap_or(1) > 1)
+            named(attrs, "NumAccounts").is_some_and(|v| v.parse::<u32>().unwrap_or(1) > 1)
         })
-        .map(|(_, attrs)| {
-            attrs
-                .iter()
-                .find(|(n, _)| n == "UDN")
-                .map(|(_, v)| v.as_str())
-                .unwrap_or("?")
-        })
+        .map(|(_, attrs)| named(attrs, "UDN").unwrap_or("?"))
         .collect();
     if packed.is_empty() {
         println!(
