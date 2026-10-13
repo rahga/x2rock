@@ -1567,7 +1567,7 @@ impl Upnp {
     /// and the DIDL-Lite document, still to be parsed.
     ///
     /// The envelope is the same whatever is browsed; only the DIDL differs, so
-    /// [`Self::browse_queue`] and [`Self::browse_content`] share this and keep
+    /// [`Self::queue`] and [`Self::browse_content`] share this and keep
     /// their own item parsers.
     async fn browse_page(
         &self,
@@ -1603,19 +1603,11 @@ impl Upnp {
         Ok((total, update_id, didl))
     }
 
-    /// One page of the queue.
-    async fn browse_queue(&self, start: u32, count: u32) -> Result<Queue> {
-        let (total, update_id, didl_text) = self.browse_page("Q:0", start, count).await?;
-        if didl_text.trim().is_empty() {
-            return Ok(Queue {
-                total,
-                update_id,
-                items: Vec::new(),
-            });
-        }
-        let didl = Document::parse(&didl_text).context("parsing queue DIDL-Lite")?;
-
-        let items = didl
+    /// One page of queue DIDL-Lite into items, with their queue positions and
+    /// durations.
+    fn queue_items_from_didl(&self, didl_text: &str) -> Result<Vec<QueueItem>> {
+        let didl = Document::parse(didl_text).context("parsing queue DIDL-Lite")?;
+        Ok(didl
             .descendants()
             .filter(|n| n.has_tag_name("item"))
             .map(|item| {
@@ -1639,30 +1631,41 @@ impl Upnp {
                     art_url: child("albumArtURI").map(|uri| self.absolute(&uri)),
                 }
             })
-            .collect();
-        Ok(Queue {
-            items,
-            total,
-            update_id,
-        })
+            .collect())
     }
 
-    /// The whole queue, up to [`MAX_QUEUE_ITEMS`].
-    pub async fn queue(&self) -> Result<Queue> {
-        let mut page = self.browse_queue(0, PAGE).await?;
-        let total = page.total;
-        let update_id = page.update_id.clone();
+    /// Every row of a container, a page at a time, up to [`MAX_QUEUE_ITEMS`]:
+    /// `parse` turns one page of DIDL-Lite into rows. Returns the rows with the
+    /// total and `UpdateID` the first page reported.
+    ///
+    /// Pages are fetched one after another, not together: each asks from where
+    /// the last one actually ended, which a player may put short of `PAGE`.
+    async fn browse_all<T>(
+        &self,
+        object_id: &str,
+        parse: impl Fn(&str) -> Result<Vec<T>>,
+    ) -> Result<(Vec<T>, u32, String)> {
+        let (total, update_id, mut didl_text) = self.browse_page(object_id, 0, PAGE).await?;
         let mut items = Vec::with_capacity(total.min(MAX_QUEUE_ITEMS) as usize);
         let mut start = 0;
-        loop {
-            let got = page.items.len() as u32;
-            items.extend(page.items);
+        while total > 0 && !didl_text.trim().is_empty() {
+            let page = parse(&didl_text)?;
+            let got = page.len() as u32;
+            items.extend(page);
             start += got;
             if got == 0 || start >= total || start >= MAX_QUEUE_ITEMS {
                 break;
             }
-            page = self.browse_queue(start, PAGE).await?;
+            didl_text = self.browse_page(object_id, start, PAGE).await?.2;
         }
+        Ok((items, total, update_id))
+    }
+
+    /// The whole queue, up to [`MAX_QUEUE_ITEMS`].
+    pub async fn queue(&self) -> Result<Queue> {
+        let (items, total, update_id) = self
+            .browse_all("Q:0", |didl| self.queue_items_from_didl(didl))
+            .await?;
         Ok(Queue {
             items,
             total,
@@ -1734,27 +1737,16 @@ impl Upnp {
 
     /// Browse a container - `SQ:` for saved playlists, `FV:2` for favorites.
     ///
-    /// Kept apart from [`Self::browse_queue`] because the two want different
+    /// Kept apart from [`Self::queue`] because the two want different
     /// things from the same DIDL: the queue needs positions and durations,
     /// this needs what it would take to enqueue the thing.
     pub async fn browse_content(&self, object_id: &str) -> Result<Vec<BrowseItem>> {
-        let mut items = Vec::new();
-        let mut start = 0;
-        loop {
-            let (total, _, didl_text) = self.browse_page(object_id, start, PAGE).await?;
-            if total == 0 || didl_text.trim().is_empty() {
-                break;
-            }
-            let page = self
-                .items_from_didl(&didl_text)
-                .with_context(|| format!("parsing DIDL-Lite of {object_id}"))?;
-            let got = page.len() as u32;
-            items.extend(page);
-            start += got;
-            if got == 0 || start >= total || start >= MAX_QUEUE_ITEMS {
-                break;
-            }
-        }
+        let (items, _, _) = self
+            .browse_all(object_id, |didl| {
+                self.items_from_didl(didl)
+                    .with_context(|| format!("parsing DIDL-Lite of {object_id}"))
+            })
+            .await?;
         Ok(items)
     }
 
@@ -1795,7 +1787,7 @@ impl Upnp {
 
     /// How many tracks the queue holds, without fetching them.
     pub async fn queue_len(&self) -> Result<u32> {
-        Ok(self.browse_queue(0, 1).await?.total)
+        Ok(self.browse_page("Q:0", 0, 1).await?.0)
     }
 
     /// The queue's current version, read cheaply.
@@ -1805,7 +1797,7 @@ impl Upnp {
     /// refusal can never fire on it; a caller acting on a list it showed
     /// someone passes the version that list was read at instead.
     pub async fn update_id(&self) -> Result<String> {
-        Ok(self.browse_queue(0, 1).await?.update_id)
+        Ok(self.browse_page("Q:0", 0, 1).await?.1)
     }
 
     /// The version a mutation quotes: `at`, the one the caller's list was read
