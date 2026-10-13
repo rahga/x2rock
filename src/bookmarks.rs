@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::http;
@@ -429,12 +429,7 @@ impl Bookmarks {
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
-        match store::read_optional(path)? {
-            Some(text) => {
-                serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
-            None => Ok(Self::default()),
-        }
+        store::load_json(path)
     }
 
     /// Change the file: load it, apply `change`, write back whatever changed.

@@ -21,7 +21,6 @@
 //! service never enters the daemon" in docs/architecture.md.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -98,9 +97,8 @@ impl Catalogue {
     /// to prevent.
     pub fn load() -> Self {
         path()
-            .and_then(|p| Ok(fs::read_to_string(p)?))
             .ok()
-            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
+            .and_then(|p| store::load_json_lenient::<Self>(&p))
             // A file this program no longer understands is treated as absent
             // rather than read half-heartedly.
             .filter(|c| c.schema == SCHEMA)

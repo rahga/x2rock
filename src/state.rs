@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::sonos::proto::Groups;
@@ -36,13 +36,7 @@ fn path() -> Result<PathBuf> {
 impl State {
     /// Load, treating a missing file as empty state.
     pub fn load() -> Result<Self> {
-        let path = path()?;
-        match store::read_optional(&path)? {
-            Some(text) => {
-                serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
-            None => Ok(Self::default()),
-        }
+        store::load_json(&path()?)
     }
 
     /// Write atomically, so a crash mid-write cannot leave a truncated file.

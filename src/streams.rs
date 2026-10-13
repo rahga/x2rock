@@ -57,10 +57,7 @@ impl Streams {
     }
 
     fn load_at(path: &Path) -> Self {
-        store::read_optional(path)
-            .ok()
-            .flatten()
-            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
+        store::load_json_lenient::<Self>(path)
             .filter(|s| s.schema == SCHEMA)
             .unwrap_or_default()
     }
