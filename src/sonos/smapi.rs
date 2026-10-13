@@ -1706,6 +1706,11 @@ impl std::error::Error for Refused {}
 /// (or just failing) would be making them pay for a problem the service
 /// already solved. `refreshed` carries the new token out to the caller, which
 /// owns persisting it; this function only spends it once, on the retry.
+///
+/// **So does a refused token imported from the household**, when the
+/// household now holds a different one for the same account - Pandora's went
+/// stale in a day while the Sonos app kept its own fresh. That replacement
+/// arrives through `refreshed` the same way; see `rereads`.
 async fn call(
     service: &Service,
     token: Option<&Token>,
@@ -1720,7 +1725,14 @@ async fn call(
         Ok(body) => return Ok(body),
         Err(fault) => fault,
     };
-    let Some(new) = fault.refresh else {
+    // No replacement in the fault: an imported token may still have a fresher
+    // copy on the household, which is read once and tried - see `rereads`.
+    let new = match (fault.refresh.clone(), token) {
+        (Some(new), _) => Some(new),
+        (None, Some(token)) => crate::rereads::reread(&service.id, token).await,
+        (None, None) => None,
+    };
+    let Some(new) = new else {
         return Err(Refused::error(format!(
             "{} refused {action}: {}",
             service.name, fault.message

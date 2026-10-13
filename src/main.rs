@@ -14,6 +14,7 @@ mod iheart;
 mod itunes;
 mod mpris;
 mod netid;
+mod rereads;
 mod restart;
 mod service;
 mod session;

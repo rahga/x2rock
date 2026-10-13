@@ -30,6 +30,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(connection: Connection, groups: Groups) -> Self {
+        crate::rereads::reached(connection.ip());
         Self {
             connection,
             groups,
