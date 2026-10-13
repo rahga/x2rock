@@ -30,7 +30,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::net::Ipv4Addr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -189,13 +188,6 @@ fn cached(dir: &Path, url: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Mark a file as just used, for [`prune`]'s least-recently-used order.
-pub(crate) fn touch(path: &Path) {
-    if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
-        let _ = file.set_modified(SystemTime::now());
-    }
-}
-
 /// Write an image in by renaming a scratch file over it, so the widget - which
 /// loads nothing but finished files from this directory - never sees half of one.
 fn store(dir: &Path, url: &str, bytes: &[u8], ext: &str) -> Result<PathBuf> {
@@ -207,15 +199,15 @@ fn store(dir: &Path, url: &str, bytes: &[u8], ext: &str) -> Result<PathBuf> {
 /// The cache directory, created owner-only.
 fn open_dir() -> Result<PathBuf> {
     let dir = dir()?;
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    store::owner_only_dir(&dir)?;
     Ok(dir)
 }
 
 /// The local file for one URL: the cached copy, or a fresh one.
 async fn resolve(dir: &Path, url: &str) -> Result<PathBuf> {
     if let Some(path) = cached(dir, url) {
-        touch(&path);
+        // Bumped for `prune`'s least-recently-used order.
+        store::touch(&path);
         return Ok(path);
     }
     let (bytes, ext) = fetch(url).await?;

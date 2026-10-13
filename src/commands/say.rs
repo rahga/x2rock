@@ -17,11 +17,10 @@
 
 use std::fs;
 use std::net::IpAddr;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::cli::SayArgs;
@@ -31,7 +30,7 @@ use crate::commands::{Report, ago, emit};
 use crate::session::{self, Session, Target};
 use crate::speech::{self, Config, Listing, Synth};
 use crate::state::State;
-use crate::{art, clipserve, store};
+use crate::{clipserve, store};
 
 /// How long the player gets to come for the clip. It took under a second in
 /// testing; this is for a busy player, not a slow one.
@@ -275,18 +274,14 @@ async fn say(
 /// where `atime` does not - the same move the art cache makes.
 fn read_cached(file: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(file).ok().filter(|b| !b.is_empty())?;
-    art::touch(file);
+    store::touch(file);
     Some(bytes)
 }
 
 /// Write the clip at 0600 under a 0700 directory, by rename, so a crash leaves
 /// no half-written MP3 for the next `say` to serve.
 fn keep(dir: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    store::owner_only_dir(dir)?;
     store::write_bytes_atomically(file, bytes, store::SECRET)
 }
 
