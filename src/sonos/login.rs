@@ -269,15 +269,12 @@ pub async fn catch_redirect(
 
 /// POST to the token endpoint with the integration's credentials.
 async fn token_request(integration: &Integration, form: &str) -> Result<Token> {
-    let (endpoint, path, tls) = http::parse_url(TOKEN)?;
     let basic = format!(
         "Basic {}",
         super::base64::encode(format!("{}:{}", integration.key, integration.secret).as_bytes())
     );
     let (status, body) = http::post(
-        &endpoint,
-        tls,
-        &path,
+        TOKEN,
         &[
             ("Authorization", &basic),
             (

@@ -1487,13 +1487,10 @@ async fn call_soap(
     action: &str,
     params: &str,
 ) -> Result<std::result::Result<String, Fault>> {
-    let (endpoint, path, tls) = http::parse_url(&service.uri)?;
     let envelope = envelope(action, params, token);
     let soap_action = format!("\"{NS}#{action}\"");
     let (status, text) = http::post(
-        &endpoint,
-        tls,
-        &path,
+        &service.uri,
         &[
             ("Content-Type", "text/xml; charset=utf-8"),
             ("SOAPACTION", &soap_action),
