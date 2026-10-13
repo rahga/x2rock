@@ -99,17 +99,16 @@ pub fn complete(what: &str, prefix: Option<&str>, out: &mut impl Write) -> Resul
         }
         "households" => {
             let state = State::load().unwrap_or_default();
-            let fp = netid::network_fingerprint();
-            if let Some(fp) = fp.as_deref() {
-                let mut list = Vec::new();
-                for (id, _) in state.households_on(fp) {
-                    list.push(id);
-                }
-                list.extend(state.room_names(Some(fp)));
-                list
-            } else {
-                Vec::new()
-            }
+            netid::network_fingerprint()
+                .map(|fp| {
+                    state
+                        .households_on(&fp)
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .chain(state.room_names(Some(&fp)))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
         "bookmarks" => Bookmarks::load()
             .map(|bms| bms.items.into_iter().map(|i| i.name).collect())
@@ -170,6 +169,106 @@ fn matching(mut names: Vec<String>, prefix: Option<&str>) -> Vec<String> {
     names
 }
 
+/// A flag whose value is completed from one of [`complete`]'s lists.
+struct FlagHook {
+    long: &'static str,
+    short: Option<char>,
+    /// The subcommand the flag belongs to, for a flag only one has; `None`
+    /// for one every subcommand takes.
+    under: Option<&'static str>,
+    list: &'static str,
+}
+
+/// A positional completed from one of [`complete`]'s lists: the subcommand
+/// path it sits under and its name as clap gives it.
+struct PositionalHook {
+    path: &'static [&'static str],
+    arg: &'static str,
+    list: &'static str,
+}
+
+/// Which flag gets which dynamic list - the one table bash and fish read.
+/// zsh keys its flags on clap's value names instead; see [`enhance_zsh`].
+const FLAG_HOOKS: &[FlagHook] = &[
+    FlagHook {
+        long: "room",
+        short: Some('r'),
+        under: None,
+        list: "rooms",
+    },
+    FlagHook {
+        long: "household",
+        short: None,
+        under: None,
+        list: "households",
+    },
+    FlagHook {
+        long: "service",
+        short: Some('s'),
+        under: None,
+        list: "services",
+    },
+    FlagHook {
+        long: "account",
+        short: None,
+        under: None,
+        list: "accountnames",
+    },
+    FlagHook {
+        long: "prefer",
+        short: None,
+        under: Some("accounts"),
+        list: "services",
+    },
+];
+
+/// Which positional gets which dynamic list - the one table all three shells
+/// read. The positional of `bookmark` and of `bookmarks remove` is a bookmark
+/// name; `ungroup` and `group` take rooms; `unlink` takes linked accounts;
+/// `link` takes services.
+const POSITIONAL_HOOKS: &[PositionalHook] = &[
+    PositionalHook {
+        path: &["bookmark"],
+        arg: "query",
+        list: "bookmarks",
+    },
+    PositionalHook {
+        path: &["bookmarks", "remove"],
+        arg: "query",
+        list: "bookmarks",
+    },
+    PositionalHook {
+        path: &["bookmarks", "pin"],
+        arg: "query",
+        list: "bookmarks",
+    },
+    PositionalHook {
+        path: &["bookmarks", "rename"],
+        arg: "query",
+        list: "bookmarks",
+    },
+    PositionalHook {
+        path: &["group"],
+        arg: "rooms",
+        list: "rooms",
+    },
+    PositionalHook {
+        path: &["ungroup"],
+        arg: "room",
+        list: "rooms",
+    },
+    PositionalHook {
+        path: &["link"],
+        arg: "service",
+        list: "services",
+    },
+    PositionalHook {
+        path: &["unlink"],
+        arg: "service",
+        list: "accounts",
+    },
+];
+
 /// The dynamic hooks for bash, spliced into the script clap_complete wrote.
 ///
 /// Anchored on the script's *structure* - a `case "${prev}"` arm for the flag,
@@ -198,14 +297,15 @@ fn enhance_bash(script: &str) -> String {
 
         // `--room)` / `-r)`, `--household)`, and `--service)` / `-s)` arms: the
         // value that follows is a room, household, or service, not a file.
-        let list = match trimmed {
-            "--room)" | "-r)" => Some("rooms"),
-            "--household)" => Some("households"),
-            "--service)" | "-s)" => Some("services"),
-            "--account)" => Some("accountnames"),
-            "--prefer)" => Some("services"),
-            _ => None,
-        };
+        let list = trimmed.strip_suffix(')').and_then(|arm| {
+            FLAG_HOOKS
+                .iter()
+                .find(|f| {
+                    arm.strip_prefix("--") == Some(f.long)
+                        || f.short.is_some_and(|s| arm == format!("-{s}"))
+                })
+                .map(|f| f.list)
+        });
         if let Some(list) = list
             && lines.get(i + 1).map(|l| l.trim()) == Some(r#"COMPREPLY=($(compgen -f "${cur}"))"#)
         {
@@ -215,22 +315,16 @@ fn enhance_bash(script: &str) -> String {
             continue;
         }
 
-        // The positional of `bookmark` and of `bookmarks remove` is a bookmark
-        // name; `ungroup` and `group` take rooms; `unlink` takes linked accounts;
-        // `link` takes services.
-        // clap offers the flags there; split its `if` so a `-` prefix
-        // still gets the flags and anything else gets the dynamic completions.
-        let positional = match block {
-            Some("x2rock__subcmd__bookmark") => Some((2, "bookmarks")),
-            Some("x2rock__subcmd__bookmarks__subcmd__remove") => Some((3, "bookmarks")),
-            Some("x2rock__subcmd__bookmarks__subcmd__pin") => Some((3, "bookmarks")),
-            Some("x2rock__subcmd__bookmarks__subcmd__rename") => Some((3, "bookmarks")),
-            Some("x2rock__subcmd__ungroup") => Some((2, "rooms")),
-            Some("x2rock__subcmd__group") => Some((2, "rooms")),
-            Some("x2rock__subcmd__unlink") => Some((2, "accounts")),
-            Some("x2rock__subcmd__link") => Some((2, "services")),
-            _ => None,
-        };
+        // A hooked positional's block, by clap's label for it, and the word
+        // the positional is: one past the subcommand path. clap offers the
+        // flags there; split its `if` so a `-` prefix still gets the flags and
+        // anything else gets the dynamic completions.
+        let positional = block.and_then(|block| {
+            POSITIONAL_HOOKS
+                .iter()
+                .find(|p| block == format!("x2rock__subcmd__{}", p.path.join("__subcmd__")))
+                .map(|p| (p.path.len() + 1, p.list))
+        });
         if let Some((n, what)) = positional
             && trimmed == format!(r#"if [[ ${{cur}} == -* || ${{COMP_CWORD}} -eq {n} ]] ; then"#)
             && lines.get(i + 3).map(|l| l.trim()) == Some("fi")
@@ -306,25 +400,34 @@ fn enhance_fish(script: &str) -> String {
     s.push_str(
         "\n# Dynamic completions for rooms, households, services, bookmarks, and accounts\n",
     );
-    s.push_str("complete -c x2rock -s r -l room -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
-    s.push_str(
-        "complete -c x2rock -l household -x -a '(x2rock __complete households 2>/dev/null)'\n",
-    );
-    s.push_str(
-        "complete -c x2rock -s s -l service -x -a '(x2rock __complete services 2>/dev/null)'\n",
-    );
-    s.push_str(
-        "complete -c x2rock -l account -x -a '(x2rock __complete accountnames 2>/dev/null)'\n",
-    );
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmark' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from remove' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from pin' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from bookmarks; and __fish_seen_subcommand_from rename' -x -a '(x2rock __complete bookmarks 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from group' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from ungroup' -x -a '(x2rock __complete rooms 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from link' -x -a '(x2rock __complete services 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from unlink' -x -a '(x2rock __complete accounts 2>/dev/null)'\n");
-    s.push_str("complete -c x2rock -n '__fish_seen_subcommand_from accounts' -l prefer -x -a '(x2rock __complete services 2>/dev/null)'\n");
+    let seen = |sub: &str| format!("__fish_seen_subcommand_from {sub}");
+    let source = |list: &str| format!("'(x2rock __complete {list} 2>/dev/null)'");
+    let flag = |f: &FlagHook| {
+        let short = f.short.map(|c| format!(" -s {c}")).unwrap_or_default();
+        format!("{short} -l {} -x -a {}", f.long, source(f.list))
+    };
+    // The flags every subcommand takes, the positionals, then the flags only
+    // one subcommand has, which are conditioned on it like a positional.
+    for f in FLAG_HOOKS.iter().filter(|f| f.under.is_none()) {
+        s.push_str(&format!("complete -c x2rock{}\n", flag(f)));
+    }
+    for p in POSITIONAL_HOOKS {
+        let when: Vec<String> = p.path.iter().map(|sub| seen(sub)).collect();
+        s.push_str(&format!(
+            "complete -c x2rock -n '{}' -x -a {}\n",
+            when.join("; and "),
+            source(p.list)
+        ));
+    }
+    for f in FLAG_HOOKS.iter() {
+        if let Some(under) = f.under {
+            s.push_str(&format!(
+                "complete -c x2rock -n '{}'{}\n",
+                seen(under),
+                flag(f)
+            ));
+        }
+    }
     s
 }
 
@@ -389,19 +492,21 @@ _x2rock_accountnames() { _x2rock_list accountnames }
             // A distinct metavar from SERVICE, which is what `unlink
             // --account` declares and gets.
             .replace(":ACCOUNT:_default'", ":ACCOUNT:_x2rock_accountnames'");
-        if matches!(label, Some("link")) && line.starts_with("'::service") {
-            line = line.replace(":_default'", ":_x2rock_services'");
-        }
-        // `::service` now, not `:service`: unlink's positional became optional
-        // when `--all` was added, and clap marks an optional positional with the
-        // double colon.
-        if matches!(label, Some("unlink")) && line.starts_with("'::service") {
-            line = line.replace(":_default'", ":_x2rock_accounts'");
-        }
-        if matches!(label, Some("bookmark" | "remove" | "pin" | "rename"))
-            && trimmed == r"':query:_default' \"
-        {
-            line = line.replace(":query:_default'", ":query:_x2rock_bookmarks'");
+        // A hooked positional, by the nearest label and its own name, which
+        // ends at a colon or at the ` -- ` before its help. Either colon count
+        // before it: clap marks an optional positional with two - unlink's
+        // became one when `--all` was added - and a required one with one.
+        let positional = trimmed
+            .strip_prefix("'::")
+            .or_else(|| trimmed.strip_prefix("':"));
+        let hooked = POSITIONAL_HOOKS.iter().find(|p| {
+            label == p.path.last().copied()
+                && positional
+                    .and_then(|rest| rest.strip_prefix(p.arg))
+                    .is_some_and(|rest| rest.starts_with([':', ' ']))
+        });
+        if let Some(p) = hooked {
+            line = line.replace(":_default'", &format!(":_x2rock_{}'", p.list));
         }
         out.push(line);
     }
