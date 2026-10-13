@@ -73,8 +73,7 @@ pub async fn pin() -> Result<(Pin, String)> {
         "/api/v2/pins?strong=true&X-Plex-Product=x2rock&X-Plex-Client-Identifier={}",
         http::urlencode(&client)
     );
-    let (endpoint, _, tls) = http::parse_url("https://plex.tv/")?;
-    let (status, body) = http::post(&endpoint, tls, &path, &[], "", TIMEOUT).await?;
+    let (status, body) = http::post(&format!("https://plex.tv{path}"), &[], "", TIMEOUT).await?;
     if status != 201 && status != 200 {
         bail!("plex.tv refused to mint a link pin: HTTP {status}");
     }

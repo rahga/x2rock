@@ -1416,15 +1416,11 @@ impl Upnp {
 
     /// One HTTP/1.1 POST, returning `(status, body)`.
     async fn post(&self, path: &str, soap_action: &str, body: &str) -> Result<(u16, String)> {
-        let endpoint = http::Endpoint::Lan {
-            ip: self.ip,
-            port: PORT,
-        };
+        // `SocketAddr` brackets an IPv6 address, which a URL needs.
+        let url = format!("http://{}{path}", std::net::SocketAddr::new(self.ip, PORT));
         let action = format!("\"{soap_action}\"");
         http::post(
-            &endpoint,
-            false,
-            path,
+            &url,
             &[
                 ("Content-Type", "text/xml; charset=\"utf-8\""),
                 ("SOAPACTION", &action),

@@ -14,7 +14,6 @@
 //! matters. See "Rule: talking to a service never enters the daemon" in
 //! docs/architecture.md.
 
-use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -33,31 +32,27 @@ use tokio_rustls::TlsConnector;
 /// `a` gets the real reply. A caller that sends its own `User-Agent` keeps it.
 const AGENT: &str = concat!("x2rock/", env!("CARGO_PKG_VERSION"));
 
-/// Where a request is going, and how to reach it.
-///
-/// `Lan` carries an address because players are found by scanning and their
-/// names mean nothing to DNS. `Web` carries a hostname because TLS validates
-/// against it, and because a service's endpoint arrives as a URL.
-pub enum Endpoint {
-    Lan { ip: IpAddr, port: u16 },
-    Web { host: String, port: u16 },
+/// Where a request is going, and how to reach it: the host and port out of a
+/// URL, and whether its scheme wants TLS. A player on the LAN arrives here as
+/// an `http://<ip>:1400` URL like everything else.
+struct Endpoint {
+    host: String,
+    port: u16,
+    tls: bool,
 }
 
 impl Endpoint {
     fn authority(&self) -> String {
-        match self {
-            Self::Lan { ip, port } => format!("{ip}:{port}"),
-            Self::Web { host, port } => format!("{host}:{port}"),
-        }
+        format!("{}:{}", self.host, self.port)
     }
 
     /// The `Host` header. Port 443 is elided because some services answer a
     /// literal `host:443` with a redirect to themselves.
     fn host_header(&self) -> String {
-        match self {
-            Self::Lan { ip, port } => format!("{ip}:{port}"),
-            Self::Web { host, port } if *port == 443 => host.clone(),
-            Self::Web { host, port } => format!("{host}:{port}"),
+        if self.port == 443 {
+            self.host.clone()
+        } else {
+            self.authority()
         }
     }
 }
@@ -67,7 +62,7 @@ impl Endpoint {
 /// Only the two schemes a Sonos deployment produces are accepted; anything else
 /// is a service descriptor we have misread, and guessing at it would turn that
 /// into a confusing network error later.
-pub fn parse_url(url: &str) -> Result<(Endpoint, String, bool)> {
+fn parse_url(url: &str) -> Result<(Endpoint, String)> {
     let (scheme, rest) = url
         .split_once("://")
         .ok_or_else(|| anyhow!("not a URL: {url}"))?;
@@ -92,12 +87,12 @@ pub fn parse_url(url: &str) -> Result<(Endpoint, String, bool)> {
         bail!("no host in {url}");
     }
     Ok((
-        Endpoint::Web {
+        Endpoint {
             host: host.to_string(),
             port,
+            tls,
         },
         path.to_string(),
-        tls,
     ))
 }
 
@@ -130,34 +125,36 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 /// `timeout` bounds the whole exchange, connect included, so a caller always
 /// gets an answer or an error within it.
 pub async fn post(
-    endpoint: &Endpoint,
-    tls: bool,
-    path: &str,
+    url: &str,
     headers: &[(&str, &str)],
     body: &str,
     timeout: Duration,
 ) -> Result<(u16, String)> {
-    let (status, head, body) = tokio::time::timeout(
+    let (endpoint, path) = parse_url(url)?;
+    let authority = endpoint.authority();
+    let (status, head, body) = within(
         timeout,
-        exchange(
-            endpoint,
-            tls,
-            "POST",
-            path,
-            headers,
-            Some(body),
-            false,
-            None,
-        ),
+        "talking to",
+        &authority,
+        exchange(&endpoint, "POST", &path, headers, Some(body), false, None),
     )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "timed out after {timeout:?} talking to {}",
-            endpoint.authority()
-        )
-    })??;
-    Ok((status, text(&head, body, &endpoint.authority())?))
+    .await?;
+    Ok((status, text(&head, body, &authority)?))
+}
+
+/// `fut` under `timeout`, its expiry reported as "timed out after .. `doing`
+/// `target`". The one place the deadline is applied, so every request below
+/// gets the same bound - connect included - and says what it was doing when it
+/// ran out.
+async fn within<T>(
+    timeout: Duration,
+    doing: &str,
+    target: &str,
+    fut: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| anyhow!("timed out after {timeout:?} {doing} {target}"))?
 }
 
 /// One HTTP/1.1 GET. Service manifests and presentation maps are plain
@@ -174,13 +171,14 @@ pub async fn get_with(
     timeout: Duration,
     headers: &[(&str, &str)],
 ) -> Result<(u16, String)> {
-    let (endpoint, path, tls) = parse_url(url)?;
-    let (status, head, body) = tokio::time::timeout(
+    let (endpoint, path) = parse_url(url)?;
+    let (status, head, body) = within(
         timeout,
-        exchange(&endpoint, tls, "GET", &path, headers, None, false, None),
+        "fetching",
+        url,
+        exchange(&endpoint, "GET", &path, headers, None, false, None),
     )
-    .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} fetching {url}"))??;
+    .await?;
     Ok((status, text(&head, body, &endpoint.authority())?))
 }
 
@@ -233,22 +231,14 @@ async fn bytes(
     timeout: Duration,
     limit: usize,
 ) -> Result<(u16, String, Vec<u8>)> {
-    let (endpoint, path, tls) = parse_url(url)?;
-    tokio::time::timeout(
+    let (endpoint, path) = parse_url(url)?;
+    within(
         timeout,
-        exchange(
-            &endpoint,
-            tls,
-            method,
-            &path,
-            headers,
-            body,
-            false,
-            Some(limit),
-        ),
+        "talking to",
+        url,
+        exchange(&endpoint, method, &path, headers, body, false, Some(limit)),
     )
     .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} talking to {url}"))?
 }
 
 /// One header's value out of a raw HTTP head, by name, case-insensitively.
@@ -280,12 +270,13 @@ pub fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 /// inconsistently, and some of the signed URLs here reject it outright while
 /// serving the same URL to a `GET` perfectly well.
 pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
-    let (endpoint, path, tls) = parse_url(url)?;
-    let (status, head, _) = tokio::time::timeout(
+    let (endpoint, path) = parse_url(url)?;
+    let (status, head, _) = within(
         timeout,
+        "probing",
+        url,
         exchange(
             &endpoint,
-            tls,
             "GET",
             &path,
             &[("Range", "bytes=0-0")],
@@ -294,8 +285,7 @@ pub async fn probe(url: &str, timeout: Duration) -> Result<(u16, String)> {
             None,
         ),
     )
-    .await
-    .map_err(|_| anyhow!("timed out after {timeout:?} probing {url}"))??;
+    .await?;
     Ok((status, head))
 }
 
@@ -353,10 +343,8 @@ pub fn urldecode(value: &str) -> String {
 ///
 /// Returns the status, the head, and the body with chunked framing removed;
 /// [`text`] makes a document of it.
-#[allow(clippy::too_many_arguments)]
 async fn exchange(
     endpoint: &Endpoint,
-    tls: bool,
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
@@ -390,10 +378,8 @@ async fn exchange(
     head.push_str("Connection: close\r\n\r\n");
     let request = format!("{head}{}", body.unwrap_or(""));
 
-    if tls {
-        let Endpoint::Web { host, .. } = endpoint else {
-            bail!("TLS needs a hostname to validate against");
-        };
+    if endpoint.tls {
+        let host = &endpoint.host;
         let name = rustls::pki_types::ServerName::try_from(host.clone())
             .with_context(|| format!("not a valid TLS server name: {host}"))?;
         let stream = TlsConnector::from(tls_config())
@@ -816,15 +802,15 @@ mod tests {
 
     #[test]
     fn urls_split_into_endpoint_path_and_scheme() {
-        let (e, path, tls) = parse_url("https://legato.radiotime.com/Radio.asmx").unwrap();
-        assert!(tls);
+        let (e, path) = parse_url("https://legato.radiotime.com/Radio.asmx").unwrap();
+        assert!(e.tls);
         assert_eq!(path, "/Radio.asmx");
         assert_eq!(e.authority(), "legato.radiotime.com:443");
         // 443 is elided from Host; anything else is kept.
         assert_eq!(e.host_header(), "legato.radiotime.com");
 
-        let (e, path, tls) = parse_url("http://example.test:8080").unwrap();
-        assert!(!tls);
+        let (e, path) = parse_url("http://example.test:8080").unwrap();
+        assert!(!e.tls);
         assert_eq!(path, "/", "a URL with no path still posts to root");
         assert_eq!(e.host_header(), "example.test:8080");
 
@@ -837,7 +823,7 @@ mod tests {
     fn a_colon_that_is_not_a_port_is_left_alone() {
         // Only an all-digit suffix is a port; otherwise the whole authority is
         // the host and the scheme's default port applies.
-        let (e, _, _) = parse_url("https://host.test:notaport/x").unwrap();
+        let (e, _) = parse_url("https://host.test:notaport/x").unwrap();
         assert_eq!(e.authority(), "host.test:notaport:443");
     }
 
