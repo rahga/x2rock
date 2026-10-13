@@ -193,6 +193,16 @@ pub fn decrypt_elements(encoded: &str, household_id: &str) -> Result<Vec<StoredR
         .collect())
 }
 
+/// The number in a `SA_RINCON<type>_...` UDN: `type / 256` is the service
+/// id and `type % 256` a schema revision.
+pub fn encoded_type(udn: &str) -> Option<u32> {
+    udn.strip_prefix("SA_RINCON")?
+        .split('_')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Parse the decrypted account XML.
 ///
 /// Each element with a `UDN` of `SA_RINCON<type>_...` is one *service*, where
@@ -220,11 +230,7 @@ fn parse_accounts(payload: &[u8]) -> Result<Vec<StoredAccount>> {
         let Some(udn) = node.attribute("UDN") else {
             continue;
         };
-        let Some(encoded_type) = udn
-            .strip_prefix("SA_RINCON")
-            .and_then(|rest| rest.split('_').next())
-            .and_then(|digits| digits.parse::<u32>().ok())
-        else {
+        let Some(encoded_type) = encoded_type(udn) else {
             continue;
         };
         let count = node
