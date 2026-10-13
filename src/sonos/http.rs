@@ -323,6 +323,28 @@ pub fn urlencode(value: &str) -> String {
     out
 }
 
+/// [`urlencode`] undone: each `%xx` becomes its byte, and a `%` not followed by
+/// two hex digits is left as it is.
+pub fn urldecode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = bytes.get(i + 1..i + 3)
+            && let Ok(hex) = std::str::from_utf8(hex)
+            && let Ok(b) = u8::from_str_radix(hex, 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// `head_only` stops the read as soon as the response headers are complete,
 /// leaving the body unread and the socket to be dropped. Only [`probe`] wants
 /// it, and it is not an optimisation: without it a server that ignores `Range`
@@ -579,6 +601,13 @@ fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urldecode_leaves_a_stray_percent_alone() {
+        assert_eq!(urldecode("a%3Ab%"), "a:b%");
+        assert_eq!(urldecode("%a\u{e9}"), "%a\u{e9}");
+        assert_eq!(urldecode(&urlencode("a:b c")), "a:b c");
+    }
 
     #[test]
     fn a_header_is_found_whatever_its_case_and_the_first_line_is_skipped() {

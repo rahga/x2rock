@@ -942,11 +942,7 @@ async fn capture_stored(
     long_household: &str,
     callback_port: u16,
 ) -> Result<(String, String)> {
-    let short = long_household
-        .split('.')
-        .next()
-        .unwrap_or(long_household)
-        .to_string();
+    let short = sonos::stored::short_household(long_household).to_string();
     let encoded = sonos::stored::capture_envelope(
         session.connection.ip(),
         callback_port,
@@ -1460,8 +1456,7 @@ pub async fn run_browse(
     // The cloud account id is the serial. Prefer the chosen account's, but fall
     // back to any account of this service in this household that has one: the
     // preferred account can be a browser link with no serial while a
-    // `--from-household` import of the same service carries it. Used by both
-    // cloud fallbacks below.
+    // `--from-household` import of the same service carries it.
     let cloud_serial = token.as_ref().and_then(|t| t.serial).or_else(|| {
         linked
             .accounts_for(&household, &chosen.id)
@@ -1470,9 +1465,7 @@ pub async fn run_browse(
     let mut refreshed = None;
     let mut answer = if sonos::cloud::is_cloud(at) {
         // A cloud container carries its own browse URL; follow it, no SMAPI.
-        sonos::cloud::browse(at)
-            .await
-            .map(|rows| page_of(rows, index, count))
+        sonos::cloud::browse(at, index, count).await
     } else {
         sonos::smapi::metadata(&chosen, token.as_ref(), at, index, count, &mut refreshed).await
     };
@@ -1489,44 +1482,44 @@ pub async fn run_browse(
     {
         answer = Ok(found);
     }
-    // A cloud search result that is a container (an album, an artist) carries a
-    // bare object id, not a `cloud:` URL, so it can still be played; descending
-    // it goes through SMAPI, which for a service the direct path cannot reach
-    // (YouTube Music) is refused. Then the cloud serves it - `containers/{id}`
-    // browses any object kind. Only on a refusal, so a service that browses
-    // fine directly never pays for the call.
-    if at != "root"
-        && !sonos::cloud::is_cloud(at)
-        && answer.is_err()
+    // The cloud fallbacks, which need the service's cloud id and an account
+    // serial, and run only for someone who has set up their own Sonos
+    // integration and signed in: every `cloud` call fails before the network
+    // otherwise, and a failure here leaves the direct answer standing.
+    if !sonos::cloud::is_cloud(at)
         && let Some(service_type) = chosen.service_type
         && let Some(serial) = cloud_serial
-        && sonos::cloud::available().await
-        && let Ok(rows) = sonos::cloud::browse_object(&household, service_type, serial, at).await
-        && !rows.is_empty()
     {
-        answer = Ok(page_of(rows, index, count));
-    }
-    // A service whose own `root` is empty or refused, but whose front page the
-    // cloud can serve (Amazon, Apple, YouTube Music), falls back to the cloud
-    // home - but only when the person has set up their own Sonos integration
-    // and signed in, so nothing here runs for anyone who has not opted in.
-    if at == "root" && !sonos::cloud::is_cloud(at) {
-        // A direct root that is a real front page runs to many shelves; a bare
-        // SMAPI root is a handful, and an error or empty is none. Only then is
-        // the cloud worth a call, and it is taken only when it is richer - so a
-        // service that already matches the app (Spotify, Deezer) is left alone.
-        let direct_len = match &answer {
-            Ok((items, _)) => items.len(),
-            Err(_) => 0,
-        };
-        if direct_len < FRONT_PAGE_FLOOR
-            && let Some(service_type) = chosen.service_type
-            && let Some(serial) = cloud_serial
-            && sonos::cloud::available().await
-            && let Ok(home) = sonos::cloud::home(&household, service_type, serial).await
-            && home.len() > direct_len
+        if at == "root" {
+            // A service whose own `root` is empty, refused or bare, but whose
+            // front page the cloud can serve (Amazon, Apple, YouTube Music). A
+            // direct root that is a real front page runs to many shelves; a
+            // bare SMAPI root is a handful, and an error or empty is none. Only
+            // then is the cloud worth a call, and it is taken only when it is
+            // richer - so a service that already matches the app (Spotify,
+            // Deezer) is left alone.
+            let direct_len = answer.as_ref().map_or(0, |(items, _)| items.len());
+            if direct_len < FRONT_PAGE_FLOOR
+                && let Ok(home) =
+                    sonos::cloud::home(&household, service_type, serial, index, count).await
+                && home.1 as usize > direct_len
+            {
+                answer = Ok(home);
+            }
+        } else if answer.is_err()
+            // A cloud search result that is a container (an album, an artist)
+            // carries a bare object id, not a `cloud:` URL, so it can still be
+            // played; descending it goes through SMAPI, which for a service the
+            // direct path cannot reach (YouTube Music) is refused. Then the
+            // cloud serves it - `containers/{id}` browses any object kind. Only
+            // on a refusal, so a service that browses fine directly never pays
+            // for the call.
+            && let Ok(found) =
+                sonos::cloud::browse_object(&household, service_type, serial, at, index, count)
+                    .await
+            && found.1 > 0
         {
-            answer = Ok(page_of(home, index, count));
+            answer = Ok(found);
         }
     }
 
@@ -1961,7 +1954,7 @@ pub async fn run_search(
 
     let token = linked.token_for(&household, &chosen.id);
     let mut refreshed = None;
-    let result = sonos::smapi::search(
+    let mut result = sonos::smapi::search(
         chosen,
         token.as_ref(),
         &picked.mapped_id,
@@ -1973,32 +1966,16 @@ pub async fn run_search(
     .await;
     // A service whose own search is refused or comes back empty, but reachable
     // through the cloud (YouTube Music's SMAPI search is 403 at Google's gate),
-    // falls back to the cloud search - opt-in, same as `browse`.
-    let (items, total) = match result {
-        Ok((items, total)) if !items.is_empty() => (items, total),
-        other => {
-            let fallback = if let Some(service_type) = chosen.service_type
-                && sonos::cloud::available().await
-            {
-                sonos::cloud::search(&household, service_type, term)
-                    .await
-                    .ok()
-                    .filter(|(items, _)| !items.is_empty())
-                    .map(|(items, total)| {
-                        // Handed back whole, so paged here; the API's own
-                        // count can run past the rows it sent.
-                        let (page, sent) = page_of(items, index, count);
-                        (page, total.max(sent))
-                    })
-            } else {
-                None
-            };
-            match fallback {
-                Some(hit) => hit,
-                None => other?,
-            }
-        }
-    };
+    // falls back to the cloud search - opt-in, same as `browse`. A miss there
+    // leaves the direct answer, refusal included, standing.
+    if result.as_ref().map_or(true, |(items, _)| items.is_empty())
+        && let Some(service_type) = chosen.service_type
+        && let Ok(found) = sonos::cloud::search(&household, service_type, term, index, count).await
+        && found.1 > 0
+    {
+        result = Ok(found);
+    }
+    let (items, total) = result?;
     // Feeds whatever comes next, below - not just persisted for later. A
     // token that just proved stale must not be handed straight to `play_item`.
     let token = use_refreshed_token(&mut linked, &chosen.id, token, refreshed);
@@ -2110,23 +2087,6 @@ pub async fn run_search(
 
 /// How much of a row's second line a plain listing prints. The JSON keeps it all.
 const SUMMARY_MAX: usize = 80;
-
-/// One `index`/`count` page of rows the cloud hands back whole, with the
-/// whole count as the total - so `--index` steps through a cloud listing the
-/// same as an SMAPI one.
-fn page_of(
-    rows: Vec<sonos::smapi::Item>,
-    index: u32,
-    count: u32,
-) -> (Vec<sonos::smapi::Item>, u32) {
-    let total = rows.len() as u32;
-    let page = rows
-        .into_iter()
-        .skip(index as usize)
-        .take(count as usize)
-        .collect();
-    (page, total)
-}
 
 /// Below this many rows, a service's own `root` is a bare SMAPI root rather
 /// than a front page, so the cloud home (opt-in) is worth a look. A real front

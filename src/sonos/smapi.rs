@@ -666,11 +666,7 @@ pub async fn metadata(
         // answered from what the front page carries for it inline.
         Err(e) if Refused::of(&e).is_some() => {
             match shelf_from_front_page(service, token, id, refreshed).await {
-                Some(items) => {
-                    let total = items.len() as u32;
-                    let page = items.into_iter().skip(index as usize).collect();
-                    Ok(at_most((page, total), count))
-                }
+                Some(items) => Ok(page(items, index, count)),
                 None => Err(e),
             }
         }
@@ -750,9 +746,7 @@ async fn front_root(
         }
         Err(_) => root?.0,
     };
-    let total = items.len() as u32;
-    let page = items.into_iter().skip(index as usize).collect();
-    Ok(at_most((page, total), count))
+    Ok(page(items, index, count))
 }
 
 /// The front page's inline items for shelf `id`, when the service has a page
@@ -849,6 +843,15 @@ fn parse_resume_point(body: &str) -> Result<Option<ResumePoint>> {
                 .and_then(|t| t.parse().ok())
                 .unwrap_or(0),
         }))
+}
+
+/// One `index`/`count` page of rows that arrived whole, with the whole count
+/// as the total - so a listing assembled here pages the same as one a service
+/// paged itself.
+pub fn page(items: Vec<Item>, index: u32, count: u32) -> (Vec<Item>, u32) {
+    let total = items.len() as u32;
+    let page = items.into_iter().skip(index as usize).collect();
+    at_most((page, total), count)
 }
 
 /// A page cut to the `count` that was asked for. `count` is a request, not a
@@ -1707,7 +1710,7 @@ impl std::error::Error for Refused {}
 /// already solved. `refreshed` carries the new token out to the caller, which
 /// owns persisting it; this function only spends it once, on the retry.
 ///
-/// **So does a refused token imported from the household**, when the
+/// **A refused token imported from the household gets one too**, when the
 /// household now holds a different one for the same account - Pandora's went
 /// stale in a day while the Sonos app kept its own fresh. That replacement
 /// arrives through `refreshed` the same way; see `rereads`.
@@ -1727,7 +1730,7 @@ async fn call(
     };
     // No replacement in the fault: an imported token may still have a fresher
     // copy on the household, which is read once and tried - see `rereads`.
-    let new = match (fault.refresh.clone(), token) {
+    let new = match (fault.refresh, token) {
         (Some(new), _) => Some(new),
         (None, Some(token)) => crate::rereads::reread(&service.id, token).await,
         (None, None) => None,

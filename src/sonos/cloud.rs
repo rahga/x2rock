@@ -11,15 +11,16 @@
 //! **Opt-in, bring-your-own-registration, no shipped credentials.** This rides
 //! the same account OAuth token as [`crate::sonos::login`] - the person's *own*
 //! Sonos developer integration, read from `sonos-integration.json`, under their
-//! own developer agreement. [`available`] is false, and every call here is
-//! skipped, unless they have set that up and signed in. x2rock ships no Sonos
-//! key or secret, and never will (see docs/reversing-the-sonos-app.md).
+//! own developer agreement. Every call here fails before touching the network
+//! unless they have set that up and signed in, and the callers treat a failure
+//! as "no fallback". x2rock ships no Sonos key or secret, and never will (see
+//! docs/reversing-the-sonos-app.md).
 //!
 //! **The id arithmetic that makes it fit.** The content API names a service by
 //! `serviceId = smapiId * 256 + schemaRev` - which is exactly the
 //! `service_type` x2rock already derives from `AvailableServiceTypeList` - and
-//! an account by its bare `sn_N` serial. So no id is harvested: a service and
-//! the account's serial, both already in hand, address the cloud directly.
+//! an account by its bare `sn_N` serial. No id is harvested: a service and the
+//! account's serial, both already in hand, address the cloud directly.
 //!
 //! A container's browse URL is carried whole in the row's `href`, so a cloud
 //! row to descend is handed back with its id set to `cloud:<url>`; [`is_cloud`]
@@ -27,13 +28,17 @@
 //! the player plays through the household registration the same as any other -
 //! the player fetches the content with the household's token, so playback works
 //! even where x2rock's own SMAPI call would be refused.
+//!
+//! The API hands each listing back whole; every function here returns one
+//! `index`/`count` page of it with the full total, the shape the SMAPI calls
+//! return, so a caller swaps one for the other.
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::sonos::smapi::Item;
+use crate::sonos::smapi::{self, Item};
 use crate::sonos::{http, login};
 
 const BASE: &str = "https://api.ws.sonos.com/content/api/v3";
@@ -47,13 +52,7 @@ pub fn is_cloud(id: &str) -> bool {
     id.starts_with(PREFIX)
 }
 
-/// Whether cloud browse/search is set up and usable: the person has their own
-/// Sonos integration and has signed in. Nothing here runs otherwise.
-pub async fn available() -> bool {
-    login::bearer().await.is_some()
-}
-
-async fn get(url: &str) -> Result<String> {
+async fn get_json(url: &str) -> Result<Value> {
     let Some(token) = login::bearer().await else {
         bail!(
             "not signed in to a Sonos account - cloud browse needs `x2rock login` \
@@ -70,17 +69,28 @@ async fn get(url: &str) -> Result<String> {
     if status != 200 {
         bail!("Sonos content API: HTTP {status}");
     }
-    Ok(body)
+    serde_json::from_str(&body).context("Sonos content API: unreadable reply")
+}
+
+/// The browse URL of one container of one account.
+fn container_url(household: &str, service_type: u32, serial: u32, id: &str) -> String {
+    format!(
+        "{BASE}/households/{household}/services/{service_type}/accounts/{serial}/containers/{}/browse",
+        http::urlencode(id)
+    )
 }
 
 /// The service's front page (its `root` container), as the shelves the app
 /// shows - each a container to descend with [`browse`].
-pub async fn home(household: &str, service_type: u32, serial: u32) -> Result<Vec<Item>> {
-    let url = format!(
-        "{BASE}/households/{household}/services/{service_type}/accounts/{serial}/containers/root/browse"
-    );
-    let page: Value = serde_json::from_str(&get(&url).await?)?;
-    Ok(home_rows(&page))
+pub async fn home(
+    household: &str,
+    service_type: u32,
+    serial: u32,
+    index: u32,
+    count: u32,
+) -> Result<(Vec<Item>, u32)> {
+    let page = get_json(&container_url(household, service_type, serial, "root")).await?;
+    Ok(smapi::page(home_rows(&page), index, count))
 }
 
 /// A home page is `sections.items[]`. A **titled** section is one shelf, a
@@ -89,11 +99,7 @@ pub async fn home(household: &str, service_type: u32, serial: u32) -> Result<Vec
 /// `items` are themselves the entries (YouTube Music's Home / Library / My
 /// Supermix), so those are emitted directly.
 fn home_rows(page: &Value) -> Vec<Item> {
-    let Some(sections) = page
-        .get("sections")
-        .and_then(|s| s.get("items"))
-        .and_then(Value::as_array)
-    else {
+    let Some(sections) = page.pointer("/sections/items").and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut rows = Vec::new();
@@ -103,9 +109,7 @@ fn home_rows(page: &Value) -> Vec<Item> {
             .and_then(Value::as_str)
             .is_some_and(|t| !t.is_empty());
         if titled {
-            if let Some(item) = shelf_item(section) {
-                rows.push(item);
-            }
+            rows.extend(shelf_item(section));
         } else if let Some(items) = section.get("items").and_then(Value::as_array) {
             rows.extend(items.iter().filter_map(browse_row));
         }
@@ -115,13 +119,12 @@ fn home_rows(page: &Value) -> Vec<Item> {
 
 /// Follow a `cloud:<url>` id one level down. Only to the content API: the id
 /// can be typed by hand, and the request carries the account's bearer token.
-pub async fn browse(cloud_id: &str) -> Result<Vec<Item>> {
+pub async fn browse(cloud_id: &str, index: u32, count: u32) -> Result<(Vec<Item>, u32)> {
     let url = cloud_id.strip_prefix(PREFIX).unwrap_or(cloud_id);
     if !url.starts_with("https://api.ws.sonos.com/") {
         bail!("not a Sonos content API address: {url}");
     }
-    let page: Value = serde_json::from_str(&get(url).await?)?;
-    Ok(rows_of(&page))
+    Ok(smapi::page(rows_of(&get_json(url).await?), index, count))
 }
 
 /// Browse a bare object id through the cloud - the fallback for descending a
@@ -134,24 +137,29 @@ pub async fn browse_object(
     service_type: u32,
     serial: u32,
     object_id: &str,
-) -> Result<Vec<Item>> {
-    let url = format!(
-        "{BASE}/households/{household}/services/{service_type}/accounts/{serial}/containers/{}/browse",
-        http::urlencode(object_id)
-    );
-    let page: Value = serde_json::from_str(&get(&url).await?)?;
-    Ok(rows_of(&page))
+    index: u32,
+    count: u32,
+) -> Result<(Vec<Item>, u32)> {
+    let page = get_json(&container_url(household, service_type, serial, object_id)).await?;
+    Ok(smapi::page(rows_of(&page), index, count))
 }
 
 /// Search one service through the cloud. The content API searches every
 /// configured service at once; this keeps the block whose `serviceId` is this
-/// service's `service_type`, which is the one the caller asked for.
-pub async fn search(household: &str, service_type: u32, query: &str) -> Result<(Vec<Item>, u32)> {
+/// service's `service_type`, which is the one the caller asked for. The total
+/// is the API's own count when that runs past the rows it sent.
+pub async fn search(
+    household: &str,
+    service_type: u32,
+    query: &str,
+    index: u32,
+    count: u32,
+) -> Result<(Vec<Item>, u32)> {
     let url = format!(
         "{BASE}/households/{household}/search?query={}",
         http::urlencode(query)
     );
-    let page: Value = serde_json::from_str(&get(&url).await?)?;
+    let page = get_json(&url).await?;
     let want = service_type.to_string();
     let Some(block) = page
         .get("services")
@@ -164,9 +172,8 @@ pub async fn search(household: &str, service_type: u32, query: &str) -> Result<(
     else {
         return Ok((Vec::new(), 0));
     };
-    let total = block
-        .get("info")
-        .and_then(|i| i.get("count"))
+    let claimed = block
+        .pointer("/info/count")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
     let items = block
@@ -174,37 +181,25 @@ pub async fn search(household: &str, service_type: u32, query: &str) -> Result<(
         .and_then(Value::as_array)
         .map(|rs| rs.iter().filter_map(search_item).collect())
         .unwrap_or_default();
-    Ok((items, total))
+    let (items, sent) = smapi::page(items, index, count);
+    Ok((items, claimed.max(sent)))
 }
 
-/// Rows out of a browsed container: either a `resources[]` list, or a
-/// `sections.items[]` home-style page (whose shelves descend further), or a
-/// section's own inline `items[]`.
+/// Rows out of a browsed container: a `resources[]` list, a single
+/// `section.items[]` (`TEMPLATE_LIST_PAGE`), a `sections.items[]` page that
+/// itself paints shelves (kept as containers to descend further), or a bare
+/// `items[]`.
 fn rows_of(page: &Value) -> Vec<Item> {
-    if let Some(rs) = page.get("resources").and_then(Value::as_array) {
-        return rs.iter().filter_map(browse_row).collect();
-    }
-    // `TEMPLATE_LIST_PAGE`: a single `section` holding the rows.
-    if let Some(items) = page
-        .get("section")
-        .and_then(|s| s.get("items"))
-        .and_then(Value::as_array)
-    {
+    let rows = |at: &str| page.pointer(at).and_then(Value::as_array);
+    if let Some(items) = rows("/resources").or_else(|| rows("/section/items")) {
         return items.iter().filter_map(browse_row).collect();
     }
-    // A page that itself paints shelves (`sections.items[]`): keep them as
-    // containers to descend further.
-    if let Some(items) = page
-        .get("sections")
-        .and_then(|s| s.get("items"))
-        .and_then(Value::as_array)
-    {
+    if let Some(items) = rows("/sections/items") {
         return items.iter().filter_map(shelf_item).collect();
     }
-    if let Some(items) = page.get("items").and_then(Value::as_array) {
-        return items.iter().filter_map(browse_row).collect();
-    }
-    Vec::new()
+    rows("/items")
+        .map(|items| items.iter().filter_map(browse_row).collect())
+        .unwrap_or_default()
 }
 
 /// A home-page shelf → a container row whose id is its browse URL.
@@ -231,18 +226,17 @@ fn browse_row(node: &Value) -> Option<Item> {
         .to_string();
     let srn = node.get("id").and_then(Value::as_str);
     let kind = srn.and_then(srn_kind);
-    let container = kind.map(is_container_kind).unwrap_or(false)
+    let container = kind.is_some_and(is_container_kind)
         || node.get("type").and_then(Value::as_str) == Some("CONTAINER");
-    let href = node.get("href").and_then(Value::as_str);
     // A container descends by its href; a leaf keeps its object id so the
     // player can play it through the household registration.
-    let id = if container {
-        match href {
-            Some(h) => format!("{PREFIX}{h}"),
-            None => srn.and_then(srn_object_id)?,
-        }
-    } else {
-        srn.and_then(srn_object_id)?
+    let href = node
+        .get("href")
+        .and_then(Value::as_str)
+        .filter(|_| container);
+    let id = match href {
+        Some(h) => format!("{PREFIX}{h}"),
+        None => srn.and_then(srn_object_id)?,
     };
     Some(Item {
         id,
@@ -261,8 +255,7 @@ fn browse_row(node: &Value) -> Option<Item> {
 fn search_item(node: &Value) -> Option<Item> {
     let title = node.get("name").and_then(Value::as_str)?.to_string();
     let object_id = node
-        .get("id")
-        .and_then(|i| i.get("objectId"))
+        .pointer("/id/objectId")
         .and_then(Value::as_str)?
         .to_string();
     let typ = node
@@ -284,8 +277,7 @@ fn search_item(node: &Value) -> Option<Item> {
         title,
         item_type: if typ.is_empty() { "track".into() } else { typ },
         summary: node
-            .get("bio")
-            .and_then(|b| b.get("content"))
+            .pointer("/bio/content")
             .and_then(Value::as_str)
             .map(str::to_string),
         art_url: first_image(node),
@@ -310,19 +302,21 @@ fn first_image(node: &Value) -> Option<String> {
     None
 }
 
-/// The kind segment of an `srn:content:audio:<kind>:<objectId>#sid:acct`.
+/// `<kind>:<objectId>` out of an `srn:content:audio:<kind>:<objectId>#sid:acct`.
+fn srn_body(srn: &str) -> Option<&str> {
+    srn.split('#').next()?.strip_prefix("srn:content:audio:")
+}
+
+/// The kind segment of an srn.
 fn srn_kind(srn: &str) -> Option<&str> {
-    let head = srn.split('#').next().unwrap_or(srn);
-    head.strip_prefix("srn:content:audio:")?.split(':').next()
+    srn_body(srn)?.split(':').next()
 }
 
 /// The object id out of an srn: the part after the kind and before the `#`,
 /// percent-decoded (the API encodes its `:` separators as `%3A`).
 fn srn_object_id(srn: &str) -> Option<String> {
-    let head = srn.split('#').next().unwrap_or(srn);
-    let rest = head.strip_prefix("srn:content:audio:")?;
-    let encoded = rest.split_once(':').map(|(_, o)| o)?;
-    Some(percent_decode(encoded))
+    let (_, encoded) = srn_body(srn)?.split_once(':')?;
+    Some(http::urldecode(encoded))
 }
 
 fn is_container_kind(kind: &str) -> bool {
@@ -330,27 +324,6 @@ fn is_container_kind(kind: &str) -> bool {
         kind,
         "container" | "playlist" | "album" | "artist" | "program"
     )
-}
-
-/// Minimal percent-decode for the srn object ids (`%3A` and friends).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let Some(hex) = bytes.get(i + 1..i + 3)
-            && let Ok(hex) = std::str::from_utf8(hex)
-            && let Ok(b) = u8::from_str_radix(hex, 16)
-        {
-            out.push(b);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -367,12 +340,6 @@ mod tests {
         );
         assert!(is_container_kind("playlist"));
         assert!(!is_container_kind("track"));
-    }
-
-    #[test]
-    fn percent_decoding_leaves_a_stray_percent_alone() {
-        assert_eq!(percent_decode("a%3Ab%"), "a:b%");
-        assert_eq!(percent_decode("%a\u{e9}"), "%a\u{e9}");
     }
 
     #[test]
