@@ -2416,10 +2416,7 @@ pub fn serials_in(items: &[BrowseItem]) -> BTreeSet<(String, String)> {
         {
             // Art URLs carry the same query percent-encoded, as the `u=`
             // parameter of `/getaa`, so one decode serves both shapes.
-            let flat = text
-                .replace("%3d", "=")
-                .replace("%3D", "=")
-                .replace("%26", "&");
+            let flat = http::urldecode(text);
             if let (Some(sid), Some(sn)) = (digits_after(&flat, "sid="), digits_after(&flat, "sn="))
             {
                 out.insert((sid.to_string(), sn.to_string()));
