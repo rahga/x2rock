@@ -391,10 +391,7 @@ pub async fn limit(
     };
     let mut out = Vec::with_capacity(speakers.len());
     for speaker in speakers {
-        let ip = speaker.ip().with_context(|| {
-            format!("{} did not report an address to reach it on", speaker.name)
-        })?;
-        let connection = session.player(Some(ip)).await?;
+        let connection = session.player(Some(speaker.reach_ip()?)).await?;
         let before = limit_pct(
             connection
                 .player_settings(&speaker.id)
@@ -432,10 +429,7 @@ async fn member_volumes<'a>(
         .members(group)
         .into_iter()
         .map(|p| async move {
-            let ip = p
-                .ip()
-                .with_context(|| format!("{} did not report an address to reach it on", p.name))?;
-            let connection = session.player(Some(ip)).await?;
+            let connection = session.player(Some(p.reach_ip()?)).await?;
             let volume = connection.player_volume(&p.id).await?;
             anyhow::Ok((p, connection, volume))
         });

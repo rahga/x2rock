@@ -105,9 +105,7 @@ pub fn named_speaker<'a>(
             .player(&target.coordinator_id)
             .ok_or_else(|| anyhow!("no player for {}", target.name))?,
     };
-    let ip = speaker
-        .ip()
-        .with_context(|| format!("{} did not report an address to reach it on", speaker.name))?;
+    let ip = speaker.reach_ip()?;
     Ok((speaker, Upnp::new(ip)))
 }
 
