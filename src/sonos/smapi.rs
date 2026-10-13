@@ -720,7 +720,7 @@ async fn front_root(
 ) -> Result<(Vec<Item>, u32)> {
     let root = get_metadata(service, token, "root", 0, ROOT_MAX, refreshed).await;
     let bearer = fresh_token(token, refreshed);
-    let items = match crate::frontpage::page(service, uri, bearer.as_deref()).await {
+    let items = match crate::frontpage::page(service, uri, bearer).await {
         Ok(page) => {
             let mut items = page.shelves();
             match root {
@@ -760,18 +760,21 @@ async fn shelf_from_front_page(
 ) -> Option<Vec<Item>> {
     let uri = crate::frontpage::endpoint(service).await.ok().flatten()?;
     let bearer = fresh_token(token, refreshed);
-    crate::frontpage::page(service, &uri, bearer.as_deref())
+    crate::frontpage::page(service, &uri, bearer)
         .await
         .ok()?
         .shelf(id)
 }
 
 /// The token to send outside SMAPI: the one a call just refreshed, if any.
-fn fresh_token(token: Option<&Token>, refreshed: &Option<RefreshedToken>) -> Option<String> {
+fn fresh_token<'a>(
+    token: Option<&'a Token>,
+    refreshed: &'a Option<RefreshedToken>,
+) -> Option<&'a str> {
     refreshed
         .as_ref()
-        .map(|r| r.auth_token.clone())
-        .or_else(|| token.map(|t| t.token.clone()))
+        .map(|r| r.auth_token.as_str())
+        .or_else(|| token.map(|t| t.token.as_str()))
 }
 
 /// Where a listener left off in something the service keeps a place in - an
