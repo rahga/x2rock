@@ -1523,49 +1523,13 @@ pub async fn run_browse(
     }
 
     if json {
-        let rows: Vec<_> = items
-            .iter()
-            .map(|i| {
-                // The field names `favorites`, `search` and `bookmarks` already
-                // use, plus whether a row is a place or a thing.
-                item_json(i, &chosen)
-            })
-            .collect();
-        // An envelope, not a bare array. `total` is the whole point: a caller
-        // that got `count` rows has no way to tell a full container from a
-        // truncated one, and `--json` used to drop the number the plain-text
-        // line already prints. `index` echoes what was asked so a pager can
-        // step without tracking it. Read `items`; there is more when
-        // `index + items.len() < total`.
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "total": total,
-                "index": index,
-                "items": rows,
-            }))?
-        );
-        return Ok(());
+        return print_page_json(&items, &chosen, total, index);
     }
     if items.is_empty() {
         println!("{} is empty on {}.", at, chosen.name);
         return Ok(());
     }
-    for item in &items {
-        let summary = item
-            .summary
-            .as_deref()
-            .map(|s| format!("  {}", one_line(s, SUMMARY_MAX)))
-            .unwrap_or_default();
-        // A trailing slash for somewhere to go, the way a directory listing
-        // marks one. Cheaper to read than a column.
-        let name = if item.opens() {
-            format!("{}/", item.title)
-        } else {
-            item.title.clone()
-        };
-        println!("{:<40} {:<10} {name}{summary}", item.id, item.item_type);
-    }
+    print_rows(&items, 40);
     if total > items.len() as u32 {
         println!("\n{} of {total} in {at}.", items.len());
     }
@@ -1977,22 +1941,7 @@ pub async fn run_search(
         return act_on_row(live(), room, chosen, token.as_ref(), item, how).await;
     }
     if json {
-        let rows: Vec<_> = items.iter().map(|i| item_json(i, chosen)).collect();
-        // An envelope, not a bare array. `total` is the whole point: a caller
-        // that got `count` rows has no way to tell a full container from a
-        // truncated one, and `--json` used to drop the number the plain-text
-        // line already prints. `index` echoes what was asked so a pager can
-        // step without tracking it. Read `items`; there is more when
-        // `index + items.len() < total`.
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "total": total,
-                "index": index,
-                "items": rows,
-            }))?
-        );
-        return Ok(());
+        return print_page_json(&items, chosen, total, index);
     }
     if items.is_empty() {
         // Name the category that was searched: a service with no `all` was
@@ -2015,25 +1964,63 @@ pub async fn run_search(
         }
         return Ok(());
     }
-    for item in &items {
+    print_rows(&items, 14);
+    if total > items.len() as u32 {
+        println!("\n{} of {total} on {}.", items.len(), chosen.name);
+    }
+    Ok(())
+}
+
+/// One page of a `browse` or a single-service `search`, as `--json` prints it.
+///
+/// An envelope, not a bare array. `total` is the whole point: a caller that got
+/// `count` rows has no way to tell a full container from a truncated one, and
+/// `--json` used to drop the number the plain-text line already prints. `index`
+/// echoes what was asked so a pager can step without tracking it. Read `items`;
+/// there is more when `index + items.len() < total`. Each row carries the field
+/// names `favorites`, `search` and `bookmarks` already use, plus whether it is
+/// a place or a thing.
+fn print_page_json(
+    items: &[sonos::smapi::Item],
+    service: &sonos::smapi::Service,
+    total: u32,
+    index: u32,
+) -> Result<()> {
+    let rows: Vec<_> = items.iter().map(|i| item_json(i, service)).collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "total": total,
+            "index": index,
+            "items": rows,
+        }))?
+    );
+    Ok(())
+}
+
+/// One page as plain rows: id, kind, title and the service's second line.
+/// `id_width` is the id column's: `browse` ids run long, a search's less so.
+///
+/// A trailing slash marks somewhere to go, the way a directory listing marks
+/// one - cheaper to read than a column, and some services answer a search
+/// entirely in collections.
+fn print_rows(items: &[sonos::smapi::Item], id_width: usize) {
+    for item in items {
         let summary = item
             .summary
             .as_deref()
             .map(|s| format!("  {}", one_line(s, SUMMARY_MAX)))
             .unwrap_or_default();
-        // The same trailing slash `browse` uses, and for the same reason: some
-        // services answer a search entirely in collections.
         let name = if item.opens() {
             format!("{}/", item.title)
         } else {
             item.title.clone()
         };
-        println!("{:<14} {:<10} {name}{summary}", item.id, item.item_type);
+        println!(
+            "{:<id_width$} {:<10} {name}{summary}",
+            item.id, item.item_type
+        );
     }
-    if total > items.len() as u32 {
-        println!("\n{} of {total} on {}.", items.len(), chosen.name);
-    }
-    Ok(())
 }
 
 /// How much of a row's second line a plain listing prints. The JSON keeps it all.
