@@ -358,11 +358,12 @@ impl Credentials {
         if let Ok(meta) = fs::metadata(path) {
             let mode = meta.permissions().mode();
             if mode & LOOSE != 0 {
-                match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+                match fs::set_permissions(path, fs::Permissions::from_mode(store::SECRET)) {
                     Ok(()) => eprintln!(
-                        "x2rock: {} was mode {:04o}; tightened to 0600",
+                        "x2rock: {} was mode {:04o}; tightened to {:04o}",
                         path.display(),
-                        mode & 0o7777
+                        mode & 0o7777,
+                        store::SECRET
                     ),
                     Err(e) => eprintln!(
                         "x2rock: {} is mode {:04o} and could not be tightened ({e})",
