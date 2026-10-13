@@ -37,7 +37,7 @@ pub enum StreamStart {
 /// Play a service item as a stream, alongside the queue rather than in it.
 pub async fn stream_item(
     session: &session::Session,
-    room: Option<&str>,
+    target: &session::Target,
     service: &sonos::smapi::Service,
     token: Option<&sonos::smapi::Token>,
     id: &str,
@@ -66,8 +66,7 @@ pub async fn stream_item(
         StreamStart::Fresh => Duration::ZERO,
         StreamStart::Resume => STREAM_START,
     };
-    let target = session::target(&session.groups, room)?;
-    let started = stream_url(session, &target, &uri, title, Some(service), wait).await?;
+    let started = stream_url(session, target, &uri, title, Some(service), wait).await?;
     // Remembered against the group's coordinator, so `play` can re-resolve a
     // fresh URL once this one expires - the player will hold only the dead URL
     // by then, not the item that made it. Non-fatal: a stream that plays but is

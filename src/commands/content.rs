@@ -485,7 +485,17 @@ async fn play_unqueued(
     id: &str,
     title: &str,
 ) -> Result<()> {
-    let streamed = stream_item(session, room, service, token, id, title, StreamStart::Fresh).await;
+    let target = session::target(&session.groups, room)?;
+    let streamed = stream_item(
+        session,
+        &target,
+        service,
+        token,
+        id,
+        title,
+        StreamStart::Fresh,
+    )
+    .await;
     // **The last resort, after both of the above said no.** `loadContent` hands
     // the player the service, account and id and lets it resolve the rest, and
     // it plays what neither path can - an iHeartRadio `artist_radio` loaded
@@ -504,7 +514,6 @@ async fn play_unqueued(
                 return Err(e);
             };
             eprintln!("x2rock: {title:?} would not stream either ({e:#}); loading it");
-            let target = session::target(&session.groups, room)?;
             let player = session::coordinator(session, &target).await?;
             let id = ContentId {
                 service_id: Some(service.id.clone()),
@@ -1595,7 +1604,6 @@ pub async fn bookmark(
     session: &Session,
     player: &Connection,
     target: &Target,
-    room: Option<&str>,
     query: &str,
     next: bool,
 ) -> Result<()> {
@@ -1626,7 +1634,7 @@ pub async fn bookmark(
                 );
                 stream_item(
                     session,
-                    room,
+                    target,
                     &service,
                     token.as_ref(),
                     &bookmark.object_id,
