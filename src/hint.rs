@@ -321,21 +321,25 @@ pub fn no_player_to_play(inner: &Error) -> Error {
     no_player(inner, format!("no player to play it on: {inner:#}"))
 }
 
-/// The household errors share one shape: a message, a code, `x2rock
-/// households` as the fix, and `data.households` as `(id, rooms)` per household
-/// so `--json` gives an agent enough to build `--household` without a second
-/// call - the same shape `unknown_room` uses for `did_you_mean`/`rooms`. One
-/// core, so a fourth household error is one more two-line constructor rather
-/// than a fourth copy of the fix string and the data shape.
+/// The household errors share one shape: a message, a code, a fix - almost
+/// always [`LIST_HOUSEHOLDS`] - and `data.households` as `(id, rooms)` per
+/// household so `--json` gives an agent enough to build `--household` without
+/// a second call - the same shape `unknown_room` uses for `did_you_mean`/`rooms`.
+/// One core, so a fourth household error is one more two-line constructor
+/// rather than a fourth copy of the fix string and the data shape.
 fn household_hint(
     message: impl Into<String>,
     code: Code,
+    fix: Option<&str>,
     households: &[(String, Vec<String>)],
 ) -> Error {
-    Hint::new(message.into(), code, Some("x2rock households".into()))
+    Hint::new(message.into(), code, fix.map(str::to_string))
         .with_data(json!({ "households": listed(households) }))
         .into()
 }
+
+/// The fix nearly every household error carries.
+const LIST_HOUSEHOLDS: Option<&str> = Some("x2rock households");
 
 /// Households as a message lists them: `Kitchen, Den (id); Studio (id)`.
 fn summary(households: &[(String, Vec<String>)]) -> String {
@@ -364,7 +368,7 @@ fn listed(households: &[(String, Vec<String>)]) -> Vec<Value> {
 /// on it and is most likely someone else's. The households and their rooms
 /// come from what this machine remembers, in `data.households`.
 pub fn no_household_in_reach(service: &str, households: &[(String, Vec<String>)]) -> Error {
-    Hint::new(
+    household_hint(
         format!(
             "No speaker is in reach to say which household this is, and {service} is linked \
              in {}: {}. Pass --household <room> to choose.",
@@ -373,9 +377,8 @@ pub fn no_household_in_reach(service: &str, households: &[(String, Vec<String>)]
         ),
         Code::MultipleHouseholds,
         None,
+        households,
     )
-    .with_data(json!({ "households": listed(households) }))
-    .into()
 }
 
 pub fn multiple_households(households: &[(String, Vec<String>)]) -> Error {
@@ -401,7 +404,12 @@ pub fn ambiguous_household(
     message: impl Into<String>,
     households: &[(String, Vec<String>)],
 ) -> Error {
-    household_hint(message, Code::MultipleHouseholds, households)
+    household_hint(
+        message,
+        Code::MultipleHouseholds,
+        LIST_HOUSEHOLDS,
+        households,
+    )
 }
 
 /// The error for a household that did not answer a rescan **that other
@@ -433,6 +441,7 @@ pub fn household_unreachable(
             summary(answered),
         ),
         Code::HouseholdUnreachable,
+        LIST_HOUSEHOLDS,
         answered,
     )
 }
@@ -448,6 +457,7 @@ pub fn unknown_household(selector: &str, households: &[(String, Vec<String>)]) -
              --room or --household); `x2rock households` lists what is actually reachable"
         ),
         Code::UnknownHousehold,
+        LIST_HOUSEHOLDS,
         households,
     )
 }
