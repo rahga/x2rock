@@ -2695,12 +2695,7 @@ pub fn unlink(
     if let Some(query) = account {
         let households: Vec<String> = match &scope {
             Some(hh) => vec![hh.clone()],
-            None => linked
-                .households
-                .iter()
-                .filter(|(_, s)| s.contains_key(&id))
-                .map(|(hh, _)| hh.clone())
-                .collect(),
+            None => linked.households_holding(&id),
         };
         let mut dropped = Vec::new();
         for hh in &households {
@@ -2753,12 +2748,7 @@ pub fn unlink(
             // Counted before the removal, and counted in *accounts*: the arm
             // above drops one household's accounts, so if this one reported
             // households the same number would mean two different things.
-            let households: Vec<String> = linked
-                .households
-                .iter()
-                .filter(|(_, s)| s.contains_key(&id))
-                .map(|(hh, _)| hh.clone())
-                .collect();
+            let households = linked.households_holding(&id);
             let accounts = households
                 .iter()
                 .filter_map(|hh| linked.accounts_for(hh, &id))
