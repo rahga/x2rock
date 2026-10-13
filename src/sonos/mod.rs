@@ -31,12 +31,6 @@ pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
     host.parse().ok()
 }
 
-/// Text made safe to sit inside an XML element or attribute value.
-///
-/// The four characters XML reserves in both positions, so one function serves
-/// SOAP arguments and DIDL-Lite alike; `'` is left alone because every caller
-/// quotes attributes with `"`. Four copies of this chain had grown up - two in
-/// `bookmarks`, one each in `upnp` and `smapi` - before it was written once.
 /// One element's text, by local name - the lookup every reply parser does,
 /// in SOAP replies from the players and from music services alike. Written out
 /// longhand six times in one file before it had a name, then twice more.
@@ -46,6 +40,22 @@ pub(crate) fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Optio
         .and_then(|n| n.text())
 }
 
+/// The text of `node`'s first direct child with this local name - the
+/// per-row counterpart to [`element_text`], for a parser walking a list of
+/// rows rather than reading one value out of a whole reply. Five closures
+/// across `upnp` and `smapi` spelled this out before it had a name.
+pub(crate) fn child_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option<&'a str> {
+    node.children()
+        .find(|c| c.tag_name().name() == tag)
+        .and_then(|c| c.text())
+}
+
+/// Text made safe to sit inside an XML element or attribute value.
+///
+/// One function serves SOAP arguments and DIDL-Lite alike. Four copies of
+/// this chain had grown up - two in `bookmarks`, one each in `upnp` and
+/// `smapi` - before it was written once.
+///
 /// All five of XML's predefined entities. Nothing here writes a single-quoted
 /// attribute, so `'` was safe left alone; escaping it as well means no future
 /// one can be broken by a title like "Don't Stop".
