@@ -796,15 +796,19 @@ impl Credentials {
         }
     }
 
-    /// Forget a service everywhere it is held. Returns how many households it
-    /// was dropped from, so `unlink` can say what it did.
-    pub fn forget_everywhere(&mut self, service_id: &str) -> usize {
-        let households: Vec<String> = self
-            .households
+    /// Every household that holds an account for this service.
+    pub fn households_holding(&self, service_id: &str) -> Vec<String> {
+        self.households
             .iter()
             .filter(|(_, s)| s.contains_key(service_id))
             .map(|(hh, _)| hh.clone())
-            .collect();
+            .collect()
+    }
+
+    /// Forget a service everywhere it is held. Returns how many households it
+    /// was dropped from, so `unlink` can say what it did.
+    pub fn forget_everywhere(&mut self, service_id: &str) -> usize {
+        let households = self.households_holding(service_id);
         for hh in &households {
             self.forget(hh, service_id);
         }
