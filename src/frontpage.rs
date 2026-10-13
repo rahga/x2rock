@@ -31,6 +31,9 @@
 //! one with a bare 401 rather than SMAPI's refresh fault. So `root` is read
 //! from SMAPI first, which refreshes it, and the page second.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
@@ -41,11 +44,28 @@ use crate::sonos::smapi::{Item, Service, TIMEOUT, manifest};
 ///
 /// https only: the token goes with the request, and a manifest is a document
 /// fetched from elsewhere.
+///
+/// Remembered per service for the life of the process: a browse of `root`
+/// asks, and the refused-shelf fallback asks again moments later, and each
+/// was a fetch of the manifest from Sonos's CDN. Only an answer is kept; a
+/// failed fetch is asked again next time.
 pub async fn endpoint(service: &Service) -> Result<Option<String>> {
-    Ok(manifest(service)
+    static SEEN: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(Default::default);
+    if let Some(known) = SEEN
+        .lock()
+        .ok()
+        .and_then(|seen| seen.get(&service.id).cloned())
+    {
+        return Ok(known);
+    }
+    let uri = manifest(service)
         .await?
         .and_then(|m| browse_endpoint(&m))
-        .filter(|uri| uri.starts_with("https://")))
+        .filter(|uri| uri.starts_with("https://"));
+    if let Ok(mut seen) = SEEN.lock() {
+        seen.insert(service.id.clone(), uri.clone());
+    }
+    Ok(uri)
 }
 
 /// The front page at `uri`, read with `token` as a bearer where there is one.
