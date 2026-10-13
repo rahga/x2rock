@@ -462,170 +462,165 @@ async fn run(cli: Cli) -> Result<()> {
 async fn run_session(cli: Cli, state: &mut State, session: &session::Session) -> Result<()> {
     let room = cli.room.first().map(String::as_str);
 
-    if let Command::Rooms { json } = cli.command {
-        status::print_rooms(&session.groups, json);
-        return Ok(());
-    }
+    // The commands that run before a target is resolved, in the order they are
+    // tried. Each returns; anything else falls through to the fan-outs and the
+    // single-room dispatch below.
+    match &cli.command {
+        Command::Rooms { json } => {
+            status::print_rooms(&session.groups, *json);
+            return Ok(());
+        }
 
-    // Like `rooms`, this is a whole-household view and must not be forced to a
-    // single group; it queries every coordinator itself, so it runs here rather
-    // than after the single-room resolution below.
-    if let Command::Status { json, full } = cli.command {
-        return status::print_status(session, json, full).await;
-    }
+        // Like `rooms`, this is a whole-household view and must not be forced to a
+        // single group; it queries every coordinator itself, so it runs here rather
+        // than after the single-room resolution below.
+        Command::Status { json, full } => return status::print_status(session, *json, *full).await,
 
-    // Favorites belong to the household, not a group, so listing them needs no
-    // room and works when several groups would otherwise force a choice.
-    if let Command::Favorites { query, json } = &cli.command {
-        return content::favorites(session, query.as_deref(), *json).await;
-    }
+        // Favorites belong to the household, not a group, so listing them needs no
+        // room and works when several groups would otherwise force a choice.
+        Command::Favorites { query, json } => {
+            return content::favorites(session, query.as_deref(), *json).await;
+        }
 
-    if let Command::Recent { query, json } = &cli.command {
-        return content::recent(session, query.as_deref(), *json).await;
-    }
+        Command::Recent { query, json } => {
+            return content::recent(session, query.as_deref(), *json).await;
+        }
 
-    // Every speaker has its own firmware, so this asks each rather than the
-    // group's coordinator - and needs no target at all.
-    if let Command::Update { json } = &cli.command {
-        return household::update(session, *json).await;
-    }
+        // Every speaker has its own firmware, so this asks each rather than the
+        // group's coordinator - and needs no target at all.
+        Command::Update { json } => return household::update(session, *json).await,
 
-    // Players, not rooms - so this reads the topology rather than `getGroups`,
-    // which has no word for a Sub. One player answers for the whole household,
-    // and each one is then asked to describe itself.
-    if let Command::Security { json } = &cli.command {
-        return emit(&household::security(session, room).await?, *json);
-    }
+        // Players, not rooms - so this reads the topology rather than `getGroups`,
+        // which has no word for a Sub. One player answers for the whole household,
+        // and each one is then asked to describe itself.
+        Command::Security { json } => {
+            return emit(&household::security(session, room).await?, *json);
+        }
 
-    if let Command::System { json, redact } = &cli.command {
-        return household::system(session, *json, *redact).await;
-    }
+        Command::System { json, redact } => {
+            return household::system(session, *json, *redact).await;
+        }
 
-    // Per-player too, and for the same reason: a battery belongs to a speaker,
-    // not to whichever group it happens to be in.
-    if let Command::Battery { room: one, json } = &cli.command {
-        return household::battery(session, one.as_deref().or(room), *json).await;
-    }
+        // Per-player too, and for the same reason: a battery belongs to a speaker,
+        // not to whichever group it happens to be in.
+        Command::Battery { room: one, json } => {
+            return household::battery(session, one.as_deref().or(room), *json).await;
+        }
 
-    // Household-wide, and addressed by id rather than by room, so these run
-    // before a target is resolved - `alarms` in a two-group house must not
-    // demand a --room it has no use for.
-    if let Command::Alarms { action, json } = &cli.command {
-        return speaker::alarms(session, room, action.as_ref(), *json).await;
-    }
+        // Household-wide, and addressed by id rather than by room, so these run
+        // before a target is resolved - `alarms` in a two-group house must not
+        // demand a --room it has no use for.
+        Command::Alarms { action, json } => {
+            return speaker::alarms(session, room, action.as_ref(), *json).await;
+        }
 
-    if let Command::Alarm { id, action } = &cli.command {
-        return speaker::alarm(session, *id, action).await;
-    }
+        Command::Alarm { id, action } => return speaker::alarm(session, *id, action).await,
 
-    if let Command::Raw {
-        transport:
-            RawTransport::Upnp {
-                service,
-                action,
-                args,
-                scope,
-            },
-    } = &cli.command
-    {
-        return raw::raw_upnp(session, room, service, action, args, *scope).await;
-    }
+        Command::Raw {
+            transport:
+                RawTransport::Upnp {
+                    service,
+                    action,
+                    args,
+                    scope,
+                },
+        } => return raw::raw_upnp(session, room, service, action, args, *scope).await,
 
-    if let Command::Raw {
-        transport:
-            RawTransport::Api {
+        Command::Raw {
+            transport:
+                RawTransport::Api {
+                    namespace,
+                    command,
+                    options,
+                    scope,
+                    watch,
+                    session: session_id,
+                    headers,
+                },
+        } => {
+            return raw::api(
+                session,
+                room,
                 namespace,
                 command,
-                options,
-                scope,
-                watch,
-                session: session_id,
+                options.as_deref(),
+                *scope,
+                *watch,
+                session_id.as_deref(),
                 headers,
-            },
-    } = &cli.command
-    {
-        return raw::api(
-            session,
-            room,
-            namespace,
-            command,
-            options.as_deref(),
-            *scope,
-            *watch,
-            session_id.as_deref(),
-            headers,
-        )
-        .await;
-    }
-
-    // Grouping resolves rooms itself: `ungroup` names its room positionally and
-    // must work without --room, which the shared target resolution below would
-    // refuse while the household has several groups.
-    if let Command::Scene { action, json } = &cli.command {
-        return match action {
-            None | Some(SceneAction::List) => scene::list(session, *json).await,
-            Some(SceneAction::Save { name, play }) => {
-                scene::save(session, room, name, play.as_deref(), *json).await
-            }
-            Some(SceneAction::Apply { name }) => scene::apply(session, name, *json).await,
-            Some(SceneAction::Delete { name }) => scene::delete(session, name, *json).await,
-        };
-    }
-
-    if let Command::Group { rooms, json } = &cli.command {
-        return emit(&household::group(session, room, rooms).await?, *json);
-    }
-
-    if let Command::Party { mode, json } = &cli.command {
-        return emit(
-            &household::party(session, room, mode.as_deref()).await?,
-            *json,
-        );
-    }
-
-    if let Command::Ungroup { room, json } = &cli.command {
-        return emit(&household::ungroup(session, room).await?, *json);
-    }
-
-    // `vol --limit` is a speaker setting, not a level: every speaker with
-    // --all, each -r, or the default room's, read or set one by one. Ahead of
-    // the fan-outs, which are for levels and know nothing of it.
-    if let Command::Vol {
-        limit: Some(value),
-        json,
-        ..
-    } = &cli.command
-    {
-        for outcome in volume::limit(session, &cli.room, cli.all, value.as_deref()).await? {
-            emit(&outcome, *json)?;
+            )
+            .await;
         }
-        return Ok(());
-    }
 
-    // `vol --each` sets every speaker in one group individually - the flatten
-    // the group slider cannot do, because the slider preserves the members'
-    // balance to match the Sonos app. It desugars to fanning `--player` over
-    // the group's own members, read from the current topology, so all the
-    // per-player machinery (per-speaker connection, clamp, fixed-volume
-    // refusal, json) is reused rather than duplicated.
-    if let Command::Vol {
-        each: true,
-        change,
-        ramp,
-        json,
-        ..
-    } = &cli.command
-    {
-        return volume::each(
-            session,
-            room,
-            cli.all,
-            cli.room.len(),
-            change.clone(),
-            *ramp,
-            *json,
-        )
-        .await;
+        // Grouping resolves rooms itself: `ungroup` names its room positionally and
+        // must work without --room, which the shared target resolution below would
+        // refuse while the household has several groups.
+        Command::Scene { action, json } => {
+            return match action {
+                None | Some(SceneAction::List) => scene::list(session, *json).await,
+                Some(SceneAction::Save { name, play }) => {
+                    scene::save(session, room, name, play.as_deref(), *json).await
+                }
+                Some(SceneAction::Apply { name }) => scene::apply(session, name, *json).await,
+                Some(SceneAction::Delete { name }) => scene::delete(session, name, *json).await,
+            };
+        }
+
+        Command::Group { rooms, json } => {
+            return emit(&household::group(session, room, rooms).await?, *json);
+        }
+
+        Command::Party { mode, json } => {
+            return emit(
+                &household::party(session, room, mode.as_deref()).await?,
+                *json,
+            );
+        }
+
+        Command::Ungroup { room, json } => {
+            return emit(&household::ungroup(session, room).await?, *json);
+        }
+
+        // `vol --limit` is a speaker setting, not a level: every speaker with
+        // --all, each -r, or the default room's, read or set one by one. Ahead of
+        // the fan-outs, which are for levels and know nothing of it.
+        Command::Vol {
+            limit: Some(value),
+            json,
+            ..
+        } => {
+            for outcome in volume::limit(session, &cli.room, cli.all, value.as_deref()).await? {
+                emit(&outcome, *json)?;
+            }
+            return Ok(());
+        }
+
+        // `vol --each` sets every speaker in one group individually - the flatten
+        // the group slider cannot do, because the slider preserves the members'
+        // balance to match the Sonos app. It desugars to fanning `--player` over
+        // the group's own members, read from the current topology, so all the
+        // per-player machinery (per-speaker connection, clamp, fixed-volume
+        // refusal, json) is reused rather than duplicated.
+        Command::Vol {
+            each: true,
+            change,
+            ramp,
+            json,
+            ..
+        } => {
+            return volume::each(
+                session,
+                room,
+                cli.all,
+                cli.room.len(),
+                change.clone(),
+                *ramp,
+                *json,
+            )
+            .await;
+        }
+
+        _ => {}
     }
 
     // --all fans a per-room command across every group, resolved by each
@@ -731,6 +726,8 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Snooze { duration, json } => {
             apply_snooze(&target, player.ip(), duration, json).await?;
         }
+        // Spelled out rather than `_`, so a new command is a compile error
+        // here until it is given a place in one of the matches above.
         Command::Play { track: None }
         | Command::Repeat { .. }
         | Command::Shuffle { .. }
