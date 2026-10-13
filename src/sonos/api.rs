@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::local::Connection;
@@ -14,28 +15,27 @@ use super::proto::{
     PlayerSettings, PlaylistsList, Repeat, SecuritySettings, Volume, Zones,
 };
 
-fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
+/// A command's header: its namespace and name, and the one id that addresses
+/// it, under `key` - `playerId`, `groupId` or `householdId`. The three below
+/// differ only in that key.
+fn addressed(namespace: &str, command: &str, key: &str, id: &str) -> Value {
     json!({
         "namespace": namespace,
         "command": command,
-        "playerId": player_id,
+        key: id,
     })
+}
+
+fn on_player(namespace: &str, command: &str, player_id: &str) -> Value {
+    addressed(namespace, command, "playerId", player_id)
 }
 
 fn on_group(namespace: &str, command: &str, group_id: &str) -> Value {
-    json!({
-        "namespace": namespace,
-        "command": command,
-        "groupId": group_id,
-    })
+    addressed(namespace, command, "groupId", group_id)
 }
 
 fn on_household(namespace: &str, command: &str, household_id: &str) -> Value {
-    json!({
-        "namespace": namespace,
-        "command": command,
-        "householdId": household_id,
-    })
+    addressed(namespace, command, "householdId", household_id)
 }
 
 /// The whole `setPlayModes` body for a repeat setting.
@@ -112,86 +112,86 @@ fn account_id(body: &Value) -> Option<String> {
 }
 
 impl Connection {
+    /// A command whose reply carries nothing wanted beyond its success.
+    async fn send(&self, command: Value, body: Value) -> Result<()> {
+        self.call(command, body).await?;
+        Ok(())
+    }
+
+    /// A command whose reply is read as `T`.
+    async fn fetch<T: DeserializeOwned>(&self, command: Value, body: Value) -> Result<T> {
+        Ok(serde_json::from_value(self.call(command, body).await?)?)
+    }
+
     pub async fn groups(&self) -> Result<Groups> {
         let household = self.household_id().await?;
-        let body = self
-            .call(on_household("groups:1", "getGroups", &household), json!({}))
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(on_household("groups:1", "getGroups", &household), json!({}))
+            .await
     }
 
     /// Start receiving a namespace's events for a group. They arrive on
     /// [`Connection::events`], beginning with a snapshot of the current state.
     pub async fn subscribe_group(&self, namespace: &str, group_id: &str) -> Result<()> {
-        self.call(on_group(namespace, "subscribe", group_id), json!({}))
-            .await?;
-        Ok(())
+        self.send(on_group(namespace, "subscribe", group_id), json!({}))
+            .await
     }
 
     /// As [`Self::subscribe_group`], for the player-scoped namespaces - the one
     /// that matters here being `playerVolume:1`, which is how a single speaker
     /// in a group is heard from and adjusted.
     pub async fn subscribe_player(&self, namespace: &str, player_id: &str) -> Result<()> {
-        self.call(on_player(namespace, "subscribe", player_id), json!({}))
-            .await?;
-        Ok(())
+        self.send(on_player(namespace, "subscribe", player_id), json!({}))
+            .await
     }
 
     /// As [`Self::subscribe_group`], for household-wide namespaces such as `groups:1`.
     pub async fn subscribe_household(&self, namespace: &str, household_id: &str) -> Result<()> {
-        self.call(
+        self.send(
             on_household(namespace, "subscribe", household_id),
             json!({}),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// A `playback:1` command with no parameters: `play`, `pause`, `togglePlayPause`,
     /// `skipToNextTrack`, `skipToPreviousTrack`.
     pub async fn playback(&self, group_id: &str, command: &str) -> Result<()> {
-        self.call(on_group("playback:1", command, group_id), json!({}))
-            .await?;
-        Ok(())
+        self.send(on_group("playback:1", command, group_id), json!({}))
+            .await
     }
 
     pub async fn playback_status(&self, group_id: &str) -> Result<PlaybackStatus> {
-        let body = self
-            .call(
-                on_group("playback:1", "getPlaybackStatus", group_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_group("playback:1", "getPlaybackStatus", group_id),
+            json!({}),
+        )
+        .await
     }
 
     pub async fn seek_to(&self, group_id: &str, position_millis: u64) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "seek", group_id),
             json!({ "positionMillis": position_millis }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     pub async fn seek_by(&self, group_id: &str, delta_millis: i64) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "seekRelative", group_id),
             json!({ "deltaMillis": delta_millis }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Repeat the queue, the current track, or neither. Both Sonos flags are sent
     /// so the result never depends on what the other one was.
     pub async fn set_repeat(&self, group_id: &str, repeat: Repeat) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "setPlayModes", group_id),
             repeat_body(repeat),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Crossfade: overlap the end of one track with the start of the next.
@@ -199,22 +199,20 @@ impl Connection {
     /// A third play mode beside repeat and shuffle, and settable the same way -
     /// only the mode named changes.
     pub async fn set_crossfade(&self, group_id: &str, crossfade: bool) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "setPlayModes", group_id),
             json!({ "playModes": { "crossfade": crossfade } }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Only the mode given changes; Sonos keeps the others as they were.
     pub async fn set_shuffle(&self, group_id: &str, shuffle: bool) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "setPlayModes", group_id),
             json!({ "playModes": { "shuffle": shuffle } }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Add players to a group, or take them out of it.
@@ -229,25 +227,21 @@ impl Connection {
         add: &[String],
         remove: &[String],
     ) -> Result<GroupInfo> {
-        let body = self
-            .call(
-                on_group("groups:1", "modifyGroupMembers", group_id),
-                json!({ "playerIdsToAdd": add, "playerIdsToRemove": remove }),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_group("groups:1", "modifyGroupMembers", group_id),
+            json!({ "playerIdsToAdd": add, "playerIdsToRemove": remove }),
+        )
+        .await
     }
 
     /// Every favorite saved in the household. Household-scoped, so it can be
     /// asked of any player, not just a coordinator.
     pub async fn favorites(&self, household_id: &str) -> Result<FavoritesList> {
-        let body = self
-            .call(
-                on_household("favorites:1", "getFavorites", household_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_household("favorites:1", "getFavorites", household_id),
+            json!({}),
+        )
+        .await
     }
 
     /// Register a linked music service account on the household.
@@ -320,13 +314,11 @@ impl Connection {
 
     /// What the household played lately, newest first. Household-scoped.
     pub async fn history(&self, household_id: &str) -> Result<History> {
-        let body = self
-            .call(
-                on_household("history:1", "getHistory", household_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_household("history:1", "getHistory", household_id),
+            json!({}),
+        )
+        .await
     }
 
     /// Replace what a group is playing with one piece of content, named the way
@@ -335,7 +327,7 @@ impl Connection {
     /// once is refused with `ERROR_PLAYBACK_NO_CONTENT` while the load is still
     /// under way - see `content::replay`, which waits it out.
     pub async fn load_content(&self, group_id: &str, id: &ContentId, kind: &str) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playback:1", "loadContent", group_id),
             json!({
                 "id": {
@@ -347,19 +339,16 @@ impl Connection {
                 "type": kind,
             }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Every saved queue in the household. Household-scoped, like favorites.
     pub async fn playlists(&self, household_id: &str) -> Result<PlaylistsList> {
-        let body = self
-            .call(
-                on_household("playlists:1", "getPlaylists", household_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_household("playlists:1", "getPlaylists", household_id),
+            json!({}),
+        )
+        .await
     }
 
     /// Replace what a group is playing with a saved playlist, and start it.
@@ -374,7 +363,7 @@ impl Connection {
     /// `loadFavorite` does without being asked. `APPEND` and `INSERT_NEXT` are
     /// the other two the player accepts; `queue add` already covers appending.
     pub async fn load_playlist(&self, group_id: &str, playlist_id: &str) -> Result<()> {
-        self.call(
+        self.send(
             on_group("playlists:1", "loadPlaylist", group_id),
             json!({
                 "playlistId": playlist_id,
@@ -382,8 +371,7 @@ impl Connection {
                 "action": "REPLACE",
             }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Replace what a group is playing with a favorite, and start it.
@@ -391,50 +379,43 @@ impl Connection {
     /// This is the one way x2rock can begin playback from nothing: `play` only
     /// resumes, and a room with an empty queue has nothing to resume.
     pub async fn load_favorite(&self, group_id: &str, favorite_id: &str) -> Result<()> {
-        self.call(
+        self.send(
             on_group("favorites:1", "loadFavorite", group_id),
             json!({ "favoriteId": favorite_id, "playOnCompletion": true }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     pub async fn metadata(&self, group_id: &str) -> Result<MetadataStatus> {
-        let body = self
-            .call(
-                on_group("playbackMetadata:1", "getMetadataStatus", group_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_group("playbackMetadata:1", "getMetadataStatus", group_id),
+            json!({}),
+        )
+        .await
     }
 
     pub async fn group_volume(&self, group_id: &str) -> Result<Volume> {
-        let body = self
-            .call(on_group("groupVolume:1", "getVolume", group_id), json!({}))
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(on_group("groupVolume:1", "getVolume", group_id), json!({}))
+            .await
     }
 
     /// Absolute level. For controls with a known position, such as a slider.
     pub async fn set_group_volume(&self, group_id: &str, volume: u8) -> Result<()> {
-        self.call(
+        self.send(
             on_group("groupVolume:1", "setVolume", group_id),
             json!({ "volume": volume }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Relative change. For stateless controls - buttons, scroll wheels - where
     /// read-modify-write would race against the player's own events.
     pub async fn adjust_group_volume(&self, group_id: &str, delta: i8) -> Result<()> {
-        self.call(
+        self.send(
             on_group("groupVolume:1", "setRelativeVolume", group_id),
             json!({ "volumeDelta": delta }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// One speaker's own volume, rather than the group's.
@@ -443,43 +424,38 @@ impl Connection {
     /// balance between them, and the only way to make one room quieter than the
     /// rest without ungrouping it.
     pub async fn player_volume(&self, player_id: &str) -> Result<Volume> {
-        let body = self
-            .call(
-                on_player("playerVolume:1", "getVolume", player_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_player("playerVolume:1", "getVolume", player_id),
+            json!({}),
+        )
+        .await
     }
 
     pub async fn set_player_volume(&self, player_id: &str, volume: u8) -> Result<()> {
-        self.call(
+        self.send(
             on_player("playerVolume:1", "setVolume", player_id),
             json!({ "volume": volume }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Relative, for the same reason [`Self::adjust_group_volume`] is.
     pub async fn adjust_player_volume(&self, player_id: &str, delta: i8) -> Result<()> {
-        self.call(
+        self.send(
             on_player("playerVolume:1", "setRelativeVolume", player_id),
             json!({ "volumeDelta": delta }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Mute without touching the level, so the relative volumes of the group's
     /// players survive - which setting volume to zero would destroy.
     pub async fn set_group_mute(&self, group_id: &str, muted: bool) -> Result<()> {
-        self.call(
+        self.send(
             on_group("groupVolume:1", "setMute", group_id),
             json!({ "muted": muted }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// A player's settings, read-only, over the Control API.
@@ -490,13 +466,11 @@ impl Connection {
     /// `playerVolume:1` does not carry. Writing them is `ERROR_NO_PERMISSION`
     /// here, so it stays on UPnP.
     pub async fn player_settings(&self, player_id: &str) -> Result<PlayerSettings> {
-        let body = self
-            .call(
-                on_player("settings:1", "getPlayerSettings", player_id),
-                json!({}),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_player("settings:1", "getPlayerSettings", player_id),
+            json!({}),
+        )
+        .await
     }
 
     /// Switch a soundbar to its TV input, over the Control API: `homeTheater:1
@@ -506,12 +480,11 @@ impl Connection {
     /// whole group over to the TV; this one is for a bar standing alone when
     /// UPnP is switched off.
     pub async fn load_home_theater_playback(&self, player_id: &str) -> Result<()> {
-        self.call(
+        self.send(
             on_player("homeTheater:1", "loadHomeTheaterPlayback", player_id),
             json!({}),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Set a speaker's volume limit, `factor` 0.0-1.0 - see
@@ -520,25 +493,22 @@ impl Connection {
     /// with `ERROR_NO_PERMISSION`, this is accepted (build 97180312,
     /// 2026-10-08), and reads back as written.
     pub async fn set_volume_limit(&self, player_id: &str, factor: f64) -> Result<()> {
-        self.call(
+        self.send(
             on_player("settings:1", "setPlayerSettings", player_id),
             json!({ "volumeScalingFactor": factor }),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// The household's Connection security switches, as this player applies
     /// them - see [`SecuritySettings`]. Player-scoped; the household-scoped form
     /// is refused for want of a `playerId`, `locationId` or `userId`.
     pub async fn security_settings(&self, player_id: &str) -> Result<SecuritySettings> {
-        let body = self
-            .call(
-                on_player("effectiveSettings:1", "getSettingsGroup", player_id),
-                json!({ "groupName": "security" }),
-            )
-            .await?;
-        Ok(serde_json::from_value(body)?)
+        self.fetch(
+            on_player("effectiveSettings:1", "getSettingsGroup", player_id),
+            json!({ "groupName": "security" }),
+        )
+        .await
     }
 
     /// Play a short clip over whatever the player is doing, then hand it back.
@@ -558,12 +528,11 @@ impl Connection {
         stream_url: Option<&str>,
         volume: Option<u8>,
     ) -> Result<()> {
-        self.call(
+        self.send(
             on_player("audioClip:1", "loadAudioClip", player_id),
             audio_clip_options(app_id, name, stream_url, volume),
         )
-        .await?;
-        Ok(())
+        .await
     }
 }
 
