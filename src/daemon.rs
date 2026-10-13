@@ -206,13 +206,21 @@ pub async fn run(explicit_ip: Option<IpAddr>, household: Option<&str>) -> Result
     // the keepalive's silence limit, just a minute and a half later. So a
     // missing one is worth a line and nothing more.
     let restarts = Restarts::new();
-    if let Err(e) = restarts.watch_suspend().await {
+    // Both are on the system bus, and share one connection to it.
+    let (suspend, network) = match zbus::Connection::system().await {
+        Ok(system) => (
+            restarts.watch_suspend(&system).await,
+            restarts.watch_network(&system).await,
+        ),
+        Err(e) => (Err(anyhow::anyhow!("{e}")), Err(anyhow::anyhow!("{e}"))),
+    };
+    if let Err(e) = suspend {
         log(&format!(
             "not watching for resume from suspend ({e:#}); \
              a dead socket will be found by the keepalive instead"
         ));
     }
-    if let Err(e) = restarts.watch_network().await {
+    if let Err(e) = network {
         log(&format!(
             "not watching for network changes ({e:#}); \
              a move between networks will be found by the keepalive instead"

@@ -133,8 +133,9 @@ impl Restarts {
     /// `false` on the way back. Only the wake is worth acting on - the socket is
     /// dead from the moment the machine froze, so there is nothing to save by
     /// closing it early, and a laptop that never comes back needs nothing.
-    pub async fn watch_suspend(&self) -> Result<()> {
-        let connection = zbus::Connection::system().await?;
+    pub async fn watch_suspend(&self, system: &zbus::Connection) -> Result<()> {
+        // A handle: the clone shares the one system-bus connection.
+        let connection = system.clone();
         let proxy = Login1Proxy::new(&connection).await?;
         let mut signals = proxy.receive_prepare_for_sleep().await?;
 
@@ -159,8 +160,8 @@ impl Restarts {
     }
 
     /// The network moving underneath, over NetworkManager.
-    pub async fn watch_network(&self) -> Result<()> {
-        let connection = zbus::Connection::system().await?;
+    pub async fn watch_network(&self, system: &zbus::Connection) -> Result<()> {
+        let connection = system.clone();
         let proxy = NetworkManagerProxy::new(&connection).await?;
         let mut states = proxy.receive_state_changed().await?;
         let mut primary = proxy.receive_primary_connection_changed().await;
