@@ -113,9 +113,13 @@ fn home_rows(page: &Value) -> Vec<Item> {
     rows
 }
 
-/// Follow a `cloud:<url>` id one level down.
+/// Follow a `cloud:<url>` id one level down. Only to the content API: the id
+/// can be typed by hand, and the request carries the account's bearer token.
 pub async fn browse(cloud_id: &str) -> Result<Vec<Item>> {
     let url = cloud_id.strip_prefix(PREFIX).unwrap_or(cloud_id);
+    if !url.starts_with("https://api.ws.sonos.com/") {
+        bail!("not a Sonos content API address: {url}");
+    }
     let page: Value = serde_json::from_str(&get(url).await?)?;
     Ok(rows_of(&page))
 }
@@ -335,8 +339,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let Some(hex) = bytes.get(i + 1..i + 3)
+            && let Ok(hex) = std::str::from_utf8(hex)
+            && let Ok(b) = u8::from_str_radix(hex, 16)
         {
             out.push(b);
             i += 3;
@@ -362,6 +367,12 @@ mod tests {
         );
         assert!(is_container_kind("playlist"));
         assert!(!is_container_kind("track"));
+    }
+
+    #[test]
+    fn percent_decoding_leaves_a_stray_percent_alone() {
+        assert_eq!(percent_decode("a%3Ab%"), "a:b%");
+        assert_eq!(percent_decode("%a\u{e9}"), "%a\u{e9}");
     }
 
     #[test]
