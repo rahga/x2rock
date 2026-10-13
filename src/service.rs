@@ -317,13 +317,21 @@ fn unquote_word(text: &str) -> Option<(String, &str)> {
 /// the same rule [`is_generated_exec`] applies to `ExecStart`.
 fn is_generated_household(line: &str) -> bool {
     line.strip_prefix("Environment=")
-        // The whole value, as `existing_household` reads it.
-        .and_then(|word| {
-            let (value, tail) = unquote_word(word)?;
-            tail.trim().is_empty().then_some(value)
-        })
-        .and_then(|a| a.strip_prefix("X2ROCK_HOUSEHOLD=").map(str::to_owned))
-        .is_some_and(|value| !value.is_empty())
+        .and_then(quoted_household)
+        .is_some()
+}
+
+/// The household a quoted `Environment=` value names: the whole value, not a
+/// word off the front of one, and not empty.
+fn quoted_household(value: &str) -> Option<String> {
+    let (assignment, tail) = unquote_word(value)?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    assignment
+        .strip_prefix("X2ROCK_HOUSEHOLD=")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// The household an installed unit already names, so a re-run can keep it.
@@ -333,18 +341,10 @@ fn is_generated_household(line: &str) -> bool {
 pub fn existing_household(unit: &str) -> Option<String> {
     unit.lines().find_map(|line| {
         let rest = line.strip_prefix("Environment=")?;
-        let assignment = if rest.starts_with('"') {
-            // The whole value, not a word off the front of one.
-            let (value, tail) = unquote_word(rest)?;
-            if !tail.trim().is_empty() {
-                return None;
-            }
-            value
-        } else {
-            rest.to_owned()
-        };
-        assignment
-            .strip_prefix("X2ROCK_HOUSEHOLD=")
+        if rest.starts_with('"') {
+            return quoted_household(rest);
+        }
+        rest.strip_prefix("X2ROCK_HOUSEHOLD=")
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     })
@@ -456,10 +456,7 @@ pub fn classify<'a>(existing: &'a str, proposed: &'a str) -> Existing<'a> {
 ///
 /// A set difference by line, not a real diff - enough to show a person which
 /// of their edits would be lost, without a dependency for it. Order is kept.
-pub fn changed_lines<'a>(
-    existing: &[&'a str],
-    proposed: &[&'a str],
-) -> (Vec<&'a str>, Vec<&'a str>) {
+fn changed_lines<'a>(existing: &[&'a str], proposed: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     let only_in = |a: &[&'a str], b: &[&'a str]| -> Vec<&'a str> {
         a.iter().copied().filter(|l| !b.contains(l)).collect()
     };
