@@ -9988,6 +9988,89 @@ services:
 | **Apple Music** | 22 shelves: Library, Top Picks for You, Playlists Made for You, Stations for You, Daily Top 100, Radio Shows, Stations by Genre, … | nothing: the household's Apple token is refused for browse (`InvalidTokenException`) |
 | **YouTube Music** | Home, Library, My Supermix | nothing: Google's project gate (HTTP 403) |
 
+**Why the last three differ, and why they stay gaps (decided 2026-10-13).** Tearing down the Sonos
+app (`com.sonos.acr2`) showed it does not call any music service directly: every service's front
+page comes from **Sonos's own cloud**, `api.ws.sonos.com/content/api`, on one code path
+parameterised by `serviceId`
+(`…/services/{serviceId}/accounts/{accountId}/containers/{containerId}/browse`), authenticated with
+an `X-Sonos-SMAPI-Auth` header Sonos's cloud mints — not the household `privateKey`. So Amazon,
+Apple and YouTube Music are not three per-service quirks; they are the one case where the app's page
+exists only because Sonos's cloud brokered it, and the service's own SMAPI endpoint (which x2rock
+speaks to directly) does not serve that page to a third party. The services that *do* match the app
+here — Spotify, Deezer, TuneIn, SiriusXM, Sonos Radio — are the ones that also expose a public
+`browse` endpoint x2rock can read.
+
+**x2rock will not close these by going through Sonos's cloud.** The model is deliberate: with a
+music service *you* are the customer, and x2rock using your own token against the service is you
+using what you pay for; Sonos's cloud is Sonos's infrastructure, and x2rock has no licence to broker
+content through it (the public developer program sanctions the *Control* API — players, groups,
+transport — not the content API). The boundary is explored once, from our end, for
+technical plausibility and completeness — never to ship — in
+`docs/reversing-the-sonos-app.md`. These three stay recorded as won't-do gaps whatever that explore
+finds.
+
+**What the one-time explore found (2026-10-13).** Registered a Sonos developer integration
+("x2rock"), ran the public OAuth flow for the account, and probed with the resulting bearer (scope
+`playback-control-all`):
+
+- The **Control API** (`api.ws.sonos.com/control/api/v1`) is fully open to the token: it listed both
+  households and returned `musicServiceAccounts/preferred` (`sn_0`).
+- The **content API** (`api.ws.sonos.com/content/api/v3/households/{hh}/services/{serviceId}/accounts/{accountId}/containers/root/browse`)
+  **authenticates and authorises the same developer bearer** — it answers business-logic errors
+  (`ERROR_SERVICE_NOT_CONFIGURED` 422, `ERROR_RESOURCE_NOT_FOUND` 404), never 401/403 or an
+  API-key demand. So the wall we feared (an app-only private key) is **not** what blocks it.
+- The content API's `serviceId`/`accountId` are its own namespace, not the SMAPI numbers. The
+  **household search** (`/content/api/v3/households/{hh}/search?query=…`) returns them: each service
+  block carries its cloud `serviceId` (TIDAL 44551, Amazon 51463, Apple 52231, **YouTube Music
+  72711**, …) and `accountId` (the `sn_N` serial minus the prefix). With those, every front page and
+  search retrieved cleanly.
+
+**Retrieved in full (2026-10-13), the exact gaps the direct path can't reach:**
+
+- **Amazon Music** — the whole Home: Collections, Followed Playlists, Songs for You, Your Frequent
+  Plays, Albums for You, New Releases, Trending Songs and the rest (11 sections; direct `api/home`
+  is 401).
+- **Apple Music** — Library, Browse Our Picks, Featured Playlists, Now in Spatial Audio, Daily Top
+  100, Radio Shows, Stations by Genre … (direct browse is `InvalidTokenException`/500).
+- **YouTube Music** — Home, Library, My Supermix, **and search** (20 hits for "kid koala") — the
+  service whose *direct* SMAPI path is 403 at Google's project gate.
+
+The response shape is `TEMPLATE_PROVIDER_HOME_PAGE` with `sections.items[]`; search is one call
+across every configured service at once.
+
+**Auth model:** Sonos is a confidential-client OAuth2 — the **client secret is required** on both the
+code exchange and every token refresh (no PKCE/public-client path; the access token lasts ~24h, so
+refreshing needs the secret too).
+
+**Verdict: fully reachable — the only thing in the way is the licence/credential boundary, not any
+technical wall.** x2rock ships **no** Sonos developer credentials. The one acceptable shape is
+**bring-your-own-registration**: the user supplies their *own* key/secret/redirect (never the repo)
+and OAuths under their own Sonos developer agreement — opt-in, only the most dedicated set it up.
+
+## Cloud browse and search, opt-in (2026-10-13)
+
+Built in the x2rock **CLI** (x2rocktv deliberately untouched) on exactly that shape. It reuses the
+existing account-OAuth layer (`sonos::login`, which already reads the person's own
+`sonos-integration.json`), so it is live only when they have set up their own Sonos integration and
+run `x2rock login`; otherwise `cloud::available()` is false and nothing here runs. `src/sonos/cloud.rs`:
+
+- **`serviceId = service_type` (`smapiId*256+schemaRev`), `accountId = sn_N` serial** — both already
+  held, so no id is harvested. When the preferred account is a browser link with no serial, any
+  `--from-household` account of the same service supplies one.
+- **`browse -s <svc>` root** falls back to the cloud home when the direct root is thin
+  (`< FRONT_PAGE_FLOOR` rows, i.e. a bare SMAPI root or an error/empty) and the cloud returns more —
+  so Spotify/Deezer, which already match the app via their public `browse` endpoint, are untouched,
+  while Amazon/Apple/YouTube Music gain their full pages. A shelf is a container whose id is its own
+  browse URL, tagged `cloud:`; descending it follows that URL (`TEMPLATE_LIST_PAGE` → `section.items`,
+  home → `sections.items`). A leaf keeps its real object id, so the player plays it through the
+  household registration — which is why **YouTube Music plays even though its own SMAPI is 403**.
+- **`search -s <svc>`** falls back to the cloud household search when the direct search is refused or
+  empty, filtered to this service's block. This is what gives **YouTube Music search** at all.
+
+Verified on hardware 2026-10-13 (office household): Amazon's 11-shelf Home and Apple's shelves
+listed, a shelf descended to its tracks, and both an Amazon track and a YouTube Music album played in
+the Media Room. See [[no-sonos-cloud-broker]] and `docs/reversing-the-sonos-app.md`.
+
 **Fixed the same day: TuneIn listed Music, News & Talk and Sports twice**, once from the page and
 once from SMAPI's root, under different ids. The merge now drops a root entry whose title matches a
 shelf as well as one whose id does. TuneIn's root is 24 rows, down from 27.
