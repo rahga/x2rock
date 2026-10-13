@@ -620,10 +620,7 @@ impl RoomPlayer {
         // The format is present only on the TV input, but its summary can be
         // empty there too (no codec named, no channels yet), so being on TV is
         // its presence, not its wording.
-        let format = meta
-            .container
-            .as_ref()
-            .and_then(|c| c.ht_input_format.as_ref());
+        let format = meta.input_format();
         state.on_tv_input = format.is_some();
         state.input_format = format.map(|f| f.summary()).unwrap_or_default();
         // No item and no container is nothing loaded. A URL stream has no item
@@ -659,15 +656,10 @@ impl RoomPlayer {
 
 fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     let track = meta.track();
-    let container = meta.container.as_ref();
     let title = meta.title();
-    let artist = track
-        .and_then(|t| t.artist.as_ref())
-        .and_then(|a| a.name.as_deref());
+    let artist = meta.artist();
     let album = track.and_then(|t| t.collection());
-    let art = track
-        .and_then(|t| t.image_url.as_deref())
-        .or_else(|| container.and_then(|c| c.image_url.as_deref()));
+    let art = meta.art_url();
 
     let mut builder = Metadata::builder().trackid(track_id(group_id, title, artist));
     if let Some(title) = title {
@@ -694,14 +686,7 @@ fn to_metadata(group_id: &str, meta: &MetadataStatus) -> Metadata {
     );
     metadata.set(
         STREAM_INFO,
-        Some(
-            meta.stream_info
-                .as_deref()
-                .map(str::trim)
-                .filter(|info| !info.is_empty())
-                .unwrap_or_default()
-                .to_owned(),
-        ),
+        Some(meta.stream_info().unwrap_or_default().to_owned()),
     );
     metadata
 }

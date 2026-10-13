@@ -17,9 +17,7 @@ use crate::{catalogue, hint, netid};
 fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     let track = meta.track();
     let title = meta.title();
-    let artist = track
-        .and_then(|t| t.artist.as_ref())
-        .and_then(|a| a.name.as_deref());
+    let artist = meta.artist();
     let album = track.and_then(|t| t.collection());
 
     // A state-less event is a daemon concern; the polled reply this reads has
@@ -41,12 +39,7 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     // the title does not, so a service stream that already names its track is
     // not made to say it twice - the same rule the daemon's `stationName` uses
     // for the opposite half of this problem.
-    if let Some(info) = meta
-        .stream_info
-        .as_deref()
-        .map(str::trim)
-        .filter(|i| !i.is_empty() && Some(*i) != title)
-    {
+    if let Some(info) = meta.stream_info().filter(|i| Some(*i) != title) {
         line.push_str(&format!(" · {info}"));
     }
     // Where it is coming from. Only present for service content, so TV input and
@@ -71,11 +64,7 @@ fn now_line(status: &PlaybackStatus, meta: &MetadataStatus) -> String {
     }
     // On a soundbar this is the whole point of looking: a source that has
     // quietly dropped to stereo says so here and nowhere else.
-    if let Some(format) = meta
-        .container
-        .as_ref()
-        .and_then(|c| c.ht_input_format.as_ref())
-    {
+    if let Some(format) = meta.input_format() {
         line.push_str(&format!("  [{}]", format.summary()));
     }
     let repeat = status.modes().repeat();
@@ -119,9 +108,8 @@ fn now_json(
     let track = meta.track();
     let next = meta.next_item.as_ref().and_then(|i| i.track.as_ref());
     let container = meta.container.as_ref();
-    let art = track
-        .and_then(|t| t.image_url.as_deref())
-        .or(container.and_then(|c| c.image_url.as_deref()));
+    let art = meta.art_url();
+    let input_format = meta.input_format();
     // The art URL names the *playback* sid, and it is the reliable one: the
     // player's own metadata carries a wrong or internal id for HLS/stream
     // content (65435 for a YouTube Music stream) while the art URL says 284.
@@ -134,8 +122,8 @@ fn now_json(
     json!({
         "room": room,
         "state": status.state(),
-        "title": track.and_then(|t| t.name.as_deref()).or(container.and_then(|c| c.name.as_deref())),
-        "artist": track.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
+        "title": meta.title(),
+        "artist": meta.artist(),
         "album": track.and_then(|t| t.collection()),
         // The show, when the episode belongs to one. Also folded into `album`
         // above so every existing reader shows something; here as well so a
@@ -164,18 +152,18 @@ fn now_json(
         // nothing here read until now. Null at the end of a queue, and on a
         // stream, which has no next.
         "next_title": next.and_then(|t| t.name.as_deref()),
-        "next_artist": next.and_then(|t| t.artist.as_ref()).and_then(|a| a.name.as_deref()),
+        "next_artist": next.and_then(|t| t.artist_name()),
         // Answers "is this the TV input?" as a field rather than by matching the
         // "TV Audio" title. The audio format only exists on a soundbar's TV
         // stream, so its presence is the signal.
-        "on_tv": container.and_then(|c| c.ht_input_format.as_ref()).is_some(),
-        "input_format": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.summary()),
-        "surround": meta.container.as_ref().and_then(|c| c.ht_input_format.as_ref()).map(|f| f.is_surround()),
+        "on_tv": input_format.is_some(),
+        "input_format": input_format.map(|f| f.summary()),
+        "surround": input_format.map(|f| f.is_surround()),
         "art_url": art,
         // The station's own "now playing" text, verbatim and unparsed. Null for
         // anything that is not a live stream, and the only track information a
         // stream loaded by `play-url` has - see `MetadataStatus::stream_info`.
-        "stream_info": meta.stream_info.as_deref().map(str::trim).filter(|i| !i.is_empty()),
+        "stream_info": meta.stream_info(),
     })
 }
 
@@ -204,15 +192,11 @@ pub async fn print_status(session: &session::Session, json: bool, full: bool) ->
         .iter()
         .map(|group| {
             let target = session::target_for(&session.groups, group);
-            let members: Vec<String> = session
-                .groups
-                .members(group)
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
+            let players = session.groups.members(group);
+            let members: Vec<String> = players.iter().map(|p| p.name.clone()).collect();
             // A soundbar's HDMI belongs to the player, so the group has a TV
             // input if any member does - the same rule `x2rock tv` uses.
-            let has_tv = session.groups.members(group).iter().any(|p| p.has_tv());
+            let has_tv = players.iter().any(|p| p.has_tv());
             let coordinator = session
                 .groups
                 .player(&group.coordinator_id)
@@ -410,10 +394,7 @@ fn room_line(facts: &RoomFacts, fetched: Fetched) -> String {
 
 /// The three group-scoped reads a snapshot wants, off the group's coordinator.
 /// Volume is best-effort: a room that will not report it is still worth showing.
-async fn fetch_room(
-    session: &session::Session,
-    target: &session::Target,
-) -> Result<(PlaybackStatus, MetadataStatus, Option<Volume>)> {
+async fn fetch_room(session: &session::Session, target: &session::Target) -> Fetched {
     let conn = session::coordinator(session, target).await?;
     // One socket, replies matched by cmdId, so the three go out together.
     // `join!` rather than `try_join!`, with the `?`s in order, so that when
@@ -468,7 +449,7 @@ pub fn print_rooms(groups: &Groups, json: bool) {
             .map(|g| {
                 json!({
                     "room": g.name,
-                    "state": g.playback_state.strip_prefix("PLAYBACK_STATE_").unwrap_or(&g.playback_state),
+                    "state": g.state(),
                     "members": groups.members(g).iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
                     "coordinator": groups.player(&g.coordinator_id).map(|p| p.name.as_str()),
                 })
@@ -478,10 +459,7 @@ pub fn print_rooms(groups: &Groups, json: bool) {
         return;
     }
     for group in &groups.groups {
-        let state = group
-            .playback_state
-            .strip_prefix("PLAYBACK_STATE_")
-            .unwrap_or(&group.playback_state);
+        let state = group.state();
         let members = groups.members(group);
         if members.len() > 1 {
             let names: Vec<_> = members.iter().map(|p| p.name.as_str()).collect();
