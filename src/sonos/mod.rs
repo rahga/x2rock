@@ -1,5 +1,6 @@
 pub mod api;
 pub mod base64;
+pub mod cloud;
 pub mod http;
 pub mod local;
 pub mod login;
