@@ -10329,3 +10329,32 @@ device-grant token with `auth/youtube` scope hit the same `SERVICE_DISABLED`). A
   (error 711 out of range, 701 when the queue is not the current source), `GetMediaInfo` reports
   `x-rincon-queue:` when the queue is the active source. The CLI switches the source with
   `SetAVTransportURI` before seeking, since after a radio stream the queue is not current.
+
+## The TUI: what it shows, and what it doesn't yet (2026-10-13)
+
+`x2rock tui` is shipped - `mod tui` in `main.rs`, `Command::Tui` → `tui::run`, on ratatui 0.30 /
+crossterm 0.29, documented in the README. It draws the whole household on one screen off the daemon
+and writes back through the in-process session path (see "Doing and printing, separated", above): a
+write opens a session on first use and the panes update from the daemon's push feed rather than by
+re-running the binary.
+
+What it covers: per-room transport, volume, mute, and the EQ values the daemon pushes (bass, treble,
+loudness, balance, crossfade). What it does **not** cover yet, and why:
+
+- **Night Sound and Speech Enhancement** are absent. They are the two values in the daemon's
+  contract that are **not push-correct** - a subscription reports nothing when they change - so they
+  need a re-read after a write rather than riding the push feed the other EQ controls use. Deferred
+  as "not a dealbreaker"; wiring them means teaching the TUI a re-read for just these two.
+- **`DialogLevel` above 1 is untested**, deliberately: settling it is a real write to the Beam, and
+  the only home-theater device here is the living-room Beam, which is off limits. The office
+  household has no appendable queue source but radio either, so some queue paths cannot be exercised
+  there.
+- **Queue, media sources and search** were named as eventual TUI surfaces; none is built.
+
+**Corroboration worth recording:** besides the GENA evidence already in this doc, another session
+measured `settings:1` accepting a subscription and pushing **nothing** for a `SetEQ` write (8-second
+window, zero events; a re-read saw the change at once) - a second namespace agreeing that these
+writes are not push-back. The precise numbers live in that project's commit `4f337c7`; this is the
+additive note the earlier handoff left unwritten because it came through a lossy paste.
+
+These are the genuinely open TUI items; the TUI itself is shipped, not in flight.

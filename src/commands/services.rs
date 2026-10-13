@@ -1457,6 +1457,16 @@ pub async fn run_browse(
     // `root` is where every service starts, and no service documents it - it is
     // simply what the players ask for.
     let at = container.unwrap_or("root");
+    // The cloud account id is the serial. Prefer the chosen account's, but fall
+    // back to any account of this service in this household that has one: the
+    // preferred account can be a browser link with no serial while a
+    // `--from-household` import of the same service carries it. Used by both
+    // cloud fallbacks below.
+    let cloud_serial = token.as_ref().and_then(|t| t.serial).or_else(|| {
+        linked
+            .accounts_for(&household, &chosen.id)
+            .and_then(|held| held.accounts.values().find_map(|a| a.household_serial()))
+    });
     let mut refreshed = None;
     let mut answer = if sonos::cloud::is_cloud(at) {
         // A cloud container carries its own browse URL; follow it, no SMAPI.
@@ -1480,6 +1490,24 @@ pub async fn run_browse(
     {
         answer = Ok(found);
     }
+    // A cloud search result that is a container (an album, an artist) carries a
+    // bare object id, not a `cloud:` URL, so it can still be played; descending
+    // it goes through SMAPI, which for a service the direct path cannot reach
+    // (YouTube Music) is refused. Then the cloud serves it - `containers/{id}`
+    // browses any object kind. Only on a refusal, so a service that browses
+    // fine directly never pays for the call.
+    if at != "root"
+        && !sonos::cloud::is_cloud(at)
+        && answer.is_err()
+        && let Some(service_type) = chosen.service_type
+        && let Some(serial) = cloud_serial
+        && sonos::cloud::available().await
+        && let Ok(rows) = sonos::cloud::browse_object(&household, service_type, serial, at).await
+        && !rows.is_empty()
+    {
+        let total = rows.len() as u32;
+        answer = Ok((rows, total));
+    }
     // A service whose own `root` is empty or refused, but whose front page the
     // cloud can serve (Amazon, Apple, YouTube Music), falls back to the cloud
     // home - but only when the person has set up their own Sonos integration
@@ -1493,18 +1521,9 @@ pub async fn run_browse(
             Ok((items, _)) => items.len(),
             Err(_) => 0,
         };
-        // The cloud account id is the serial. Prefer the chosen account's, but
-        // fall back to any account of this service in this household that has
-        // one: the preferred account can be a browser link with no serial while
-        // a `--from-household` import of the same service carries it.
-        let serial = token.as_ref().and_then(|t| t.serial).or_else(|| {
-            linked
-                .accounts_for(&household, &chosen.id)
-                .and_then(|held| held.accounts.values().find_map(|a| a.household_serial()))
-        });
         if direct_len < FRONT_PAGE_FLOOR
             && let Some(service_type) = chosen.service_type
-            && let Some(serial) = serial
+            && let Some(serial) = cloud_serial
             && sonos::cloud::available().await
             && let Ok(home) = sonos::cloud::home(&household, service_type, serial).await
             && home.len() > direct_len
