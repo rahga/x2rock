@@ -209,7 +209,10 @@ pub async fn connect(
         // *is* the unregistered-network case, and says so by name. The
         // constructor owns the never-hand-out-a-scan rationale (and its
         // pinning test).
-        return Err(crate::hint::unregistered_network(fingerprint));
+        return Err(crate::hint::unregistered_network(
+            fingerprint,
+            state.networks.is_empty(),
+        ));
     }
     // The room a command names already says which household it means, in
     // every case but two households sharing a room name - so `-r Studio` picks

@@ -281,7 +281,7 @@ When it is null, read `error` and change the request.**
 | `unknown_room` | `-r` is not a room (or is a group's composite label); carries `did_you_mean` and `rooms` | `x2rock rooms` |
 | `needs_link` | no token here for that music service | `x2rock link '<svc>'` — a browser login a person must finish |
 | `no_player` | known network, remembered speakers, and a rescan found **nothing at all** | **null** — likely powered off; `discover` would only repeat the scan |
-| `unregistered_network` | no speakers are known here — normal away from home | **null** — `discover` is *offered*, never auto-run |
+| `unregistered_network` | no speakers are known here — normal away from home, or before the first `discover` | **null** — `discover` is *offered*, never auto-run |
 
 Those are the four a person meets. The full table — every code the binary can raise — is in the
 skill, [`skills/x2rock/SKILL.md`](skills/x2rock/SKILL.md) under *Errors*, and a test holds it to
