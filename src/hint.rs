@@ -263,17 +263,24 @@ pub fn no_player(inner: &Error, message: impl Into<String>) -> Error {
 /// just because an agent follows a "run the fix" rule - the exact behaviour
 /// the road-warrior design avoids. Discovery is offered, not run. The message
 /// says how; the field withholds the command.
-pub fn unregistered_network(fingerprint: &str) -> Error {
-    Hint::new(
+///
+/// `first_run` is a machine that has never discovered speakers anywhere: "away
+/// from home" would be the wrong story for someone who has just installed it.
+pub fn unregistered_network(fingerprint: &str, first_run: bool) -> Error {
+    let message = if first_run {
+        format!(
+            "unregistered network (gateway {fingerprint}): no speakers have been discovered yet. \
+             If this is the network your speakers are on, `x2rock discover` scans it for them; \
+             or pass `--ip <speaker>`."
+        )
+    } else {
         format!(
             "unregistered network (gateway {fingerprint}): no speakers are known here. This is \
              normal away from home. `x2rock discover` will scan this network for speakers - \
              offer it rather than run it unasked - or pass `--ip <speaker>`."
-        ),
-        Code::UnregisteredNetwork,
-        None,
-    )
-    .into()
+        )
+    };
+    Hint::new(message, Code::UnregisteredNetwork, None).into()
 }
 
 /// The speakers answered and refused: the household's Connection security has
@@ -655,7 +662,7 @@ mod tests {
 
         // But an unregistered network keeps its own, better diagnosis - the
         // more specific code, and its deliberately null fix.
-        let inner: Error = unregistered_network("192.168.1.1");
+        let inner: Error = unregistered_network("192.168.1.1", false);
         let wrapped = no_player(&inner, "no player to play it on");
         assert_eq!(of(&wrapped), (Code::UnregisteredNetwork, None));
     }
@@ -684,12 +691,15 @@ mod tests {
         // came back empty (no_player). The message offers the command; the
         // field withholds it. These are the constructors the production sites
         // in session.rs use, so a regression there fails here.
-        let unregistered = unregistered_network("192.168.86.1");
-        assert_eq!(of(&unregistered), (Code::UnregisteredNetwork, None));
-        assert!(
-            format!("{unregistered}").contains("`x2rock discover`"),
-            "discovery is offered in prose"
-        );
+        // A first run gets its own wording, under the same code and null fix.
+        for first_run in [false, true] {
+            let unregistered = unregistered_network("192.168.86.1", first_run);
+            assert_eq!(of(&unregistered), (Code::UnregisteredNetwork, None));
+            assert!(
+                format!("{unregistered}").contains("`x2rock discover`"),
+                "discovery is offered in prose"
+            );
+        }
 
         let silent = no_players_answered(&["Kitchen", "Bedroom"]);
         assert_eq!(of(&silent), (Code::NoPlayer, None));
