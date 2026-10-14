@@ -210,6 +210,11 @@ local token buys search and browse, and nothing of playback.
 | **Pandora** | app-link | ✓ browser (2026-09-10); ✓ `--from-household` (trial tier, 2026-10-11) | ✓ search - every hit a station (`SF:` factory, `program`, `canPlay` true, `canEnumerate` false); browse root is only My Stations | ✓ as radio, both a saved station (`ST:`) and a search hit (`SF:`), from `search --play`, `browse --play` and the widget (fixed 2026-10-11; before, only `play-item --kind program`). Playing an `SF:` hit **adds it to My Stations**, as the app does | 2026-10-11, home |
 | **Pandora CloudCover** | app-link | not attempted — out of scope (decided 2026-10-11) | — | — | — |
 
+**The rows describe the direct path.** Since 2026-10-13 an opt-in cloud fallback also reaches
+Amazon's Home, Apple's shelves and YouTube Music browse and search. It needs the person's own Sonos
+developer integration and `x2rock login`; see "Cloud browse and search, opt-in" (verified that day
+in the office household).
+
 **Household import pass (2026-10-11, home).** With trials added in the Sonos app, `link
 --from-household` imported 18 accounts. The rows above for Spotify, Amazon Music, Pandora,
 SiriusXM, SoundCloud, Bandcamp and Sonos Radio come from it. The cross-cutting findings are in
@@ -275,6 +280,10 @@ early claim rather than leaving it standing beside a pointer. (A pass on 2026-09
 whole file: claims wholly overtaken by later testing were removed or rewritten in place, so the
 lines below record the reversals rather than warn about text that still says otherwise.)
 
+- **Amazon, Apple and YouTube Music's app pages are reachable, opt-in.** First recorded as
+  permanent gaps because only Sonos's cloud serves them. The same day, an opt-in fallback through
+  that cloud was built; it runs on the person's own developer integration and `x2rock login`.
+  See "Cloud browse and search, opt-in" (2026-10-13).
 - **`browse --play` plays an album or a playlist** (2026-10-11), as `search --play` has since
   2026-09-18. Only a container of containers is refused. See "Every household token, imported".
 - **A file fallback declares its type.** `play_url_as_track` sent a bare DIDL, and the player
@@ -10031,14 +10040,15 @@ speaks to directly) does not serve that page to a third party. The services that
 here — Spotify, Deezer, TuneIn, SiriusXM, Sonos Radio — are the ones that also expose a public
 `browse` endpoint x2rock can read.
 
-**x2rock will not close these by going through Sonos's cloud.** The model is deliberate: with a
+**x2rock will not close these through Sonos's cloud on its own account.** The model is deliberate: with a
 music service *you* are the customer, and x2rock using your own token against the service is you
 using what you pay for; Sonos's cloud is Sonos's infrastructure, and x2rock has no licence to broker
 content through it (the public developer program sanctions the *Control* API — players, groups,
 transport — not the content API). The boundary is explored once, from our end, for
 technical plausibility and completeness — never to ship — in
-`docs/reversing-the-sonos-app.md`. These three stay recorded as won't-do gaps whatever that explore
-finds.
+`docs/reversing-the-sonos-app.md`. **Revised the same day:** the explore led to an opt-in fallback
+that runs only on the person's own Sonos developer integration, while x2rock itself still ships no
+credentials. See "Cloud browse and search, opt-in" (2026-10-13).
 
 **What the one-time explore found (2026-10-13).** Registered a Sonos developer integration
 ("x2rock"), ran the public OAuth flow for the account, and probed with the resulting bearer (scope
@@ -10102,7 +10112,7 @@ typical user can flip. `src/sonos/cloud.rs`:
 
 Verified on hardware 2026-10-13 (office household): Amazon's 11-shelf Home and Apple's shelves
 listed, a shelf descended to its tracks, and both an Amazon track and a YouTube Music album played in
-the Media Room. See [[no-sonos-cloud-broker]] and `docs/reversing-the-sonos-app.md`.
+the Media Room. See `docs/reversing-the-sonos-app.md`.
 
 **Fixed the same day: TuneIn listed Music, News & Talk and Sports twice**, once from the page and
 once from SMAPI's root, under different ids. The merge now drops a root entry whose title matches a

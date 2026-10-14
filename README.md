@@ -38,15 +38,51 @@ x2rock service install --enable     # the daemon as a user service - every room 
 
 If `x2rock rooms` lists your speakers, you are done. `discover` scans only this machine's own
 subnet; if it finds nothing because the speakers are on another subnet, VLAN or guest network,
-run `x2rock --ip <speaker-address> rooms` once and the household is remembered. Needs Rust 1.89 or newer and a C compiler;
-[Requirements](#requirements) covers what bites on Ubuntu and on a machine with no desktop, and
-[Installing it as a service](#installing-it-as-a-service) says what `service install` writes and how
-to check on it. Cloning instead gets you the source and the bar widget:
+run `x2rock --ip <speaker-address> rooms` once and the household is remembered. Needs Rust 1.89
+or newer and a C compiler; [Requirements](#requirements) covers what bites on Ubuntu and on a
+machine with no desktop, and [Installing it as a service](#installing-it-as-a-service) says what
+`service install` writes and how to check on it. Cloning instead gets you the source and the bar
+widget:
 
 ```sh
 git clone https://github.com/rahga/x2rock && cd x2rock
 cargo build --release --locked && install -Dm755 target/release/x2rock ~/.local/bin/x2rock
 ```
+
+Then: [name a room](#rooms-and-the-household), [read an error](#errors-are-data),
+[link a music service](#linking-an-account), and check [what works](#what-works-and-what-it-needs)
+before you invest time in something.
+
+## What works, and what it needs
+
+"Exercised" means run against real speakers or a real desktop and recorded. Anything else is
+expected to work but untested, which is not the same as known to fail.
+
+| Capability | Needs | Exercised |
+|---|---|---|
+| Playback, volume, mute, grouping, favorites, `status` | An S2 speaker on the same LAN; nothing else | Two households, five speaker models — see [Tested devices](#tested-devices) |
+| Queue, alarms, sleep timer, tone, TV input, room rename | The Sonos **UPnP** setting, on by default | Same households; room rename has no recorded test |
+| Media keys and desktop "now playing" (the MPRIS daemon) | A systemd user session with D-Bus | Omarchy (Arch, Hyprland) daily. GNOME, KDE and Waybar speak the same standard but are untested here |
+| A box with no desktop | `service install --headless` and lingering | Documented, not recorded as exercised |
+| Terminal UI · Omarchy bar widget | A terminal · Omarchy's Quickshell bar | Omarchy |
+| Internet radio (`stations`, `play-url`) | Internet access | Home household |
+| Search and browse of free services | Internet access; no account | Per service, dated: [the tested-services table](docs/architecture.md#music-services-what-has-actually-been-tested) |
+| Search and browse of your own subscriptions | `x2rock link` per service. Playback also needs the service added to the household in the Sonos app | Same table; results vary by service |
+| Apple Music catalogue search | `link --from-household` | Same table |
+| Amazon Home, Apple's shelves, YouTube Music search and browse | Your **own** Sonos developer integration, `x2rock login` and `link --from-household`; see [the cloud fallback](#optional-sonos-cloud-search-and-browse) | Office household, 2026-10-13 |
+| A household with Authentication switched on | The same integration and `x2rock login` | Verified 2026-09-27 |
+| `say` · `link --from-household` | An inbound TCP 3401 rule from the speakers' network | Office One SL · home and office |
+
+Builds and the test suite also run in CI on Ubuntu, with no speakers attached.
+
+**Not available:**
+- Sonos S1.
+- Control from outside the LAN.
+- A line-in command: no Port or Amp has been available to build it against.
+- Anything [only the Sonos app does](#what-stays-with-the-sonos-app): firmware updates, adding
+  speakers, bonds, TruePlay measurement, editing favorites.
+
+**Untested hardware:** Atmos soundbars, Era, Move, Roam and other models. Reports are welcome.
 
 ## Why local-first
 
@@ -561,7 +597,8 @@ Bandcamp's Sonos interface is *your own collection*, so a fresh account correctl
 > **Which services actually work?** Ask this household rather than a table: `x2rock search` with no
 > arguments lists what can be searched here, and `x2rock link` with none lists what can be linked.
 > What has been *tested*, service by service, with dates and the household each result came from,
-> is the table at the top of [docs/architecture.md](docs/architecture.md).
+> is [the tested-services table](docs/architecture.md#music-services-what-has-actually-been-tested)
+> in the architecture notes.
 
 **Two ways to get a token.** Fifteen services offer *device linking*: `x2rock link <svc>` opens the
 service's own login page in your browser, waits for you to finish, and stores the token the service
@@ -871,8 +908,9 @@ x2rock a server.
 The reasoning behind every choice — the local WebSocket over the cloud API, discovery behind a
 default-deny firewall, the protocol facts verified against real hardware and the ones that turned
 out to be wrong — is in [docs/architecture.md](docs/architecture.md). It is a dated engineering
-log rather than a reference; its *Superseded claims* index at the top says which early findings
-later ones overturned.
+log rather than a reference; its
+[*Superseded claims*](docs/architecture.md#superseded-claims--check-here-before-trusting-an-early-section)
+index says which early findings later ones overturned.
 
 For the source map, local checks and hardware-test boundaries, see
 [Contributing](CONTRIBUTING.md).
