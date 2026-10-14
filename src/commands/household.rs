@@ -346,6 +346,15 @@ pub async fn discover_and_remember() -> Result<()> {
     eprintln!("Scanning {}/{} ...", network.ip, network.prefix_len());
     let Some(discovered) = sweep_and_remember().await? else {
         println!("No Sonos players found.");
+        // The one way past a sweep that cannot see the speakers - another
+        // subnet or VLAN, a guest network, a VPN - is an address: `attach`
+        // remembers the household for this network, so it is needed once.
+        eprintln!(
+            "Only this machine's own subnet is scanned, and only Sonos S2 players are supported. If \
+             the speakers are on another subnet, VLAN or guest network, or a VPN is up, give one \
+             speaker's address (from the Sonos app's About My System, or your router) once: \
+             `x2rock --ip <address> rooms` remembers them for this network."
+        );
         return Ok(());
     };
 

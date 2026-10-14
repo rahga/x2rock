@@ -854,6 +854,9 @@ or the user is surprised nothing responds.
   user confirms this is their own. Away from home, the answer is "your speakers aren't on this
   network", not a scan of it. **`households` scans the same way** (it always scans fresh), so the
   same rule applies to it: not on a network that is not the user's.
+- **`discover` found nothing on the user's own network?** It scans only this machine's subnet, so
+  speakers on another subnet, VLAN or guest network stay invisible to it. Ask for one speaker's
+  address; `x2rock --ip <address> rooms` once remembers the household for this network.
 - **Searching and browsing still work away from home**, from the cached catalogue and the accounts
   this machine holds - but with more than one household remembered, nothing says whose account to
   use. The error is `multiple_households` with **`fix` null** and `data.households` listing each
