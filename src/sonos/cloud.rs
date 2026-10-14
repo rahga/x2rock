@@ -14,7 +14,7 @@
 //! own developer agreement. Every call here fails before touching the network
 //! unless they have set that up and signed in, and the callers treat a failure
 //! as "no fallback". x2rock ships no Sonos key or secret, and never will (see
-//! docs/reversing-the-sonos-app.md).
+//! docs/sonos-terms-boundaries.md).
 //!
 //! **The id arithmetic that makes it fit.** The content API names a service by
 //! `serviceId = smapiId * 256 + schemaRev` - which is exactly the
