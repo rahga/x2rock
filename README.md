@@ -36,7 +36,9 @@ x2rock discover                     # once per network; everything else reconnec
 x2rock service install --enable     # the daemon as a user service - every room is now an MPRIS player
 ```
 
-If `x2rock rooms` lists your speakers, you are done. Needs Rust 1.89 or newer and a C compiler;
+If `x2rock rooms` lists your speakers, you are done. `discover` scans only this machine's own
+subnet; if it finds nothing because the speakers are on another subnet, VLAN or guest network,
+run `x2rock --ip <speaker-address> rooms` once and the household is remembered. Needs Rust 1.89 or newer and a C compiler;
 [Requirements](#requirements) covers what bites on Ubuntu and on a machine with no desktop, and
 [Installing it as a service](#installing-it-as-a-service) says what `service install` writes and how
 to check on it. Cloning instead gets you the source and the bar widget:
