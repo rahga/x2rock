@@ -69,7 +69,7 @@ expected to work but untested, which is not the same as known to fail.
 | Search and browse of free services | Internet access; no account | Per service, dated: [the tested-services table](docs/architecture.md#music-services-what-has-actually-been-tested) |
 | Search and browse of your own subscriptions | `x2rock link` per service. Playback also needs the service added to the household in the Sonos app | Same table; results vary by service |
 | Apple Music catalogue search | `link --from-household` | Same table |
-| Amazon Home, Apple's shelves, YouTube Music search and browse | Your **own** Sonos developer integration, `x2rock login` and `link --from-household`; see [the cloud fallback](#optional-sonos-cloud-search-and-browse) | Office household, 2026-10-13 |
+| Amazon Home, Apple's shelves, YouTube Music search and browse | Your **own** Sonos developer integration, `x2rock login` and `link --from-household`; see [the cloud fallback](#optional-sonos-cloud-search-and-browse) | Office household, 2026-10-13. **Outside the Sonos terms**; see the note in that section |
 | A household with Authentication switched on | The same integration and `x2rock login` | Verified 2026-09-27 |
 | `say` · `link --from-household` | An inbound TCP 3401 rule from the speakers' network | Office One SL · home and office |
 
@@ -649,6 +649,10 @@ The daemon does not make those calls. Its speaker control stays on the LAN; when
 in to Sonos, refreshing that sign-in is its one cloud exception.
 
 ### Optional Sonos cloud search and browse
+
+> **Outside the Sonos terms.** This fallback uses Sonos's cloud content service, which the Sonos
+> developer program does not license. Anyone who sets it up does so under their own developer
+> agreement. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
 
 `x2rock login` also enables a fallback through Sonos's cloud content API, even in a household
 with Authentication off. It uses your own developer integration and Sonos sign-in; follow the

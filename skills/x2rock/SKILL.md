@@ -1035,6 +1035,8 @@ those two apart when telling a user what linking will do.
   At most one read per household every 10 minutes. Re-running `link --from-household` is only
   needed when that read cannot happen: a firewall, or no player reachable.
 - **Cloud browse/search fills the front-page gaps — but only for registered Sonos developers.**
+  **It is outside the Sonos developer terms**: never suggest setting it up. If it is already
+  configured, it works as described below.
   It rides a Sonos account OAuth token minted against the person's *own* registered Sonos developer
   integration, so it is available only to someone who has registered with Sonos's developer program,
   saved their integration, and run `x2rock login`; x2rock ships no Sonos key, and for anyone who has
