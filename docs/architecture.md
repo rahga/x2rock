@@ -1,10353 +1,1237 @@
-# x2rock — Architecture & Design Notes
+# x2rock — architecture
 
-> This began as the project kickoff and has been kept current as the design was verified against
-> real hardware. It records not just what x2rock does but *why* — the transport choice, the
-> firewall and discovery constraints, and the protocol facts each decision rests on. Every claim
-> marked "verified" was tested against an actual Sonos player, not taken from documentation.
->
-> The original kickoff assumed the Sonos **cloud** Control API was the only integration path. That
-> was wrong; the local LAN WebSocket is better on every axis. See "Integration path" below.
+The current reference for how x2rock works and why: the transports it uses, what the speakers
+answer, and the decisions that follow. It states what is true now, and dates hardware observations,
+since those depend on firmware. The investigation that produced it, about 10,000 lines of dated
+log, is in git history: `git log -p -- docs/architecture.md` before the commit that replaced it.
 
-## What this is
+Every protocol claim here was measured on a real speaker unless it says otherwise. Two households
+were used. Home has eleven players in five rooms on firmware 97.1-80312 (display 18.8) for Beam and
+One SL, and 86.x for the older generation. The office has a single One SL, build 97180312. Claims
+about third parties (a vendor's menu, a live catalogue) go stale; claims about what the speakers
+answer have held.
 
-A Rust rewrite of the Sonos control CLI, split off from the original `x2rock` project. The
-original repo has been renamed **`x2rocktv`** and continues as the Kotlin/JVM Android TV app
-(`:app` + `:core`) — locally at `~/x2rocktv`, on GitHub at `rahga/x2rocktv`. Note that the rename
-moved the source tree only; see the config-path note under "Carried-over knowledge".
+Where something is technically possible but outside the Sonos Platform Terms of Service, see
+[the terms boundaries note](sonos-terms-boundaries.md). This document records conclusions, not how
+they were reached.
 
-This new repo — the new **`x2rock`** on GitHub — is Linux-only, Rust, and targets
-**Omarchy 4.0 "Quattro"** specifically. No Android code, no JVM, no `:core` shared-module
-architecture to preserve.
-
-Not a port of the Kotlin CLI line-for-line — a fresh implementation informed by everything the
-Kotlin version got right (and wrong) over its lifetime. See "Carried-over knowledge" below.
-
-### Reading this document from another language or platform
-
-Most of what is here is not about Rust or Linux at all. Two thirds of it is protocol: what the
-speakers answer, what they refuse, and what they do while they are refusing it. That part is worth
-as much to a Kotlin app on Android TV as it is here, so it is worth being explicit about which is
-which.
-
-**Protocol truth — portable anywhere, and the reason this file exists:** "Integration path" and its
-queue subsection, "Volume handling", "Grouping over the local API", "Soundbars: the TV input",
-"Per-player volume, and who may be asked", "Queue mutation over UPnP", "Favorites over the local
-API", and "Protocol facts learned while building the daemon". Every "verified" note in those is a
-statement about Sonos hardware, not about this implementation.
-
-**Host-specific — true here, and not to be inherited without retesting:** "The firewall problem"
-and "Discovery" are both conclusions about *Omarchy's default-deny ufw*, not about Sonos or about
-networks in general. "Target platform", "Language & structure", "Rust ecosystem notes" and the
-Quickshell sections are implementation.
-
-**Mixed:** "Connection lifecycle and network mobility" - the *reasons* to reconnect are universal,
-the logind and NetworkManager mechanisms are not.
-
-A concrete porting guide lives in x2rocktv's own `docs/porting-from-x2rock.md`, where it moved on
-2026-09-23.
-
-## The computer's volume keys, driving a room (2026-10-02)
-
-A ricing trick rather than a feature, recorded here because it was weighed as a feature and
-declined. The question came from reading `migueltvms/speaker-volume-bridge`, a Tauri tray app whose
-entire job is to keep one Sonos speaker's volume and mute in step with the computer's output device,
-so that the keyboard's volume keys move the speaker. It does this over UPnP alone - SSDP discovery,
-SOAP `RenderingControl`, and GENA eventing with an inbound callback listener and a polling fallback
-for when the callbacks stop arriving - which is the transport design "The firewall problem" rules
-out here, and it addresses a single player with group coordination left unimplemented by its own
-ADR. The one thing it does that x2rock does not is the sink binding itself: MPRIS gives the media
-keys play, pause and skip, but a desktop's volume keys move the local sink, never an MPRIS player.
-
-**Why it is a script and not the daemon's.** The cheap transport is the PulseAudio protocol, not
-PipeWire's own. PipeWire serves it through pipewire-pulse on Omarchy and on every Ubuntu since
-22.10, and `pactl subscribe` is a ready-made event stream (verified on this machine: a nudge of the
-sink produces a `change` event on the sink each time, alongside events for the asking client and
-the card). Reading and writing the level is `pactl get-sink-volume` and `set-sink-volume`, so the
-whole feature is three subprocesses and no new crate - and real PulseAudio on a 22.04 desktop comes
-free, since it is the same protocol. The native route is the `pipewire` crate, which binds
-libpipewire through pkg-config: a C library build dependency and a foreign event loop in a tree
-that needs only a C compiler for ring. `wpctl` has no monitor mode at all, so a native subprocess
-approach would mean parsing `pw-mon`, worse than `pactl` on every axis. Even on the cheap path the
-daemon would have to supervise a long-lived child and grow a policy layer - which room, a cap, and
-telling an echo from a real change - for something few people want. That is what "front ends are
-consumers of the daemon" is for.
-
-**Built as `scripts/follow-sink.sh`.** It waits on `pactl subscribe`, re-reads the default sink on
-every sink or server event, and sends `x2rock -r <room> vol N` only when the mapped level actually
-moved, with the sink's 100% landing on a cap (50 by default) and mute following as `vol mute` /
-`vol unmute`. One direction only: the speaker never moves the computer. Several events arrive per
-keypress, so the dedupe is what keeps it to one command each. `X2ROCK=echo` dry-runs it.
-
-**Mute and retry correction (2026-10-13).** A Sonos volume set also unmutes the group, so the
-bridge now defers volume writes while the computer is muted and applies the latest level on
-unmute. Sending mute and then volume could make the room audible. Only successful commands update
-the dedupe state, so a failed write is retried on the next sink/server event. The cap is validated
-as 0–100, and `pactl` runs in the C locale for consistent parsing. The mock-command regression
-suite is `python3 scripts/test-follow-sink.py`; it needs neither an audio server nor speakers.
-
-## Concurrent file writes and Sonos sign-in changes (2026-10-13)
-
-Two reliability gaps reproduced with local tests, without a Sonos account or live speakers:
-
-- **A process id did not give each writer its own scratch file.** Eight threads writing one
-  destination through `store::write_bytes_atomically` collided at the shared `<file>.<pid>.tmp`:
-  one removed or renamed another's file, and a save failed with `No such file or directory`.
-  Every write now creates its own PID-and-counter name with `create_new`, skips occupied names,
-  and removes its own scratch file on failure. A separate regression checks cleanup after a
-  failed rename. Atomic replacement still does not merge competing updates; callers doing
-  read/modify/write need the store's transaction lock.
-- **The Sonos token cache lived longer than the sign-in it described.** Caching `None` forever
-  meant a running client missed a later login; caching a token forever meant it missed logout
-  or replacement. Clients now read the small saved token before each command. Concurrent stale
-  callers in one process share a refresh and wait one minute before retrying a failed endpoint.
-  The network request holds no file lock. Its result is committed under a short writer lock
-  only if the original token is still current, so a late refresh cannot restore a logged-out
-  account or overwrite a replacement. Separate processes can still make concurrent refresh
-  requests, but only a result for the current token can be saved.
-
-The token tests exercise login/logout/replacement, refresh completing after logout or a new
-login, competing refresh results, shared requests and failure cooldowns with temporary files
-and dummy responses. This checks client lifecycle behavior, not Sonos's live token endpoint.
-
-## Reading the household's own tokens: the `ThirdPartyMediaServersX` decrypt
-
-*Written to be followed without a networking or cryptography background; the measured detail, the
-proof the decrypt is real, and the build are far below under "The household stores every token, and
-they can be read".*
-
-The short version: your Sonos speakers keep the login credentials for every streaming service you
-have added - the secret tokens that let a speaker pull music from Deezer, TIDAL, Amazon or Qobuz on
-your behalf - and any program on your home network can read them, because the "encryption" wrapped
-around them is not protecting a real secret. `link --from-household` is x2rock doing exactly that.
-
-The technique - that these tokens sit on the speaker and unscramble to anyone in the household - was
-worked out and published by Simon ([BookCatKid](https://github.com/BookCatKid)) in
-[SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010), "Add modern music service browsing and
-account management". x2rock is an independent Rust reimplementation of it, and the credit for finding
-the door belongs there.
-
-**Where the tokens live, and why.** Sonos is a whole-house system: you add a streaming account once,
-in the app, and every speaker in the house has to be able to use it. To stay in sync, the speakers
-continuously announce their shared state to each other and to any app that is listening - ordinary
-home-network device chatter (the UPnP protocol family, the same kind of thing that lets a remote find
-your TV). The account credentials are bundled into that announcement, under a value Sonos names
-`ThirdPartyMediaServersX`. Unscrambled, it is a short list - one entry per streaming account - each
-carrying the service, a display name, a serial number, and the two secret strings (`Token`/`Key`) the
-speaker logs in with.
-
-**How you get it.** One catch: a speaker only includes this value in the *first* message it sends a
-new listener, and it flatly refuses a direct "just give me that value" request. x2rock does what
-the speakers do to one another - it subscribes to the announcement, and the speaker sends that first
-update back to a small listener x2rock opens for the moment. That reply is the only time a Sonos
-speaker ever reaches *out* to your computer instead of the other way around, which is why it needs a
-temporary hole poked in your computer's own firewall - the one on the PC running x2rock, not the
-router.
-
-**Why the encryption is not really a lock.** The value is scrambled with a standard cipher (AES), but
-the key that unscrambles it is not a secret - it is *computed*, on the spot, from three things anyone
-on your network already has:
-
-- a fixed **salt**: one constant number, identical in every Sonos household on earth, that someone
-  read out of Sonos's own app years ago - Sonos never published it, and it is documented nowhere
-  official;
-- your **household id**: not a password, just a name for your system that any device on the network
-  can ask for and be told, no login required;
-- a **starter number** (cryptographers call it an IV) that is sent *alongside* the scrambled data, in
-  plain sight.
-
-Run those three through a standard scrambling recipe and out comes the key. The key is just a
-recipe applied to public ingredients - a lock with its key taped to the front. What actually keeps
-strangers out is not the cipher; it is being *on the home network* to begin with, which is Sonos's
-entire security model anyway (local control needs no account, because being on your Wi-Fi is treated
-as being trusted). The sensitive thing is what sits *inside* the wrapper - the real login tokens - not
-the wrapper itself, which hands you its own key. And if Sonos ever changed that constant, it would be
-right back out of the next app the same way; x2rock recognises the format by a `2:` label it carries
-and stops with a clear message rather than guessing, so following a change is a one-line update, not a
-dead end.
-
-**Why it is worth the trouble.** On current Sonos firmware, the old and honest way to read these
-tokens - a plain status page - now returns nothing. This scrambled announcement is the only route
-left. It is what lets x2rock search Qobuz and Amazon Music - services whose normal sign-in x2rock
-cannot complete on its own - because the working token was never truly out of reach. (Not everything
-it reaches becomes searchable: Apple Music imports too, but the credential the speaker holds for it
-is incomplete, and its SMAPI search stays locked - see the Apple Music entry below. Its catalogue is
-searched through Apple's public API instead; see the entry that follows it.)
-It was sitting on the speaker the whole time, behind a lock that opens with a key the design hands
-you.
-
-## Music services: what has actually been tested
-
-One table, kept here rather than in the README, because every row is a measurement with a date and
-a household attached rather than a product capability. `README.md` summarises the tiers; the agent
-skill carries a short scoreboard derived from this; **this is the source both defer to.**
-
-**Read the "playback" column carefully: it is not a property of the service.** On-demand content is
-enqueued and the *player* resolves it with a registration the household made in the Sonos app.
-"Enqueue ✓" therefore means "works in a household that has added this service", not "works". The
-local token buys search and browse, and nothing of playback.
-
-| service | tier | link | search / browse | playback | last verified |
-|---|---|---|---|---|---|
-| **Deezer** | device-link | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the file-transport fix | 2026-09-20, home + office |
-| **TIDAL** | device-link (OAuth in fact) | ✓ | ✓ | enqueue ✓ (needs registration); stream fallback ✓ since the fix | 2026-09-19, home |
-| **iHeartRadio** | device-link | ✓ | ✓ | live stations stream ✓; podcasts enqueue ✓; `artist_radio_track` ids are per-listener and stream-only | 2026-09-19, home |
-| **Spotify** | app-link | ✓ browser; ✓ `--from-household` (2026-10-11) | ✓; browse root is the app's front page (manifest `browse` endpoint), 21 personal shelves before SMAPI's 5 - see "Every household token, imported" | enqueue ✓ (needs registration, native `x-sonos-spotify`); fallback ✗ (unsupported scheme) | 2026-10-11, home |
-| **Amazon Music** | app-link | ✓ browser; ✓ `--from-household` | ✓ on a family trial, an album is a real tracklist (`catalog:album:asin:…`), not the Prime-tier station; browse root is only Library and User Playlists, and the app's Home (`api/home`) refuses a bearer token | enqueue ✓ on the household's registration (tracks and albums); the player rewrites a track to `x-sonos-http:<asin>.mpd`, and expands an album as `x-sonosapi-hls-static`. Stations (`catalog:station:`) play as radio | 2026-10-11, home |
-| **YouTube Music** | app-link | ✗ HTTP 403 — Google's project gate: `SERVICE_DISABLED` for "YouTube Music API (Partner)", not enableable by a self-service project; the household's own token imports and gets the same 403 | ✗ | enqueue ✓ for ids already saved (favorites, bookmarks); the household's registration plays it | 2026-09-23, office; same 403 at home 2026-10-11 |
-| **Saavn (JioSaavn)** | device-link | ✓, and `match` returned `sn_13` | ✓ **with Pro**; without it everything answers `User not Pro`. Podcasts browse-only - no search category | ✓ tracks, albums, playlists, radio and podcast episodes all play; Devanagari survives intact | 2026-09-21, office (Pro); home (free) |
-| **Plex** | own PIN flow; ✓ `--from-household` (`sn_45`, 2026-10-12) | ✓ 2026-10-12, home, once two things outside x2rock were fixed - see "Plex on the home household" (2026-10-12). Now the 2026-09-01 split again: **the household's token** browses root (Discover, Playlists, By Artist, By Album, Shuffle All, hubs) and searches; **x2rock's PIN token** searches but root is refused ("Unexpected error."). So the household's account is preferred | ✓ 2026-10-12, Kitchen + Dining Room: a searched track, an album from a library hub (30 FLAC rows) and an album from search (100 rows) queued and played; Shuffle All (`program`) played as radio. The player rewrites x2rock's enqueue to the app's `x-sonos-http:…track.mp3`/`.flac` form, `sn=45` | 2026-10-12, home |
-| **Bandcamp** | device-link | ✓, re-linked 2026-10-11; **a household token never answers x2rock** (`Client.LoginInvalid`, even freshly minted after a re-add, 2026-10-12), so x2rock's own link must be the preferred account | ✓ with an x2rock-minted token: root is Artists, Albums, Tracks, Recent Purchases, Recent Releases; search covers the collection only (one purchased track here) | ✓ through the queue once the household re-added Bandcamp (`sn_43`; the link account's dead serial resolves to it). Before that, the file fallback, once the DIDL declared the MIME type (it was UPnP 714) | 2026-10-12, home |
-| **Mixcloud** | device-link (OAuth authorize) | ✓ | ✓ | ✓ once the `cloudcast:` colon was percent-encoded | 2026-09-08 |
-| **TuneIn (New)** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `tunein.com/authorize` page (with a Premium upsell that can be skipped) | ✓ 91 hits for "jazz"; browse reaches featured, Music, News & Talk, Sports | streams ✓ (Jazz Club, as a direct stream) | 2026-09-30, office |
-| **Radio Paradise** | app-link (was anonymous on 2026-09-04) | ✓ browser: `getAppLink` hands over a `radioparadise.com/auth/linking/login` page; linked on the second attempt (the first timed out unconfirmed). Sends no `userIdHashCode`, so the household is not matched | browse ✓ with the token - three bitrate tiers (128k, 320k, FLAC), each listing the channels (Main Mix, Mellow Mix, RockIt!, The Globe, Beyond, Serenity, KFAT) as `program`s; still **no search categories** | **✓ as radio, once the household has it** (added in the Sonos app). Its channels are not queue material (`AddURIToQueue` 800) and it has no `getMediaURI`; the app plays one by making it the transport's source, `x-sonosapi-radio:channel%3a5%3a4%3aresume?sid=308&flags=0&sn=20` with an `audioBroadcast` DIDL, and `play-item` now does the same for a `program` the queue refuses. Played with the generic `-0-` cdudn and no `sn`, the household's one account resolved | 2026-09-30, office |
-| **Sonos Radio** | device-link in the descriptor | ✗ both link calls fault `TypeError: method is not a function`; ✓ `--from-household` | ✓ search with the household token; root from `browse/v1` (2026-10-08, see "The 2026-10-08 review") | ✓ a search hit plays as radio | 2026-10-11, home |
-| **Sonos Backgrounds** | device-link | **✗ no link code** — `getDeviceLinkCode` answers HTTP 200 with an empty `getDeviceLinkCodeResponse`; not in the office household's store, so there is no token to import either. `x2rock link` now says so and names `--from-household` | — | — | 2026-09-30, office |
-| **Classical Archives** | device-link | **✗ both link methods stubbed** — `Server.ServiceUnknownError` / `str3` | content endpoint is implemented and authenticates, but no token can be minted | — **won't test** (decided 2026-10-11) | 2026-09-21 |
-| **Apple Music** | app-link | ✗ refuses `getAppLink` (re-confirmed 2026-09-24); `link --from-household` reads the household token but it is invalid | ✗ `InvalidTokenException` on search **and** browse — the stored credential has an **empty `privateKey`**, the only authenticated service here missing one; the read is fresh and byte-accurate, so the wall is Apple's provisioning, not a stale or mis-read token. **Catalogue search ✓ through Apple's public iTunes API instead** (tracks, albums; `src/itunes.rs`) | enqueue ✓ for any catalogue id, seen or not - `song:<trackId>`, `album:<collectionId>`, both straight from Apple's public iTunes search | 2026-09-24, office; 2026-09-26, home; unchanged 2026-10-11, home (manifest `browse/v1` answers 500) |
-| **SiriusXM** | app-link | ✗ refuses `getAppLink` (`Service Error`); **✓ `--from-household`**, the only route (2026-10-11) | ✓ search (`all`: artist stations, live channels, talent, Xtra channels); browse root matches the app's `browse/v1` view for view | ✓ live channels (`channel-linear:`, `stream`) as a direct stream - the radio route answers `NO_CONTENT`; artist stations and Xtra channels (`program`) ✓ as radio, all from `search --play` and a front-page shelf since the station fix | 2026-10-11, home; 2026-10-12, office (`sn_24`, its own account: a 14-shelf personal page) |
-| **Qobuz** | app-link | ✗ by its own flow (`getAppLink` answers and the browser login succeeds, but `getDeviceAuthToken` always answers `NOT_LINKED_FAILURE`); ✓ via `link --from-household`, which is the only route | ✓ with the household's token: 121 hits for "miles davis", and browse reaches playlists, purchases, favorites and Discover | ✓ by id: plays from the household's `sn_14`. **Sonos Favorites cannot be created** - its DIDL has no cdudn | 2026-09-23, office |
-| **SoundCloud** | app-link | ✗ `Client.NOT_AUTHORIZED`; **✓ `--from-household`**, the only route (2026-10-11) | ✓ search and browse (Likes, Playlists, Feed, New & Hot, Following, own uploads). No `all`; a bare single-service search asked `artists` only until 2026-10-11, and now asks tracks, artists and albums. Ignores `index`, so paging repeats page one | ✓ enqueue, `x-sonosapi-hls-static:track-%3esoundcloud…` | 2026-10-11, home |
-| **Pandora** | app-link | ✓ browser (2026-09-10); ✓ `--from-household` (trial tier, 2026-10-11) | ✓ search - every hit a station (`SF:` factory, `program`, `canPlay` true, `canEnumerate` false); browse root is only My Stations | ✓ as radio, both a saved station (`ST:`) and a search hit (`SF:`), from `search --play`, `browse --play` and the widget (fixed 2026-10-11; before, only `play-item --kind program`). Playing an `SF:` hit **adds it to My Stations**, as the app does | 2026-10-11, home |
-| **Pandora CloudCover** | app-link | not attempted — out of scope (decided 2026-10-11) | — | — | — |
-
-**The rows describe the direct path.** Sonos's cloud content service also reaches Amazon's Home,
-Apple's shelves and YouTube Music browse and search, but not within the Sonos terms; see
-[the terms boundaries note](sonos-terms-boundaries.md).
-
-**Household import pass (2026-10-11, home).** With trials added in the Sonos app, `link
---from-household` imported 18 accounts. The rows above for Spotify, Amazon Music, Pandora,
-SiriusXM, SoundCloud, Bandcamp and Sonos Radio come from it. The cross-cutting findings are in
-"Every household token, imported": several services' app front pages come from a manifest `browse` endpoint x2rock reads
-only for Sonos Radio; `search --play`/`browse --play` refused station-shaped `program`s that play
-fine as radio, and a bare single-service search asked the first category rather than the default
-set (both fixed the same day).
-
-Roughly 108 services appear in a household's catalogue; 23 are searchable here today and 15 accept
-`x2rock link`. The live per-household answer is always `x2rock search` (bare) and `x2rock link`
-(bare), which read the catalogue and the credential store rather than this table.
-
-**Re-read 2026-09-29, office: 109 services, 41 searchable, 15 linkable** - 62 app-link, 33
-anonymous, 14 device-link. The searchable count grew with the anonymous radio services now counted
-and with Amazon, Apple Music and Qobuz linked. Two rows above no longer match the catalogue:
-**TuneIn (New) and Radio Paradise are listed as app-link now**, not anonymous, and neither is among
-the searchable. Re-probed 2026-09-30: both hand over a real browser login through `getAppLink`, and
-TuneIn (New) passes end to end once linked; Radio Paradise links and browses, and plays once the
-household has it, through a radio route `play-item` gained for it - the rows above say so.
-
-**Regression pass after the HTTP client refactor (2026-09-29, office).** `get_bytes` reshaped
-`http::exchange`, which every SMAPI call goes through - Deezer's gzipped replies included - so a
-search was re-run on every linked service: Deezer, TIDAL, Saavn, Qobuz, Sonos Radio, Amazon Music,
-Apple Music (through iTunes) and TuneIn all answered; NTS Radio correctly refused as having no search
-categories. It found one old bug: **Amazon Music ignores `count`** and sends every hit (65 for a
-search asking for 2), which went straight through to `--count` and the widget. Search and browse
-pages are now cut to the count asked for (`smapi::at_most`), the total left as the service
-reported it.
-
-**Untested and worth something.** The free candidates are now spent: Saavn was linked and passes
-(non-Latin metadata survives SMAPI, DIDL and playback), and Classical Archives cannot be linked at
-all. What remains costs a subscription - so each was first asked for a browser page, which needs no
-account and settles whether the money would be wasted (2026-09-22):
-
-| candidate | `getAppLink` | what it would teach |
-|---|---|---|
-| **Qobuz** | ✓ `qobuz.com/signin/external?linkToken=…` | hi-res FLAC through the new file-transport path, and a classical tier - the work/movement/composer shape that code assuming artist/album/track has never met |
-| **Audible** | ✓ `amazon.com/us/code?cbl-code=…` | chaptered long-form: resume position and multi-hour durations |
-| **SiriusXM** | **✗ `Service Error`** | ~~nothing - it cannot be linked at all, so a subscription buys no test~~ - **wrong (2026-10-11)**: the household's own token imports and searches, browses and plays; see "Every household token, imported" |
-
-SiriusXM is therefore struck from the list on evidence rather than on price, and it joins Apple
-Music and SoundCloud as an app-link service that refuses the call outright. **Overturned
-2026-10-11**: the probe tests x2rock's own flow, and `link --from-household` does not need that
-flow. With a trial added in the Sonos app, SiriusXM and SoundCloud both work fully. See
-"Every household token, imported". Worth doing this probe
-before *any* paid signup: it is free, it takes seconds, and it would have wasted a subscription
-here.
-
-**And it is necessary but not sufficient - Qobuz proved that the same day, at the cost of a
-subscription.** See below: Qobuz passes this probe with a real, working login page and then refuses
-every token exchange. The probe answers "will this service talk to us at all", not "can this
-service be linked".
-
-## Superseded claims — check here before trusting an early section
-
-This file grows by appending findings in the order they were made, so a foundational claim near the
-top can be quietly overturned by a section thousands of lines later. Each reversal is corrected in
-place with a dated pointer, but a reader who lands on the early claim and stops might miss it. This
-is the "do not trust the old version" list - not the changelog (the inline dated notes hold the
-detail), just the set of early statements a later finding overturned, and where the truth now lives.
-**When a later finding overturns an earlier claim, add a line here**, and correct or remove the
-early claim rather than leaving it standing beside a pointer. (A pass on 2026-09-13 did that for the
-whole file: claims wholly overtaken by later testing were removed or rewritten in place, so the
-lines below record the reversals rather than warn about text that still says otherwise.)
-
-- **Amazon, Apple and YouTube Music's app pages are technically reachable, but not within the
-  Sonos terms.** First recorded as gaps because only Sonos's cloud serves them; the cloud serves
-  them to any developer sign-in, but the developer program does not license that service. See
-  [the terms boundaries note](sonos-terms-boundaries.md) (2026-10-14).
-- **`browse --play` plays an album or a playlist** (2026-10-11), as `search --play` has since
-  2026-09-18. Only a container of containers is refused. See "Every household token, imported".
-- **A file fallback declares its type.** `play_url_as_track` sent a bare DIDL, and the player
-  refused an extensionless URL (Bandcamp's) with UPnP 714. See "Every household token, imported"
-  (2026-10-11).
-- **SiriusXM and SoundCloud can be reached.** Recorded as unlinkable because `getAppLink` refuses.
-  Their household tokens, imported, search, browse and play. A refused `getAppLink` rules out
-  x2rock's own flow, not the service. See "Every household token, imported" (2026-10-11).
-- **Amazon Music's albums are not stations, and its enqueue works**, on a paid (trial) tier with a
-  household registration. The station shape was Prime's. See "Every household token, imported" (2026-10-11).
-- **Pandora's "Unsupported action for account type" is not a tier limit.** A station declares
-  `canEnumerate` false and plays as radio. See "Every household token, imported" (2026-10-11).
-- **`replay` does not use `loadContent`** (except for a Sonos playlist). It was built on it on
-  2026-09-26; on Mixcloud it restarts the speaker. See "Replay queues, because `loadContent`
-  restarts a speaker on Mixcloud" (2026-10-11).
-- **`artist_radio` does not need `loadContent`.** Recorded as playing only through it, as a last
-  resort (2026-09-26). It plays as the room's source, `x-sonosapi-radio:`, which every `program`
-  now tries first. See "iHeartRadio searched the way the Sonos app shows it" (2026-10-07).
-- **`queueVersion` is not the queue-change signal** *on the firmware this was measured on.* It was
-  the intended push trigger; that firmware sent no such field, in status or events, and the
-  trigger there is the UPnP `UpdateID` on a `Q:0` browse. See "`queueVersion` does not exist".
-  **Later firmware does send it**, and it moves on every edit: see "Findings from x2rocktv"
-  (2026-10-02), measured on build 97180312.
-- **`match` has succeeded, once.** Long recorded as never succeeding, it answered for Spotify on
-  2026-09-10 with `sn_22` — the serial the household's Sonos-app registration already held. It has
-  never *created* a registration. See "The real fix: the enqueue URI itself was wrong".
-- **Serial allocation is `highest live serial + 1`**, not monotonic and not unknown. Numbers come
-  back into use after higher accounts are removed. See "Household registration is per *account*".
-- **The account harvest is not a lower bound** on a household's accounts; it can show dead ones and
-  miss live ones. See "The harvest showed a deleted account and hid a live one".
-- **The cdudn does not pick the account; `sn=` does.** Early sections and code comments said the
-  player ignores `sn=` and resolves the account from the cdudn - true only because every test ran
-  against a service with one account. With two, `sn=` picks, the cdudn's selector is ignored for
-  that choice, and a mismatched pair leaves the queued row disagreeing with what plays. See "Which
-  account an enqueue plays from".
-- **A stored bookmark serial cannot go stale in a way that matters**: a serial the household no
-  longer holds falls back to its default account, which for a one-account service is the current
-  registration. See "Re-added the same day", and "Which account an enqueue plays from" for the
-  fallback measured.
-- **`play-url` and `stations --play` verify playback.** Early notes say they report what was asked
-  for; they now wait for `PLAYING` and fail with `stream_did_not_play`.
-- **Browse reaches more services than search** — twelve anonymous services publish no search
-  category. See "A third of the anonymous tier cannot be searched at all".
-- **The bar widget can be driven from a script through the keyboard** (`summon` plus `wtype`), just
-  not the pointer.
-- **A player does serve a `/status` index**, and `/status/accounts` is not an endpoint: any unknown
-  name under `/status` answers with the same empty `ZPSupportInfo` (re-probed on 97.1-80312; `/status/zp`
-  and `/status/ifconfig` still serve data). This bullet used to add that the conclusion - the
-  registry cannot be read over the LAN - was unchanged. **That conclusion was overturned on
-  2026-09-22**; see the next entry. See "How good the serial proxy actually is" for the probe.
-- **The Control API *can* switch a soundbar to its TV input.** Early notes say it cannot; that was
-  only true of `loadLineIn` (analog line-in). `homeTheater:1 loadHomeTheaterPlayback` does it -
-  though x2rock still uses UPnP for the group-preserving handoff. See "Soundbars: the TV input".
-- **The Control API *can read* tone and home-theatre state, just not write it.** The flat "the
-  Control API cannot reach any of this" about EQ/tone was wrong on the read side: `settings:1
-  getPlayerSettings` returns bass/treble/loudness and night/dialog. Writes are `ERROR_NO_PERMISSION`
-  and go over UPnP `SetEQ`. See "What `eq` does not cover".
-- **Night mode and dialog are settable, not read-only.** `eq --night on|off` / `--dialog on|off`
-  write them over UPnP. Any "read-only" or "no command yet" framing is superseded.
-- **`settings:1` has a working no-parameter reader.** The "required parameter unidentified" was the
-  wrong command: `getPlayerSettings` needs none; `getSettings` wants a `userId` (an account) x2rock
-  lacks. See the `settings:1` note in the raw-scope discussion.
-- **The test household is eleven players in five rooms** - not the "three Beams and a One SL and a
-  SYMFONISK" an early draft gave - and the firmware split is by hardware platform, not vendor; the
-  Living Room surrounds are Play:1, not One SL. See "What this was actually tested on".
-- **`loadCloudQueue` is a permanent no, not "not now".** It is content-integration-only per Sonos,
-  and would make x2rock a server. See "`loadCloudQueue` is a permanent no".
-- **An empty-body probe is unsafe only for a parameterless *action* command**, not for setters as a
-  class - a command that needs a parameter refuses harmlessly. See the empty-body note in
-  "Soundbars: the TV input".
-- **The 5.1 `htInputFormat` reading is confirmed on real hardware**, no longer pending on the TV
-  being off. See "The extended EQ set, and what to probe at home".
-- **The player TLS cert is not "self-signed for its own IP".** It is a leaf-only chain, `CN=<MAC>`
-  signed by "Sonos Device Authentication Root CA" (root not sent), with SAN `sonos-<MAC>.local` and
-  no IP - so it is CA-signed, and connecting by the `.local` name would validate. x2rock relaxes
-  verification anyway, but the old reason was wrong. Corrected 2026-09-07 from x2rocktv's hardware
-  capture; see "Certificates are validated here".
-- **The picker's search is no longer a `Search TuneIn` row at the end of the list.** Typing puts the
-  search first, it runs itself once typing pauses (`searchDelay`), and with `searchService` set to
-  `"all"` or `"linked"` it is a merged search across services, grouped by service the way the mobile
-  app does. The single-service default (`"TuneIn"`) is still what a fresh install gets; merged
-  search is opt-in per `shell.json`. Changed 2026-09-18; see the widget README.
-- **The Services door is always the first row of the picker's base list**, whatever the
-  configuration, unless `browseServices: []` turns browsing off by hand. It used to be hidden until
-  the async account read landed, and hidden for good under `"all"`/`"linked"` with nothing linked.
-  The linkable list loads on every picker open in every mode, so offering to link a service with no
-  token is no longer an `"all"`-only feature. Changed 2026-09-18/19.
-- **`remember()` writes once per track because the daemon dedupes per room**, not because `note()`
-  does. See "Cheap by construction" under the bookmarks section; corrected 2026-09-19.
-- **The household's account registry *can* be read over the LAN, tokens included.** Every player
-  publishes it encrypted in the initial `ZoneGroupTopology` event as `ThirdPartyMediaServersX`, keyed
-  to the household id. The serial harvest was a proxy for something readable outright, and every
-  "cannot be read" above it is superseded. See "The household stores every token, and they can be
-  read".
-- **The credential store is keyed household → service → account and holds several accounts per
-  service.** "One token per service, per machine" was the 2026-08-31 description and was true of the
-  store then. The protocol finding beneath it stands - a token is not scoped to a household at the
-  service. See "The credential store became household-aware" and "A household can hold two accounts
-  for one service".
-- **YouTube Music's key is sealed *in public*, not "in firmware".** The manifest hands the encrypted
-  envelopes to anyone who asks; what is private is the key that opens them. The framing changed on
-  2026-09-22, the conclusion did not. See "YouTube Music, attempted again".
-- **YouTube Music is closed by a Google *project* gate, not a Sonos client pin, and the OAuth
-  identity probe is answered.** A self-service API key gets `SERVICE_DISABLED` for "YouTube Music API
-  (Partner)", method `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and
-  cannot be enabled by a self-service project; an OAuth token is judged against the same project
-  (measured 2026-09-23, both scopes). It is a party-to-party API defined for Sonos - `google.music.sonos.v1` - not a public
-  one with a gate, so there is nothing to self-serve and nothing to wait for short of Google
-  publishing a YouTube Music API generally. Every "the one live thread is the OAuth probe" line is
-  superseded. See "TASK: the OAuth identity probe".
-
-## Open questions
-
-1. Whether to wire x2rock's widget to `omarchy.media`'s service — either pinning the bar pill to a
-   room via `selectPlayer()`, or the reciprocal read that marks which room the pill is showing. The
-   mechanism is confirmed to exist (see "Bar-widget interop with `omarchy.media`" above); what is
-   not confirmed is whether it behaves with several rooms on the bus, since only one room was
-   reachable when it was written up. **Pick this up from the home household.**
-
-2. Upstream Quickshell docs (not just Omarchy's usage of it) — worth a direct look before
-   committing to only the three integration patterns Omarchy's plugin README documents. Much less
-   pressing than it was: a working widget now exists, and the Quickshell behaviours that actually
-   cost time are written up above rather than left to be rediscovered.
+**Reading it from another platform.** Most of this is protocol and transfers anywhere: the
+integration path, the namespaces, volume, grouping, soundbars, the queue, favorites and SMAPI. Two
+sections are host-specific, *The firewall problem* and *Discovery*, because both follow from
+Omarchy's default-deny `ufw`. The Android TV sibling, [`x2rocktv`](https://github.com/rahga/x2rocktv),
+keeps its own porting guide in `docs/porting-from-x2rock.md`.
 
 ## Scope
 
-### The axiom, stated precisely (sharpened 2026-09-04)
+### The axiom, stated precisely
 
-**x2rock never requires a Sonos account - unless the household has Authentication enabled.** That
-is the whole of it, and the rest of this document should be read against that sentence rather than
-against a vaguer one.
+**x2rock never requires a Sonos account, unless the household has Authentication switched on.**
 
-**The amendment (2026-09-26).** The Sonos app's Account > Privacy and Security > Connection Security has an
-**Authentication** switch, and with it on the speakers refuse every unauthenticated Control API
-command (`ERROR_NO_PERMISSION`; see "Player-scoped finds"). For such a household there is no
-account-free way in: the household itself has decided that only an identified client may control
-it. So the exception is scoped to exactly that - an **opt-in, authenticated mode** for a household
-that has turned Authentication on, and nothing else. Every household with it off, which is the
-default, keeps the account-free behaviour unchanged: no login is asked for, stored or used. The mode
-is not built yet; what it must present is still to be probed (see there).
+That is narrower than "never uses the internet". Searching a music service calls that service's
+server, and `x2rock stations` calls a radio directory. Neither needs a Sonos login. The line is a
+Sonos login, because depending on one would make x2rock a client of Sonos's cloud instead of a
+client of the speakers on the LAN.
 
-It is *not* "never touches the internet" and it is *not* "never calls a cloud service". x2rock calls
-somebody's server in another country for every music-service search — SMAPI is a cloud API — and
-`x2rock stations` calls a radio directory that has nothing to do with Sonos at all. Both are fine.
-The line is a **Sonos login**: nothing may depend on signing in to Sonos, because that is the
-dependency that would make this a client of Sonos's cloud instead of a client of the speakers on
-the LAN. A speaker on the LAN answers to whoever is on the LAN; a cloud account answers to whoever
-holds the account.
+A household with **Authentication** on (Sonos app: Account > Privacy and Security > Connection
+Security) refuses every unauthenticated Control API command. For that household only, x2rock has an
+opt-in signed-in mode; see *Authentication on, and signing in*. Control still stays on the LAN.
 
-Two rules follow, and both were already being kept for their own reasons:
+Two rules follow:
 
-- **Control never leaves the LAN.** Not because cloud is forbidden, but because the local transport
-  is better at it — push events, one connection, no round trip.
-- **Talking to a service never enters the daemon** (see the rule of that name). Outbound calls are
-  the CLI's business, on demand.
+- **Control never leaves the LAN.** The local transport is better at it: push events, one
+  connection, no round trip.
+- **Talking to a service never enters the daemon.** See the rule of that name.
 
-Nothing in this document's conclusions changes under the sharper wording, which is the useful check
-on it: cloud OAuth was cut because it needs a Sonos login, and the first-party web app's content
-API is refused because it is gated behind a Sonos account session. Both were the right call for
-this reason and not for the looser one. What the sharper wording does is stop "it is cloud" being
-mistaken for an argument on its own.
+### In scope and out
 
-### What is in and out
+- **In:** local control over the LAN Control API, UPnP on :1400 for what that API lacks (the queue
+  above all), an MPRIS2 daemon, a CLI built for scripts and agents, a terminal UI, and an Omarchy
+  Quattro bar widget.
+- **S2 only.** `<swGen>` in `http://<player>:1400/xml/device_description.xml` reads `2` on every
+  supported device. S1 and S2 cannot share a household, so supporting S1 would mean a second content
+  and grouping model.
+- **Not wanted:** control from outside the LAN; Android, which is x2rocktv's job; a GUI of x2rock's
+  own beyond its front ends.
 
-- **In scope**: **local-first** Sonos control over the LAN Control API (see below), a `clap`-based
-  CLI (`x2rock play`, `rooms`, `vol`, etc.), an MPRIS2 server so it works with anything that
-  already speaks MPRIS, and first-class support for Omarchy Quattro's Quickshell top bar.
-- **Also in scope, and required**: UPnP queue navigation (see below). Playing a chosen track from
-  the queue is a core requirement, and only UPnP can do it.
-- **Cut from v1**: cloud OAuth (Sonos Control API over `api.ws.sonos.com`). This is the axiom's
-  one hard exclusion rather than a preference about transports: it is the Sonos *login*. (Amended
-  2026-09-26: a login becomes permissible for a household with Authentication on, as an opt-in mode
-  - see the amendment above. Control still stays on the LAN; the login only proves who is asking.) Off-LAN
-  control is also not wanted for now — decided 2026-08-28. Keep the transport seam so it *can* return, since off-LAN
-  control is what would arrive through it, but build no OAuth, no token storage and no `login`
-  command for v1. An earlier draft of this bullet also listed *music services* as an account-linked
-  feature waiting on the cloud. That was wrong — a service is linked to the **household**, not to a
-  Sonos account, and the LAN hands out everything needed to address one. See "Music service search,
-  reopened (verified 2026-08-31)".
-- **S2 only.** Every supported device runs Sonos S2. S1 is not supported and no S1 accommodation
-  belongs in this code. The check is `<swGen>` in
-  `http://<player>:1400/xml/device_description.xml`, which reads `2` on every device here. This is
-  not a reluctant cut: S1 and S2 systems cannot be mixed in one household anyway, so supporting
-  both would mean carrying two content and grouping models to reach households this tool's target
-  desktop is unlikely to be sitting on.
-- **Out of scope**: Android, any pre-Quattro Omarchy/Hyprland/Waybar-specific work (Quattro
-  replaced that whole stack — don't design around it), and Sonos S1.
+### What stays with the Sonos app
 
-## Integration path (revised — this is the core decision)
+x2rock operates speakers and reads their state. It does not provision, reconfigure or physically
+re-shape a household. These are decisions, not gaps:
 
-Sonos speakers expose the **same JSON Control API protocol on the local network** that the cloud
-API exposes remotely, over a WebSocket, with **no OAuth and no internet**. This is the transport
-the official Sonos mobile app itself has used since the v80/2024 rewrite.
+- **Installing firmware.** `ZoneGroupTopology BeginSoftwareUpdate` exists and x2rock will never
+  offer it. The app gates it behind a dialog warning against unplugging speakers, and a flag cannot
+  carry that moment of reading. `x2rock update` uses `CheckForUpdate`, which is read-only. This is
+  scope, not a security boundary: `raw upnp` reaches every action.
+- **Onboarding, removing or factory-resetting a speaker.** No public action exists for it.
+- **Editing bonds.** `RemoveBondedZones` and `RemoveHTSatellite` exist, but they reconfigure the
+  household. `system` reports bonds and does not edit them.
+- **Measuring TruePlay.** That needs the app and a phone microphone. x2rock reads whether TruePlay
+  is on and can turn it off.
+- **Adding a music service to the household**, which only the app (or the desktop controller) does.
+- **Editing favorites.** `favorites:1` offers only `getFavorites` and `loadFavorite`. Deleting one
+  is possible through `ContentDirectory DestroyObject` on `FV:2/<id>` and stays a `raw` escape
+  hatch. The rule: if the Control API does not sanction an edit, x2rock does not add it as a command.
+- **Cloud queues.** `loadCloudQueue` is a permanent no. Sonos scopes the Cloud Queue API to content
+  integrations, and it would make x2rock an inbound server the player polls.
 
-**Verified 2026-08-28** against a Sonos One SL (`RINCON_48A6B81853E001400`, "Media Room",
-firmware `95.0-77060`, `apiVersion` 1.52.1):
+## Integration path
+
+Sonos speakers serve the same JSON Control API on the LAN that Sonos's cloud serves remotely, over a
+WebSocket, with no OAuth and no internet. The official app has used it since the 2024 rewrite.
+Sonos calls it not available for wide release; it is durable because Sonos's own app depends on it.
 
 ```
 URL        wss://<player-ip>:1443/websocket/api
-Headers    X-Sonos-Api-Key: 123e4567-e89b-12d3-a456-426655440000
+Headers    X-Sonos-Api-Key: 123e4567-e89b-12d3-a456-426655440000   (the community's sample key)
            Sec-WebSocket-Protocol: v1.api.smartspeaker.audio
-           (send NO Origin header)
-TLS        leaf-only chain: CN=<MAC> signed by "Sonos Device Authentication Root
-           CA" (root not sent), SAN sonos-<MAC>.local, no IP — NOT self-signed.
-           x2rock disables verification; validating via the .local name is possible.
-Wire       2-element JSON array: [command, options]  — responses and events likewise
+           no Origin header
+Wire       a two-element JSON array, [header, body], for commands, replies and events
 ```
 
-Two handshake details x2rocktv nailed on Android hardware (2026-09-07), worth pinning here:
+- **The header rules are enforced.** An `Origin` header gets 403, and a missing API key gets 400.
+  That is why a browser or WebView cannot connect: a browser always sends `Origin`.
+- **The player's certificate is CA-signed, not self-signed.** It is a leaf-only chain, `CN=<MAC>`
+  issued by "Sonos Device Authentication Root CA" (the root is not sent), RSA-2048, valid about six
+  months. Its SAN carries `urn:sonos:udn:RINCON_…`, `sonos-<MAC>.local` and
+  `sonos-<MAC>.smartspeaker.audio`, and no IP. The `.local` name derives from the player id: strip
+  `RINCON_` and the trailing `01400`. x2rock accepts any certificate on the player socket, because
+  a LAN already concedes active MITM. A music service gets real roots.
+- **A reply can span several WebSocket frames.** `tokio-tungstenite` reassembles them.
 
-- **The header rules are enforced, and asymmetrically.** An `Origin` header *present* gets `403
-  Forbidden`; the API key *missing* gets `400 Bad Request`. `tokio-tungstenite` sends no `Origin`,
-  so x2rock is never bitten - but it is why a browser or WebView client cannot connect at all: the
-  browser WebSocket API forces an `Origin` header that cannot be removed. Hence "send NO Origin"
-  above.
-- **A player's `.local` name is derivable from its id - no mDNS lookup needed.** The RINCON id
-  carries the MAC: `RINCON_48A6B818D13801400` → strip the `RINCON_` prefix and the trailing
-  `01400` → `sonos-48A6B818D138.local`. That is exactly the name in the cert's SAN (above), which
-  is what makes validating the player socket possible rather than blanket-accepting it; and
-  `getGroups` already returns each player's id *and* its `websocketUrl` (carrying the IP), so one
-  call yields both the name and the address a name→IP mapping would need. Verified against all five
-  players in the household.
+Unauthenticated, these work for reads and writes: `groups:1`, `playback:1`, `playbackMetadata:1`,
+`groupVolume:1`, `playerVolume:1`, `favorites:1`, `playlists:1`, `audioClip:1`, `playbackSession:1`
+and `history:1`. `settings:1` reads, and refuses writes except the volume limit.
 
-Confirmed working **unauthenticated**, reads *and* writes: `groups:1`, `playback:1`,
-`playbackMetadata:1`, `groupVolume:1`, `playerVolume:1`, `favorites:1`, `playlists:1`,
-`audioClip:1`. `settings:1` reads but refuses writes (`ERROR_NO_PERMISSION`; see "Which scope each
-namespace wants"). A `setVolume` write succeeded. `subscribe` returns an immediate state snapshot
-and then delivers **unsolicited push events** on change.
+### Where the Control API stops, UPnP on :1400 takes over
 
-Why this wins over the alternatives:
+The Control API has no view of the local queue: `queue:1`, `playbackQueue:1` and `cloudQueue:1` are
+unsupported namespaces, and `skipToItem`/`loadQueue` are unsupported commands. It also has no alarms,
+no sleep timer, no tone writes, no group-preserving TV switch, no room rename and no hardware
+inventory. UPnP SOAP on :1400 has all of them.
 
-- **No login.** `x2rock login` stops being a precondition for the tool working at all.
-- **Push, not polling.** Solves the highest-leverage item in "Carried-over knowledge" below,
-  without the cloud.
-- **One outbound TCP connection**, carrying commands and events. This matters enormously — see
-  "The firewall problem" below.
-- **Same command/event model the Kotlin project already documented**, so that knowledge transfers
-  directly.
-- **Durable.** The API is undocumented and Sonos has said the Control API on the LAN is "not
-  available for wide release" — but the official app runs on it, so it can't be removed without
-  Sonos breaking their own product.
+| purpose | transport |
+|---|---|
+| control, state, events | WebSocket :1443, the spine |
+| queue, content browsing, alarms, sleep, tone, TV handoff | UPnP SOAP :1400, **calls only** |
+| remote (off-LAN) control | not built |
 
-Residual risk: 2025+ firmware added an **Authentication** setting covering third-party LAN API
-use, which can require client-certificate auth. It is **off by default** (demonstrably — all of
-the above worked). Mitigate by keeping the transport behind an abstraction so cloud OAuth can slot
-in as a second implementation rather than a rewrite.
+**Never UPnP eventing (GENA).** A subscription needs the player to connect back, which a default-deny
+firewall drops silently. Read a service's own description (`/xml/<Service>1.xml`) before calling a
+new action: it states argument names and ranges, and costs nothing.
 
-Note the API key above is a well-known sample key, not one issued to this project.
+### Namespaces, scopes and how to probe them
 
-### Queue navigation and content: UPnP is mandatory, not optional
+The target key (`groupId`, `playerId`, `householdId`, `sessionId`) travels in the **header**, never
+the body.
 
-**Requirement**: play different tracks in the queue; the queue may be populated from the official
-Sonos app or elsewhere.
+| scope | namespaces |
+|---|---|
+| group | `playback:1`, `playbackMetadata:1`, `groupVolume:1`, `playbackSession:1` (by `sessionId`) |
+| player | `playerVolume:1`, `homeTheater:1`, `audioClip:1`, `settings:1`, `info:1`, `hdmi:1`, `hardwareStatus:1`, `trueplay:1`, `ircontrol:1`, `effectiveSettings:1` |
+| household | `groups:1`, `favorites:1`, `playlists:1`, `musicServiceAccounts:1`, `history:1`, `zones:1`, `devices:1`, `areas:1`, `alarms:1` |
 
-The Control API **cannot do this at all**. Verified 2026-08-28 by namespace probing — `queue:1`,
-`playbackQueue:1` and `cloudQueue:1` all return `ERROR_UNSUPPORTED_NAMESPACE`; `playback:1
-skipToItem` and `playback:1 loadQueue` return `ERROR_UNSUPPORTED_COMMAND`. The namespace model only
-understands *cloud queues* that your own app hosts and loads via `playbackSession:1`. It has no
-view of the local Sonos queue that the official apps populate. (This is the same gap that left
-queue management missing from the 2024 Sonos app rewrite.)
+- **A group command answers only on the group's coordinator, and a player command only on that
+  player.** Anything else gets `ERROR_INVALID_OBJECT_ID` ("Incorrect playerId"). The wrong scope
+  answers `ERROR_MISSING_PARAMETERS` naming the key it wanted.
+- **Namespaces resolve by prefix and alias.** `home:1` answers as `homeTheater:1`, and
+  `musicService:1` as `musicServiceAccounts:1`. A real namespace rejects an unknown *command*
+  (`ERROR_UNSUPPORTED_COMMAND`, the canonical name echoed in the header). A nonsense one rejects the
+  *namespace* (`ERROR_UNSUPPORTED_NAMESPACE`, namespace `global`). Read the echoed namespace before
+  concluding one is missing. Walking prefixes found 41 namespaces. `positioning:1` is declared and
+  has no implementation.
+- **An empty body runs a parameterless action.** `togglePlayPause`, `pause`, `skipToNextTrack` and
+  `loadHomeTheaterPlayback` all executed on `{}`. A command that needs a parameter refuses an empty
+  body harmlessly. So probe with care, or with `--scope none`.
+- **`x2rock raw`** is the probe. A refusal prints and exits 0, while an unreachable speaker exits
+  non-zero. It prints the reply header, `--watch` attaches before sending (a `subscribe` reply can be
+  overtaken by its event), and `--header KEY=VALUE` covers keys `--scope` cannot derive.
 
-**UPnP does it completely.** Verified on the test speaker:
+### Protocol facts the transport is built on
 
-- `ContentDirectory Browse` on `ObjectID=Q:0` enumerates the live queue with full metadata.
-- `AVTransport Seek` with `Unit=TRACK_NR` jumps to a queue position.
-- Full mutation is available: `AddURIToQueue`, `AddMultipleURIsToQueue`, `RemoveTrackFromQueue`,
-  `RemoveTrackRangeFromQueue`, `RemoveAllTracksFromQueue`, `ReorderTracksInQueue`, `SaveQueue`,
-  plus a dedicated `Queue` service (`AddURI`, `ReplaceAllTracks`, `ReorderTracks`,
-  `SaveAsSonosPlaylist`).
-- `ContentDirectory Browse` also enumerates the local library: Artists, Albums, Genres, Composers,
-  Tracks, Playlists.
+- **`cmdId` is echoed** in replies, so replies match callers out of order. A command the player
+  cannot parse at all gets a reply with no `cmdId`, matched by arrival order.
+- **Replies carry `success`; events never do.**
+- **Subscribe, then listen.** The snapshot arrives as events immediately after the `subscribe`
+  reply, one per namespace, so the event receiver has to be attached first. Subscriptions do not
+  survive a reconnect and there is no replay: resubscribe and take the snapshot as truth.
+- **`groups` events omit `playbackState`** and carry a `partial` flag. Only `getGroups` replies
+  include playback state. The snapshot after `subscribe` repeats known topology; republishing MPRIS
+  for it would flap every bus name.
+- **An event body that omits a field does not set it to false.** `playback:1` sends `playbackError`
+  bodies beside `playbackStatus`, told apart only by `_objectType`, and a `homeTheater:1`
+  confirmation carries no options at all. Any type deserialized from both a reply and an event needs
+  `Option` fields meaning "unchanged". All-false defaults once published a room as unable to play
+  after every failed stream.
+- **Liveness:** the player answers WebSocket Ping. The daemon pings every 30 s and treats 90 s of
+  silence as a dead socket.
+- **`track.imageUrl` is served by the player** (`http://<ip>:1400/getaa?…`) and works directly as
+  `mpris:artUrl`. Its `u=` parameter carries the player's own playback URI, which is how the player's
+  preferred enqueue scheme for a service can be read.
+- **`playback:1 loadContainer` answers `success` and does nothing**, even for a garbage id. Like
+  `loadStreamUrl` accepting an unplayable URL, a `success` here has to be checked by reading state
+  back.
 
-All of these are **outbound SOAP calls**, so they work on a stock Omarchy box. This corroborates
-that the traditional Sonos desktop app — which handles queues well — is UPnP-based.
+## The firewall problem
 
-**The hybrid, and how the two transports cooperate:**
+Omarchy's installer runs `ufw default deny incoming`, and every stock install blocks inbound. The
+consequences are silent:
 
-| Purpose | Transport | Notes |
-|---|---|---|
-| Control, state, **events** | WebSocket `:1443` | the spine |
-| Queue read/navigate/mutate | UPnP SOAP `:1400`, **calls only** | required for the core use case |
-| Content enumeration | UPnP SOAP `:1400`, **calls only** | same path, free once queue works |
-| Remote (off-LAN) control | cloud OAuth | cut from v1 |
-
-Queue changes still arrive without polling, but not from the Control API: `playback:1` carries no
-queue version on this firmware, so the daemon reads the UPnP `UpdateID` on a `Q:0` browse whenever
-a playback event arrives. See "`queueVersion` does not exist".
-
-### Music search: not from the player, but not closed
-
-Neither of the player's own interfaces searches a music service:
-
-- `musicService:1 search` answers `ERROR_UNSUPPORTED_COMMAND`, because the player canonicalises
-  that namespace to `musicServiceAccounts:1`, which is about accounts, not content. See
-  "`musicService:1` is real, and it is `musicServiceAccounts:1`".
-- Sonos's `ContentDirectory` reports **empty** `SearchCapabilities` — it implements no UPnP
-  `Search` action at all. Re-confirmed 2026-08-31.
-
-Service search is done by calling the service's SMAPI endpoint directly, the way a player does. The
-endpoint is handed out free over the LAN, and a service link belongs to the household rather than
-to any Sonos account. Built as `x2rock search`; see "SMAPI, read properly at last" and "Music
-service search, reopened".
-
-**Never use UPnP eventing (GENA `SUBSCRIBE`).** See below.
-
-## The firewall problem (design-critical)
-
-Omarchy's own installer (`/usr/share/omarchy/install/config/firewall.sh`) runs:
-
-```
-ufw default deny incoming
-ufw default allow outgoing
-```
-
-The only inbound exceptions are LocalSend (53317) and Docker DNS. **Every stock Omarchy install —
-the sole target platform — blocks inbound by default.** Verified on the dev machine.
-
-Consequences, all of them *silent*:
-
-- **SSDP discovery finds nothing.** M-SEARCH replies arrive from the speaker's unicast IP and
-  don't match the conntrack entry for the packet sent to `239.255.255.250`, so they are dropped as
-  unsolicited. mDNS fails the same way.
-- **UPnP GENA eventing never fires.** `SUBSCRIBE` returns **HTTP 200 with a valid SID**, and then
-  no event ever arrives. There is no error to observe. This is the same symptom Home Assistant
-  users report as "Sonos subscriptions failed", and it will be this project's number-one support
-  question if it is ever relied upon.
+- **SSDP and mDNS discovery find nothing.** Replies come from the speaker's unicast address, do not
+  match the multicast conntrack entry, and are dropped.
+- **UPnP GENA never delivers.** `SUBSCRIBE` returns 200 with a valid SID, and then no event arrives.
 - **The LAN WebSocket is unaffected**, because it needs no inbound connection.
 
-Both failures were reproduced and then fixed with a single `ufw allow from <speaker-ip>`, which
-confirms the host firewall — *not* the network — as the cause. (The dev network is corporate
-Fortinet WiFi and passes both multicast and client-to-client unicast fine.)
+Both failures were reproduced and fixed with one `ufw allow` from the speaker, which places the
+cause on the host firewall, not the network.
 
-If UPnP eventing or SSDP is ever used as a fast path, detect the silent case — *subscription
-accepted, zero events within N seconds* — and tell the user to check their host firewall before
-they start suspecting their network.
+**So x2rock is outbound-only, with two exceptions.** Both bind a fixed TCP port, 3401 by default, so
+a host firewall needs one rule written once, and both are short-lived and opt-in:
 
-## Connection lifecycle and network mobility (design-critical)
+- `link --from-household`, which has to receive the player's initial topology event;
+- `say`, whose speaker fetches the generated clip from this machine.
 
-**Decided 2026-08-28: build for the laptop case.** Many users are expected to be road warriors,
-moving between home, office, client sites and hotels. This is not a hardening detail bolted onto an
-always-on design — it changes the shape of the program.
+Anything that ever relies on inbound traffic should detect the silent case (accepted, then nothing)
+and name the host firewall.
 
-### The speaker being absent is the normal state, not an error
+## Discovery and network identity
 
-A road warrior's laptop is on a network with no reachable Sonos most of the time. Treat "no player"
-as a first-class steady state:
+1. **Steady state:** remembered players per network, connected outbound on :1443. No scan.
+2. **Bootstrap:** `x2rock discover` runs a TCP connect sweep of port 1443 on the local subnet, a
+   rolling window, every responder kept. A network wider than /24 sweeps only the local /24 and
+   says so. One reachable player per household is enough: `groups:1 getGroups` returns every player's
+   `websocketUrl`, `householdId` and capabilities.
+3. **Never scan a network nobody chose.** An unrecognised network gets `unregistered_network` and no
+   scan. The only automatic rescan is the one `connect` runs when a *known* network's remembered
+   players all stop answering. On a first run the message says nothing has been discovered yet, and
+   elsewhere that this is normal away from home. Neither message carries `discover` as a `fix`.
+4. **`--ip` registers too.** `x2rock --ip <speaker> <command>` remembers that household for the
+   current network, which is the way past a subnet the sweep cannot see (another VLAN, a guest
+   network, a VPN).
 
-- MPRIS should **withdraw its bus name** when no player is reachable, rather than advertise a
-  player that cannot be controlled. A dead media widget in the Omarchy bar is worse than no widget.
-- Reconnect with **capped exponential backoff** — retrying every few seconds forever on a network
-  that has no Sonos wastes battery and fills logs. Reset the backoff on a network change, not on a
-  timer. (Done since 2026-10-08: `wait_to_retry` sits out the backoff unless a
-  network change or a resume arrives, which retries at once from the floor. Before, the signal was
-  read only once connected, so a return early in a 60s wait sat out nearly all of it.)
-- Never treat absence as a failure worth reporting loudly. Log it once, quietly.
+**Network identity is the default gateway's MAC** (from `/proc/net/route`, then the neighbour
+table). It is stable per site, where SSIDs and RFC 1918 subnets collide. A default route whose
+gateway is `0.0.0.0` or that lacks `RTF_GATEWAY` (a dummy or VPN interface) is skipped.
 
-### Identify the network before deciding what to try
+**A household is a property of the players.** `householdId` is stable unless speakers move networks.
+`forget_superseded_households` drops a remembered household only when *every* remembered address now
+answers for a different id (a reset, a replacement, DHCP reuse). A room name picks its household. A
+network with two households needs `--household` (or `X2ROCK_HOUSEHOLD`) only for a command that names
+no room, such as the daemon, or for a room name both share. `x2rock households` always scans, so it
+is offered rather than run, like `discover`.
 
-Config should not hold "the speaker IP" but **known locations**, each with a household ID, its
-players, and their last-known addresses. On any network change, work out where you are first:
+Away from every household, commands that need a speaker fail at once with `unregistered_network`.
+Bookmarks, the radio directory, `accounts`, `service status`, `desktop status` and `art` still work.
+Offline, a household is resolved from remembered room names (`State::household_rooms`).
 
-- **Primary fingerprint: the default gateway's MAC address** (`ip neigh show <gateway>`). It is
-  stable per site and does not collide the way SSIDs and RFC1918 subnets do — `192.168.1.0/24` and
-  an SSID of `guest` are shared by half the planet. The gateway is read from `/proc/net/route`, and
-  since 2026-09-19 a default route whose gateway is `0.0.0.0` or that lacks `RTF_GATEWAY` (a `dummy`
-  or VPN interface listed first) is skipped rather than fingerprinting nothing.
-- **Secondary: SSID / NetworkManager connection UUID.** NetworkManager is present on Omarchy
-  (`nmcli` available, service active) and its D-Bus signals are the right change trigger.
-- On an unrecognised network: try nothing, advertise nothing, wait.
+## Connection lifecycle and network mobility
 
-### Wake and network-change handling
+Built for a laptop that moves between home, office and hotels, where no speaker is the normal state.
 
-- **Subscribe to `PrepareForSleep` on `org.freedesktop.login1`.** It is present on Omarchy. (Built
-  2026-08-28. The original claim that the MPRIS `zbus` connection makes this nearly free was
-  wrong — logind is on the *system* bus and MPRIS on the session bus, so it needs its own.)
-- **A frozen socket is not a closed socket.** On resume the WebSocket is typically a zombie: writes
-  succeed into a dead TCP session and nothing surfaces until a long timeout. Do not wait for the
-  socket to report failure — treat wake as *assume dead, reconnect from scratch*.
-- **Network changes happen while awake too** — docking, VPN up/down, AP roaming. NetworkManager
-  signals matter at least as much as sleep signals.
-- **Re-resolve the address on reconnect.** A cached IP is a hint, not a fact; DHCP leases lapse.
-- **Missed events are not recoverable and do not need to be.** Subscriptions do not survive a
-  reconnect, and there is no replay. Re-`subscribe`, take the fresh state snapshot as truth, and
-  discard pre-sleep state rather than merging it.
+- **No player is a steady state, not an error.** The daemon withdraws its MPRIS names, logs once and
+  retries with **capped exponential backoff**. A network change or a resume resets the backoff and
+  retries at once (`wait_to_retry`).
+- **Wake means assume dead.** A socket frozen across suspend accepts writes into a dead TCP session.
+  On resume, reconnect from scratch. logind's `PrepareForSleep` and NetworkManager are on the
+  *system* bus, so the daemon holds separate connections for them. Both are optional; without them
+  the keepalive finds a dead socket a little later.
+- **NetworkManager:** fire on the *transition into* connected (it climbs `CONNECTED_LOCAL`, `SITE`,
+  `GLOBAL`), and watch `PrimaryConnection`, since docking or a VPN changes the route without changing
+  the state. Losing the network is not a reason to act; only arrival is. A zbus `PropertyStream`
+  opens by yielding its current value, so compare rather than count.
+- **Re-resolve addresses on reconnect.** A cached IP is a hint.
+- **Guest networks with client isolation** block the WebSocket entirely. Fail fast and quietly.
+- **A firmware update** looks to the daemon like the speaker switched off for about 85 seconds.
 
-### Do not scan networks you do not know
+**The daemon's log stays quiet.** `StatusLog` coalesces an unchanged state on a key that includes the
+network fingerprint, re-logs once an hour with a count, and resets after a successful connect.
+`X2ROCK_LOG_VERBOSE` restores every retry; `X2ROCK_LOG_EVENTS` logs every event body.
 
-The bootstrap TCP scan is acceptable on a network the user has identified as theirs. Running it
-automatically on hotel, airport, conference or client-site WiFi is genuinely bad behaviour and is
-exactly the traffic corporate security gear is tuned to flag. So:
+## Rule: talking to a service never enters the daemon
 
-- **Never scan automatically on an unrecognised network.** Cached addresses only.
-- Scanning happens on **explicit `x2rock discover`**, single-port, or as the one rescan `connect`
-  runs when a *known* network's remembered players stop answering.
-- Once a location is known, `getGroups` keeps its player list fresh without ever scanning again.
+Losing a name lookup must never cost the household its transport or its volume. The daemon speaks
+only to the LAN: the WebSocket on :1443, and UPnP and cover art on :1400. Every call to a music
+service, the radio directory, a speech provider or an image CDN is a CLI command, and the widget runs
+each as its own `Process`, so a failure is a line in one picker rather than a fault in the bar.
+The check is structural: nothing reachable from `daemon.rs` or `mpris.rs` builds an internet request.
 
-### Expect guest networks to block this outright
+**One exception:** a household with Authentication on needs its Sonos sign-in refreshed about once a
+day, and a daemon that could not refresh would lose control of that household. So the daemon makes
+that one call to Sonos's cloud. A household with Authentication off never has a sign-in to refresh.
 
-Hotel and guest WiFi very commonly enable client isolation, which blocks client-to-client traffic
-entirely — the WebSocket will not connect at all, and nothing can fix that from this side. Fail
-fast and quietly. (Note that the *dev* network, corporate Fortinet WiFi, does **not** do this; the
-failures seen during investigation were the local host firewall. See above.)
+What the split implies for front ends: state reaches them over MPRIS from the daemon's events, and
+anything MPRIS cannot express shells out to the CLI (relative volume, member volume, grouping, the
+TV input, queue edits, ratings). The CLI may fail bluntly with an error code; the widget presents
+the failure gracefully. Its pattern is a `Process` per kind of call, a non-zero exit shown as a
+status line, empty stdout treated as failure rather than as an empty list, and existing rows kept
+while a refresh runs.
 
-## Discovery
+## Volume
 
-Multicast is not dependable **here**, and the cause is this host's firewall rather than the network
-or the speakers - so do not build on it, and do not carry the conclusion to a platform without that
-firewall. See "Re-derive, do not inherit: discovery" under the Android TV porting notes.
+Sonos's own rules ([docs.sonos.com/docs/volume](https://docs.sonos.com/docs/volume)), followed:
 
-1. **Steady state**: cached player IP + household ID in config; connect outbound to `:1443`.
-   No firewall interaction at all.
-2. **First run / bootstrap**: TCP connect-scan on **port 1443 only**. Outbound, so it works
-   through default-deny. Every responder is kept, not just the first, because a network can carry
-   more than one household (an office running two systems; see `x2rock households`).
-3. **Then fan out**: `groups:1 getGroups` returns **every** player's own `websocketUrl`,
-   `householdId` and capabilities, so one reachable player per household is enough. Players are
-   grouped by `householdId`; a network with several households needs `--household` only when no
-   room name already picks one.
-4. **SSDP as an opportunistic fast path** was considered and never built; the scan is the only
-   mechanism.
-
-**What a household *is*, from Sonos's own Control API docs** (supplied 2026-09-13; dated because it
-is an external claim that can rot): a set of players on one network, defined cloud-side as being
-"under a user account," identified by a stable `householdId` that "only changes if speakers are
-physically moved to a completely different network"; one account can hold several (a home and a
-vacation home), and an app "must ask the user to select a `householdId` if multiple exist before
-sending playback or group commands." Three things this settles for x2rock:
-
-- **The identity is a property of the players, not the account.** x2rock reads the same stable
-  `householdId` off a player over the LAN ([`Connection::household_id`]) with no account at all. The
-  "under a user account" is Sonos's framing; identifying the household needs none of it - which is
-  the axiom, confirmed from Sonos's side.
-- **x2rock already does the "must," and asks less.** The room a command names selects the household
-  in every case but two households sharing a room name, so `-r Studio play` needs no
-  `--household`; the selector and `multiple_households` are the collision-only fallback. See
-  "Addressing a household".
-- **The stability claim underpins `forget_superseded_households` and does not contradict it.** A
-  stable id that changes only on a network move means the forget rule's trigger - *every* remembered
-  address now answering for a *different* id - is not an id "changing" but a **new** household
-  replacing the old one at those addresses (a factory reset, a replacement, DHCP reuse). Speakers
-  that genuinely moved networks stop answering here and stay remembered, which is the conservative
-  branch. The doc reinforces the rule.
-
-Keep any scan to an explicitly-invoked `x2rock discover`, single-port and rate-limited — an
-aggressive full-subnet sweep on every launch is poor manners on an office network and can register
-as reconnaissance on corporate gear.
-
-## Language & structure
-
-- **Rust**, single crate (not a workspace) — this is a from-scratch project, not one preserving a
-  reusable-core split for a second frontend that no longer exists here.
-- Layout as built:
-  ```
-  x2rock/
-    Cargo.toml
-    src/
-      main.rs        # `main` and `run`: parse, resolve the room, dispatch into commands/
-      cli.rs         # the clap tree: `Cli`, `Command`, every subcommand enum - the `--help` text
-      commands/      # one file per command family; `run` calls in, nothing here parses
-        mod.rs       # fan-out over rooms, and the small helpers every family shares
-        admin.rs     # `skill`, `service`, `desktop`, `completions`: installing x2rock itself
-        content.rs   # favorites, playlists, bookmarks, the queue, `play-item`/`queue-item`
-        household.rs # `discover`, `households`, `system`, `update`, `group`/`party`/`ungroup`
-        playback.rs  # transport, and confirming that `play` actually started
-        raw.rs       # the `raw` probe, over both wires
-        services.rs  # `link`/`unlink`/`accounts`, `search`, `browse`, `rate`
-        speaker.rs   # per-speaker settings, sleep/snooze, alarms, the soundbar's TV input
-        status.rs    # `status`, `now`, `rooms`: the snapshot and its JSON shape
-        stream.rs    # `play-url`, `stations`, `chime`/`notify`, and the stream session
-      session.rs     # command -> live connection + known household; shared by CLI and daemon
-      discover.rs    # finding players: outbound TCP sweep of the local subnet, no multicast
-      netid.rs       # identifying the attached network, so cached players are scoped to it
-      restart.rs     # logind and NetworkManager: when to drop everything and reconnect
-      state.rs       # $XDG_STATE_HOME/x2rock/: which players live on which network
-      store.rs       # the state directory, and the rules every file in it follows
-      daemon.rs      # `x2rock daemon`: one MPRIS2 player per group, kept current by events
-      mpris.rs       # the MPRIS2 server itself
-      hint.rs        # machine-actionable errors: a stable `code` and a runnable `fix`
-      catalogue.rs   # the music-service catalogue, cached on disk
-      credentials.rs # the one secret kept: a music service's link token
-      bookmarks.rs   # `keep`/`bookmark`: things worth playing again, by id
-      streams.rs     # the last direct stream started in a room, so `play` can resume it
-      stations.rs    # the Radio Browser directory, deliberately not Sonos's
-      completions.rs # shell completions
-      service.rs     # what `service install` writes: the unit, and whether a file on disk is ours
-      tui/           # `x2rock tui`: the household on one terminal screen, read off the daemon
-      sonos/
-        mod.rs
-        local.rs     # LAN transport: WebSocket straight to a player, no cloud, no OAuth
-        api.rs       # Control API commands as methods on a connection
-        proto.rs     # Control API wire types
-        upnp.rs      # UPnP/SOAP on port 1400 (SOAP calls only, never GENA)
-        http.rs      # the one HTTP client, plain to a player or TLS to a service
-        smapi.rs     # SMAPI: searching, browsing and linking a music service directly
-        plex.rs      # Plex's own PIN link flow
-    quickshell/x2rock.sonos/   # Omarchy Quattro bar widget: BarWidget.qml, CoverArt.qml,
-                               # manifest.json, and a README of its shell.json keys
-    systemd/x2rock.service     # user unit for the daemon, beside logging.conf.example
-                               # (a drop-in carrying the two diagnostic log flags)
-  ```
-  The one split that was worth having up front is the transport boundary (`sonos/local.rs` vs
-  `sonos/api.rs`), because it is what contains the Authentication-setting risk noted above. The
-  rest was split only as files actually got unwieldy, per the project's "no unnecessary
-  abstractions" preference. `main.rs` was that file by 2026-09-16 - 9,500 lines, a third of them
-  one `run` function - and was split into `cli.rs` and `commands/` as a pure move: every help
-  page, completion script and JSON snapshot was captured before and diffed after, byte-identical.
-
-## What this was actually tested on (rewritten 2026-09-05 from the household itself)
-
-Read off `/status/zp`, `/xml/device_description.xml` and `GetZoneGroupState`
-rather than from memory, because the earlier version of this section was wrong
-in a way that mattered: it said "three Sonos Beams and a One SL on firmware
-95.1-78010, and an IKEA SYMFONISK Bookshelf on 86.7-77050", which undercounted
-the household and missed **every bonded set in it**. Eleven players, five rooms:
-
-| Room | Players | Models | Firmware |
-|---|---|---|---|
-| Kitchen | 1 | One SL (S22) | 96.1-79270 |
-| Living Room | 4 | Beam (S14) + **Sub** + two Play:1 (S12) surrounds | 96.1 / **86.8** |
-| Bedroom | 3 | Beam (S14) + two One SL (S22) surrounds | 96.1-79270 |
-| Guest TV | 1 | Beam (S14) | 96.1-79270 |
-| Dining Room | 2 | two SYMFONISK Bookshelf (S21), **stereo pair** | 86.8-78270 |
-
-So the household has a genuine 5.1 home theatre (Living Room), a second bonded
-home-theatre set without a Sub (Bedroom), and a stereo pair (Dining Room) —
-three bonded configurations the file previously did not know existed. What
-"verified" means in this file is *these* devices, which is a real limit on some
-of them.
-
-**The firmware split is by hardware platform, not by vendor.** The previous
-version of this section read the SYMFONISK's much older version string as a
-third-party quirk. It is not: Sub, Play:1 and SYMFONISK Bookshelf all carry
-**86.8-78270**, while Beam and One SL carry **96.1-79270** — and Living Room
-runs both at once, a 96.1 Beam coordinating 86.8 satellites. The older line is a
-hardware generation, and a first-party Sub sits on it just as squarely as the
-IKEA speaker does. The useful conclusion is unchanged and now better founded:
-nothing here depends on a player being first-party or current, and a single
-*room* may not be on a single firmware.
-
-Two gaps are known and specific rather than general:
-
-- **No height channels have ever been seen, and this household cannot ever see
-  them.** `HomeTheaterFormat` handles them and would render `5.1.2`, but all
-  three soundbars are **Beam (S14), which is the first-generation Beam and has
-  no Dolby Atmos support at all** — so this is not "no Atmos content has been
-  played yet", it is a hardware ceiling. Feeding it Atmos content cannot settle
-  the branch. An Arc, or a Beam gen 2 (S50), is required. Recorded this
-  precisely because "an Arc would settle it" read as a content problem.
-- **No player with analog line-in.** `playback:1 loadLineIn` was found to refuse
-  a Beam - "player does not have line-in" - which is why TV input goes over UPnP.
-  A Port or an Amp would very likely accept that same command. This is only
-  about `loadLineIn` (analog line-in), though - switching a *soundbar* to its TV
-  input over the Control API **does** work, via `homeTheater:1
-  loadHomeTheaterPlayback` (see "Soundbars: the TV input", corrected 2026-09-05).
-  So the honest statement is narrow: `loadLineIn` refuses on a player that has no
-  analog line-in - not "the Control API cannot switch inputs", which is false.
-
-## Volume handling (Sonos's own rules — follow them)
-
-Volume is the single most bug-prone area of any Sonos client: a group volume change makes every
-member emit an event, ordering is not guaranteed, and naive handling produces event storms. This
-is a documented, well-known failure mode — the 2024 Sonos app shipped it. Per
-`docs.sonos.com/docs/volume`:
-
-- **Never send a volume command in response to a volume event.** This is the feedback loop.
-- **Batch commands** — no more than roughly one per 100ms.
-- **Always use group volume commands for groups.** Never fan out per-player commands; doing so
-  destroys the user's carefully-set relative levels between speakers. x2rock breaks this only when
-  changing the balance *is* the request: a member's own slider (`vol --player`), `vol --each`, and
+- **Never send a volume command in response to a volume event.** That is the feedback loop.
+- **About one command per 100 ms at most.**
+- **Group volume for groups.** Per-player commands would destroy the relative levels a person set.
+  x2rock fans out only when balance is the request: `vol --player`, `vol --each` and
   `vol normalize`.
-- **`setVolume` for controls with known state** (a slider); **`setRelativeVolume` for stateless
-  controls** (buttons).
+- **`setVolume` for controls with known state (a slider), `setRelativeVolume` for stateless controls**
+  (buttons, a scroll gesture, MPRIS volume steps, the TUI's keys). Never read-modify-write.
 
-That last rule maps directly onto this project's integration points: a Quickshell scroll-to-adjust
-gesture and MPRIS volume steps are *stateless increments*, so they must use `setRelativeVolume`,
-not read-modify-write.
+Measured on a One SL:
 
-**Measured 2026-08-28 on the One SL — the player enforces its own coalescing:**
+- **The player coalesces.** A command is applied in about 21 ms. A second command within about
+  260 ms is deferred until that window closes, and `getVolume` returns the old value meanwhile. So
+  the CLI reports the requested change, never a read straight after a write.
+- **Both `setVolume` and `setRelativeVolume` unmute the group.** The volume bridge depends on this;
+  re-checked on hardware 2026-10-13.
+- **A group's volume is derived from its members'.** Rooms at 0 and 14 report 7, so the group slider
+  cannot reach one room.
+- **`playerVolume:1` is player-scoped**, and only that player answers it. `getVolume` returns
+  `{volume, muted, fixed}` in both namespaces.
+- **Mute is group-only in x2rock.** A single muted member is a puzzle to find later.
+- **The volume limit** (the app's Volume Limit) is `settings:1 volumeScalingFactor`, 0.0-1.0. It is
+  the one field `setPlayerSettings` accepts from this connection. It scales rather than clamps.
+  `vol --limit` sets it per speaker.
+- **An alarm sets a room's volume lastingly**, ramping to it over about ten seconds.
 
-- A single volume command is applied and readable within ~21ms of its ack.
-- A second volume command arriving within roughly **260ms** of the first is *deferred* until that
-  window closes. During the window, `getVolume` returns the pre-change value even though the
-  command was acked as successful. Identical behaviour whether the commands share a connection
-  or each opens a fresh one.
-- **Both `setVolume` and `setRelativeVolume` unmute** the group as a side effect.
+### The computer's volume keys, driving a room
 
-Consequences: a read straight after a write is unreliable and must never be used to report a
-result — the CLI computes the outcome from the requested change instead. A scroll-wheel burst from
-a bar widget will be coalesced by the player into one settled `groupVolume` event ~260ms later;
-the daemon should surface *that* event and nothing else, and per the rule above must never answer
-it with a further command.
+`scripts/follow-sink.sh` keeps one room's volume and mute in step with the desktop's default sink.
+It is a script, not a daemon feature, so the daemon does not supervise a child process or grow a
+policy layer for something few people want. It waits on `pactl subscribe` (pipewire-pulse or
+PulseAudio), re-reads the sink on each sink or server event, and sends `x2rock -r <room> vol N` only
+when the mapped level changes; the sink's 100 % maps to a cap, 50 by default. It runs one way only:
+the speaker never moves the computer.
 
-## Grouping over the local API (verified 2026-08-29)
+Because a volume write unmutes, the bridge defers volume while the sink is muted and applies the
+latest level on unmute. Only successful commands update its dedupe state, so a failed write is
+retried on the next event. `python3 scripts/test-follow-sink.py` runs it against a fake `pactl` and a
+fake CLI.
 
-Probed for the contract first, then exercised on real rooms.
+## Grouping over the local API
 
-- **`modifyGroupMembers` is the right primitive in both directions**, not `createGroup`. It is
-  group-scoped, takes `playerIdsToAdd` and `playerIdsToRemove`, keeps the group and whatever it is
-  playing, and moves only the players named. Removing a player leaves it as a group of its own, so
-  "ungroup" needs no separate command. `createGroup` exists and wants `playerIds`, but builds a new
-  group and so decides the coordinator itself.
-- **It answers with the resulting group** (`groupInfo`), which is what lets the CLI print what
-  actually happened rather than assuming its request took effect.
-- **Empty on both sides is a safe no-op** that still returns the group - useful for probing, and it
-  means a redundant request costs nothing.
-- **`evictPlayers` does not exist** on this firmware: `ERROR_UNSUPPORTED_COMMAND`.
-- **A group is named after its coordinator and renamed as it grows** - "Dining Room" becomes
-  "Dining Room + 2". So a room must be resolved through *players*, never group names: the group
-  name is not stable, and the player name is.
-- **A room keeps its own queue across grouping.** Joining shows it the group's queue; leaving gives
-  it its own back. Confirmed deliberately (2026-08-29) after a session of regrouping left a room
-  empty and cast doubt on it: Kitchen with six tracks joined a group of three, read those three
-  while grouped, and had its own six again on leaving.
-- **What leaving does not restore is the position.** The room comes back `IDLE` at the first track
-  rather than paused where it left off.
-- **Removing the *coordinator* from a group hands its queue to whoever is left, and costs them
-  theirs.** Reproduced deliberately: Kitchen holding six tracks, Dining Room holding three; add
-  Dining Room to Kitchen so Kitchen coordinates, then tell Kitchen to leave. Kitchen departs with
-  its own six intact, and Dining Room — the room that stayed — comes out holding a copy of those
-  six, its own three gone.
+- **`modifyGroupMembers` is the primitive in both directions** (`playerIdsToAdd`,
+  `playerIdsToRemove`). It keeps the group and what it plays, moves only the named players, and
+  answers with the resulting group, whose member order differs from `getGroups`. An empty request is
+  a no-op that still returns the group. `createGroup` builds a new group and picks the coordinator
+  itself. `evictPlayers` is unsupported.
+- **A group is named after its coordinator and renamed as it grows** ("Dining Room + 2"), so rooms
+  resolve through players, never group names. `-r` with any member addresses the group; `--player`
+  reaches one speaker inside it.
+- **A room keeps its own queue across grouping**, and gets it back on leaving, at the first track
+  and `IDLE`.
+- **Removing the coordinator hands its queue to whoever stays, and their own queue is lost.** That
+  is Sonos's behaviour and the app allows it, so it is documented rather than prevented. Scenes are
+  built never to do it.
+- **A soundbar on its TV input can stall a group change** for about 20 seconds. A change the
+  coordinator does not answer in time is checked against a fresh `getGroups` and reported as done
+  with a note when it landed (`household::change_group`).
 
-  Worth stating plainly because the damage lands where nobody looks for it: the room that *left* is
-  fine, and the room that *stayed put* is the one whose queue was replaced. It also explains a
-  household that ended up with two rooms holding identical copies of a third's queue while the
-  third was empty, which had looked like a queue being lost at random.
+### Bonded sets
 
-  This is Sonos's own behaviour, not something x2rock introduces, and the Sonos app permits the
-  same move — so it is documented rather than prevented. But any UI that lists a group's members
-  with a "leave" beside each, as the bar widget's grouping panel does, makes it a single click.
+A stereo pair is two `ZoneGroupMember`s sharing a `ChannelMapSet`, the second `Invisible="1"`. A
+home-theatre bond is one member with `HTSatChanMapSet` and a `<Satellite>` per Sub or surround.
+`rooms` hides both. The firmware keeps a bond in lockstep: volume and tone on the visible player
+reach every member. Satellites do not answer `GetBass`. A room can mix firmware generations (a 97.1
+Beam with 86.x satellites), and `update` reports only the coordinator, which is a known blind spot.
 
-## Portability, and where the Omarchy dependency actually is
+`zones:1` adds what the topology lacks: a `disconnected` flag per bonded member and its `gainTrimDB`,
+shown by `system`.
 
-Recorded 2026-08-29, because "targets Omarchy" reads as a harder constraint than it is.
+### Scenes
 
-The Omarchy dependency is the bar widget and nothing else. `src/` contains no reference to Omarchy,
-Quickshell or Hyprland; the CLI and daemon are ordinary Linux programs. What they do rely on is
-generic: systemd for the user service, a session D-Bus for MPRIS, `/proc/net/arp` and the interface
-netmask for discovery, and plain outbound TCP for both transports.
+`scene save/apply` (`src/commands/scene.rs`, `scenes.json` per household, rooms by player id) keeps
+the groups, each room's volume, each group's mute and an optional soundtrack (a favorite or a
+bookmark). Applying never removes a coordinator from its own group: `next_step` plans one
+`modifyGroupMembers` at a time against a fresh `getGroups`, detaching a wanted coordinator first,
+and changes only what differs. Mute is set after levels, because a level unmutes. Multi-room apply
+has not yet run on real speakers.
 
-logind and NetworkManager are used but not required — each is attempted separately and a missing
-one costs only its own speed, which was built that way for laptops and turns out to be what makes
-a machine without either work at all.
+## Soundbars and the TV input
 
-Two things that would trip a non-Omarchy install, both worth stating rather than discovering:
-`edition = "2024"` needs Rust 1.88 and `File::lock` needs 1.89, which is newer than several
-distributions package; and the systemd unit is `WantedBy=graphical-session.target`, which never
-fires on a headless machine.
+- **`getGroups` capabilities say which players are soundbars:** `HT_PLAYBACK` and `HDMI`. A
+  soundbar's HDMI belongs to the player, not the group, so "does this room have a TV" is
+  `any(members)`.
+- **`x2rock tv` hands the group to the TV over UPnP:** `SetAVTransportURI` to
+  `x-sonos-htastream:<playerId>:spdif` (which covers ARC as well as optical), sent to the
+  coordinator. The soundbar then takes over coordination, and for about 13 seconds neither player
+  answers. The original request never returns, so the switch is waited out (14-20 s) and then
+  reported. Sent to the soundbar directly, the same call makes the soundbar leave its group instead.
+- **`homeTheater:1 loadHomeTheaterPlayback`** (player-scoped, no parameters) switches a soundbar to
+  TV over the Control API, but for the bar alone. It is the fallback only when UPnP is off and the
+  bar's group is just the bar. `playback:1 loadLineIn` is analog line-in and refuses a soundbar.
+- **Leaving TV is any transport change**, even a failed `loadFavorite`. `pause` on TV input is
+  `ERROR_PLAYBACK_NO_CONTENT`.
+- **What the TV sends arrives as a push**, in `playbackMetadata:1` as `container.htInputFormat`:
+  `numGroundChannels`, `numLFEChannels` (an explicit rename is needed, since camelCase would derive
+  `numLfeChannels`), `numHeightChannels` and `streamDescription`. The channel counts matter more
+  than the codec name: a degraded source keeps its name and drops channels. A dark TV, or an
+  unplugged HDMI, reads `No Signal`. `GetPositionInfo` answers `NOT_IMPLEMENTED` on an HT stream.
+- **Ask `x2rock:onTvInput`, never `inputFormat`.** It is the presence of `htInputFormat`; the format
+  string can be empty while on TV.
+- **`hdmi:1`** (player-scoped `subscribe`) reports `connection` (`NO_CONNECTION` when nothing is
+  plugged in, which is what "TV Audio [Unavailable]" means), `tvPowerStatus`, and ARC/eARC/CEC state.
+- **`homeTheater:1 setTvPowerState`** (`ON`/`STANDBY`) is fire-and-forget, unreadable, and was
+  ignored by a TV with the Beam on its ARC port. It stays `raw`-only, so x2rock never reports a TV
+  off that is still on.
+- **Night sound and speech enhancement** read through `settings:1 getPlayerSettings` and write over
+  UPnP `SetEQ`. Nothing pushes their changes: `homeTheater:1` and `settings:1` accept subscriptions
+  and send nothing, and the app sees them through GENA. So clients re-read after a write.
 
-This is not a promise to support other desktops. It is a note that the CLI and the MPRIS daemon
-cost nothing to use elsewhere, and that MPRIS is where most of the widget's value already lives -
-`playerctl`, Waybar, GNOME and KDE all drive it without knowing what Sonos is.
+### `DialogLevel`
 
-The platform notes that used to follow this section - the Omarchy 4.0 "Quattro" plugin
-architecture, and the Quickshell and QML facts learned wiring the volume sliders and the favorites
-picker - moved to the widget's own README, `quickshell/x2rock.sonos/README.md`, under "Facts
-learned building this" (2026-09-23). They are facts about the one component that has a desktop
-dependency, and belong with it.
+On a first-generation Beam, `DialogLevel` is the speech-enhancement switch, written `0` or `1`, and
+the app shows a plain toggle. Newer soundbars reportedly take levels 1-4 and move on/off to
+`SpeechEnhanceEnabled`. That type answers `0` on a Beam while enhancement is on, so the split is not
+operative there. The SCPD gives no range for either, so the player will not say what a level above 1
+means. Untested: a write above 1 needs hardware not present.
 
-## Search, as built (2026-08-31)
+## Tone, EQ and TruePlay
 
-`x2rock search` exists. `x2rock search` alone lists what can be searched, `-s <service>` alone
-lists that service's categories, and a term searches. `--play N` plays the Nth hit.
+Writes are UPnP `RenderingControl:1` only; `setPlayerSettings` refuses them. Reads can come from
+either side: `settings:1 getPlayerSettings` carries `eq` (bass, treble, loudness) and `homeTheater`
+(night, dialog).
 
-```
-$ x2rock search
-24 of 108 services can be searched:
-  ... Hype Machine, SomaFM Radio, TuneIn, ...
+- **Bass and treble are -10 to 10.** Both are validated before either is sent, so a rejected treble
+  never leaves an accepted bass behind.
+- **`SetLoudness`/`GetLoudness` need `Channel=Master`**; omitted, the answer is UPnP 402.
+- **Booleans are `1`/`0` on the wire.** Setters answer with an empty body, so the CLI reads back what
+  the speaker holds.
+- **Tone is per speaker, never per group.** `eq` resolves `--room` to the speaker; `--all` does not
+  apply.
+- **Loudness is on by default.** At low volume, turning it off changes what volume 1 sounds like.
 
-$ x2rock search -s tunein --count 5 jazz
-s249973        stream     Smooth Jazz  Smooth Jazz
-s328971        stream     One Jazz  Jazz
-...
-5 of 93 on TuneIn.
+**The extended set** (`GetEQ`/`SetEQ` with an `EQType`): `SurroundEnable`, `SurroundLevel`,
+`MusicSurroundLevel`, `NightMode` and `DialogLevel` answer only on a soundbar (UPnP 402 elsewhere),
+so they separate a soundbar from a non-soundbar exactly. `SubEnable`, `SubGain`, `SubCrossover`,
+`SubPolarity` and `HeightChannelLevel` answer on every speaker, so their presence means nothing;
+only `SubGain`'s value tracked a real Sub. Capability comes from `getGroups`, not from probing EQ.
 
-$ x2rock search -s somafm --count 5 --play 3 ambient
-Media Room — Deep Space One on SomaFM Radio
-```
+**TruePlay** is `Get/SetRoomCalibrationStatus` (`Enabled`, `Available`). Disabling is a clean,
+reversible toggle, and the stored curve survives it. There is no action to list or delete a curve.
+Whether `Available` means "a curve is stored" or "the model supports one" cannot be told from the
+LAN; it read 1 on every player, including a Sub. x2rock reads both booleans, disables, and refuses
+to enable where nothing is available. The case for the disable: a speaker moved between rooms keeps
+applying the curve measured for the room it left.
 
-### How it is put together
+## The queue
 
-- **`sonos/http.rs`** — the HTTP/1.1 client, lifted out of `upnp.rs` and given TLS. One client for
-  both directions: plain to a player on 1400, TLS to a service on 443. `tokio-rustls` and
-  `webpki-roots` were **already in the lock file** via `tokio-tungstenite`, so this cost no new
-  third-party crate. Timeouts belong to the caller, because 8s against a player on the same switch
-  and 6s against a service in another country are different budgets. It sends a `User-Agent` and
-  decodes a gzip body; both were added on 2026-09-17 and both are load-bearing — see "Deezer was
-  never broken; this client was".
-- **`sonos/smapi.rs`** — the SMAPI client. Parses the descriptor list, reads categories out of the
-  manifest and presentation map, and does `search` and `getMediaURI`.
-- **`upnp.rs::list_services`** — `ListAvailableServices`, the one LAN call search needs.
-- **`commands/services.rs`** — the `search` command, and nothing else touches any of it.
+- **Read:** `ContentDirectory Browse Q:0`, which also returns the queue's `UpdateID`.
+- **Navigate:** `AVTransport Seek` with `Unit=TRACK_NR` (711 is out of range, 701 means the queue is
+  not the current source). The CLI points the group at `x-rincon-queue:` first, since after a stream
+  the queue is not current.
+- **Mutate:** `AVTransport:1` carries everything: `AddURIToQueue`, `AddMultipleURIsToQueue`,
+  `ReorderTracksInQueue`, `RemoveTrackFromQueue`, `RemoveTrackRangeFromQueue` (native, with
+  `StartingIndex` + `NumberOfTracks`), `RemoveAllTracksFromQueue`, `SaveQueue`. The argument is
+  `UpdateID`, not `UpdatedID`.
+- **`UpdateID` is enforced.** A stale one answers 1028 and changes nothing. `queue --json` reports
+  `version`, and `remove`/`move --at VERSION` quote the version the positions came from; without
+  `--at`, a fresh read is used. `clear` takes no version. Faults: 800 bad position, 1028 stale
+  version, 711 navigation, 402 for `NumberOfTracks: 0`.
+- **Always send metadata.** An `AddURIToQueue` with empty `EnqueuedURIMetaData` is accepted and then
+  blanks the titles of the whole queue.
+- **What can be enqueued is decided by the kind of thing.** Tracks yes; stations and
+  container-of-containers no (800 or 804). For a favorite, the discriminator is the `upnp:class`
+  inside its `r:resMD`, since the favorite's own class is always `sonos-favorite`.
+- **`AddURIToQueue` validates nothing about playability.** It accepts ids that never play, and some
+  live stations it then refuses at play. An empty title on a queued row is the tell.
+- **"Play next"** needs `DesiredFirstTrackNumberEnqueued` set to the current track + 1;
+  `EnqueueAsNext` alone appends.
+- **`AddURIToQueue` returns `FirstTrackNumberEnqueued` and `NumTracksAdded`.** Playing a container
+  seeks to the first, and a refusal after an add removes the whole added range.
+- **`playbackStatus.itemId` is the 1-based queue position** while the queue drives (`"0"` for an
+  empty queue), and an opaque hash otherwise, so `queue_position` is `null` on a stream. It
+  renumbers on edits, so it is a place, not a handle.
+- **Queue changes:** the daemon publishes `x2rock:queueVersion` from the `Q:0` `UpdateID`, fetched
+  off the event loop on each playback event (no polling). A pushed `playbackStatus.queueVersion`
+  exists on recent firmware, but it does not move for edits to a queue that is not the room's source,
+  so it cannot replace the `UpdateID`. A silent append to a room still playing something else is seen
+  only on the next playback event.
+- **Rows with no metadata** come from the Sonos app's "Play Now" menu; x2rock prints them as
+  "(no title from the player)".
+- **Saved playlists:** `Browse SQ:` (resources `file:///jffs/settings/savedqueues.rsq#N`).
+  `playlists:1` uses a bare id (`"0"`) where UPnP uses `SQ:0`, and the two are not interchangeable.
+  `loadPlaylist`'s `action` defaults to `APPEND`, so `x2rock playlist` sends `REPLACE`.
+  `SaveQueue` takes `Title` and an `ObjectID` and returns `AssignedObjectID`; ids increment and are
+  not reused.
 
-### Things worth knowing, learned building it
+## Favorites, history and bookmarks
 
-- **One crypto provider, named explicitly, in one place.** `rustls::ClientConfig::builder()` panics
-  at runtime when more than one provider is compiled in and none is installed as the process
-  default. Both `local.rs` and `http.rs` build through `builder_with_provider`, but neither names a
-  backend: they call `sonos::crypto_provider()`, which is the single site that names `ring`. Today
-  only one provider is compiled in, so `builder()` would happen to work — the explicit naming stays
-  because it is what keeps this binary correct the day some dependency re-enables `rustls`'s
-  default `aws_lc_rs` feature and a second provider is silently linked back in. That failure would
-  not show up until the first TLS handshake.
-- **`ring` over `aws-lc-rs`, deliberately.** rustls's default crypto backend is `aws-lc-rs`, a
-  compiled-C BoringSSL fork. It was the single largest crate in the binary (1.3MiB of `.text`
-  plus its `.rodata` tables) and the long pole of a clean build (`cc`/`cmake`). Swapping the
-  backend to `ring` — `default-features = false` on `rustls` and `tokio-rustls` in `Cargo.toml`,
-  plus `ring` named in `sonos::crypto_provider`, the one site in the code that names a backend at
-  all — took the stripped binary from 9.3MB to 7.2MB and a clean build from 2m15s to 1m36s, with
-  identical cipher suites. Those three places are the whole swap, and they have to move together.
-  Two things were knowingly given up. First, `prefer-post-quantum`: `ring` has no ML-KEM, so the
-  client no longer offers X25519MLKEM768 hybrid key exchange, and the internet-facing SMAPI/radio
-  traffic keys classically. The threat that guards against is harvest-now-decrypt-later — an
-  adversary archiving ciphertext today to decrypt with a future quantum computer — and everything
-  this program sends is worthless on that horizon: revocable music-service session tokens and
-  listening metadata, while the LAN path already concedes active MITM by accepting any
-  certificate. Second, P-521 in both of its roles: `ring` advertises no P-521 signature schemes,
-  so a hypothetical P-521 certificate fails the handshake *before* `AcceptAnyCert` is consulted —
-  an opaque alert the "we don't check certs" mental model points away from — and `ring`'s provider
-  also drops the `secp521r1` key-exchange group, so a peer that would only agree on that curve
-  fails at connect for a second, separate reason. Sonos ships RSA-2048, negotiates a P-256 or
-  X25519 group, and public CAs do not issue P-521, so this is a latent edge, recorded here so the
-  alert is recognisable if it ever fires. Checked after the swap against real hardware: three
-  rooms, including one playing a live stream, handshake and answer under `ring`. If x2rock ever
-  carries a durable secret — a payment detail, a cloud password — the post-quantum half of this
-  decision should be revisited; until then the 2MB was buying nothing this program needs.
-- **Certificates are validated here, unlike the player socket.** `local.rs` accepts any
-  certificate on the player socket, and the transport never leaves the LAN, so that is safe - but
-  the *reason* recorded here was wrong, corrected 2026-09-07 from x2rocktv's on-hardware capture.
-  The player cert is **not self-signed and carries no IP**: it is a leaf-only chain, `CN=<MAC>`
-  signed by `CN=Sonos Device Authentication Root CA`, with the root not sent in the handshake, and
-  its SAN is `sonos-<MAC>.local`. So a public trust store rejects it because the *root is absent*,
-  not because it is self-signed, and IP-based verification fails because there is *no IP in the
-  cert* - the name it does carry, `sonos-<MAC>.local` (derivable from the RINCON id: strip
-  `RINCON_` and the trailing `01400`), would verify fine if connected to by that name. x2rock could
-  therefore validate properly - the default hostname verifier via the `.local` name, plus the Sonos
-  root as a trust anchor - and accepts any cert only because on a LAN that already concedes active
-  MITM it buys nothing. A music service, by contrast, is a public host with a real chain, and this
-  call does leave the LAN, so it gets real roots.
+- **`favorites:1 getFavorites`** is household-scoped and needs no login. Only `id` and `name` are
+  reliable. **`loadFavorite`** is group-scoped, takes `favoriteId` in the body, replaces the queue,
+  and resolves everything itself, account included. That makes a favorite the reliable way to play
+  someone's personal content in a household with several accounts.
+- **`FV:2` over UPnP** also lists service shortcuts (`<r:type>shortcut</r:type>`, empty `<res>`),
+  which `getFavorites` rightly omits. Filter on the marker, not on the missing resource.
+- **A favorite's `resource.id` carries the player's container prefix** (`1004206cALBUM:79488223`),
+  which the service does not know. `browse --favorite` strips it from the favorite's own id, or
+  retries without it after a refusal. All-digit ids look the same, so it is never stripped on sight.
+- **`history:1 getHistory`** is the household's recently played list, with ids as
+  `{serviceId, accountId, objectId}`. It is `x2rock recent`, `replay` and the widget's Recently
+  played. With the app's Personalization Services off it answers `ERROR_DISALLOWED_BY_POLICY`, and
+  nothing is recorded retroactively.
+- **Bookmarks** (`bookmarks.json`): `keep` stores the playing item's `universalMusicObjectId`,
+  readable from `playbackMetadata:1` with no credential, and `bookmark` rebuilds the enqueue URI and
+  DIDL. The daemon also records every track with a real id as history (the last 50); `keep` pins an
+  entry. The daemon's write never fails a room: errors are logged and swallowed. It writes once per
+  track. `keep --container` is meaningful only while a real container plays. `keep` never blanks a
+  stored field with an empty one. A bookmark depends on the household still holding an account for
+  the service: the player validates the service at enqueue time (800 if none) and resolves the
+  current registration, so a stored serial is provenance, not a pin.
 
-  **Independently confirmed from x2rock's own side, 2026-09-08** - `openssl s_client` against the
-  office Media Room One SL (a *different* speaker from x2rocktv's capture): one cert sent
-  (leaf-only), `subject=CN=48A6B81853E0`, `issuer=CN=Sonos Device Authentication Root CA`, verify
-  error 20/21 (root not obtainable), RSA-2048 / SHA-256, TLS 1.3, validity Jun 4 → Dec 15 2026
-  (~6 months). The SAN turned out richer than expected and settles the derivation for good: it
-  carries **both** `URI:urn:sonos:udn:RINCON_48A6B81853E001400` and
-  `DNS:sonos-48A6B81853E0.local`, so the RINCON→`.local` transform is provable from the cert
-  itself. It also carries a second hostname, `DNS:sonos-48A6B81853E0.smartspeaker.audio`, and a
-  full `urn:sonos:*` identity block (serial with its check digit, household id, model, generation)
-  - none needed today, but noted in case an identity lookup ever wants a source that needs no call.
-- **No XML declaration, no BOM.** Already recorded, and the client now strips a leading BOM from
-  every response too, because services send one and every XML parser then rejects it as content
-  before the declaration.
-- **Two services, two shapes.** TuneIn's categories are `stations`/`podcasts` mapping to
-  `search:station`/`search:show`; SomaFM's differ. The mapped id is what goes on the wire and the
-  plain id is what a person types. Nothing about the code is TuneIn-shaped, which was worth
-  proving with a second service before believing it.
-- **Playing a stream hit uses a session, not the queue.** `createSession` then `loadStreamUrl`,
-  exactly as the sample app documents. Verified that the queue is **untouched**: `x2rock queue`
-  shows the same single track before and after, while the room plays the stream. (On-demand content
-  came later and is enqueued instead; see "The design consequence, built".)
-- **Transport and volume keep working against a session source.** `pause`, `play` and `vol` all
-  act on it normally. Note that pausing a live stream reports `IDLE` rather than `PAUSED` — Sonos
-  stops a live stream rather than holding a position in it, which is correct behaviour and not a
-  bug to chase.
+## Alarms, the sleep timer and the household clock
 
-### The isolation, checked rather than asserted
+**Sleep timer** (`AVTransport`, group-scoped):
 
-The rule above says the daemon must never acquire an internet timeout. That is now structural and
-can be grepped:
+- `ConfigureSleepTimer` takes `HH:MM:SS` only; seconds alone are 402. An empty string cancels.
+- An unset timer reads as an empty element, not zero.
+- It counts from acceptance, so the CLI reads it back.
+- `00:00:00` lingers for about seven seconds while still playing, so `sleep_ms == 0` (about to stop)
+  differs from `null` (no timer).
+- It ends `PAUSED`, keeping the queue position.
 
-```
-$ grep -rln "http::get\|Endpoint::Web" src/     # who can make an HTTP request
-   src/sonos/http.rs
-   src/sonos/plex.rs
-   src/sonos/smapi.rs
-   src/sonos/upnp.rs      # device_description.xml, on the LAN
-   src/stations.rs
-$ grep -n "smapi\|http::get\|Endpoint::Web\|stations" src/daemon.rs src/mpris.rs
-   (nothing)
-```
+**Alarms** (`AlarmClock:1`, household-wide; any player answers; rooms by `RoomUUID`):
 
-Re-run 2026-09-13. `smapi`, `plex` and `stations` are reachable only from CLI commands (`search`,
-`browse`, `link`, `play-item`, `bookmark`'s stream fallback, `stations`). The daemon and the MPRIS
-server cannot reach the internet, so nothing that reaches the widget over MPRIS can be delayed by a
-service.
+- `ListAlarms` returns an escaped XML document, so reading it is two parses.
+- `UpdateAlarm` needs all ten fields, so a toggle is read-modify-write; a partial record is a 402
+  that changes nothing.
+- The field is `StartTime` on read and `StartLocalTime` on write.
+- `Recurrence` accepts `ON_<digits>` day bitmaps beyond the SCPD's four values; x2rock passes it
+  through.
+- `x-rincon-buzzer:0` is the built-in chime. Creating an alarm disabled is how to probe safely.
+- An alarm created within about two minutes of its time misses its scheduling slot and fires late.
+- `DestroyAlarm` does not stop one that is ringing; `pause` does.
+- The duration runs from the scheduled time, and an alarm ends `IDLE`.
+- A ringing alarm shows in `playbackMetadata:1` as a container named `x-rincon-buzzer:0` with
+  `serviceId: "buzzer"`.
 
-### The catalogue cache (added 2026-08-31)
+**The household clock** is what alarm times mean. `GetTimeZone` index `-1` means UTC, so
+`alarms add` prints the household's own clock. `SetTimeZone(Index, AutoAdjustDst)` fixes it.
+`GetTimeZoneRule` returns hex in which the first four digits are a signed offset in minutes,
+POSIX-style (positive is *west*), followed by the DST rule. Indices ascend eastward (0 is UTC-12, 25
+is UTC); index 9 is US Central with DST, and 13 and 14 are US Eastern. x2rock has no command for
+this yet.
 
-`src/catalogue.rs`, cached in `$XDG_STATE_HOME/x2rock/services.json` alongside the player list.
-A cold search cost ~950ms and three round trips before any query ran; warm it is ~420ms.
+## Streams and `play-url`
 
-- **Invalidation is a real signal, not an expiry.** `ListAvailableServices` returns
-  `AvailableServiceListVersion` in the *same reply* as the descriptors — here
-  `RINCON_…:58`, the same 58 that `musicServicesChanged` reports as `availableServicesVersion`.
-  So the cheap LAN call decides whether the expensive internet ones can be skipped, and no TTL had
-  to be guessed. Category lists are keyed to the catalogue version rather than to a service id,
-  because a presentation map can change while an id does not.
-- **A player is wanted, not required.** This is the part worth keeping: the first attempt put the
-  cache behind `session::connect`, so with the household unreachable `x2rock search` failed at the
-  connection and the fallback inside the cache was dead code. A cache that fails whenever the thing
-  it caches is unavailable is not doing its job. `search` now runs before the connection, tolerates
-  its failure, and only `--play` — or a first run with nothing cached — insists on a player:
+### A stream URL needs no service
 
-  ```
-  $ X2ROCK_PLAYER=<unreachable> x2rock search
-  x2rock: no player reached, using the cached catalogue (…Connection refused…)
-  24 of 108 services can be searched: …
+- **`playbackSession:1 createSession` + `loadStreamUrl`** plays a URL alongside the queue, leaving
+  it untouched. That is how radio should behave. `createSession` is group-scoped and needs only
+  `appId` and `appContext`. `loadStreamUrl` needs only `streamUrl`; `stationMetadata.name` is where
+  the room's title comes from. A session outlives the CLI process. Pausing a live stream reports
+  `IDLE` or `PAUSED` according to `canPause`, not according to liveness.
+- **`SetAVTransportURI` with `x-rincon-mp3radio://<url>`** also plays a bare stream, but it
+  *replaces* the room's source. A bare `http(s)://` URI there is refused (714/804), and the player
+  rewrites the scheme to wrap the whole URL (`x-rincon-mp3radio://http://…`).
+- **First audio takes several seconds** in `TRANSITIONING`, which must not be read as failure.
+- **`loadStreamUrl` accepts what it cannot play and then sits `IDLE`.** So `play-url` and
+  `stations --play` wait up to ten seconds for `PLAYING`, then fail with `stream_did_not_play` (or
+  `stream_unverified`). The speaker fetches the URL itself, so it has to be reachable from the
+  speaker. A bare URL omits `stationMetadata.service`; the default title is the host.
+- **ICY now-playing text** reaches the Control API as `streamInfo`, which x2rock exposes as
+  `stream_info` without parsing it ("Artist - Title" is a convention, not a format). It arrives a few
+  seconds after playback starts.
+- **Live versus file.** `loadStreamUrl` treats everything as a station: a finite file (a service's
+  signed FLAC) sits at 0:00 whatever `type` says. So a URL is probed first with a one-byte range
+  request. `shaped_like_file` calls it a file only when there are no `icy-*` headers, an
+  `ETag`/`Last-Modified` is present, and the length is not Icecast's 1073741823 sentinel (Icecast
+  honours ranges on live streams). A playlist `Content-Type` (`mpegurl`, `dash+xml`, `x-scpls`)
+  stays a stream, as does anything unclear (non-2xx, a redirect, a timeout). A file goes to
+  `SetAVTransportURI` with a `musicTrack` DIDL that declares its `audio/*` type (an extensionless URL
+  is otherwise refused with 714). The cost: a file replaces the room's source.
+- **`now --json` fills a file's duration** with one `GetPositionInfo`, only when the Control API gave
+  none and the room is playing or paused. `status` does not, to keep its sweep cheap.
 
-  $ X2ROCK_PLAYER=<unreachable> x2rock search -s tunein --play 1 jazz
-  Error: no player to play it on: …
-  ```
-- **A corrupt cache reads as empty rather than failing.** Unlike the player list, it is wholly
-  regenerable, and refusing to search over a malformed cache file would be the cache causing the
-  outage it exists to prevent.
-- **A name resolves by exact match, then by *unique* prefix.** "radio" matches a dozen services on
-  this catalogue; picking whichever sorted first would be worse than naming the alternatives.
-  An exact match still wins over an ambiguous prefix, so a service actually called "Radio" resolves.
+### `x2rock stations`: a directory that is not Sonos's
 
-### Search in the widget (2026-08-31)
+[Radio Browser](https://www.radio-browser.info) needs no key and no account. x2rock uses
+`url_resolved`, never `url` (often a `.pls`), and renames it to `url` in its JSON. Results are sorted
+by votes with `hidebroken=true`, and nothing is cached on disk. It sends `User-Agent: x2rock/<version>`,
+as the operators ask; `http::AGENT` sends it on every request lacking one. The `hls` flag is reported
+and not acted on: some HLS stations play and some do not. `all.api.radio-browser.info` round-robins,
+so SRV lookup is not implemented.
 
-The favorites picker now searches too. Typing filters the favorites as before; with a term typed
-and nothing sent yet, a **`Search TuneIn`** row appeared at the end of the list (since 2026-09-18 the search sits first
-and runs itself on a pause; see "Superseded claims"), and choosing it
-runs the query. Hits land in the same list under the same delegate.
+## Music services
 
-Four decisions in it:
+### SMAPI, and who is the client
 
-- **One list, not two.** Favorites and hits answer the same question — what should this room play —
-  and a person filtering for something they own should not have to decide in advance whether they
-  own it. This is why `search --json` was changed to emit the *same field names* as
-  `favorites --json` (`name`, `type`, `description`, `art_url`): the widget concatenates rather
-  than translates, and one delegate renders both.
-- **The search row is an action, not a result.** Nothing is sent until it is chosen. Searching on
-  every keystroke would put a network round trip behind typing, which is the behaviour this widget
-  exists to avoid.
-- **A reply belongs to the term that asked for it.** The field can be edited while the subprocess
-  runs, so the term in flight is kept in `pendingTerm` and results are only shown while the typed
-  text still matches `searchedTerm`. Without that, a slow answer surfaces under a different word.
-- **Failure is one line, never an empty list.** A non-zero exit sets a status string shown in the
-  count position at the top right, leaving the rows already on screen up. Empty stdout is a
-  failure; `[]` is a real answer meaning the service has nothing. Copied from the favorites picker,
-  which already had all of this right.
+SMAPI is SOAP 1.1 over HTTPS (`http://www.sonos.com/Services/1.1`). **Sonos is the client and the
+music service is the server.** A controller that wants search does what a player does and calls the
+service directly. The Control API has no content discovery at all. Its published spec (53 paths) and
+the live one agree, and `musicServiceAccounts:1` offers only `match`.
 
-`searchService` in `shell.json` picks the service (default `TuneIn`; `"all"` or `"linked"` makes it a
-merged search across services, since 2026-09-18) and `""` turns the feature
-off, leaving the picker exactly as it was with no network call behind it. `searchCount` sets how
-many hits to ask for.
-
-Playing a hit uses **`x2rock play-item -s <service> <id> --title <name>`**, added for this:
-`search --play N` would re-run the query to find the Nth result, costing a second round trip and
-risking a different item if the service reordered. The widget already holds the id.
-
-**Verified in the widget**, by hand: typed a term, chose the search row, played "Texican Radio T"
-into the Media Room from the picker, and watched it come back through the daemon to MPRIS. The
-whole chain — descriptor list, manifest, presentation map, SMAPI `search`, `getMediaURI`,
-`createSession`, `loadStreamUrl`, MPRIS — now runs from one keystroke in a bar popup.
-
-It took a fix to get there, and the bug is the interesting part. **A status line must not pre-empt
-the list it describes.** `pickerStatus` keyed its visibility off `favoritesStatus !== ""`, and the
-list was bound to `!pickerStatus.visible`. On a household with no favorites that status is
-permanently set, so the entire list was hidden — search row included — and typing did nothing
-visible. The status now shows only when there are genuinely no rows, and what it had to say moves
-to the count line while the list is up, so a real favorites *failure* is still reported rather than
-swallowed by the rows that survived it.
-
-Two things worth carrying forward from that:
-
-- It is the same shape as the cache bug: a fallback that fires whenever the thing it describes is
-  unavailable, taking the working part down with it. Copying the favorites picker's status handling
-  faithfully was right up until a row appeared that did not come from favorites, which broke the
-  assumption the handling was built on.
-- **It could only be caught on this household.** With the home household's 41 favorites,
-  `favoritesStatus` is empty and the bug never appears. The office household — three favorites the
-  Control API does not report — is the worse fixture and therefore the better test.
-
-Driving the widget from a script works through the keyboard and not the pointer. `omarchy-shell
-shell summon x2rock.sonos` opens the room list, and `wtype` keys then drive it (`↓`, then `f`, `q` or
-`g` for a room's panels), which is how the grouping panel's normalize button was tested 2026-09-13.
-What still cannot be scripted is hover and click: Hyprland has no click dispatcher, and a
-`hyprctl dispatch movecursor` warp does not reach the shell as pointer motion.
-
-## YouTube Music without a Sonos account: what the player will hand over (2026-08-31)
-
-Probed while the household played a YouTube Music album started from a phone that is **not signed
-in to a Sonos account**. That detail is the whole point: the service is linked to the *household*,
-and every controller on the LAN inherits it.
-
-### The full MusicObjectId is readable, with no credential
-
-`playbackMetadata:1 getMetadataStatus` returns, for the container and for the current track:
-
-```json
-"id": { "_objectType": "universalMusicObjectId",
-        "accountId": "sn_3", "serviceId": "284",
-        "objectId": "ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H" }
-```
-
-`accountId` is `sn_3` — the same account serial that appears as `sn=3` inside the player's own
-`x-sonosapi-hls-static:` URIs. So the triple that `createSession`'s optional `accountId` and
-`loadCloudQueue`'s `trackMetadata.id` both want is simply *there*, for the asking, on a household
-nobody has logged into.
-
-Also confirmed on the phone: the app's search offers exactly **Sonos Radio** and **YouTube Music**
-— the household's registered set, and the enumeration no API would give up. And its favorites list
-is empty, which is what settled the `FV:2` shortcut question above.
-
-### A service *track* can be enqueued. The 2026-08-29 question is answered.
-
-That entry said `AddURIToQueue` refuses service-backed containers and stations, and that whether an
-individual **track** fares better "was never testable here, since every favorite on this household
-is a container or a station". A phone-started album put one in the queue, so it became testable:
+The chain, no account involved:
 
 ```
-AddURIToQueue
-  EnqueuedURI          x-sonosapi-hls-static:ALkSOiGTPQu2…?sid=284&flags=65544&sn=3
-  EnqueuedURIMetaData  (empty)
-→ FirstTrackNumberEnqueued 2, NumTracksAdded 1, NewQueueLength 2
+MusicServices ListAvailableServices (LAN, unauthenticated)  -> endpoint, Policy Auth, manifest URI, service type
+manifest + presentation map (anonymous CDN)                  -> endpoints, search categories, ratings
+SMAPI search / getMetadata                                   -> items
+SMAPI getMediaURI, or the player resolving an enqueued id    -> playback
 ```
 
-**Accepted.** So the refusal is about the *kind* of content, not about the service: containers and
-stations no, tracks yes. And the URI carries its own account (`sn=3`), which is why no metadata was
-needed for the player to take it.
+**The credentials header:**
 
-### But empty metadata cost the queue its titles
-
-Immediately afterwards, `Browse Q:0` returned **no `dc:title` for either item** — including the
-original, which had shown "Bodies" minutes earlier. Removing the added track did not bring it back,
-and it had not returned several seconds later. `x2rock now` still shows the title correctly, since
-that comes from `playbackMetadata` rather than the queue, so the damage is confined to the queue
-listing.
-
-This is caused by the add, on the evidence — it was the only mutation between the two reads —
-though it cannot now be proved, since the first read is gone. Two things follow:
-
-- The 2026-08-28 insistence that `EnqueuedURIMetaData` must carry the item's `r:resMD` **verbatim**
-  is right, and stronger than it looked: the player accepts an add without it and then has nothing
-  to display, for the whole queue rather than just the new row.
-- A YouTube Music queue item carries **no `r:resMD` at all** — the field the favorites path relies
-  on simply is not there to copy. So "enqueue a service track properly" is not solved by copying
-  what the queue already holds; the next section synthesizes the metadata instead.
-
-### Both open questions closed: it plays, and metadata fixes the titles (2026-08-31)
-
-Re-run with the room at volume 0. A **synthesized** `EnqueuedURIMetaData` — no `r:resMD` to copy,
-so one was built from scratch — with the service's cdudn in it:
-
-```xml
-<item id="00032020ALkSOiGTPQu2…" parentID="-1" restricted="true">
-  <dc:title>Bodies</dc:title><dc:creator>Offset, JID</dc:creator>
-  <upnp:class>object.item.audioItem.musicTrack</upnp:class>
-  <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/"
-    >SA_RINCON72711_X_#Svc72711-0-Token</desc>
-</item>
-```
-
-- **The title came back**: the queue row reads `Bodies — Offset, JID  2:59`. The duration was never
-  sent, so the player resolved it through the cdudn — the metadata is not merely being echoed, it
-  is being *used* to reach the service.
-- **It plays.** `x2rock play 2` moved the cursor to our row and `positionMillis` advanced
-  19004 → 23239 across four seconds. Streaming, not just a hopeful `PLAYING`.
-
-**The cdudn is derivable, not scavenged.** `SA_RINCON<N>_X_#Svc<N>-0-Token` where `N` is the
-service type from `ListAvailableServices`'s `AvailableServiceTypeList`: YouTube Music is 72711
-(= 284 × 256 + 7), and the same arithmetic reproduces the `SA_RINCON77575` that Sonos Radio's
-favorites actually carry (303 × 256 + 7). So a service's cdudn can be computed for any service in
-the list, from data the player hands out unauthenticated.
-
-### So this works, today, with no account
-
-```
-objectId (from playbackMetadata, or anywhere it can be had)
-  → x-sonosapi-hls-static:<objectId>?sid=<serviceId>&flags=65544&sn=<account serial>
-  → AddURIToQueue with a synthesized DIDL carrying SA_RINCON<type>_X_#Svc<type>-0-Token
-  → the room plays it
-```
-
-x2rock never sees a token. The player resolves the credential it already holds, exactly as it does
-for a favorite. What is missing is only **discovery** — a way to learn an `objectId` for something
-not already playing — and that is what search would have provided.
-
-Which makes the feature concrete: **remember what played, and start it again.** Every id needed is
-readable while something plays; storing them is a local matter. Discovery stays with the Sonos app,
-repetition moves to the bar.
-
-### Built: `keep` / `bookmarks` / `bookmark` (2026-08-31)
-
-`src/bookmarks.rs`, stored in `$XDG_STATE_HOME/x2rock/bookmarks.json`. `keep` reads the playing
-track's `universalMusicObjectId` from `playbackMetadata`, `bookmark` rebuilds the URI and a
-synthesized DIDL and enqueues it. Verified against YouTube Music: kept while the album played,
-then replayed from the bookmark alone with `positionMillis` advancing 14740 → 19016.
-
-Two things it taught, both worth more than the feature:
-
-- **The cache had no schema version, and that is a real design fault.** Adding `service_type` to
-  the cached `Service` left every existing file deserializing *cleanly* — `Option` defaults to
-  `None` — while still matching the player's `AvailableServiceListVersion`, so nothing refetched
-  and every cdudn was underivable. The invalidation key answered "has the catalogue moved?" and
-  never "do we still read it the same way?". `Catalogue` now carries a `SCHEMA` constant and
-  `load()` discards a file that does not match, which is a rule any on-disk cache in this project
-  should follow. Pinned by a test built from the exact file that broke.
-- **Two failures were wearing one message.** "Service 284 is not in this player's service list" was
-  reported for a service that *was* in the list but had no type to derive a cdudn from, which sent
-  the debugging in the wrong direction. Split.
-
-`from_id` refuses what cannot be replayed rather than storing it: `objectId: "-1"` (what a player
-reports for a live stream's notional container), a missing `serviceId`, a missing `accountId` —
-each with its own reason, because each means something different went wrong.
-
-#### The stored serial goes stale, and a bookmark cannot tell (found 2026-08-31)
-
-A bookmark stores the account serial, and **a serial belongs to a registration, not to a service.**
-Re-register and the number moves.
-
-Observed within one day on this household: YouTube Music was `sn_3` in live playback, recorded in
-the section above and hardcoded into `bookmarks.rs` tests. It is `sn_16` now. The household owner
-had switched that subscription — the same person, a different plan — and the switch minted a new
-registration with a new serial.
-
-So a bookmark kept *before* an account switch names a serial that no longer exists. **That does not
-break it**: the enqueue path sends no serial, and the player resolves the household's *current*
-registration for the service. What a bookmark actually depends on is the household still holding
-*an* account for the service, and nothing in the bookmark can tell whether it does — tested
-2026-08-31 by removing the YouTube Music registration (the entry died at `AddURIToQueue` with UPnP
-800) and re-adding it (the same entry played again under the new serial). See "The YouTube Music
-account was disconnected" and "Re-added the same day: `sn_20`".
-
-Two consequences beyond this feature:
-
-- **`FV:2` serials are not all live.** A favorite embeds the serial current when it was *saved*, so
-  the harvest described under "Where the registry can be read" mixes registrations with fossils.
-  `sn_2` for YouTube Music is most likely one: a serial from before the switch, preserved in an old
-  favorite. That makes the harvest a weaker enumeration source than that section credits — it is a
-  lower bound on accounts that ever existed, not on accounts that exist.
-- **The daemon records what plays regardless of whose account it came from.** Seven of the entries
-  in this household's file are from an iHeartRadio session on `sn_15`, the household default,
-  played from the Sonos app by someone other than whoever linked x2rock here.
-
-  This is what `bookmarks remove` was added for (2026-08-31). Until it existed, taking something
-  back out of the history meant hand-editing `bookmarks.json` — which is a poor answer for a file
-  that fills itself with whatever anyone in the house plays.
-
-**A bookmark storing the serial is provenance, nothing more.** Storing it cannot *pin* a bookmark to
-the account it was kept from: the player ignores whatever serial the enqueue path carries (sid 284
-with `sn=9`, never registered, played) and resolves the household's current registration for the
-sid — demonstrated when the Espresso entry, recorded under `sn_16`, played as `sn_20` after the same
-YouTube Premium subscription was re-registered.
-
-### In the widget (2026-08-31)
-
-Kept items join the picker beneath the household's favorites — a flat list, since both answer "what
-should this room play" and the CLI emits them with the same field names. A **keep** glyph for each
-room's switch row was designed - beside the TV input, since remembering what is playing is about
-this room's own source; dimmed when there is no title, since the CLI refuses a live stream - but
-never wired in: `canKeep`/`keepPlaying`/`keepProc` sat unreferenced until a 2026-09-18 review found
-them and they were removed. Keeping is `x2rock keep` from a terminal; the widget *shows* kept items.
-
-`bookmarksProc` is quieter on failure than `favoritesProc`: an empty bookmark list is the normal
-state until someone keeps something, so a non-zero exit leaves the section absent rather than
-claiming an error.
-
-### The daemon remembers what plays (2026-08-31)
-
-`keep` requires remembering to press something, which is exactly what a person listening to music
-does not do. So the daemon notes every track that has a real id, and `x2rock bookmarks --all`
-includes them. Kept entries are *pinned*: they never expire, they sort first, and they carry a `*`
-in the listing.
-
-One store, not two. "Recently played" and "saved" are the same list with a flag, which means one
-file, one command set, and `keep` on something the daemon already saw promotes it rather than
-adding a duplicate.
-
-**The write must never be able to break a room.** This is the first state the daemon has ever
-written, and it is a convenience sitting inside the process whose job is transport. So `remember()`
-has no `?` in it: every failure is logged and swallowed. Verified by making the store unreadable
-(`chmod 000`) and confirming `pause`, `play` and `vol` all still worked and the unit stayed active.
-
-Cheap by construction, too: `RoomPlayer::track_changed` remembers the last object id stored per
-room, so `remember()` returns before touching the store for every further `playbackMetadata` event
-naming the same track — a queue edit, a new `nextItem` — and a track playing for four minutes writes
-once, not once per event. (`note()` alone did not give that: it re-stamps whenever the second
-differs, which every event did; corrected 2026-09-19.) A pinned entry keeps its name and its pin — only the
-timestamp moves — because someone named it deliberately and the daemon must not rename it back.
-That one is pinned by a test.
-
-**User data migrates; caches get discarded.** The opposite of the rule for the service catalogue,
-and deliberately: `pinned` defaults to *true* when absent, because anything written before the flag
-existed got there by someone running `keep`. Discarding a file this program no longer understands
-is right for something refetchable in a second and wrong for the only copy of what a person saved.
-
-Several daemons write this file if a household runs one unit per room, as the home one does, and
-the CLI writes it on `keep`. The first version reasoned that the atomic rename bounded the damage to
-a lost timestamp, and declined a lock on that evidence. The 2026-09-08 review found the reasoning
-wrong on one point: every writer used the *same* scratch name, `bookmarks.json.tmp`, so two of them
-overlapping opened one inode with `O_TRUNC`, wrote into it together, and one renamed the mixture
-into place — where `load()`, which refuses a corrupt file on purpose, then refused it for good.
-The rename was atomic; the shared scratch file was not. So now (`store.rs`): every state file's
-scratch is named for the writing process, and bookmarks alone also take a `flock` (std's
-`File::lock`, which is what moved the MSRV from 1.88 to 1.89) on a sibling
-`bookmarks.json.lock` from the read to the rename (`Bookmarks::update`, the only write path), since
-a `keep` landing as the daemon noted the same track was exactly the entry that went missing. The
-lock file is a sibling because the rename replaces the data file's inode. The player list keeps no
-lock: both its writers write what a player just said, and the loser of that race loses nothing the
-next `attach` does not put back.
-
-**Credentials take the same lock, as a transaction (2026-10-08).** `credentials.json` was saved
-whole from the copy a command loaded at its start, and a command holds that copy across a browser
-link or a SMAPI call. So two links at once kept only the second, and a token refresh landing after
-an `unlink` wrote the unlinked account back - found by a review, reproduced in tests.
-`Credentials::update` takes `credentials.json.lock`, reloads, applies only the command's own
-change and saves; link, the household import and token refresh go through it, and `unlink` and
-`--prefer`, whose read-to-save is local, hold the lock throughout. A refresh lands only on the token
-it refreshed (`apply_refresh`): an account unlinked or relinked meanwhile keeps what it has.
-
-### Two things learned keeping an album (2026-08-31)
-
-**`keep --container` is only meaningful while a real container is playing.** After x2rock replays a
-single track, the player reports the *container as the track* — `container.type: "track"`, with the
-track's own object id. That is not a bug in either place, but it means the useful moment to keep an
-album is right after starting it from the Sonos app, before anything else has been queued.
-
-**`keep` was blanking what it did not know.** Keeping the container of a track already kept arrived
-with no artist — containers carry none — and overwrote the artist already stored. An update that
-silently downgrades saved data is worse than one that fails, so `keep` now fills each display field
-from the existing entry when the new one has none, while a genuinely new value still wins. Two
-tests, one for each direction.
-
-**Also observed, unexplained:** the account serial moved. The phone-started album reported
-`accountId: "sn_3"`; after x2rock enqueued a track built with `sn=3`, the player began reporting
-`sn_2` for the same content. Playback is unaffected, and a bookmark is not at risk from it: the
-player never consults the serial on the enqueue path (see "The stored serial goes stale").
-
-### An intermittent enqueue failure, observed not explained
-
-`AddURIToQueue` returned **UPnP 800, "no such position in the queue"**, once, for a call that
-succeeded on each of the next three attempts with no change. It is the same flavour as the Sonos
-app failing to start this album the first time and working seconds later — the household reports
-losing its connection to YouTube Music now and then.
-
-No retry has been added. 800 nominally means the add did not happen, so retrying would be safe, but
-"nominally" is not enough to build on and one observation is not a pattern. Worth watching: if it
-recurs, the question is whether the player or the service is the one dropping out, which
-`playbackStatus` events during the failure would settle.
-
-One caution for whoever builds it: the earlier add with *empty* metadata blanked the titles of the
-whole queue and they did not come back. Always send a metadata document.
-
-### `match` wants a link code
-
-With all three required fields present but an unknown `userIdHashCode`, `musicServiceAccounts:1
-match` answers:
-
-```
-ERROR_COMMAND_FAILED — "Link code required to add guest account"
-```
-
-So `match` is not a lookup we lack a hash for; with an unrecognised hash it tries to *add* an
-account and wants the `linkCode` from the browser link flow.
-
-**This section originally read that as confirming the chain from the player's side** —
-`getDeviceLinkCode` → user authenticates → `getDeviceAuthToken` returns `userIdHashCode` and the
-link code → `match` registers the account and returns its id. It confirms no such thing. The
-message is unconditional: it is returned identically for a service the household *has* installed
-and one it has not, which was checked directly once a service could be added from the phone. See
-"Four hypotheses this killed" under "The household's account registry, read at last". The chain
-above may well be right — but this error is not evidence for it.
-
-### Where this leaves YouTube Music
-
-Search is not reachable — `music.googleapis.com` answers 403 without Sonos's own API key, and that
-key is sealed in an RSA/AES envelope opened only by the controller app and player firmware, so it
-is not something to go after (see "The YouTube Music `apiKey` is sealed"). Whether a self-owned
-OAuth token clears the endpoint instead is the one open probe; see "TASK: the OAuth identity
-probe". But the ids are readable and a track will
-enqueue, so the shape of a feature x2rock *could* have is: **remember what played and start it
-again**, referencing
-content by `objectId` and letting the player resolve the credential it already holds. Discovery
-stays with the Sonos app; repetition moves to the bar.
-
-Everything that had to be settled for it is: an enqueued service track plays, a synthesized
-`EnqueuedURIMetaData` restores its title (both "Both open questions closed", shipped as
-`keep`/`bookmark`), and the cloud-queue alternative is declined (see "`loadCloudQueue` is a
-permanent no"). The remaining YouTube Music thread is *discovery*, a separate question from enqueue:
-see "TASK: the OAuth identity probe".
-
-
-## `FV:2` carries shortcuts; `getFavorites` does not (settled 2026-08-31)
-
-Recorded on 2026-08-28 as agreeing at 41 each on the home household, then apparently contradicted on
-the office household:
-
-- `favorites:1 getFavorites` → `{"items": []}` — **empty**.
-- UPnP `Browse FV:2` → **three** items: "Discover Sonos Radio", "Sonos Presents", "Trending Now".
-
-They do not actually disagree about favorites. All three of those carry
-`<r:type>shortcut</r:type>` and an **empty `<res>`**, and their `r:description` is "Sonos Radio":
-they are the service's own navigation entries, not saved favorites. The Control API is right to
-omit them.
-
-**Confirmed against the Sonos app**, which is the tie-breaker: on iPhone and Android the favorites
-list for this household shows *empty*. Nobody saved anything here, and the app does not present the
-shortcuts as favorites either. So `x2rock favorites` printing "No favorites." was correct all
-along, and the earlier note guessing at "defaults a service contributes" was directionally right
-but had no mechanism.
-
-The real defect was elsewhere. `x2rock queue sources` browses `FV:2` over UPnP and was listing all
-three as `favorite play` — offering things with no resource, which then failed a step later with
-`"Trending Now" has nothing to play`. `BrowseItem` now carries a `shortcut` flag taken from the
-`r:type` marker, and the sources list drops them, so both paths agree on nothing-to-play.
-
-Two details worth keeping:
-
-- **The marker decides, not the missing `res`.** A real favorite whose content the service resolves
-  can also arrive without one, and filtering on `uri.is_none()` would lose things that do play.
-- An empty `<res></res>` parses as *no text*, so `uri` is `None` rather than `Some("")` — which is
-  why `uri` alone could never have told the two apart. Pinned in a test.
-
-### What the app's search list says about this household
-
-Also from the phone: tapping search offers **Sonos Radio** and **YouTube Music**, and nothing else.
-That is the household's *registered* set — the answer to the enumeration question this document has
-been unable to get out of any API. Worth noting the asymmetry it exposes:
-
-- The Sonos app searches the services the household has **linked** (2 here).
-- `x2rock search`, at the time, searched only services that need **no** linking (20 of the 32
-  anonymous ones publish a search category; see "A third of the anonymous tier cannot be searched
-  at all").
-
-On 2026-08-31 the two sets did not overlap at all: x2rock offered more search than the app on this
-household, just not the two the household actually used. That was the case for the
-account-linking work that followed, and why YouTube Music being unreachable matters.
-
-## Linking an account: what the browser flow actually is (verified 2026-08-31)
-
-The question was whether a Linux desktop can link a music service account gracefully — no embedded
-browser, no Sonos partner registration. **For services that offer device linking, yes, and it is
-better than an OAuth popup.** Proven against Bandcamp in one call.
-
-### A correction first
-
-An earlier note here said `musicServiceAccounts:1 match` needs a `userIdHashCode` that "only the
-service's own SMAPI server can compute", and used that to argue a controller could never register
-an account. That is wrong. [`getDeviceAuthToken`](https://docs.sonos.com/docs/add-browser-authentication)
-returns **`authToken`, `privateKey` *and* `userIdHashCode`** to whoever completes the link. The
-field is handed to the controller by design — it is the controller that later calls `match`.
-
-### The flow, and who does what
-
-Per [Add browser authentication](https://docs.sonos.com/docs/add-browser-authentication), the
-**controller** drives it; the player only confirms the account afterwards:
-
-1. Controller calls `getDeviceLinkCode` (device-link services) or `getAppLink` (app-link services).
-2. Service returns `regUrl`, `linkCode`, and `showLinkCode` — the last saying whether the user must
-   type the code or whether it is already embedded in the URL.
-3. Controller opens `regUrl` in a browser. On Linux that is `xdg-open`, in whatever browser the
-   person already uses — **no embedded Chromium, no webview, nothing to bundle.**
-4. Controller polls `getDeviceAuthToken` for up to seven minutes. Pending is a SOAP fault with
-   `faultcode Client.NOT_LINKED_RETRY` and `SonosError` 5 — a fault that means "keep waiting", not
-   a failure.
-5. On success: `authToken`, `privateKey`, `userIdHashCode`.
-
-No Sonos partner registration appears anywhere in it, and no device certificate.
-
-### Verified: Bandcamp handed over a link URL immediately
-
-One `getDeviceLinkCode`, with a credentials header containing nothing but
-`<deviceProvider>Sonos</deviceProvider>`:
-
-```
-regUrl        https://bandcamp.com/login?sonos_link_code=7083934b166ea10c27f9495e71fa6a8b
-linkCode      7083934b166ea10c27f9495e71fa6a8b
-showLinkCode  false
-```
-
-`showLinkCode: false` because the code is already in the URL — so the whole interaction is: open a
-link, log in, done. That is the graceful flow, and it exists today.
-
-### But it is per-service, and YouTube Music is not one of them
-
-The 108 services split three ways by `<Policy Auth>`: **32 Anonymous** (working now), **14
-DeviceLink**, **62 AppLink**. (`Auth` is reachability. Of the 32 anonymous, 20 publish a search
-category and 12 are browse-only — counted 2026-09-04, see "A third of the anonymous tier cannot be
-searched at all".)
-
-The 14 device-link services are the tractable next tier: AccuRadio, Bandcamp, Classical Archives,
-Deezer, FIT Radio, iHeartRadio, Mixcloud, Murfie, NhacCuaTui, Saavn, Sonos Backgrounds, Sonos
-Radio, TIDAL, Tribe of Noise. Ten of them answer a minimal `getDeviceLinkCode`; see "All 14 probed".
-
-**YouTube Music answers `getAppLink` with HTTP 403:**
-
-```json
-{"error":{"code":403,"status":"PERMISSION_DENIED",
-  "message":"Method doesn't allow unregistered callers (callers without established identity).
-             Please use API Key or other form of API consumer identity to call this API."}}
-```
-
-Google gates the endpoint on an API key before the question of user auth even arises. Note the
-error text is generic Google API-gateway boilerplate, not a Sonos-specific check — the same refusal
-any Google endpoint gives with key enforcement on.
-
-**Two claims that stood here have since been corrected — both amended 2026-09-01.**
-
-*On the handoff.* This said app-link services expect the Sonos app to launch the *service's* mobile
-app, so Linux would be stuck on a browser fallback a service need not offer. Wrong, or at least
-unsupported: **the Sonos PC controller completes app-link too**, so any service that links on a
-desktop Sonos client must serve a non-mobile flow. The browser path is load-bearing for a shipping
-Sonos client, not a courtesy. That removes a wall this document claimed for two sessions.
-
-*On the key.* This said the key "is not secret from us" because the manifest carries an `apiKey`
-object with `cr` and `zp` values, making the 403 "probably answerable" and the rest a judgement
-call. **The manifest carries no key.** It carries two encrypted envelopes — RSA-1024-wrapped,
-AES payload, tagged with the fingerprint of a private key held in the controller app and the player
-firmware. There is no string to decide about presenting. See "The YouTube Music `apiKey` is sealed"
-below for the bytes, the entropy controls, and the decision that closes it.
-
-### Auth is not the last wall
-
-Even with a token, playing protected content is a separate problem.
-[`getMediaURI`](https://docs.sonos.com/docs/getmediauri) can return `httpHeaders` for the player to
-send with the media GET, plus `contentKey` and `deviceSessionKey` for encrypted streams.
-`loadStreamUrl` has **no field for headers**; only `loadCloudQueue` does (`httpAuthorization`),
-which means x2rock serving a cloud queue over HTTP the players can reach — behind Omarchy's
-default-deny firewall. Free radio worked with `loadStreamUrl` precisely because it needs none of
-this.
-
-This wall is real for `loadStreamUrl` and is not the whole story: on-demand content is enqueued
-instead, which makes the *player* resolve the stream with the household's own credential, so
-protected content plays that way (see "The design consequence, built"). Cloud queue is declined
-outright (see "`loadCloudQueue` is a permanent no").
-
-
-## `x2rock link`, built (2026-08-31)
-
-Shipped: `x2rock link [service]`, `x2rock accounts`, `x2rock unlink <service>`. `getDeviceLinkCode`, `xdg-open`, polling `getDeviceAuthToken` through the pending
-fault, storing the token, and `musicServiceAccounts:1 match` to register the account. Verified on
-the office household against Bandcamp as far as the browser step; the login itself is a person's
-job and is noted below as the one thing still unconfirmed.
-
-`link` with no argument lists the device-link services (plus Plex, which links through its own PIN
-flow), and naming an app-link service still asks it for a browser page. `search` with no argument
-lists what can be searched, and says how many more could be linked.
-
-### The finding that cost the most: a fault at HTTP 200
-
-`getDeviceAuthToken`'s pending reply is a SOAP fault, as documented, but it arrives with **HTTP
-200** - and the fault code is `s:NOT_LINKED_RETRY`, not the documented `Client.NOT_LINKED_RETRY`:
-
-```
-HTTP/1.1 200
-<s:Fault><faultcode>s:NOT_LINKED_RETRY</faultcode>
-  <faultstring>Link Code not found retry...</faultstring>
-  <detail><ExceptionInfo>NOT_LINKED_RETRY</ExceptionInfo><SonosError>5</SonosError></detail>
-</s:Fault>
-```
-
-`smapi.rs` had only ever looked for a fault when the status was not 200, which was fine for every
-call it made before this one, because every one of those either worked or failed with a 500. Here
-it read the pending fault as a *successful reply*, found no `authToken` in it, and reported
-"Bandcamp linked but returned no authToken" three seconds into a flow that had not begun. **The
-body decides whether a reply is a fault, not the status.** Both signals are now checked for
-pending - the `NOT_LINKED_RETRY` substring and `SonosError` 5 - because services are inconsistent
-about which they populate and Bandcamp's faultcode already disagrees with the spec.
-
-A related hardening, from the same lesson: a body that will not parse at all falls back to a
-substring check for `NOT_LINKED_RETRY` before being called an error. Seven minutes of polling
-should not abort on one truncated reply, because the cost of aborting is a link code that cannot be
-reused and a person sent back to the browser.
-
-### The first secret, and where it goes
-
-`$XDG_STATE_HOME/x2rock/credentials.json`, mode **0600**, its own file. Decided over the DBus
-Secret Service deliberately. A keyring would encrypt it at rest and would add a dependency plus a
-new failure mode - a locked or absent keyring between a person and their music - to a tool that is
-expected to work over ssh and inside a bar widget's subprocess. The token is scoped to one music
-service and revocable from that service's own account page, and the file leans on the disk
-encryption a laptop already has.
-
-Four decisions in the store worth keeping if it is rewritten:
-
-- **The mode is set when the temporary file is created**, in the `OpenOptions`, not `chmod`ed
-  afterwards. A `chmod` after the write leaves a window where the token sits on disk at the umask's
-  mercy.
-- **A loose file is tightened on read**, with a line to stderr. Warning and carrying on would leave
-  a world-readable secret world-readable.
-- **Keyed by service id, not name.** A name in Sonos's catalogue can change under a stable id.
-- **A corrupt file is an error, not an empty account list** - the bookmarks rule, not the catalogue
-  rule. Silently starting over would present itself as "no account linked" and send someone back
-  through a browser flow to fix a typo they could have edited back.
-- **The token is written before `match` is attempted.** A link code is single-use, so a failure in
-  the household step must not cost the credential that already worked; `match` failing prints a
-  warning and exits 0 with the token saved.
-
-### `Auth` grew a third case, and the cache had to go
-
-`Auth` was Anonymous-or-Linked, which flattened exactly the distinction linking depends on. It is
-now `Anonymous`, `DeviceLink`, `AppLink`, so `SCHEMA` went to 2 and every cached catalogue is
-discarded - a service wrongly filed as unusable is precisely what this feature exists to fix.
-Anything unrecognised maps to `AppLink`, the conservative direction: mislabelling costs a clear
-error instead of a confusing failure part-way through a flow.
-
-Refusals now name the fix: `Run \`x2rock link <name>\``. An app-link service gets the same
-suggestion, because `link` asks it through `getAppLink` and some answer with a browser page (see
-"TuneIn (New): the first front-door AppLink completion").
-
-### Linked for real, and the flow works (verified 2026-08-31)
-
-A person logged in. The whole path runs:
-
-```
-$ x2rock link Bandcamp
-Opened Bandcamp in your browser.
-Waiting for you to finish.............................
-Linked Bandcamp. Search it with: x2rock search -s Bandcamp
-```
-
-29 polls, about 90 seconds of someone registering an account. What came back:
-
-- `authToken` — 32 hex characters.
-- `privateKey` — **`p455w0rd`**, literally. Bandcamp does not use the field and says so in the
-  most legible way available to it. The decision to accept a reply with a token and no real key
-  rather than refusing it was the right one, and this is why.
-- `userIdHashCode` — **absent**. So `match` was skipped, with the message it was written for, and
-  the household does not know about the account. *Those are two facts, not one: see "A missing
-  hash is not what keeps a service out of the queue" below.*
-
-The `loginToken` header is accepted: `getMetadata` on `root` returns Bandcamp's browse tree, which
-is proof the credential is honoured by an endpoint that has one to check.
-
-### The deflating part: a token buys a *collection*, not a catalogue
-
-`search` returns `total 0` for every term in every category, with no fault. Not a bug, and the
-probe says why. Bandcamp's SMAPI root is:
-
-```
-artists / albums / tracks / rp (Recent Purchases) / rr (Recent Releases)
-```
-
-and `getMetadata` on all five reports `total=0`. Those are the *account's* containers, not
-Bandcamp's catalogue: a new account with no purchases, no wishlist and nobody followed has nothing
-in them, so a search over them finds nothing. The categories and their `mappedId`s were never
-wrong — Bandcamp's own presentation map declares exactly `artists`/`albums`/`tracks` with identity
-mappings, and that is what was sent.
-
-**This corrects an assumption this document carried without stating it**: that the 76 services
-search cannot reach are 76 catalogues behind a credential. At least for Bandcamp, the credential
-opens a personal library. Linking is still worth having — it is the only way to reach a paid
-collection from Linux at all — but "link a service and search it" is not the shape of the feature
-for services like this one, and the next service linked should be checked against this question
-first rather than assumed.
-
-That points at browsing, not searching, as the thing worth building next for linked services:
-`getMetadata` over those containers is what would make a Bandcamp collection playable from the bar.
-Its absence is why `search -s Bandcamp` looks broken when nothing is.
-
-### `X2ROCK_DUMP_SMAPI`
-
-Set it and every SMAPI request and reply goes to stderr. It paid for itself twice in one session -
-once on the HTTP 200 fault, once on the empty search - so it stays. The **whole credentials header**
-is replaced with `(credentials omitted)`, not the token and key within it: a redaction that has to
-enumerate which fields are secret is one field away from printing a token into a log, and the
-header has never been the interesting half of a request that is misbehaving.
-
-### Answered after this
-
-- **`match`** was first exercised by iHeartRadio, which does send a `userIdHashCode`, and was
-  refused; see "`match`, and why nothing needs it yet".
-- **A device-link service can offer a searchable catalogue**: iHeartRadio does. See "iHeartRadio
-  linked".
-- **`linkDeviceId`**, still left out of both link calls. No longer a leading hypothesis for
-  anything: 10 of the 14 answer without it, iHeartRadio among them, and the 4 that do not fail for
-  four unrelated reasons. See "All 14 probed".
-
-### All 14 probed: 10 answer, and 4 fail in four different ways (verified 2026-08-31)
-
-One `getDeviceLinkCode` each. **Ten hand over a link URL immediately:**
-
-```
-AccuRadio        https://www.accuradio.com/sonos/login/?code=XJWOLY
-Bandcamp         https://bandcamp.com/login?sonos_link_code=...
-FIT Radio        https://www.fitradio.com/sonoslogin?sonos_code=Z6MKJ3H
-iHeartRadio      https://www.iheart.com/activate/sonos/?code=88224
-Mixcloud         https://app.mixcloud.com/oauth/authorize?client_id=...
-Murfie           https://www.murfie.com/sonos/link/15KBLX6K
-NhacCuaTui       https://sonos.nhaccuatui.com/device/link?linkCode=...
-Saavn            https://www.saavn.com/login.php?ctx=sonos&linkcode=...
-TIDAL            https://login.tidal.com/authorize?redirect_uri=...
-Tribe of Noise   https://sonos.tribeofnoise.com/sessions/start/4AYWS
-```
-
-**This corrects the earlier note that iHeartRadio and Deezer "returned nothing".** iHeartRadio
-answers fine — a five-digit activation code, the shortest of any of them. Only Deezer does not, and
-the four failures are four different problems, none of them `linkDeviceId`:
-
-- **Deezer** — HTTP 200 with an **empty body**. *Superseded 2026-09-17: the service was answering
-  all along and this client was sending no `User-Agent`. See "Deezer was never broken; this client
-  was".*
-- **Classical Archives** — a fault whose entire message is `str3`.
-- **Sonos Backgrounds** — a reply with no `linkCode` in it. Plausibly not a real music service.
-- **Sonos Radio** — its SMAPI server **crashes**: `TypeError: method is not a function`, SOAP 1.2,
-  HTTP 500. Sonos's own service is the only one that returns a stack-trace-shaped error, which
-  closes the hopeful guess that Sonos Radio would be the device-link service with a real catalogue.
-  **Still crashing 2026-09-18** on 97.1 from the home household, and `getAppLink` crashes
-  identically - so neither link flow is implemented, not merely the tier's one. The server is
-  otherwise alive: `getMetadata` on `root` with no credential answers HTTP 200 with an empty
-  (`xsi:nil`) body rather than a fault. The household's Sonos Radio favorites play regardless,
-  since `favorite` resolves through the household's own registration; what a link would add is
-  search, and that stays closed until Sonos fixes its own handler.
-
-So `linkDeviceId` is no longer the leading hypothesis for anything, and the deferred question is
-not "make more services answer" — 10 of 14 already do.
-
-### Which of the ten are actually worth a login (probed 2026-08-31)
-
-The link URL is a login page, so it can be fetched and read without linking anything. Sign-in
-providers are taken from the served HTML, which is suggestive rather than final — several of these
-are JS-rendered and may offer more than they ship in the first response.
-
-| Service | Page | Sign-in seen | Cost | Shape |
-|---|---|---|---|---|
-| Mixcloud | 200 | Google, Facebook, Twitter | free tier | DJ mixes; **OAuth `authorize` flow**, unlike any linked so far |
-| Saavn (JioSaavn) | 200 | Google, Facebook | free tier | very large catalogue |
-| FIT Radio | 200 | Google, Apple, Facebook | subscription | workout radio |
-| AccuRadio | 200 | Facebook, Apple, password — **no Google** | free | US radio |
-| Tribe of Noise | 200 | none in HTML | free | Creative Commons music |
-| TIDAL | 403 to curl (bot check) | — | paid | **the only protected-stream candidate** |
-| Murfie | 200, 2.7 KB, Facebook only | — | — | company shut down years ago; a zombie in Sonos's catalogue |
-| NhacCuaTui | 200, **175 bytes** | none | — | serves an all but empty page |
-| Bandcamp | linked | — | free | shop-shaped, collection empty |
-| iHeartRadio | linked | — | free | broadcaster, works |
-
-Read for what each would *teach* rather than what would merely work:
-
-- **Mixcloud** is the best next login. Free, Google sign-in, catalogue-shaped, and its `regUrl` is a
-  real OAuth `authorize` endpoint carrying the `linkCode` in `redirect_uri` — a third flow shape
-  after Bandcamp's code-in-URL and iHeartRadio's typed code, and the only one that puts a consent
-  screen in the path. It also has a following/favourites side, so it exercises browse and search at
-  once, and it is a second chance for `match` to succeed.
-- **TIDAL** is the only route to the one architectural unknown left: whether `getMediaURI` ever
-  returns `httpHeaders` or a `contentKey` that `loadStreamUrl` cannot carry. Every service reached
-  so far hands back a plain URL. Costs a subscription, which is why it is not first.
-  *Settled 2026-09-19: TIDAL was subscribed to and asked, and it hands back a plain URL too - a
-  bare `getMediaURIResult` with no sibling elements, pointing at a publicly fetchable FLAC. No
-  service reached so far returns either field. See "The fallback stalls because we call every URL
-  a station".*
-- **AccuRadio** looks like the obvious free-radio pick and is the wrong one for a Google account.
-- **Murfie and NhacCuaTui answer `getDeviceLinkCode` and are not worth a login.** A service
-  answering the protocol says nothing about the service being alive, which is worth knowing before
-  reading a refusal as a bug in this code.
-
-### Two parser gaps the survey found, both fixed
-
-Neither was reachable from Bandcamp, which is why building against one service was not enough:
-
-1. **SOAP 1.2.** SMAPI is specified as 1.1 and Sonos Radio replies in 1.2, where a fault has no
-   `faultcode` and no `faultstring`: the code is `Code/Value` plus `Subcode/Value`, the message is
-   `Reason/Text`. Reading only the 1.1 names turned "TypeError: method is not a function" into "a
-   fault with no faultstring" — the useful answer was in the reply and got discarded. All code
-   values are joined, so a pending check works whichever half carries the word, and a 1.2-shaped
-   `NOT_LINKED_RETRY` is now pending too, though nothing has sent one.
-2. **An empty 200 is not a reply.** Deezer's empty body fell through to the XML reader and reported
-   "parsing getDeviceLinkCode response", blaming the parser for a service that said nothing. The
-   guard was right and the diagnosis was wrong: Deezer sends an empty 200 only to a request with no
-   `User-Agent`. Corrected 2026-09-17.
-
-The pattern in both: an error message that named the wrong culprit. `X2ROCK_DUMP_SMAPI` found each
-in one run.
-
-### The free radio services are the cheap way forward
-
-Four of the ten that answer are free, catalogue-shaped services needing no purchase: **AccuRadio,
-FIT Radio, iHeartRadio, Tribe of Noise**. Any one of them settles, for the price of one browser
-login, the two things Bandcamp cannot:
-
-- **Whether a linked service offers a searchable catalogue** rather than a personal library. A
-  radio service has no collection to be empty, so a search that returns nothing there would mean
-  something quite different from Bandcamp's zero.
-- **Whether `match` ever runs.** It has never executed, because Bandcamp sends no
-  `userIdHashCode`. Any service that sends one exercises it.
-
-iHeartRadio is the pick: the largest catalogue of the four, and its five-digit code makes the
-browser step the shortest.
-
-## iHeartRadio linked: a token does buy a catalogue (verified 2026-08-31)
-
-The experiment the Bandcamp result called for, and it answers the open question in the affirmative.
-
-```
-$ x2rock link iHeartRadio
-Opened iHeartRadio in your browser.
-Enter this code when asked:
-
-  45943
-
-Waiting for you to finish...
-Linked iHeartRadio.
-```
-
-Three polls. `showLinkCode: true` this time, so the code-on-screen path is verified too — the
-branch Bandcamp never exercised, since its code rides in the URL.
-
-**Search works over a real catalogue.** Six categories — stations, artists, tracks, albums,
-playlists, podcasts — and `jazz` returned 55 stations (50 on re-test 2026-09-12; a live catalogue). So the deflating Bandcamp finding was about
-*Bandcamp*, not about linking: a device-link credential can absolutely open a searchable catalogue,
-and the difference is whether the service is a shop or a broadcaster. Bandcamp sells you a library;
-iHeartRadio broadcasts a catalogue. Both are reached the same way.
-
-Its token is also the second in a row to make the same point about strictness: `authToken` is 11
-characters and `privateKey` is **empty**. Bandcamp sent `p455w0rd`. Refusing a reply that carries a
-token without a real key would have blocked both services this project has successfully linked.
-
-### `match`, and why nothing needs it yet
-
-`musicServiceAccounts:1 match` ran for the first time here — iHeartRadio does send a
-`userIdHashCode` (`13012528881`) — and it was refused: `ERROR_COMMAND_FAILED`, no reason. Probed
-with `x2rock raw` afterwards:
-
-- Without `linkCode`: an explicit complaint, **`Link code required to add guest account`**.
-- With `linkCode`, real or freshly minted, and with or without `linkDeviceId`:
-  `ERROR_COMMAND_FAILED` and **no reason at all**.
-- `serviceId` as a JSON number or a string makes no difference.
-
-So the household reaches a silent failure path whenever a code is present. The word *guest* is the
-only real clue, and it hints that `match` adds a limited kind of account rather than a full one. A
-fresh unredeemed code failed identically, but that probe used a bogus `userIdHashCode`, so it does
-not cleanly rule out the tidier theory — that `getDeviceAuthToken` and `match` are two *alternative*
-consumers of one single-use code, and the controller taking the token leaves nothing for the
-household to redeem. Testing that properly needs a service linked by calling `match` *before*
-`getDeviceAuthToken`, which is a different flow from the one built here.
-
-**None of which has cost anything, because the account identity travels in the stream URL.**
-`getMediaURI` on an iHeartRadio station returns a plain HLS URL:
-
-```
-http://stream.revma.ihrhls.com/zc4242/hls.m3u8?...&deviceId=Sonos_Gcd...&profileId=13012528881&...
-```
-
-`profileId` is the `userIdHashCode`. No `httpHeaders`, no `contentKey`, no `deviceSessionKey` — so
-`loadStreamUrl` can carry it, and "Auth is not the last wall" turns out not to be a wall for this
-service at all. The household does not need to know about the account because every request already
-names it.
-
-Which reframes `match` from a required last step into an optional one that may not be available to a
-controller at all.
-
-That reframing was itself doubted and then restored on the same day, which is worth recording because
-the doubt was reasoned and wrong. Mixcloud could be searched, browsed and handed to a room and would
-not play, and the chain "its stream needs service-side key derivation → the player must resolve it →
-the player needs a credential → the account must be registered" was written here as fact. It was
-not: Mixcloud's refusal was **a missing percent-encode in x2rock's own URI**, and it plays with no
-`match`, no account serial, and nothing registered by this tool. See "Found: it was a missing
-percent-encode, and Mixcloud plays".
-
-**The standing position, three services in: `match` is needed for nothing yet.** Search, browse and
-playback all work without it, including playback of content whose stream x2rock cannot resolve
-itself. It is still attempted on every link; its one success (Spotify, 2026-09-10) matched an account
-the household already held. Anything that appears to need it should be suspected of being a bug on
-this side first — that is now the historical record twice over.
-
-### Played, end to end (verified 2026-08-31)
-
-```
-$ x2rock play-item -s iHeartRadio live_stations.2157 --title "The BIG 98"
-Media Room — The BIG 98 on iHeartRadio
-$ x2rock now
-PLAYING  Springsteen — Eric Church
-```
-
-The whole chain: device link, browse, `getMediaURI`, `loadStreamUrl`, audio in the room, and live
-per-track metadata arriving back through the daemon's MPRIS without the daemon knowing a service was
-ever linked. **There is no wall.** "Auth is not the last wall" was written about content that needs
-`httpHeaders` or `contentKey`; a linked broadcaster needs neither.
-
-Three facts learned in the attempt:
-
-- **`getMediaURI` has an id grammar, and it is narrow.** Asking for `artist_radio.41615` was refused
-  with the accepted set spelled out: `artist_radio_track`, `live_stations.`, `podcast_show`. So an
-  `artist_radio` entry is a *container* to browse into, not a playable id, even though `getMetadata`
-  marks it `canPlay` — that flag means "this collection can be played", not "this id can be
-  resolved". Worth remembering before trusting `canPlay` as a filter.
-- **A failed `play-item` leaves the room alone.** `getMediaURI` is called before the session is
-  created, so the refusal above cost nothing: the room kept playing what it was playing. That
-  ordering was accidental rather than designed, and is worth keeping.
-- **iHeartRadio's own "My Stations" is broken**, server-side and nothing to do with x2rock:
-
-  ```
-  faultcode senv:Server.ServiceUnknownError
-  Request to http://ampinternal.ihrprod.net/api/v2/playlists/13012528881?... failed with error
-  {"obj.hits[0].seedProfileId":[{"msg":["error.expected.int"],"args":[]}]}
-  ```
-
-  Their internal playlists API cannot serialize its own first result. `for_you` (57 items) and
-  `nearby_stations` (10) answer fine, so the account is healthy and one container is not.
-
-### The clearest argument yet for `x2rock browse`
-
-The request that produced all of the above was "play something from my iHeart playlists" — and it
-was **not expressible with the CLI as it stands.** Search takes a term; a personal container is not
-a search. Answering it needed hand-rolled SOAP against `getMetadata`, and the account root turned
-out to hold seven containers worth reaching:
-
-```
-for_you (57)      nearby_stations (10)   live_stations   create_station
-my_playlists_<userIdHashCode>  ("My Stations", broken upstream)
-top_podcasts      top_genres
-```
-
-That id embedding the `userIdHashCode` is the same identity `profileId` carries in the stream URL,
-which is a third sighting of the same fact: everything personal about a linked service is keyed by
-that hash, and the household is never consulted.
-
-So `browse` is not a nice-to-have for shop-shaped services like Bandcamp. It is the missing half of
-the feature for *every* linked service, and the first real user request against linked accounts
-could not be served without it.
-
-## `browse`, and the picker that stopped being about favorites (2026-08-31)
-
-`x2rock browse [-s service] [container]`, and the widget's picker rebuilt around it. Verified three
-levels deep on TuneIn — root, `Music`, `Top Music Stations`, ending in playable `s30119` streams —
-and on iHeartRadio's own containers.
-
-`getMetadata` and `search` return the same payload, so one parser serves both. What browsing needs
-that searching did not is a single new field on an item: **`container`**, true when it arrived as a
-`mediaCollection` rather than a `mediaMetadata`. That is the *only* reliable answer to "can this be
-played", and the reason is written up above — iHeartRadio marks an `artist_radio` collection
-`canPlay` and then refuses its id with a grammar error. `canPlay` is never consulted.
-
-Browsing is offered for every service that is reachable: an endpoint plus, if linked, a token.
-Search is offered for a narrower set, because a reachable service can publish no search category;
-see "A third of the anonymous tier cannot be searched at all" for the `usable`/`searchable` split.
-
-### The picker is now a music picker
-
-The room-row button changed from a star to a note, and with it the panel's meaning: it was the
-household's favorites, and it is now favorites, this machine's kept items, a service's own
-containers, and a search. Four sources, one question — what should this room play.
-
-- **The glyph is `nf-md-music` (U+F075A), two beamed quavers.** Plain `♪` (U+266A) was tried first,
-  to avoid depending on a patched font — and reverted the same day, because **the dependency was
-  already there**: sixteen of the widget's seventeen glyphs are Nerd Font icons and the whole thing
-  draws boxes without one. Avoiding it for a single button bought nothing and cost a per-character
-  font fallback, since JetBrainsMono Nerd Font has no U+266A and the note arrived from Adwaita or
-  Liberation at a different weight from its neighbours. The lesson is small and generalises: check
-  what a dependency already costs before paying to avoid it in one place. `♪` stays documented as
-  the right default for a bar whose font is *not* patched, which is what `glyphs.music` is for, and
-  `party`'s `◉` remains the one plain-Unicode default.
-- **The glyph key is `music` now, and `favorites` still works.** Renaming a documented setting to
-  reflect a better name is not worth breaking a household's `shell.json` over, so the old key is
-  honoured after the merge.
-- **Inside a container the list is that container and nothing else.** Favorites are not mixed in:
-  with them there, "back" has two meanings and the count line describes nothing.
-- **The path is pushed before the reply arrives**, so the title and the back row are right while the
-  call is still in flight. The reply is then only shown if it answers the container on screen —
-  `browseAnsweredFor` against the frame's key — because a slow reply to somewhere already left would
-  silently move someone.
-- **A container that fails to open leaves the path where it is.** iHeartRadio's own My Stations
-  returns a 500, and dropping someone out of a tree they were halfway down would be a worse answer
-  than a one-line status. This is the "one failing container must not fail the listing" rule from the
-  entry above, in the only form the widget needs it.
-- **`Backspace` and `←` go up, but only on an empty filter.** Both keys mean something to a text
-  cursor, and a filter someone is still editing outranks navigation.
-- **`play-item` takes the row's own service**, not `searchService`. A browse row can come from a
-  service the picker was not configured around, and the old code would have handed one service's id
-  to another.
-- **The subtitle drops the service name while browsing.** The title already says which service one
-  is inside; repeating it on fifty rows is noise.
-
-Its own `Process`, like `searchProc` and for the same reason: browsing leaves the LAN, and the rule
-that talking to a service never enters the daemon covers this too.
-
-## Mixcloud: a third flow shape, and a search that answers in places (verified 2026-08-31)
-
-Linked through an OAuth `authorize` endpoint with a consent screen — the third flow shape after
-Bandcamp's code-in-URL and iHeartRadio's typed code, and the one that most resembles what people
-expect from "sign in with". `showLinkCode` false, 28 polls, no `userIdHashCode`, so `match` was
-skipped again. Its `privateKey` is 10 characters and its `authToken` 32.
-
-Its root is the hybrid Bandcamp and iHeartRadio each only half were:
-
-```
-feed / trending / listen-later / categories:music / categories:talk
-new-uploads / queue / user:<username>
-```
-
-and `user:<username>` opens Stream, Uploads, Favorites, Listens, Playlists, Followers, Following.
-So one service carries both a catalogue and a personal library, reached identically. That id
-embedding the account's own username is the third sighting of the pattern — iHeartRadio's
-`my_playlists_<userIdHashCode>`, `profileId` in its stream URL, and now this: everything personal
-about a linked service is keyed into the id, and the household is never consulted.
-
-### The bug it found: a search can answer entirely in containers
-
-**Mixcloud's only search category is `tags`, and every hit is a `tag:` collection rather than a
-track.** No service before it had done this — TuneIn and iHeartRadio both answer searches with
-playable streams — so `search` had quietly assumed its results were things to play:
-
-- `search --json` did not emit `container`, though `browse` did and the field existed on the item.
-- `search --play N` would have handed a collection id to `getMediaURI`.
-- The widget offered every hit as a track, so choosing one would have failed in `play-item`.
-
-All three fixed, and the widget now descends into a container hit instead of playing it. That path
-had to stop assuming a browse frame was open, because a container can now arrive as a *search* hit
-with no frame to inherit a service from.
-
-The general lesson is the one `canPlay` already taught in a different costume: **`container` is the
-only thing that says whether an id can be played, and it has to be carried everywhere an item
-goes.** Adding a field to a struct is not the same as plumbing it.
-
-### Why `loadStreamUrl` cannot play Mixcloud
-
-Mixcloud plays through the enqueue path (see "Found: it was a missing percent-encode, and Mixcloud
-plays"). Through `loadStreamUrl` it does not: the stream is accepted, the room takes the item and
-shows its title, and then the player oscillates
-`BUFFERING` → `IDLE` with `positionMillis: 0` and `canPause: false`. It never starts.
-
-`getMediaURI` is not the problem and neither is authentication. It returns a plain HLS URL with no
-`httpHeaders`, no `contentKey`, no `deviceSessionKey` — and every part of that stream is publicly
-fetchable without a credential: the master playlist answers 200, the variant answers 200, and a
-segment answers 200 with 90 KB of audio. The problem is one line inside the playlist:
-
-```
-#EXT-X-KEY:METHOD=AES-128,URI="data:text/plain,/secure/hls_aes128/2/2/1/8/1268-...-f1b97737e761.m4a"
-```
-
-That `data:` URI's payload is a **63-byte path string**. AES-128 keys are 16 bytes. So a
-standards-compliant HLS client fetches the key, gets something that cannot be a key, and stalls —
-which is exactly what the speaker does. Mixcloud's own player evidently derives the real key from
-that path; nothing else can.
-
-Two lessons follow:
-
-1. **A plain URL from `getMediaURI` does not mean playable.** The wall can sit *downstream of the
-   URL*, inside the stream's own encryption, where no SMAPI field will warn you.
-2. **`contentKey` and `deviceSessionKey` are not a legacy path.** Mixcloud's stream needs
-   service-side key derivation and sends neither, which is explained by **Sonos not playing
-   Mixcloud through `loadStreamUrl` at all.**
-
-### Which mechanism a stream needs
-
-`bookmarks` enqueues service content by building DIDL with a `SA_RINCON<type>_X_#Svc<type>-0-Token`
-cdudn, where **the literal trailing `Token` is a placeholder the player resolves against its own
-stored credential.** That is how a kept YouTube Music track plays while x2rock holds no YouTube
-credential at all: the player fetches the stream, not us. So the division of labour is:
-
-- `loadStreamUrl` works when the URL is genuinely self-sufficient — free radio, and anything whose
-  segments need nothing.
-- **Enqueueing with a cdudn** is what a service-side-encrypted stream needs, because it makes the
-  *player* resolve the media with the household's own credential for that service.
-
-### The experiment, run (2026-08-31)
-
-Done by hand-writing entries into `bookmarks.json` and using the shipping `x2rock bookmark` path, so
-no code was changed to get the answer.
-
-| # | URI / DIDL | Result |
-|---|---|---|
-| A | `cloudcast:2191563811`, sid 181, sn=1 | `AddURIToQueue` → **UPnP 800** |
-| B | same, sn=2 | UPnP 800 |
-| C | `cloudcast%3a2191563811`, sid 181 | UPnP 800 |
-| **control** | the YouTube Music id that already works, sid 284, sn=2 | **plays** |
-| D | YouTube Music id, sid 284, **sn=9** — a serial the household does not have | **plays** |
-| **E** | **YouTube Music id, sid 181** — the working id under Mixcloud's service | **UPnP 800** |
-
-**D shows `sn=` is not load-bearing** — a serial that cannot exist still plays, so the player is not
-resolving the account from it.
-
-**E is confounded, and that is the part worth keeping.** Putting a YouTube Music object id under
-service 181 changes two things, not one: the account *and* whether the id means anything to the
-service being asked. It was first read as isolating the service account, which made `match` look
-like the blocker; that reading is withdrawn. **Test A re-run with Mixcloud signed in through the
-Sonos app** — so the household genuinely held the account — returned **UPnP 800 again, unchanged**,
-so the account was never the blocker. The actual cause is in the next section.
-
-### Found: it was a missing percent-encode, and Mixcloud plays
-
-`x2rock keep` on a Mixcloud show playing from the phone app harvested this:
-
-```
-object_id  cloudcast:2191051074      account  4
-art_url    .../getaa?s=1&u=x-sonosapi-hls-static%3acloudcast%253a2191051074%3fsid%3d181%26flags%3d8232%26sn%3d4
-```
-
-The art URL leaks the player's own playback URI, and `GetPositionInfo` confirms it verbatim:
-
-```
-x-sonosapi-hls-static:cloudcast%3a2191051074?sid=181&flags=8232&sn=4     the player
-x-sonosapi-hls-static:cloudcast:2191051074?sid=181&flags=65544&sn=4      what x2rock built
-```
-
-Two differences, and a four-way test isolated which one mattered:
-
-| | colon encoded | colon raw |
-|---|---|---|
-| `flags=8232` | **accepted, plays** | refused, UPnP 800 |
-| `flags=65544` | **accepted, plays** | refused, UPnP 800 |
-
-**The colon. That is the whole bug.** The object id sits between the scheme and the `?`, where a URI
-parser reads a colon as structure, and `uri()` never escaped it. Every id this had ever been tested
-against came from YouTube Music — alphanumeric with `_` and `-` — so the encoding was a no-op and
-its absence invisible. Fixed by percent-encoding the id in both the URI and the DIDL `id`, lowercase
-hex as the player writes it, with a test pinning that a YouTube id comes through byte-identical.
-
-`x2rock bookmark` now plays the Mixcloud show through the shipping path, and YouTube Music is
-unregressed.
-
-### Which corrects rather a lot
-
-- **SMAPI ids and DIDL object ids are the same namespace.** `cloudcast:2191051074` *is* the object
-  id — the player uses exactly that string — and the `00032020` class prefix was right.
-- **`flags` is not load-bearing.** The player uses `8232` for Mixcloud and `65544` for YouTube Music,
-  and both values enqueue *and play* Mixcloud. Left at `65544` rather than guessed per service.
-- **Neither is the account serial.** `sn=9`, a serial the household cannot have, plays fine.
-- **"Mixcloud playback does not work" was wrong.** Mixcloud plays. What does not work is
-  `loadStreamUrl`, and the reason is the nonstandard AES-128 key documented above — a 63-byte path
-  where 16 bytes of key belong. The enqueue path sidesteps it entirely by making the *player* resolve
-  the media, which is precisely what the cdudn is for.
-
-### The design consequence, built (2026-08-31)
-
-The guess in the paragraph this replaces — "use the enqueue path for anything from a service" — was
-half right, and the half that was wrong matters: **neither mechanism subsumes the other.**
-
-| | on-demand track (Mixcloud) | live stream (iHeartRadio) |
-|---|---|---|
-| `loadStreamUrl` | accepted, then **silently `IDLE`** | plays |
-| `AddURIToQueue` + cdudn | plays | **refused, UPnP 800** |
-
-A station is not queue material and the player says so outright; on-demand content whose stream
-x2rock cannot resolve needs the player to resolve it, which only the queue path arranges. So
-`play_item` now splits:
-
-- **`kind == "stream"` → stream it.** `search`/`browse --json` already report `type`, and the widget
-  passes it as `--kind`.
-- **anything else, when the service has a cdudn → enqueue it**, and **fall back to streaming on any
-  refusal.** The refusal is the player telling us this is not queue material, and it arrives
-  immediately.
-- **No cdudn → stream.** A service absent from the player's type list has no account to name, and
-  `SA_RINCONNone_X_#SvcNone-0-Token` is not one. TuneIn is such a service, and its content is
-  streams anyway.
-
-**The fallback only works in that direction, which is why the order is what it is.** An enqueue
-refusal is immediate and legible; `loadStreamUrl`'s failure is silent, arrives seconds later as
-`IDLE`, and nothing in the reply distinguishes it from success. There is no fallback to build on top
-of a mechanism that does not report failure.
-
-Verified all three ways: a Mixcloud `cloudcast:` plays (it did not before), an iHeartRadio
-`live_stations.` with `--kind stream` plays, and the same stream with **no** `--kind` tries the queue,
-is refused, says so on stderr, and plays.
-
-Two things dropped out of it. `sn=` is not sent at all on this path — nothing here has ever played,
-so there is no serial to harvest, and the player does not need one: the real serial, a wrong one and
-no `sn=` were each accepted and each played. And `bookmarks::service_uri`/`service_didl` now back
-both `bookmark` and `play-item`, so there is one place where a service playback URI is built rather
-than two that could drift.
-
-Also fixed while here: UPnP 800 was glossed as "no such position in the queue", which is true of
-`Seek` and of nothing else. 800 is UPnP's *undefined* error code, and that gloss confidently narrated
-first a percent-encoding bug and then a stream that cannot be queued. It now says the player refused
-without giving a reason, which is all anyone knows.
-
-Worth noting what made this findable: **the player will tell you its own answer.** `keep` harvests
-what the player itself built, and `GetPositionInfo` prints it. Three hypotheses were argued from
-first principles and all three were wrong; one look at the player's own URI settled it.
-
-### How to test this when the collection is not empty (deferred 2026-08-31)
-
-Everything above was verified against an account with nothing in it, which is exactly the state
-that cannot tell "the credential is not working" apart from "there is nothing to find". Closing
-that needs one purchase, one wishlist item, or one followed artist on
-[bandcamp.com](https://bandcamp.com) — the account is already linked, so no re-link is needed.
-Then, in order, and each one answers something the empty account could not:
-
-```sh
-X2ROCK_DUMP_SMAPI=1 x2rock search -s bandcamp -c albums <something in the collection>
-```
-
-1. **Do the containers fill?** `x2rock browse -s bandcamp` and then each of
-   `artists`/`albums`/`tracks`/`rp`/`rr`: a non-zero `total` is the whole answer — the credential
-   works and the library is simply reachable.
-2. **Does `search` see the collection, or only browse?** A wishlist item that `getMetadata` lists
-   but `search` still misses would mean Bandcamp's `search` is scoped to purchases alone, or is not
-   really implemented — worth knowing before any UI leans on it.
-3. **Does a hit play?** `x2rock play-item -s bandcamp <id>`. An on-demand item is enqueued first,
-   so the player resolves it with the household's credential; that needs the household to hold a
-   Bandcamp account (x2rock's own link does not register one). Only if the enqueue is refused does
-   it fall back to `getMediaURI` and `loadStreamUrl`, where `httpHeaders` or a `contentKey` would be
-   the wall described under "Auth is not the last wall".
-
-If (1) comes back empty with something genuinely in the collection, suspect the account rather than
-the code: Bandcamp's Sonos integration may want the purchase to be a *download* rather than a
-stream-only item, and re-linking would be the cheap thing to rule out next.
-
-
-## The household's account registry, read at last (verified 2026-08-31)
-
-Two questions had been open behind every `match` probe: whether a service token is scoped to the
-service or to the household, and whether the household's registration is per-service or once. Both
-are now answered, and neither was answered by `match`, which had not succeeded at the time.
-
-> **The registry is now read outright, tokens and all** - from the encrypted `ThirdPartyMediaServersX`
-> variable, see "The household stores every token, and they can be read (SoCo #1010)". What follows is
-> the 2026-08-31 reading through the serials that saved content carries, kept because its findings
-> about token scope and per-account registration still stand.
-
-### Token scope is per service. Settled by a control, not by a guess
-
-The test that mattered was not "link a service and see if it searches", which passes under either
-hypothesis and is the same two-variables mistake as test E. The discriminating form is *link one
-service, then search a different one*:
-
-| step | result |
+| field | when to send it |
 |---|---|
-| `search -s Mixcloud jazz`, nothing linked | `Mixcloud needs a linked account` |
-| `link iHeartRadio` | linked; `match` refused as always |
-| `search -s iHeartRadio jazz` | 51 results |
-| `search -s Mixcloud jazz`, still unlinked | the identical error, byte for byte |
-
-One variable moved and Mixcloud did not follow it. `credentials.json` holds exactly one entry, keyed
-`6`, with its own token — so **one token per service, per machine**, as `credentials.rs` already
-modelled. The `household` field on an `Account` describes the household a token was minted against;
-it does not scope the token.
-
-> **Store shape superseded 2026-09-22.** The protocol finding stands - the service does not scope a
-> token to a household - but the store no longer looks like this. It is keyed household → service →
-> account and holds several accounts per service, because a machine that moves between households
-> holds a different account in each. See "The credential store became household-aware" and "A
-> household can hold two accounts for one service".
-
-The stronger evidence is that the iHeartRadio search returned 51 results while its `account_id` was
-`none`, `match` having failed. Search worked against a token the household had never registered. If
-tokens were household-scoped that could not happen.
-
-### Household registration is per *account*, and a service may have several
-
-Read from the URIs in `FV:2` and `Q:0`, which carry `sid` and `sn` on every entry:
-
-| serial | sid | service |
-|---|---|---|
-| sn_2 | 284 | YouTube Music |
-| sn_5 | 6 | iHeartRadio |
-| sn_6 | 201 | Amazon Music |
-| sn_7 | 151 | *not in the 108-service catalogue* |
-| sn_10 | 303 | Sonos Radio |
-| sn_14 | 333 | TuneIn (New) |
-| sn_15 | 6 | iHeartRadio, again |
-| sn_17 | 181 | Mixcloud |
-
-**`sid 6` appears twice.** One service, two accounts, one household. That settles the question
-outright: registration is per account, not once per household, and the guess at `credentials.rs:50`
-— "Sonos allows several, and choosing between them is a feature nothing has asked for yet" — is
-correct and now has evidence behind it.
-
-The serials are a household-wide counter incrementing per account added, which is why a Mixcloud
-account added from the phone during this session landed at 17 rather than at 1.
-
-**Confirmed by prediction rather than by hindsight (2026-08-31).** With the highest serial standing
-at 17, the next account added from the phone — TIDAL, `sid 174` — was predicted to be `sn_18` before
-it was added. It is: `getMetadataStatus` reported `accountId: "sn_18"` on the first track played
-from it. **Household-wide rather than per-service** — a brand new service landing at 18 rather than
-at 1 shows that much, and that half still stands. Whether the counter is *monotonic* is the half
-that did not survive; see the paragraph below.
-
-**"Not recycled" was claimed here, withdrawn, earned - and withdrawn again on 2026-09-01. It is
-retired rather than re-litigated.** The history is the point, so it is left standing:
-
-1. 17 → 18 with nothing deleted in between showed only that the counter increments. Claimed, then
-   withdrawn as unsupported.
-2. Re-earned by a deletion test: TIDAL (`sn_18`, the *highest* serial) removed from the phone,
-   TuneIn added in its place, and the new account came back **`sn_19`**. Read as "a freed serial is
-   not reused".
-3. **Broken 2026-09-01.** The owner connected "TuneIn (New)" from the phone, and the station it
-   played reported `accountId: "sn_5"` live, from `getMetadataStatus` on the container. Under
-   high-water-plus-one a registration made that day should have been `sn_21` or above.
-4. **And a second reading the same hour made it a pattern rather than an anomaly.** Virgin Radio UK
-   (`sid 336`) was added next and came back **`sn_6`** - immediately after `sn_5`, from a
-   high-water mark that stood at 20 the day before. Two consecutive low serials, issued in order.
-
-5. **The discriminating test ran, 2026-09-01, and it was decisive.** Virgin Radio UK (`sn_6`) was
-   removed from the phone while CBC Radio & Music held `sn_7`. Audible was then added and came back
-   **`sn_8`** - stepping over the free `sn_6` rather than filling it.
-
-**One model fits every live reading: `next = highest currently-live serial + 1`.** Not a persisted
-counter, and not a free-slot scan. Derived each time from the maximum serial the household is
-actually holding:
-
-| highest live before | added | serial | fits |
-|---|---|---|---|
-| 17 | TIDAL | `sn_18` | yes - the prediction that started this |
-| 19 | YouTube Music, re-added | `sn_20` | yes |
-| 4 | TuneIn (New) | `sn_5` | yes |
-| 5 | Virgin Radio UK | `sn_6` | yes |
-| 6 | CBC Radio & Music | `sn_7` | yes |
-| 7 *(`sn_6` freed, `sn_7` still live)* | Audible | **`sn_8`** | **yes - and lowest-free predicted 6** |
-
-**This reconciles the whole argument, and shows which half of the old claim was wrong.**
-
-- **"Not recycled" was right.** `sn_6` was free, known to be free, and skipped. That is a stronger
-  result than the deletion test that first earned the claim, because the freed slot was *low* and
-  the gap was unambiguous.
-- **"Monotonic" was wrong**, and it is the half nobody tested. The counter is not persisted, so it
-  **goes down** when the highest accounts are removed. That is the whole of the `sn_20` to `sn_5`
-  drop between 08-31 and 09-01: services were cleared from the household in between, the highest
-  live serial fell to 4, and the next registration took 5. No recycling was involved.
-
-So a serial is unique among *live* registrations and says nothing across time. `sn_5` yesterday and
-`sn_5` today can be different accounts on different services, and that is exactly what happened -
-the 08-31 harvest attributed `sn_5` to iHeartRadio.
-
-**The one observation that does not fit**, kept rather than filed away: TIDAL at `sn_18` was
-removed and the next account was `sn_19`, where this model wants 18. The two happened minutes
-apart, so a removal that had not yet settled would account for it - but that is an explanation, not
-a measurement, and re-running it deliberately with a pause is what would close it.
-
-**What would falsify the model:** add a service while the highest live serial is `N` and get
-anything other than `N+1`.
-
-**Why it took three sessions: the harvest reads fossils.** `FV:2` and `Q:0` carry the serial that
-was current when a favorite was *saved*, so the table above mixes past registrations with live ones
-and cannot tell which is which. "Lowest free index" was also ruled out on the way (the 08-31
-harvest's gaps would have predicted `sn_1`, not `sn_18`). Anything that needs an account's identity
-should read it live from `getMetadataStatus`, not infer it from a serial.
-
-The same 09-01 reading shows the fossil problem directly: that harvest attributed `sn_5` to
-iHeartRadio (`sid 6`) and gave TuneIn (New) `sn_14`, while today TuneIn (New) reports `sn_5` live.
-Same household throughout - one player id, one network, one household in `networks.json` - so a
-second household is not the explanation.
-
-**None of this is a correctness problem, because the consequence it was carrying had already been
-closed by other means.** The claim mattered only as the benign answer to the staleness hazard: a
-bookmark holding a dead serial stays a dead pointer rather than coming back to life pointing at
-somebody else's account. That worry is moot either way - **the player never consults the serial on
-the enqueue path**, proven when a bookmark recorded under `sn_16` played under `sn_20` (see
-"Re-added the same day: `sn_20`"). A bookmark cannot pin an account deliberately, so it cannot be
-silently repointed accidentally. The serial is provenance and nothing else.
-
-TIDAL had been in x2rock's "14 services can be linked" list all day while the household held no
-TIDAL account, which is the offerable catalogue and the registry being independent, once more.
-
-**And the same test showed the harvest is volatile, not merely incomplete.** Re-running it after
-the TIDAL track started, `sn_17` was *gone* — Mixcloud's account still exists, nothing removed it,
-but the queue entry that was the only URI naming it had been replaced. So the visible set changes
-with whatever happens to be playing. An enumeration built on this cannot be cached and cannot be
-trusted to be stable between two reads a minute apart, which is a sharper limit than "only accounts
-with saved content appear".
-
-#### The harvest showed a deleted account and hid a live one, at the same time
-
-The removal test above put the worst case on the record. Immediately after TIDAL was removed and
-TuneIn added:
-
-| | in the harvest? | actually exists? |
-|---|---|---|
-| `sn_18`, TIDAL | **yes**, `sid=174&sn=18` in `Q:0` | **no** — removed minutes earlier |
-| `sn_19`, TuneIn | **no** | **yes** — playing at that moment |
-
-The dead one survives because removing an account does not rewrite the queue: four Dolly Parton
-tracks still name `sn_18` in their URIs. The live one is absent because it is a radio stream, and
-per "The design consequence, built" a station never becomes queue material, so nothing writes its
-serial anywhere the harvest reads.
-
-So the harvest is not a lower bound on live accounts. It is **a set that overlaps the real registry
-without containing it or being contained by it.** Nothing built on it should present its results as
-the household's accounts, and the earlier framing of it as "a lower bound" was too kind.
-
-`sn_14` and `sn_19` are now both TuneIn (`sid 333`) — a second service with two accounts, this one
-created under observation rather than found already present.
-
-##### One serial, followed end to end
-
-`sn_18` was watched from birth to invisibility, which is the whole problem in one row per hour:
-
-| moment | in the harvest? | account exists? |
-|---|---|---|
-| TIDAL added from the phone, a track playing | yes | yes |
-| TIDAL removed from the phone | **yes** | **no** |
-| Kitchen's queue cleared, ~an hour later | no | no |
-
-**Nothing about the removal made it disappear.** It went on being reported because 25 Dolly Parton
-tracks in a queue nobody was playing still named it, and it would have gone on being reported
-indefinitely. What finally cleared it was an unrelated `queue clear` — a coincidence, not a
-mechanism. There is no event, no expiry and no reconciliation that retires a serial from the
-harvest; only the deletion of whatever content happens to mention it.
-
-The reverse held at the same moment: `sn_19` was live and playing throughout the last two rows and
-appears in none of them, because TuneIn is a station and a station never enters the queue.
-
-So the seven pairs the harvest currently reports are not the household's accounts. `sn_2` and `sn_5`
-are unverified and may be fossils of exactly the kind this table watched form — and the only reason
-`sn_18` is known to be one is that its death was observed. For any serial not watched being created
-and destroyed, the harvest cannot say which column it belongs in.
-
-#### `RemoveAccount` is declared, not demonstrably functional
-
-`SystemProperties:1` declares `RemoveAccount(AccountType, AccountID)`, and an earlier note here read
-that as "there is an API route to remove an account". That is a declaration read as a capability —
-the same error as reading the 108-service catalogue as the household's list. Probed:
-
-| call | answer |
-|---|---|
-| `RemoveAccount` type=44551 (TIDAL), id ∈ {18, sn_18, 174} | 806 |
-| `RemoveAccount` type=44551, id=999999 | 806 |
-| `RemoveAccount` type=99999 (no such type), id=18 | 806 |
-| `GetWebCode` type=44551, and type=0 | 800 |
-
-A real service type holding a real account fails **identically** to a type that does not exist, so
-the type is not being resolved at all. The legacy account surface looks vestigial: declared in the
-SCPD, gutted in the firmware.
-
-Stated honestly: this does not separate "the right `AccountID` was never guessed" from "the action
-does nothing", because 806 covers both. What it does establish is that **removing an account from
-this side is not a route to rely on** — the Sonos app removed TIDAL in seconds, and that is what the
-test above used.
-
-`registeredServicesVersion` moved across both operations, `2026-09-01T01:36:42` → `T02:07:18`,
-confirming it tracks the account set rather than the catalogue.
-
-`sid 151` is an account for a service that `ListAvailableServices` does not list. The 108-service
-catalogue is what a household may *add*, not what it has, and it is not a superset of what it has.
-
-### Where the registry can be read, and what that method cannot tell you
-
-`S:` browses empty on this firmware, `/status/accounts` says nothing (and is not an endpoint at all
-- see the note under "How good the serial proxy actually is"), and `musicServices:1` is not a
-namespace the player answers. `musicServiceAccounts:1` has no read
-command at all — `getAccounts`, `getMusicServiceAccounts`, `list` and `getAccountList` are each
-`ERROR_UNSUPPORTED_COMMAND`. What works is harvesting `sid`/`sn` out of `FV:2` and `Q:0` URIs, and
-`playbackMetadata:1 getMetadataStatus` reports the live one directly as
-`id.accountId: "sn_17"`.
-
-Two limits, both load-bearing for anything built on this:
-
-- **It is not the registry, and not even a lower bound on it.** Only accounts with favorites or
-  queue entries appear, so an account nothing has saved from is invisible — including any account
-  used only for stations, which never enter the queue.
-- **It cannot distinguish live entries from dead ones.** A favorite or queue item embeds the serial
-  current when it was saved, so a serial can outlive the registration it named. See "The harvest
-  showed a deleted account and hid a live one, at the same time".
-
-#### Searched properly: there is no listing anywhere (2026-08-31)
-
-The first pass tried four command names and concluded "no read command". That was a guess dressed
-as a search. Done properly, against a real player, every route fails:
-
-| route | answer |
-|---|---|
-| `musicServiceAccounts:1` — `getAccounts`, `getMusicServiceAccounts`, `list`, `getAccountList`, `getAll`, `getVersion`, `getHouseholdAccounts`, `refresh` | `ERROR_UNSUPPORTED_COMMAND`, each |
-| `musicServices:1` (plural) | `ERROR_UNSUPPORTED_NAMESPACE` |
-| `musicService:1 getSessions`, `households:1 getHousehold` / `getHouseholds` | `ERROR_UNSUPPORTED_COMMAND` |
-| UPnP `MusicServices:1`, from its own SCPD | three actions, and none of them lists accounts: `ListAvailableServices`, `UpdateAvailableServices`, `GetSessionId` |
-| UPnP `SystemProperties:1`, from its own SCPD | account **mutations** only — `AddAccountX`, `AddOAuthAccountX`, `RemoveAccount`, `ReplaceAccountX`, `SetAccountNicknameX`, `EditAccountMd`, `RefreshAccountCredentialsX` |
-| `SystemProperties GetString` on `R_SvcAccounts`, `R_Accounts`, `AccountList`, `Accounts`, `R_TrialAccount`, `sonos_accounts`, `McAccountsVersion` | UPnP 800 |
-| ContentDirectory `S:` | empty result, 0 matches |
-| `http://<player>:1400/status/accounts` | empty `ZPSupportInfo` - which is what *any* unknown `/status/<name>` answers, so it is a 404 in disguise rather than a gutted page |
-
-Reading the SCPDs rather than guessing verbs is what makes this a search and not another four
-guesses: `/xml/MusicServices1.xml` and `/xml/SystemProperties1.xml` enumerate every action the
-player implements. **A Sonos player will add, remove, rename and re-credential an account, and will
-not tell you which accounts exist.**
-
-So the harvest above is not a stopgap until the real call is found. It is the only route.
-
-#### The published reference confirms it (checked 2026-08-31)
-
-The handoff note flagged the Control API row of the table above as the weak half of this result:
-eight guessed command names, with no Sonos documentation read in that session. Checked against the
-current published reference at `docs.sonos.com` (the `llms.txt` index enumerates every reference
-page; the `match` page embeds the live Control API OpenAPI spec, `v1.55.0-alpha.16-production-cloud`,
-updated 2026-06): the `musicServiceAccounts` namespace documents **exactly one command, `match`**,
-plus the `MusicServiceAccount` object it returns. The only path under the namespace in the spec is
-`/households/{householdId}/musicServiceAccounts/match`.
-
-That agrees with the 53-path `OAS_production.json` from Sonos's sample app, which an earlier
-session had already read (see "What Sonos's own sample app settles") — the negative result is now
-confirmed against both the shipped spec and the live one. And SMAPI offers no way around it: its
-published verb list (`docs.sonos.com/docs/smapi`) is the *service-side* interface — auth, browse,
-playlists, reporting, `getMediaURI` — and nothing in it lists a household's accounts either.
-
-There is no listing verb left to be guessed at. This section stops being provisional, and
-`accounts --content` rests on a sound premise.
-
-#### But the household does say *when* accounts change
-
-`musicServiceAccounts:1 subscribe` succeeds — an empty reply, then an event:
-
-```json
-{ "_objectType": "musicServicesChanged",
-  "availableServicesVersion":  { "version": "2234" },
-  "registeredServicesVersion": { "version": "2026-09-01T01:36:42.389777473" } }
-```
-
-**`registeredServicesVersion` is a second version, and it tracks the accounts.** A timestamp rather
-than a counter, and it matched when TIDAL was added from the phone minutes earlier.
-
-This corrects the claim under "Four hypotheses this killed" that an account being added is
-undetectable. What is true is narrower: `AvailableServiceListVersion` is blind to it — the number
-the *catalogue* cache keys on did not move. `registeredServicesVersion` is not blind to it. Anything
-caching a harvested account table has a signal to invalidate on, which is worth knowing before
-building one, and it arrives by subscription rather than by polling.
-
-`x2rock raw --watch <seconds>` is how this was read: a `subscribe` reply is empty and the state it
-asked for turns up afterwards as an event.
-
-### Choosing between several accounts is an open question
-
-Told from the phone to play iHeartRadio into Kitchen, the household played from **`sn_15`** — the
-higher of the two serials, and the more recently added. One observation cannot separate "highest
-serial wins" from "the app's remembered default, which happens to be the newest here"; the two
-predict identically here. Distinguishing them needs a household whose *older* account is the active
-one, which is not worth manufacturing.
-
-This matters more than the taxonomy does. Knowing the household holds an account for a service is
-not enough to use it — with several present, choosing wrong plays from the wrong account.
-
-**Probed 2026-09-18 on a household that really has two, and still open**: the Sonos app has a **Set
-Primary**, and its own playback follows it at once - but the enqueue path went on resolving the
-*other*, lower-numbered serial regardless. See "Two accounts for one service, one per person".
-
-### The two playback paths use two different identities (verified 2026-08-31)
-
-Worse than "choosing wrong" — x2rock does not choose at all, and the two paths in the table under
-"The design consequence, built" end up on *different accounts*.
-
-`play-item` passes no serial, so the enqueue path names no account. The player fills
-one in. Enqueuing an iHeartRadio podcast episode and reading `Q:0` back:
-
-```
-podcast_show.96972136.101839702.mp3?sid=6&flags=8&sn=15
-```
-
-**`sn_15`** — the household's default for that service, and the same account the Sonos app played
-from. Meanwhile `loadStreamUrl` carries x2rock's own token, whose `userIdHashCode` is
-`13012528881`; iHeartRadio's browse tree names it outright in a container id,
-`my_playlists_13012528881`. So:
-
-| path | content | plays as |
-|---|---|---|
-| `loadStreamUrl` | stations | x2rock's linked token |
-| enqueue + cdudn | on-demand | the household's default serial |
-
-Which identity a request runs as is therefore decided by **the content type**, which is not a
-property anyone would expect to select an account. On a household where the accounts belong to
-different people — two here, the household's default being someone other than whoever linked
-x2rock on this machine — listening history lands on whichever person the content type happened to
-pick.
-
-The earlier note that "a wrong `sn` and no `sn` were each accepted and each played" is still true
-and was read too comfortably: the player accepting an omitted serial does not mean the serial does
-not matter. It means the player substitutes one, silently, and that substitution has an owner.
-
-Not a bug with an obvious fix — naming x2rock's own account on the enqueue path requires a serial
-this tool cannot mint (`match` has only ever matched an account the household already held), and
-nothing maps a serial back to an identity from the controller side. Worth
-recording before anything is built on the enqueue path.
-
-YouTube Music also holds two accounts: `sn_2` in `FV:2`, `sn_16` on a queue item. Several accounts
-per service is not an iHeartRadio quirk.
-
-### Four hypotheses this killed, three of them this document's
-
-- ~~`match` refuses because the service is not installed on the household~~. The "guest account"
-  wording invited this reading, and the section "`match` wants a link code" concluded from it that
-  the message "confirms the chain from the player's side". It does not confirm anything. After
-  Mixcloud was added from the phone, `match` for Mixcloud returned **the identical refusal**, word
-  for word, as `match` for iHeartRadio which was not added — with a link code and without one. The
-  message is unconditional parameter validation and says nothing about installation state.
-- ~~`AvailableServiceListVersion` will move when an account is added~~. It did not: `:2234` before
-  and after. That version tracks the offerable catalogue only, so **the catalogue cache cannot
-  detect an account being added or removed**, and the invalidation note under "The catalogue cache"
-  should not be read as covering account state. (Narrowed later the same day: *that* version is
-  blind to it, but `registeredServicesVersion` on the `musicServicesChanged` event is not — see
-  "But the household does say *when* accounts change". The catalogue cache is still blind; the
-  household is not.)
-- ~~The single-use-code theory can be tested by calling `match` with an unredeemed code~~. It cannot,
-  by anyone, from a controller. `match` requires a `userIdHashCode`; the hash arrives only from
-  `getDeviceAuthToken`; that call is what redeems the code. **A valid hash and an unspent code cannot
-  coexist.** The theory recorded in "`match`, and why nothing needs it yet" is not disproved — it is
-  unfalsifiable by this route, which is a different and more useful thing to know about it.
-- ~~The household is the thing that authorizes search~~. It is not; see the 51 results above.
-
-### What this does to `x2rock accounts`
-
-`x2rock accounts` printed `not registered on the household` for iHeartRadio while the household held
-**two** iHeartRadio accounts. The line is true about `match` and misleading as output: it reports on
-this machine's registration attempt, not on the registry — which no interface reveals (see
-"Searched properly: there is no listing anywhere"). The link minted a third iHeartRadio identity that
-only this machine knows about. The output now reads `no registration from this machine`.
-
-### The standing position, restated
-
-`match` remains needed for nothing: **the registration it performs is something the Sonos app does
-perfectly well**, and playback through the enqueue path rides on that registration whoever made it.
-What stays open is the half no controller can reach: listing a household's accounts (not possible;
-the content harvest is only partial evidence), and knowing which account the player picks when a
-service has more than one.
-
-
-## Rule: talking to a service never enters the daemon (decided 2026-08-31)
-
-Talking to music services is allowed. Breaking the parts that do not need the internet is not.
-Losing a name lookup must never cost the household its transport or its volume.
-
-Written when `search` was the only command that left the LAN. **`browse`, `link`, `play-item`,
-`bookmark`'s stream fallback and `stations` now do too**, and the rule covers them unchanged: each is
-a CLI command, the widget runs each as its own `Process`, and none of them is reachable from the
-daemon. Read "search" below as "any call to a music service or the radio directory".
-
-The architecture already separates these, and the rule is to keep it that way rather than to build
-anything new for it:
-
-- **State reaches the widget over MPRIS**, published by the daemon from the player's own events.
-  The daemon speaks only to the LAN — the Control API WebSocket on 1443 and UPnP on 1400 — and
-  cover art comes from the player itself (`http://<player>:1400/getaa`). **Nothing the daemon does
-  touches the internet, and search must not change that.** A daemon that fetched a service
-  catalogue would put an internet timeout in front of play/pause for every room.
-- **Transport reaches the speakers over MPRIS too.** Everything MPRIS cannot express shells out to
-  the CLI: the scroll gesture (`x2rock vol +N -r <room>`, because Sonos wants relative volume),
-  per-member volume, grouping and party mode, the TV input, queue edits, ratings and normalize.
-  Those calls are LAN-only and stay that way.
-- **Search is therefore a CLI command and nothing else.** The widget invokes it the way it already
-  invokes favorites: a separate `Process`, whose failure is a string inside one picker rather than
-  a fault in the widget. `browse` followed the same shape when it was built, with a `Process` of its
-  own, for exactly this reason.
-
-That last point is not a plan, it is a working precedent. The favorites picker in `BarWidget.qml`
-already does exactly what search needs to do, and it is worth copying rather than reinventing:
-
-- a `Process` of its own, so a hung or failed call cannot reach anything else;
-- a non-zero exit sets a status string shown *in the picker*, leaving rooms, transport and volume
-  untouched;
-- empty stdout is treated as failure rather than as an empty list, because the two mean different
-  things and only the exit code can tell them apart;
-- the results already on screen stay up while a refresh runs, so a network blip degrades to stale
-  data rather than to an empty list.
-
-**The CLI may be blunt.** `x2rock search` failing with a plain error and a non-zero exit is correct
-behaviour; it is a terminal command and the person running it can read. The graceful half belongs
-in the widget, and the split is deliberate: one honest failure mode at the boundary, one forgiving
-presentation above it.
-
-Two things follow for the implementation:
-
-- **Internet calls need their own timeout**, short and bounded, not the LAN's. `upnp.rs` uses 8s
-  against a server on the same switch; a widget-invoked subprocess that might be waiting on a
-  service in another country needs a budget it will actually hit, and it must always terminate.
-- **The service catalogue is cached on disk and usable stale.** With no internet, listing services
-  and categories should still work from the last good read; only the query itself needs to fail.
-  `musicServiceAccounts:1`'s `musicServicesChanged` event carries `availableServicesVersion`, which
-  is the invalidation signal — the one use that namespace turns out to have.
-
-
-## SMAPI, read properly at last — and search works today (verified 2026-08-31)
-
-Everything this document said about SMAPI before this section was inferred from service descriptors
-and from the Control API spec's passing mentions of it. [The actual
-documentation](https://docs.sonos.com/docs/smapi) had never been read. It should have been read
-first, and reading it turned a blocked feature into a working one inside an hour.
-
-### What SMAPI is
-
-SOAP 1.1 over HTTPS, namespace `http://www.sonos.com/Services/1.1`, described by WSDL. **Sonos is
-the client and the music service is the server** — a service implements SMAPI so that Sonos can
-call it. 32 operations in six groups; the ones that matter here are `search`, `getMetadata`,
-`getMediaMetadata` and `getMediaURI`.
-
-That direction is the thing this document kept getting backwards. There is no sense in which a
-controller "gets search from Sonos". A controller that wants search does what a Sonos player does:
-it calls the service directly, as a SMAPI client.
-
-### The credentials header, and who actually needs one
-
-From [SOAP requests and responses](https://docs.sonos.com/docs/soap-requests-and-responses), the
-`credentials` header carries:
-
-| Element | Status |
-|---|---|
-| `deviceProvider` | **required**, always the string `Sonos` |
-| `loginToken` (`token`, `key`, `householdId`) | required **for services that authenticate** |
-| `deviceCert` | optional; only when the service declares "Requires Device Certificate" — and **enforced by nothing**, on either path (tested 2026-09-04; see "`request-header-device-cert` gates nothing") |
-| `zonePlayerId` | optional; only when the service declares that capability |
-| `deviceId` | deprecated, ignorable |
-
-`token` is the authentication token and `key` the refresh token — the per-household service
-credential. But the header is only as heavy as the service demands, and this is the fact that
-changes everything:
-
-**32 of the 108 services on this household's descriptor list are `Auth="Anonymous"`.** That is what
-can be *reached* with no credential; 20 of the 32 can also be searched, the rest being browse-only
-(counted 2026-09-04). The split:
-
-| `Policy Auth` | count |
-|---|---|
-| `AppLink` | 62 |
-| `Anonymous` | **32** |
-| `DeviceLink` | 14 |
-
-Anonymous means no `loginToken` at all. And the anonymous third is not a leftover — it is TuneIn
-(254), SomaFM (516), Hype Machine (44), Global Player, CBC Radio, and a long tail of radio
-networks. Exactly the discovery-shaped services.
-
-### Verified end to end, no account, no token, no cert
-
-Against TuneIn (`https://legato.radiotime.com/Radio.asmx`), with a credentials header containing
-nothing but `<deviceProvider>Sonos</deviceProvider>`:
-
-- **Search categories** come from the presentation map, fetched anonymously:
-  `stations → search:station`, `podcasts → search:show`.
-- **`search`** with `id=search:station`, `term=jazz`, `index=0`, `count=5` returned **HTTP 200 and
-  93 total matches**, as `mediaMetadata` with `id`, `title`, `itemType=stream`, genre, country,
-  bitrate and logo URL. The response is the same shape as `getMetadata`, exactly as documented.
-- **`getMediaURI`** for the first result (`s249973`, "Smooth Jazz") returned a playable URL:
-  `http://opml.radiotime.com/Tune.ashx?id=s249973&listenId=…&partnerId=Sonos`.
-
-So the whole chain, with no credential anywhere in it:
-
-```
-ListAvailableServices (LAN, unauthenticated)   → endpoint + Policy Auth + manifest URI
-manifest + presentation map (anonymous CDN)    → search endpoint shape + categories
-SMAPI search  (deviceProvider: Sonos)          → results
-SMAPI getMediaURI                              → a stream URL
-playbackSession:1 createSession + loadStreamUrl → plays it
-```
-
-**The whole chain is verified.** Run end to end on the Media Room, 2026-08-31:
-
-```sh
-# search:station "jazz" -> s250015 "Jazz Club" -> getMediaURI
-x2rock raw playbackSession:1 createSession \
-  '{"appId":"com.rahga.x2rock","appContext":"cli"}' --scope group -r "Media Room"
-#   -> sessionCreated: true, sessionState: SESSION_STATE_CONNECTED
-#   -> sessionId: RINCON_48A6B81853E001400:836412709@3406530134
-x2rock raw playbackSession:1 loadStreamUrl \
-  '{"streamUrl":"http://opml.radiotime.com/Tune.ashx?id=s250015&listenId=…&partnerId=Sonos",
-    "playOnCompletion":true,
-    "stationMetadata":{"name":"Jazz Club","type":"station",
-                       "service":{"name":"TuneIn","id":"254"}}}' \
-  --session 'RINCON_48A6B81853E001400:836412709@3406530134'
-#   -> success, empty body; the room starts playing
-```
-
-`x2rock now` then reported `PLAYING  Jazz Club`, and it propagated through x2rock's own daemon to
-MPRIS — `xesam:title "Jazz Club"`, `PlaybackStatus "Playing"` — so the bar widget picked it up with
-no extra work. Notes from doing it:
-
-- `createSession` is **group**-scoped and returns the `sessionId`; everything after it is addressed
-  by that id, which is why `x2rock raw` grew `--session`. A session id is an explicit address, so
-  it overrides `--scope` rather than combining with it.
-- `stationMetadata` is optional but worth sending: it is where the title the room displays comes
-  from. Without it the stream plays with nothing to show.
-- The session survives the CLI process exiting — it belongs to the group, not to the connection.
-- Playback did **not** disturb the queue: a session source plays alongside it rather than as a
-  queue entry, which is the whole point of the mechanism.
-
-**A gotcha that cost a request:** sending the envelope with an XML declaration produced
-`s:Client / Expecting state 'Element'.. Encountered 'Text'`, which reads like a malformed-request
-fault and is not one. Send the envelope with no `<?xml?>` prologue and no BOM (`curl --data-binary`
-from a file written with `printf`, not `echo`).
-
-### What this does to the credential question
-
-It shrinks it from "the feature is blocked" to "a third of services work now, and the other
-two-thirds need the household's `loginToken`".
-
-It also explains **UPnP 806**. SMAPI `getSessionId` is the *legacy* username-and-password auth path
-— Sonos's own guidance is that new integrations should use `getAppLink` — so `MusicServices:1
-GetSessionId` answers 806 because modern services do not do sessions at all, not because the
-household lacks accounts. Confirmed against four services, one of them playing; see
-"`GetSessionId`: answered, and it answers nothing".
-
-There is no read path to a household's `loginToken`: `SystemProperties:1` can write accounts
-(`AddOAuthAccountX`) and has nothing that reads them back, and S1's `/status/accounts` is gone. So
-authenticated services are reached by x2rock running a link flow and holding its own token, which is
-what `x2rock link` does. Search against the anonymous services came first and is built.
-
-
-## What Sonos's own sample app settles (read 2026-08-31)
-
-[`sonos/api-web-sample-app`](https://github.com/sonos/api-web-sample-app) — Sonos's official
-web sample, last pushed 2025-05-29 — carries two artefacts worth more than the app itself:
-`sample-app/Client/src/App/museClient/OAS_production.json`, the full **Control API OpenAPI spec**
-(`v2.0.0-production`), and a Postman collection of the same. Together they are the authoritative
-answer to what this API does and does not contain, and they close a question this document had
-been circling.
-
-### The Control API has no content discovery. At all.
-
-**53 paths**, and not one of them searches, browses, or lists anything a service holds: playback,
-volume, groups, favorites, playlists, audio clips, sessions. That is the whole surface.
-
-This is not the LAN transport being a subset of the cloud — it is the *cloud* spec. So the earlier
-finding that `musicService:1` rejects `search` was never about firmware or about the local API. The
-command does not exist anywhere, and no amount of probing a player will produce it. **Question
-closed: the Control API will never search.**
-
-> **Bounded 2026-09-04, and still true.** Sonos *does* have a cloud content API — favorites,
-> playlists, history, browse, federated search — but it is not this one and not in this spec. It is
-> the private, cookie-authenticated surface the first-party web app uses, at
-> `play.sonos.com/api/content/v1`. See "The first-party web app has a third API". Nothing above
-> changes: the *Control* API has no content discovery, and the published spec is the whole of what
-> Sonos documents.
-
-### `musicServiceAccounts match` is for service providers, not controllers
-
-The one music-service endpoint in the API is not the account-enumeration tool it looked like when
-probed. Its required fields are `userIdHashCode`, `nickname` and `serviceId`, and the spec says of
-the first:
-
-> Opaque hash of the user account. You must use the same algorithm used by **your SMAPI server**.
-> See `getDeviceAuthToken` and `getUserInfo` SMAPI requests for details.
-
-with `linkCode` and `linkDeviceId` described in terms of what "your SMAPI service" sends. So `match`
-is how a **music service** registers or looks up its own account on a household. It returns an
-account `id`, but only to a caller that already implements the service side. A controller has no
-way to supply `userIdHashCode`, and this is not a route to borrowing the household's credential.
-
-That reframes the credential question honestly: **SMAPI is a service-provider interface, and Sonos
-never intended a third-party controller to consume it.** There is no route to borrowing what the
-household holds (`GetSessionId` was the last candidate and answers nothing; see "`GetSessionId`:
-answered"). In practice a controller does receive a `userIdHashCode` from `getDeviceAuthToken`, so
-`match` can be called; it has succeeded once, for Spotify, by returning an account the household
-already held (see "The real fix: the enqueue URI itself was wrong").
-
-### What Sonos expects a third-party app to do instead: bring its own content
-
-The sanctioned path is `playbackSession`, and it is fully specified:
-
-- **`createSession`** — required fields are only `appId` and `appContext`, both strings the app
-  picks (`appId` a reverse-DNS name). No registration, no Sonos-side identity. Optional `accountId`
-  names a music service account for the session, and `customData` is an opaque blob other instances
-  of the app can read back. Returns `sessionId`, `sessionState`, `sessionCreated`.
-- **`loadStreamUrl`** — **required fields: `streamUrl`, and nothing else.** Optional
-  `playOnCompletion`, `stationMetadata`, `itemId`. This plays a live stream with no account, no
-  cloud queue and no search.
-- **`loadCloudQueue`** — required: `queueBaseUrl`. The player then pulls the track list from a
-  server the app hosts, with optional `httpAuthorization`, `itemId`, `queueVersion`,
-  `positionMillis` and full `trackMetadata` (whose `id` is `{objectId, serviceId, accountId}` — the
-  place a service account, if we ever had one, would be referenced). `refreshCloudQueue` and
-  `skipToItem` complete it.
-
-This also explains something this document recorded as a puzzle on 2026-08-29: `AddURIToQueue`
-refusing service-backed containers and stations is not an obstacle to work around. Sonos's model
-is that a third-party app does not inject into the Sonos queue at all — it opens a session and
-serves its own content.
-
-### Verified on the LAN, 2026-08-31
-
-The spec is the cloud API, so whether the local WebSocket carries the same namespaces had to be
-checked. Probed with `x2rock raw`, deliberately with *no* parameters so that nothing was created —
-the `ERROR_INVALID_PARAMETER` / `ERROR_UNSUPPORTED_COMMAND` distinction is enough:
-
-| probe | answer | reading |
-|---|---|---|
-| `playbackSession:1 createSession` | `ERROR_INVALID_PARAMETER` | command exists |
-| `playbackSession:1 loadStreamUrl` | `ERROR_INVALID_PARAMETER` | command exists |
-| `audioClip:1 createSession` | `ERROR_UNSUPPORTED_COMMAND` | control: namespace exists, command does not |
-| `playlists:1 getPlaylists` | success — `{playlists, version}` | a whole namespace x2rock does not use yet |
-
-So the session API is present on the LAN.
-
-### What this made worth building, independently of search
-
-**`createSession` + `loadStreamUrl`** needs nothing unsolved: one required field, no account, no
-credential, no HTTP server of our own. It became `x2rock play-url` (an arbitrary stream URL in any
-room) and the stream path under `play-item` and `stations --play`; `x2rock raw` grew `--session
-<id>` for addressing session commands.
-
-### `loadCloudQueue` is a permanent no, not a backlog item (decided 2026-09-05)
-
-Earlier this was "not now". It is now "not ever", for two reasons, and the first one is decisive on
-its own.
-
-**Sonos scopes the Cloud Queue API to content integrations, which x2rock is not.** The official
-docs are explicit (Cloud Queue API v2.3): "The Sonos Cloud Queue API defines the interface between
-a player and your cloud queue server. The player will make calls to your server, via this API, to
-retrieve a window of track URLs to play. **The Sonos Cloud Queue API is available for content
-integrations only.**" A content integration is a registered music-service partner with a Sonos
-developer account and a service manifest - the exact Sonos-side identity x2rock refuses to have.
-x2rock is a local *control* client, not a content source, so this API is out of scope by Sonos's
-own definition, not merely by our preference. That is the same reason `musicService:1` search and
-the sealed YouTube Music key are out of scope: they belong to the partner-integration surface, and
-x2rock lives entirely on the account-less control surface.
-
-**And even if it were offered to us, the shape is wrong.** `loadCloudQueue` requires the player to
-fetch its track list from an HTTP server **x2rock hosts and the player reaches inbound**, and to
-keep fetching as the queue advances. That inverts the one property every other capability here is
-built on: x2rock is a client - one outbound connection, zero inbound, working behind Omarchy's
-default-deny ufw (see "Firewall"). Cloud queue would make it a *server*, and a long-lived, stateful
-one that only the daemon could host, listening on a port the platform blocks inbound by default -
-the same wall UPnP GENA eventing runs into.
-
-**x2rock is not a content integration and will not become a queue server.** That is the line, and
-either half of it is enough. Were the API somehow open to us, the cost would still be the category
-change and the firewall hole the whole design exists to avoid, bought for a capability the existing
-pieces already cover the everyday shape of: `loadStreamUrl` plays an arbitrary stream in any room,
-`audioClip` overlays a clip, `favorite`/`playlist` drive the household's own queue. What cloud queue
-would add - a multi-track queue of x2rock-chosen content, advanced by the player - is real but not
-worth inverting the architecture for, and serving *service* content that way would reopen the
-account question on top. So this is closed the way `BeginSoftwareUpdate` and Control-API search are
-closed: a decision, not a gap waiting on someone's afternoon.
-
-`createSession` + `loadStreamUrl` stay - they need no server of our own, which is exactly why they
-were the half worth building and cloud queue is the half declined.
-
-
-## Sonos 27mcp: an agent-shaped API, and what it will not say (2026-09-20)
-
-Sonos ships an MCP server at `https://mcp.ws.sonos.com/mcp` - the backend behind the built-in Sonos
-connector in Claude and other agent clients. It is another surface alongside SMAPI, UPnP, the Control API and the
-first-party `play.sonos.com` content API, and it is the one place Sonos has shipped content resolution to third parties. This
-section is what it actually does, probed directly with a scratch client rather than through an
-agent, so the findings are about the API rather than about some model's turn.
-
-### Getting in is open, which was the surprise
-
-Everything needed is advertised:
-
-```
-/.well-known/oauth-protected-resource  → scopes: playback-control-all, partner-content:read
-/.well-known/oauth-authorization-server → registration_endpoint, PKCE S256,
-                                          token_endpoint_auth_methods_supported: ["none"]
-```
-
-**Dynamic client registration is open to anyone** - `POST /mcp-oauth/register` answered `201` with a
-`client_id` for a client calling itself "x2rock probe", no account, no partner gate, nothing like
-the allowlist on `music.googleapis.com`. Then ordinary PKCE: browser consent, code, token. So a
-non-agent program can hold a Sonos cloud token today, and the `partner-content:read` scope is
-exactly the content capability the Control API's 53 paths do not contain.
-
-**One token reached both households** - home and office - with nothing scoping it to either. Worth
-knowing before treating such a token as a per-house credential.
-
-### There is no search. The model is meant to be the index.
-
-About thirty tools: discovery of ids, transport, volume, grouping, favorites, playlists, line-in,
-night sound / speech enhancement, and six `play_*` verbs. **Not one queries a catalogue.** Nothing
-returns a track list, an album list, or an id you can hold and choose from. The design bet is that
-the calling LLM already knows the world's discography and only needs a resolver, so `play_album`
-takes the album's *name*.
-
-What the verbs actually do, which is not what they say:
-
-| called | replied | what the player actually had |
-|---|---|---|
-| `play_album` "Oops!... I Did It Again" | ✓ Playing album | **12-row queue**, position 1 |
-| `play_artist` "Daft Punk" | ✓ Playing *station* "Top Tracks" | **100-row queue**, position 1 |
-| `play_station` artist "Miles Davis" | ✓ Playing *playlist* "100% Miles Davis" | **40-row queue** |
-| `play_track` "Bohemian Rhapsody" | ✓ Playing *station* | **no queue at all**, `queue_position: null` |
-| `play_radio` "NPR" | ✓ "P.R.E. News & Ideas" on Sonos Radio | a stream, and not NPR |
-
-So two of the three "station" verbs build ordinary queues, the verb you would expect to queue one
-track refuses to, and the radio resolver renames what you asked for. A program consuming this must
-verify against the player afterwards rather than trust the reply - which is what everything else in
-this document already does, for the same reason.
-
-### The `music_service` enum is the whole YouTube Music story, again
-
-`play_track`/`play_album`/`play_artist`/`play_playlist`/`play_station` all take an optional
-`music_service`, and its schema is a **closed enum of seven**:
-
-> Amazon Music, Apple Music, Deezer, Pandora, Radio France, Sonos Radio, Spotify
-
-The home household is registered for Deezer, iHeartRadio ×2, Sonos Radio, TIDAL and **YouTube
-Music**. Three of those - YouTube Music, TIDAL, iHeartRadio - are **not in the enum and cannot be
-named**. `get_registered_music_services` lists YouTube Music happily; every play verb refuses the
-words.
-
-The checks run in a fixed order, each with its own message, which is how the layers were separated:
-
-| asked | answer |
-|---|---|
-| `music_service: "YouTube Music"` | `"YouTube Music" is not a recognized music service.` ← vocabulary |
-| `music_service: "Spotify"` (in enum, not connected here) | `That music service isn't set up on this household.` ← registration |
-| `music_service: "Sonos Radio"` (connected, has no albums) | `No matching content found.` ← catalogue |
-| no `music_service` at all | resolved to **Deezer**, the household's first full-catalogue service |
-
-**Consequence, and it is the sharp one.** On a household whose only connected service were YouTube
-Music, "play There's No 'I' In Team by Taking Back Sunday" fails twice - the enum rejects the name,
-and omitting it leaves the resolver nothing eligible but Sonos Radio, which answers `No matching
-content found`. The user owns the song; the API says it cannot find it. That error is
-indistinguishable from "the song does not exist", "you invented the title" and "the service does
-not carry it", and an agent relaying it says "sorry, I couldn't find that song" - confidently
-wrong, about a library the same API listed by name moments earlier.
-
-### But playback is not gated, only resolution
-
-`play_sonos_favorite` on a favorite backed by YouTube Music **plays it** - verified on hardware,
-`Hot House` by Ryo Fukui, position advancing, `sn=2`. Nobody has to name the service for a
-household object, so the player resolves it with the household's own account exactly as the local
-enqueue path does.
-
-So the split is identical to the one the rest of this document found from the LAN side: **discovery
-is gated, playback is not.** Anything already saved - a favorite, a Sonos playlist - plays through
-any route. Only *finding* it is closed.
-
-One caveat for anyone reading the playlist route as a workaround: `get_sonos_playlists` returns
-`{id, name, trackCount}` and nothing else. **The tracks inside a playlist are invisible**, so there
-is no way to tell whether a playlist contains the wanted song short of playing it and reading
-`get_now_playing`.
-
-### The error taxonomy is prose in a success envelope
-
-Tested for whether the strings are model-generated: **they are not.** Byte-identical wording across
-three repeats and across different inputs, 0.27-0.94s round trip. Static templates - including the
-instruction to the *calling model* baked into the constant:
-
-```
-Error: No matching content found. Tell the user what happened.
-```
-
-Where the standardized channel is used, and where it is not:
-
-| condition | answer |
-|---|---|
-| unknown JSON-RPC **method** | `{"error":{"code":-32601,"message":"Method not found"}}` - proper |
-| unknown **tool** | HTTP 200, `result.content[0].text = "Error: Unknown tool: …"` |
-| wrong argument type | HTTP 200, `"Error: Invalid input: expected string, received number"` (Zod's own wording, verbatim - a Node/TypeScript server leaking its validator) |
-| every domain failure | HTTP 200, `"Error: …"` prose |
-
-And **`isError` is absent on every failure**, though MCP defines it for exactly this case. So a
-program cannot distinguish success from failure except by matching the prefix `"Error: "`. That is
-the one thing here worth calling a defect rather than a design choice.
-
-### A diagnostic trap worth remembering: `NO_CONTENT` can mean "out of streams"
-
-Mid-probe, a YouTube Music favorite that had played an hour earlier began failing on **both**
-transports at once - locally `favorites:1 loadFavorite failed: ERROR_PLAYBACK_NO_CONTENT`, and
-through 27mcp `That favorite appears to be unavailable — likely the associated music service
-account is missing`. Both readings pointed at a dead registration, and both were wrong: another
-person in the house was streaming, and YouTube Music's **concurrent-device limit** was refusing the
-household a slot. It cleared by itself.
-
-Two lessons. **An intermittent `NO_CONTENT` is not evidence of a broken account** - do not go
-re-linking a service that was never broken, which is exactly what was about to be recommended here.
-And 27mcp's message names a cause it cannot observe; the underlying error carries no such detail.
-
-### What it would be worth to x2rock
-
-A narrow supplement, and only that. It cannot back a picker - no results, no ids - so nothing about
-the bar widget or `search` changes. What it would add is "play this named thing", cloud-mediated,
-for the two catalogues x2rock cannot reach locally at all: **Apple Music and Spotify**. Cost: an
-OAuth token, a cloud round trip, a per-household rate limit, US-English only, and a reply that must
-be verified against the player. Not built; recorded so the trade is on paper.
-
-Two corrections made while probing, kept visible because both were mine and both came from
-over-generalising a single call: "the play verbs never build a queue" (false - `play_album` does),
-and "`shuffle` is required by the implementation but not the schema" (false - the schema declares
-it required; the rejected call was simply invalid).
-
-### Where the enum comes from, and what others report
-
-Sonos's own materials explain the seven names, and it is not arbitrary: **27mcp "supports the same
-set of content services as Classic Sonos Voice Control"**, and the enum is that list, inherited
-verbatim. Sonos's support page for voice content services names exactly: Sonos Radio, Apple Music,
-Amazon Music, Deezer, Pandora, Spotify, Radio France - **the same seven, item for item**, which is
-why Radio France is in there looking out of place. YouTube Music, TIDAL and iHeartRadio were never
-Sonos Voice Control services, so they are absent here for a reason that predates MCP entirely. The
-exclusion is a *hand-me-down*, not a judgement about those services - which also means it will not
-be fixed by anything MCP-specific.
-
-**Three locks, three lock-holders - do not collapse them into one.** YouTube Music is closed to
-this project on every discovery route, but for unrelated reasons: SMAPI search is locked by
-*Google* (its endpoint gates unknown callers on the sealed key), 27mcp is locked by *Sonos* (this
-inherited enum), and the Control API has no discovery for anyone. Deezer, TIDAL and iHeartRadio
-prove SMAPI itself is fine - they answer x2rock's ordinary device-link token and search normally.
-Nothing here is evidence that Sonos's general content mechanism failed; it is evidence that one
-provider fenced its own endpoint, and that Sonos's narrow first-party pipeline - the one holding
-the key - will not say the service's name.
-
-**And the list has barely moved in four years.** Sonos Voice Control launched June 2022 (US) with
-Apple Music, Amazon Music, Deezer, Pandora and Sonos Radio - *without Spotify*, which took roughly
-two years to arrive. Radio France is the only other addition. So the constraint x2rock ran into in
-2026 is a 2022 list with two entries appended, now inherited by the AI product: the household's
-own YouTube Music account has been unaddressable by every Sonos-built voice or agent surface for
-its entire existence.
-
-Sonos's engineering blog adds three things worth recording:
-
-- **34 tools**, described as "the source of truth", with no stated rationale for the absence of
-  search or discovery.
-- **"Tool inventory, names, descriptions, and schema will evolve without notice."** Anything built
-  on this is building on a contract its author says is unstable - a real argument against depending
-  on it for anything a person would notice breaking.
-- Early access, English only, S2 required, cloud connectivity required.
-
-Independent reports from the Sonos community match what was measured here and add two findings this
-probe did not reach:
-
-- "The mcp is fairly limited right now to playback related operations. It can't do diagnostic
-  functions, can't return search results, etc." - the no-search finding, reached independently.
-- **Multi-profile services cannot be targeted.** A household with a Spotify family plan or an
-  Amazon Music account has no way to say *which profile* a command applies to. The same shape as
-  the two-iHeartRadio-accounts problem recorded elsewhere in this document, and 27mcp has no
-  parameter for it at all (x2rock's `accountLabel` equivalent is visible in
-  `get_registered_music_services`, but no play verb accepts one).
-
-
-## `x2rock raw`, and what it found in the account namespaces (verified 2026-08-31)
-
-The first open question said to build a raw Control-API command before guessing at anything else.
-Built: `x2rock raw <namespace> <command> [PARAMS]`, with `--scope household|group|player|none` for
-the target key and `--watch <seconds>` to stay attached and print events afterwards. Three
-decisions in it are worth keeping if it is ever rewritten:
-
-- **A refusal is a result.** It prints the error body and still exits 0, because
-  `ERROR_UNSUPPORTED_COMMAND` is the answer a probe usually went to get. Only a transport failure
-  is an error.
-- **It prints the header, not just the body.** The header is where the player says which namespace
-  it thinks it answered, which turned out to be the single most useful field here.
-- **`--watch` attaches the event receiver before sending**, because a `subscribe` can be answered
-  by an event that overtakes the reply.
-
-### `--scope player` was addressing the right player over the wrong socket (fixed 2026-08-31)
-
-`--scope group` reconnects to the group's coordinator before sending, because only the coordinator
-answers for a group. `--scope player` set `playerId` and did not do the equivalent, so a
-player-scoped probe went out over whichever socket the session happened to open. The player it
-reached answered:
-
-```
-ERROR_INVALID_OBJECT_ID — "Incorrect playerId"
-```
-
-for an id that was perfectly correct — it simply was not *that* player's id. Every player-scoped
-namespace was unreachable without also passing `--ip` for the same room named in `--room`, and the
-error pointed at the id rather than at the connection. `playerVolume:1 getVolume` on Living Room
-failed with the default connection and succeeded with `-i 192.168.86.25`, which is what isolated
-it. Now it opens a connection to the named player, mirroring the group branch.
-
-**A player answers player-scoped commands only for itself.** That is the general fact, and it is
-the same shape as the coordinator rule one level down.
-
-### Which scope each namespace wants (verified 2026-08-31)
-
-Sent `subscribe` to each namespace at all four scopes and recorded which one the player accepted:
-
-| Scope | Namespaces |
-|---|---|
-| `group` | `playback:1`, `playbackMetadata:1`, `groupVolume:1` |
-| `player` | `playerVolume:1`, `homeTheater:1`, `audioClip:1` |
-| `household` | `groups:1`, `favorites:1`, `playlists:1`, `musicServiceAccounts:1` |
-
-The wrong scope always answers `ERROR_MISSING_PARAMETERS` naming the key it wanted — `Missing
-groupId`, `Missing playerId`, `Missing householdId` — so the error says which scope to use.
-`playbackSession:1` answers `ERROR_MISSING_PARAMETERS` at every scope because it wants `--session`.
-
-**`settings:1`'s "unidentified required parameter" is identified now (2026-09-05), and it was the
-wrong command being probed.** The namespace is **player**-scoped. `getSettings` wants `userId` - a
-Sonos account identity x2rock does not have and will not get - so that command is closed to this
-model. But **`getPlayerSettings` needs no parameter at all and answers `success`**, returning a
-`playerSettings` object: `roomName`, `volumeMode` (VARIABLE/FIXED), `monoMode`,
-`enableSpatialAudio`, `gainTrimDB`, `volumeScalingFactor`, a bluetooth/wifi/sonosnet policy block,
-and - the surprise - an `eq` block (`bass`, `treble`, `loudness`) and a `homeTheater` block
-(`nightMode`, `enhanceDialog`, `enhanceDialogLevel`, `enableTrueRoom`). So the Control API *can*
-read tone and home-theatre state (see the EQ correction below). Writing them is a different story:
-`setPlayerSettings` exists but answers **`ERROR_NO_PERMISSION`** to this anonymous LAN connection -
-the command shape is fine, the authority is not - so configuration writes stay on UPnP. **Not for
-every field (2026-10-08):** `{"volumeScalingFactor": ...}` alone is accepted and takes effect; see
-"The 2026-10-08 review".
-`setSettings` is `ERROR_UNSUPPORTED_COMMAND`.
-
-The target key lives in the **header**, so putting `groupId` in `PARAMS` does nothing; the body is
-only ever the command's own parameters. This is now in `raw --help`, with the table and five
-worked examples, because the tool is driven far more often by an agent reading `--help` than by a
-person who remembers last week's probe.
-
-### `musicService:1` is real, and it is `musicServiceAccounts:1`
-
-The 2026-08-28 note recorded that `musicService:1 search` returns `ERROR_UNSUPPORTED_COMMAND`. That
-is still true, and it was being read wrong. The reply's header says:
-
-```
-"namespace": "musicServiceAccounts:1", "response": "search", "success": false
-```
-
-The player **canonicalises** `musicService:1` to `musicServiceAccounts:1` and then rejects the
-*command*. The control experiment is what makes this solid: a nonsense namespace answers
-`ERROR_UNSUPPORTED_NAMESPACE` with `"namespace": "global"` and the reason
-`v1:totallyBogus:9 namespace is not supported.` So the two failures are different failures.
-`musicService:1` is a supported namespace with no `search` in it — and its real name says what it
-is actually for, which is accounts, not content.
-
-Always read the echoed `namespace` before concluding a namespace is missing.
-
-### What `musicServiceAccounts:1` actually supports
-
-Probed by name; everything not listed returned `ERROR_UNSUPPORTED_COMMAND` (`getAccounts`,
-`getServices`, `getMusicServices`, `getAvailableServices`, `getRegisteredServices`, `list`,
-`getAll`, `refresh`, `create`, `add`, `getSessions`, and the obvious variants).
-
-- **`match`** — supported, and wants a `nickname`: `Parsing terminated:[1].nickname`. An account
-  lookup, not a list.
-- **`subscribe` / `unsubscribe`** — supported, reply body empty.
-- The event that follows a subscribe is **`musicServicesChanged`**, and it carries only version
-  markers, not content:
-  ```json
-  {"_objectType":"musicServicesChanged",
-   "availableServicesVersion":{"version":"58"},
-   "registeredServicesVersion":{"version":"2026-08-31T13:38:41.240774449"}}
-  ```
-  So the Control API's role here is **cache invalidation**: it tells a controller that the
-  available or the registered set has moved, and the controller re-reads the actual lists
-  somewhere else. The word `registeredServices` is the first direct evidence that the household
-  distinguishes "all services Sonos knows" from "services this household has" — but this namespace
-  will not hand the second one over, and nothing else does either (see "Searched properly: there is
-  no listing anywhere").
-
-### The UPnP action lists, which should have been read first
-
-Straight from the SCPDs, and definitive — no guessing at command names required:
-
-- **`MusicServices:1`** (`/xml/MusicServices1.xml`): `GetSessionId(ServiceId, Username) → SessionId`,
-  `ListAvailableServices`, `UpdateAvailableServices`. That is the whole service.
-- **`SystemProperties:1`** (`/xml/SystemProperties1.xml`): `GetString`/`SetString`/`Remove`,
-  `GetWebCode`, `AddAccountX`, **`AddOAuthAccountX`**(`AccountType`, `AccountToken`, `AccountKey`,
-  `OAuthDeviceID`, `AuthorizationCode`, `RedirectURI`, `UserIdHashCode`, `AccountTier`,
-  `AccountNickname`), `RemoveAccount`, `ReplaceAccountX`, `EditAccountPasswordX`,
-  `SetAccountNicknameX`, `RefreshAccountCredentialsX`, `EditAccountMd`,
-  `ProvisionCredentialedTrialAccountX`, `ResetThirdPartyCredentials`, `EnableRDM`/`GetRDM`,
-  `DoPostUpdateTasks`.
-
-Two things fall out of that list:
-
-- **`GetSessionId` looked like the credential path** — the one action that hands a controller
-  something to present to a service — and answers UPnP 806 for every service tried, including one
-  that plays. See the next section.
-- **There is no enumeration action anywhere.** `AddAccountX` and friends write accounts; nothing
-  reads the list back. `/status/accounts` is gone on this firmware. x2rock instead runs a link flow
-  itself and holds its own service token (`x2rock link`, `credentials.json`).
-
-### `GetSessionId`: answered, and it answers nothing (closed 2026-08-31)
-
-**Do not spend the ten minutes this section used to ask for.** It was finally run against four
-services on one household, with an empty `Username`:
-
-| Service | State on this household | `GetSessionId` |
-|---|---|---|
-| YouTube Music (284) | linked in the Sonos app, **plays today** | UPnP **806** |
-| Mixcloud (181) | signed in through the Sonos app | UPnP **806** |
-| iHeartRadio (6) | linked by x2rock only | UPnP **806** |
-| Bandcamp (157) | linked by x2rock only | UPnP **806** |
-
-**806 for the service that demonstrably works.** So the call does not distinguish a registered
-account from an absent one, and it cannot be used to ask "does this household hold an account for
-service N" — which was the only remaining use anyone had for it. The earlier guess that 806 means
-"this service does not do sessions" survives, and `getSessionId` being the legacy
-username-and-password path explains why every modern service refuses it.
-
-The question behind it — whether any read path to a household's `loginToken` exists — is not answered
-here and has no other candidate. Treat it as closed by exhaustion rather than by proof.
-
-**There is no way to enumerate a household's linked services.** Harvesting `sid`/`sn` out of `FV:2`
-and `Q:0` URIs is the only method, and it only finds services something was saved from. Each
-favorite's `SA_RINCON<N>` also names its service, by `N >> 8` (confirmed for two services under
-"Both open questions closed").
-
-### Where this leaves the three questions
-
-All three are closed:
-
-1. **`musicService:1`** — no search there; the namespace is about accounts and only reports versions.
-2. **The credential** — `GetSessionId` answers nothing, and no read path to a `loginToken` exists.
-   x2rock links services itself instead.
-3. **Enumerating linked services** — no listing exists in any Control API namespace, UPnP service or
-   the published reference. See "Searched properly: there is no listing anywhere".
-
-
-## Music service search, reopened (verified 2026-08-31)
-
-Search was ruled out of scope on 2026-08-29, and the decision rested on one claim: that reaching a
-music service needs "per-service authentication", meaning the Sonos account this tool deliberately
-does not have. **That claim conflated two different accounts and is wrong.**
-
-The first counter-evidence was ordinary use, not a probe. The Sonos app on iPhone and on Android,
-*not* signed in to a Sonos account, lists services — Sonos Radio, YouTube Music — searches them,
-and a Sonos One SL plays what the search returns. Whatever search needs, a Sonos login is not it.
-
-The reason is that a music service is linked to the **household**, not to a controller. Any
-controller on the LAN inherits the link. This document had already recorded half of that without
-following it through: `favorites:1 getFavorites` works on the LAN with no login, and each favorite
-carries a *reference* to the household's service credential inside `r:resMD` (the cdudn, whose
-trailing `Token` the player resolves itself).
-
-### Probed 2026-08-31 (office household, Sonos One SL, firmware 95.0-77060 / displayVersion 18.4)
-
-- **`MusicServices ListAvailableServices` answers unauthenticated over the LAN** — 53KB, 108
-  services. Each descriptor carries the SMAPI endpoint (`Uri` and `SecureUri`), a `Capabilities`
-  bitmask, a `<Policy Auth=...>` and a `<Manifest Uri=...>`. "Needs the service's own endpoint" was
-  never a barrier; the speaker gives it away.
-  - `Id="284" Name="YouTube Music"`, `Auth="AppLink"`, `https://music.googleapis.com/v1:sendRequest`
-  - `Id="303" Name="Sonos Radio"`, `Auth="DeviceLink"`, `https://sali.sonos.superhi.fi/smapi`
-- **The `Manifest` URI is fetchable anonymously** from Sonos's CDN (`cf.ws.sonos.com/p/m/<uuid>`)
-  and declares typed endpoints. The two services differ in shape, which matters for the client:
-  - Sonos Radio declares a dedicated search endpoint —
-    `{"type":"search","uri":"https://sali.sonos.superhi.fi/content/search","version":"2.3"}` —
-    alongside `browse`, `radio` and `reporting`.
-  - YouTube Music declares only `reporting`, so its search is the classic SOAP `search` action at
-    its `SecureUri`.
-  - So a client needs **both** paths, and the manifest is what tells it which to use.
-- **The presentation map (`cf.ws.sonos.com/p/p/<uuid>`, also anonymous) declares the search
-  categories**, which is exactly what a search UI needs to offer:
-  - Sonos Radio: `stations`, `artists`, `genres`, `all`
-  - YouTube Music: `artists`, `playlists`, `tracks` (mapped `SONGS`), `albums`, `all`
-- **`FV:2` reveals *some* linked services, and is not a way to enumerate them.** Every favorite
-  here carries `<desc id="cdudn">SA_RINCON77575_X_#Svc77575-0-Token</desc>`, and 77575 = 303·256 + 7
-  — service 303, Sonos Radio. But that only names services which happen to have a favorite. The
-  phone app on this household also lists YouTube Music, which has no favorite here and so leaves no
-  trace in `FV:2`. `ListAvailableServices` returns all 108 services Sonos knows about rather than
-  the household's, and `/status/accounts` — the S1-era endpoint for exactly this — is not served at
-  all any more (it answers the same empty `ZPSupportInfo` every unknown `/status` name does). No
-  other route exists either; see "Searched properly: there is no listing anywhere".
-- Note the household difference: the office household has **3** favorites and one linked service.
-  The 41-favorite count and the `Svc51463` token recorded elsewhere in this document are the home
-  household. Numbers in this document are per-household; the mechanisms are not.
-
-### What still stands
-
-- **UPnP `Search` does not exist.** `GetSearchCapabilities` returned an empty `SearchCaps` again on
-  2026-08-31. Search will not come from `ContentDirectory`.
-- `musicService:1 search` returns `ERROR_UNSUPPORTED_COMMAND`. Re-probed 2026-08-31 with the new
-  `x2rock raw`, and it holds — but the reason was misread the first time: the namespace resolves to
-  `musicServiceAccounts:1` and is about accounts, not content. See "`x2rock raw`, and what it found
-  in the account namespaces".
-
-### The credential
-
-The endpoint is free; the household's credential is not in our hands. `SA_RINCON77575_X_#Svc77575-0-Token`
-is a *reference*, not a secret — the literal trailing `Token` is a placeholder the **player**
-resolves against its own stored credential. That is why enqueuing works without x2rock holding any
-token: the player substitutes. A search issued by x2rock straight at the service endpoint gets no
-such substitution, so an authenticated service needs x2rock's own token, minted by `x2rock link`.
-
-The questions this section once listed are all answered: the player will not search
-(`musicService:1` is about accounts), the household will not hand over its credential
-(`GetSessionId` answers nothing, so x2rock links services itself), linked services cannot be listed
-(see "Searched properly"), and a service track *can* be enqueued (see "A service *track* can be
-enqueued").
-
-`playbackSession:1` `loadStreamUrl` and `loadCloudQueue` are not a way *around* `AddURIToQueue`'s
-refusals — they are what Sonos intends instead of it, and both are confirmed present on the LAN.
-See "What Sonos's own sample app settles", which also has their full contracts.
-
-
-## Bar-widget interop with `omarchy.media`, and the room-name decision (2026-08-31)
-
-Verified against Omarchy 4.0.2 running from `/usr/share/omarchy/shell`. **Only the office Media
-Room was reachable, so everything below about *multiple* players is read out of Omarchy's source
-rather than exercised — that half needs the home household to confirm.**
-
-### Settling which widget drew what
-
-`qs -p /usr/share/omarchy/shell ipc call shell debugBarGeometry` returns every bar slot's id,
-section, x and width. Coordinates are logical; multiply by the scale (1.25 on a 1920px screen
-here) to compare against a `grim` capture. Use it. Reading a screenshot by eye misattributed the
-now-playing text twice before this call settled it:
-
-- `omarchy.media` — center, x=830 w=203 (physical 1037–1291): the "now playing" text.
-- `x2rock.sonos` — right, x=1396 w=18 (physical 1745–1767): icon only, as `BarWidget.qml:758`
-  sizes it (`glyph.implicitWidth + Style.space(14)`).
-
-So with the daemon running, the track name in the bar is **Omarchy's** widget rendering x2rock's
-MPRIS data. x2rock's own pill contributes nothing but the speaker glyph.
-
-### `omarchy.media` never shows the room
-
-Its bar label is `trackTitle + "  ·  " + trackArtist`. Its popup source rows use
-`trackTitle || identity` and `trackArtist || identity`. Since x2rock always supplies a title and
-an artist, the MPRIS `Identity` — which is the room name — never renders anywhere in that widget.
-Two rooms playing the same album produce two visually identical rows.
-
-### Which player it picks
-
-`plugins/services/media/Service.qml`, `selectActivePlayer()`:
-
-```
-preferred && preferred.isPlaying
-  → oldestPlayingPlayer(true)    // requires a local PipeWire stream
-  → oldestPlayingPlayer(false)
-  → streamPreferred → streamCandidate → preferred → trackPlayer → …
-```
-
-- `oldestPlayingPlayer(true)` demands `playerHasPlaybackStream()`, a fuzzy name match of the
-  player against local PipeWire *output* streams. A Sonos room has no local stream — the audio is
-  on the speaker — so it can never pass that round, and **local playback outranks any room** unless
-  the room is the pinned `preferredPlayerKey` *and* playing.
-- "oldest" means start-order, stamped by `syncPlayingOrder()` the first time a player is seen
-  playing and held until it stops. Among several playing rooms the bar keeps whichever started
-  first; starting a second room does not move it, and the widget's middle-click / scroll then acts
-  on the first room rather than the one just started.
-- With everything paused it falls through to `preferred`, else `trackPlayer` — the first
-  `Mpris.players` entry carrying metadata, i.e. D-Bus arrival order, which is not stable across
-  daemon restarts.
-
-### One player per group, not per room
-
-`src/mpris.rs:20` and `daemon.rs:348` publish one bus per Sonos *group*, named for the
-coordinator. Party mode collapses the whole household to a single MPRIS player. This is why a
-multi-room house can look better behaved here than it is: grouped rooms never exercise the
-multi-player paths above.
-
-### Why the room name came out of the x2rock pill (decided 2026-08-31)
-
-Given the line above, a room name on the pill would have named the *coordinator* rather than the
-room in front of you, and re-labelled itself on every regroup. It also could not switch rooms, so
-it was a label with nothing behind it. The pill stays an icon; the room list lives in the popup.
-
-### The interop that would justify putting it back — designed, not built
-
-`shell.qml:279` is `function firstPartyServiceFor(pluginId) { return serviceFor(pluginId) }` — no
-first-party gate — and `Bar.qml`'s `injectProps()` hands every widget, third-party included, the
-`bar` reference. So x2rock's widget can reach Omarchy's media service the same way Omarchy's own
-widget does:
-
-```qml
-readonly property var mediaService: bar?.shell?.firstPartyServiceFor("omarchy.media")
-mediaService?.selectPlayer(roomPlayer.dbusName)   // pins the bar pill to that room
-```
-
-`playerKey()` is just `player.dbusName`, which the widget already holds from
-`Quickshell.Services.Mpris` — no need to recompute `bus_suffix()` in QML.
-
-Caveats, all from the selection order above: the pin only wins outright while that player is
-playing; `runAction` overwrites `preferredPlayerKey` on every successful transport action, so a
-click on the media pill re-pins it; it is session state, lost on shell restart; and it is an
-undeclared dependency on an Omarchy internal. That last one is harmless if `omarchy.media` is not
-placed in the bar — its manifest is `keepLoaded` with kind `service`, so the service exists and
-the call is a visual no-op.
-
-The **reciprocal read is probably the better feature**: `mediaService.activePlayer` tells x2rock's
-popup which room the bar pill is currently showing, so the popup can mark it. That hands
-`omarchy.media` the room identity it structurally cannot express, without putting a name back on
-the pill.
-
-### Unexplained, low priority
-
-With a single paused room, the `omarchy.media` marquee sat frozen at the same pixel offset across
-four captures ten minutes apart, showing `Espresso` with the artist clipped out of view.
-`running: labelText.needsScroll && !root.popupOpen` points at a stuck `popupOpen`, but the
-bar-level `openPanelIndicator` (`Bar.qml:1641`, `panelOpen: root.activePopout === slot.activeItem`)
-had already cleared by then, and `qs ipc call shell call omarchy.media close ""` answers
-`unknown`. Worth a second look at home, where several players may make the trigger obvious.
-
-
-## Soundbars: the TV input, and what is arriving on it (verified 2026-08-29)
-
-- **`capabilities` already says which rooms are soundbars.** `getGroups` returns
-  it per player and x2rock had been deserializing it and reading it nowhere.
-  `HT_PLAYBACK` and `HDMI` mark the home-theatre players; on this household the
-  Beams carry `PLAYBACK,CLOUD,HT_PLAYBACK,HT_POWER_STATE,AIRPLAY,AUDIO_CLIP,
-  VOICE,HDMI`, and one adds `IR_CONTROL`. No probing needed to know which rooms
-  have a TV input.
-- **`playback:1 loadLineIn` cannot switch to it - but the Control API can, and
-  this section first said otherwise (corrected 2026-09-05).** `loadLineIn` is
-  for analog line-in and answers `ERROR_NOT_CAPABLE`, "player does not have
-  line-in", on a Beam, with or without a `deviceId`. The wrong-command mistake
-  was reading that as "the Control API has no reach into the TV input". It has:
-  **`homeTheater:1 loadHomeTheaterPlayback` (player-scoped, no parameters)
-  switches a soundbar to its TV input** and answers `success`. So the TV input
-  is not, after the queue, a second thing the Control API cannot touch -
-  `loadLineIn` was simply the wrong door. (Found by an empty-body probe that
-  **executed**, and confirmed deliberately afterward with a before/after:
-  `loadHomeTheaterPlayback` on empty flipped Guest TV from paused-on-its-queue
-  to TV input within ~2s. The precise rule, since an earlier draft over-stated
-  it: an empty body is unsafe only for a command that takes **no required
-  parameter and performs an action**. Confirmed across five, each with a
-  before/after: `loadHomeTheaterPlayback` (off-TV → TV input), and `playback:1`'s
-  `togglePlayPause` (paused → playing), `pause` (playing → paused),
-  `skipToNextTrack` and `skipToPreviousTrack` (queue position ±1) - all ran on an
-  empty body. (`skip*` while paused advanced the queue *without* starting
-  playback - a silent, purely observable confirmation.) The other side is
-  equally firm: a command that requires a parameter refuses the empty body
-  harmlessly - `createSession`, `loadStreamUrl`, `loadAudioClip` and
-  `setTvPowerState` all answer `ERROR_INVALID_PARAMETER`/`MISSING_PARAMETERS`
-  rather than acting - and even the parameterless `setOptions` no-op'd
-  (`success`, nothing changed). So "setters are unsafe to probe empty" is wrong;
-  the test is "does it need a parameter" - if not, and it acts, an empty body
-  runs it. Probe those with `--scope none` or reason first.)
-- **x2rock uses UPnP for it anyway**, and keeps doing so: `SetAVTransportURI` to
-  `x-sonos-htastream:<playerId>:spdif`, exactly what the device reports as its
-  own `CurrentURI` while on TV. `spdif` covers HDMI-ARC as well as optical, and
-  the group-preserving handoff (below) is already worked out here. The Control
-  API command is a known alternative, not a reason to rewrite a working path.
-- **`setTvPowerState`: TV power over HDMI-CEC - `raw`-only, deliberately not a
-  built command (probed 2026-09-05).** The field is `tvPowerState`; the values
-  are **`ON`** and **`STANDBY`** (case-insensitive), *not* "OFF" - that answers
-  "power state is not valid". The command is **accepted but fire-and-forget and
-  unconfirmable**: `getTvPowerState` is `ERROR_UNSUPPORTED_COMMAND`, there is no
-  power field in `getOptions`, and no power event in the `homeTheater:1`
-  subscription - the only readable proxy is `tvAudioSignalStatus.signalDetected`
-  (is a TV audio signal arriving), which is signal presence, not TV power. And
-  it is **configuration-dependent to the point of not working here**: sent
-  `STANDBY` to the Living Room Beam while it was on and playing 5.1, got
-  `success`, and the TV stayed on - `signalDetected` never dropped. The reason
-  is CEC topology: the Beam is on the TV's **ARC** port, an *audio* device, and
-  TV power is conventionally driven by *source* devices (a player, a console)
-  asserting active-source or broadcasting standby; a soundbar-initiated power
-  command is honored inconsistently and was ignored by this TV. So `success`
-  here means "the Beam queued a CEC message", never "the TV obeyed".
-  **Decision:** this stays reachable only through `raw` -
-  `x2rock raw api homeTheater:1 setTvPowerState --scope player -r "<Room>"
-  '{"tvPowerState":"STANDBY"}'` - and is *not* promoted to a first-class
-  command. A blessed `tv-power` would report `success` and let a caller (or an
-  agent) tell the user the TV is off while it is still on, which is worse than
-  not offering it. It is the `raw` escape hatch's whole purpose: the wide API,
-  used by whoever wants it, without x2rock vouching for it.
-- **`homeTheater:1` accepts a subscribe and then never sends anything
-  (measured 2026-09-08).** `subscribe` on player scope answers `success: true`,
-  so it looks like the push channel for night mode and dialog enhancement. It
-  is not: night mode was toggled on and off with `eq --night` and *no event
-  arrived*, on either edge, with `X2ROCK_LOG_EVENTS=1` capturing every body -
-  only `playback:1`, `playbackMetadata:1` and `groupVolume:1` ever fired.
-  **The push channel exists; it is just not this one.** The official app does
-  reflect a night/dialog change live, which first read as a contradiction and is
-  not: `RenderingControl`'s SCPD marks `NightMode`, `DialogLevel` and `EQValue`
-  all `sendEvents="no"` and `LastChange` `sendEvents="yes"`, the ordinary UPnP
-  bundling - so these travel as UPnP **GENA** events, which need the player to
-  connect back to the subscriber and are therefore the one transport this file
-  rules out on purpose (see the module comment on `sonos/upnp.rs`: a default-deny
-  firewall silently eats the callback). So the app is not using a Control-API
-  namespace x2rock has missed. An earlier draft of this note guessed the cause
-  was the Control API failing to observe a UPnP write from underneath; that was
-  speculation and it was wrong.
-  **What `homeTheater:1` does send is a confirmation
-  carrying no options at all**, and that is the dangerous part: read through
-  `HomeTheaterOptions`, whose bools are `#[serde(default)]`, an empty body says
-  "night off, dialog off". It overwrote a Beam that had just been seeded
-  correctly - `enhanceDialog: true` published, then `false` a second later, with
-  nothing in the log to say why. Hence `HomeTheaterUpdate`, whose fields are
-  `Option` so absent means unchanged. The same trap `PlaybackActions` documents;
-  the second time this shape has cost real debugging, so the rule is worth
-  stating flatly: **in this API an event body that omits a field is not a body
-  setting it to false**, and any type deserialized from both a reply and an
-  event needs two shapes, not one.
-  The consequence for consumers is that the daemon's night/dialog values are
-  right when read and never updated again, which is why the bar widget lays its
-  own toggles over them rather than waiting for a push that does not come.
-- **`getOptions`/`setOptions` on `homeTheater:1` - a lead, not built.**
-  `getOptions` reads the home-theatre block (night mode, dialog, virtual
-  height, grouping latency); `setOptions` on an empty body answered `success`
-  and changed nothing, which *hints* at a Control-API **write** path for
-  night/dialog that `settings:1 setPlayerSettings` refused with
-  `ERROR_NO_PERMISSION` - which, if real, would move the night/dialog writes off
-  UPnP. Left unprobed not because the empty body is dangerous (it no-op'd) but
-  because settling it means a **real-parameter** `setOptions`, and that *would*
-  write - a state change worth doing on purpose, not as a probe. x2rock writes
-  night/dialog over UPnP `SetEQ` today, which works, so this stays a lead.
-- **The audio format arrives as a push event, in a namespace already
-  subscribed.** `playbackMetadata:1` carries `container.htInputFormat` on a
-  soundbar:
-
-  ```json
-  { "numGroundChannels": 5, "numLFEChannels": 1,
-    "numHeightChannels": 0, "streamDescription": "Dolby Digital Surround" }
-  ```
-
-  (A real capture, not illustrative: the Living Room 5.1 set on Dolby Digital
-  content, 2026-09-05 - see the confirmation under "The extended EQ set, and
-  what to probe at home".)
-
-  So "what is the TV actually sending" needs no polling and no new subscription.
-  It is also the only place this is visible: `GetPositionInfo` returns
-  `NOT_IMPLEMENTED` for everything on an HT stream, `HTControl:1` is only IR and
-  LED, and `RenderingControl:1` has no format read.
-- **The channel counts are the point, not the codec name.** A source that has
-  fallen back reports its codec unchanged and drops the channels - "Dolby
-  Digital 2.0" where "Dolby Digital Surround 5.1" was expected. Observed live:
-  the same Beam read 2.0, then 5.1, then 2.0 again as the content changed.
-- **The LFE count arrives as `numLFEChannels`, in caps.** It is the one field
-  here that `serde(rename_all = "camelCase")` gets wrong - the derived name is
-  `numLfeChannels`, so the field needs an explicit `rename`. With `default` on
-  it this failed silently: every layout lost its `.1` and read 5.0, and a 2.1
-  source looked like plain stereo to `is_surround`.
-- **With the television off it reports `streamDescription: "No Signal"` and no
-  channels**, which is worth rendering as "No Signal" rather than "No Signal
-  0.0". Re-confirmed 2026-09-05 on the 5.1 Living Room set, which is the first
-  time this path has run on a soundbar with a Sub and real surrounds bonded to
-  it: `x2rock now` printed `PLAYING  TV Audio  [No Signal]` and the JSON gave
-  `input_format: "No Signal"`, `surround: false`, `on_tv: true`. Bonded surround
-  hardware does not make the player invent channels while the source is dark.
-- **`pause` cannot get a soundbar back off its TV input.** `x2rock pause` on a
-  room showing TV Audio fails with `playback:1 pause failed:
-  ERROR_PLAYBACK_NO_CONTENT` - correctly, since the TV input is not content that
-  can be paused. The way back is any command that sets the transport to
-  something else. Worth knowing that this happens *before* content resolution:
-  a `favorites:1 loadFavorite` that itself failed with `ERROR_PLAYBACK_NO_CONTENT
-  ("No tracks added to queue")` still took the room off TV input and left it
-  `IDLE`. So "switch to TV and back" is not symmetrical - `x2rock tv` is one
-  command and the return trip is a different one.
-- **Ask `x2rock:onTvInput` whether a room is on TV; never `x2rock:inputFormat`.**
-  The format is display text and nothing else: it is empty off the TV input, but
-  it is also empty *on* it whenever the player names no codec and no channels, so
-  reading emptiness as "not on TV" is wrong in a state that happens routinely.
-  `onTvInput` is the presence of `container.htInputFormat`, which is the question.
-- **A soundbar's HDMI belongs to the player, not to the group.** A Beam that
-  joined a bookshelf speaker's group still has its TV input, so "does this room
-  have a TV" is `any(members)`, not the coordinator alone - and `x2rock tv` finds
-  the soundbar among the members the same way.
-- **Switching a *member* soundbar to TV hands it the group, and costs the
-  request its answer** (measured 2026-08-29, Beam + SYMFONISK, firmware
-  95.1-78010). `SetAVTransportURI` goes to the coordinator, as AVTransport calls
-  do. The soundbar then takes coordination, and:
-
-  | t | soundbar | old coordinator |
-  |---|---|---|
-  | 0 - 1.1s | answers ~10ms, `x-rincon:<coord>` | answers ~10ms, own queue |
-  | ~1.05s | `x-rincon-queue:<self>#0` for ~250ms | - |
-  | 1.1 - 13.3s | **answers nothing** | **answers nothing** |
-  | ~13.5s | `x-sonos-htastream:<self>:spdif` | `x-rincon:<soundbar>` |
-
-  The original request never returns: the coordinator stops coordinating before
-  it replies, so the read times out and reports a failure for a switch that
-  plainly happened. **There is no faster witness.** An uninvolved player answers
-  `GetZoneGroupState` in 30ms throughout, and reports the *old* grouping for the
-  same thirteen seconds. The 250ms flicker at ~1.05s is too narrow to poll for
-  reliably - tried, and missed. So a switch that takes the group over is waited
-  out, roughly fourteen to twenty seconds, and only then reported.
-- **Addressing the soundbar directly is a different command, not a shortcut.**
-  `SetAVTransportURI` sent to the soundbar itself answers in 10ms with no stall -
-  but it makes the soundbar *leave* its group and take the TV alone, rather than
-  bringing the room with it. Both verified; the group-preserving one is what
-  `x2rock tv` means.
-
-## Per-player volume, and who may be asked (verified 2026-08-29)
-
-- **`playerVolume:1` is player-scoped, and only that player will answer it.**
-  Sent to anyone else - the group's coordinator, say - it fails with
-  `ERROR_INVALID_OBJECT_ID`, "Incorrect playerId". Group commands go to the
-  coordinator; player commands go to the player itself. Getting this wrong is
-  not a quiet failure: the daemon subscribed member volumes over the
-  coordinator's socket and spent several minutes in a retry loop publishing
-  nothing at all.
-- `getVolume` answers `{volume, muted, fixed}` - the same shape `groupVolume:1`
-  returns, so one wire type serves both.
-- **A group's volume is derived from its members', not stored beside them.**
-  Two rooms at 0 and 14 report a group volume of 7; setting one member to 22
-  moved the group to 18. So the group slider and the per-room sliders are
-  genuinely different controls, and the group one cannot be used to reach a
-  single room.
-- Muting is deliberately left group-only in x2rock. A single muted member of a
-  group is a puzzle to find later, and the group mute is what people mean.
-- **A member's socket is opened best-effort and is dropped the same way.** The
-  per-member connections exist only to balance one room against another, so
-  losing one costs a frozen slider and nothing else. The daemon classifies them
-  `Loss::Tolerated` and swallows their `LOST` rather than forwarding it: a
-  primary or coordinator going away means every player it feeds is stale and the
-  daemon must reconnect, but one flaky portable must never tear down the whole
-  household. A member `LOST` that appears to vanish is that rule working, not a
-  dropped event.
-
-## Bonded sets: stereo pairs and home theatre (verified 2026-09-05)
-
-The file assumed one player per room everywhere except ad-hoc grouping, because
-the household it was written against had no bonded sets. It now has three — a
-5.1 Living Room, a 5.0 Bedroom, and a Dining Room stereo pair — and the good
-news is that **the assumption held for the wrong reason, and holds anyway**.
-
-- **Topology spells the two bonds differently.** A stereo pair is two ordinary
-  `ZoneGroupMember`s sharing a `ChannelMapSet`
-  (`RINCON_…AF74:LF,LF;RINCON_…D8DC:RF,RF`), with the second carrying
-  `Invisible="1"`. A home-theatre bond is one member carrying `HTSatChanMapSet`
-  plus nested `<Satellite>` elements, one per Sub or surround
-  (`…:LF,RF;…:SW;…:LR;…:RR`). So "is this room several speakers" has two
-  different answers depending on which kind of bond it is, and neither looks
-  like an ad-hoc group.
-- **x2rock already hides all of it correctly.** `x2rock rooms` lists five rooms
-  for eleven players; satellites and the invisible pair half never appear as rooms
-  and never need to.
-- **The firmware keeps bonded members in lockstep, so x2rock does not have to.**
-  This was the open worry — whether per-room volume and tone reach one physical
-  unit or the whole bond. Measured both ways on the Dining Room pair: `x2rock eq
-  --room "Dining Room" --bass 4` moved the invisible RF half to `4` as well as
-  the visible LF coordinator, and `x2rock vol --room "Dining Room" 12` moved both
-  halves to 12. Living Room's Beam, Sub and both surrounds all read the same
-  volume. Addressing the visible player is addressing the bond; there is no
-  satellite handling to write.
-- **Satellites do not answer `GetBass` at all** - the Sub and the Play:1
-  surrounds return an empty `CurrentBass` where the pair halves return a number.
-  Tone belongs to the bond's primary, which is consistent with the app, and is
-  another reason nothing here needs a per-satellite door.
-- **A room is not necessarily on one firmware.** Living Room is a 96.1-79270
-  Beam coordinating 86.8-78270 satellites. `x2rock update` reports per *room*,
-  so it prints one line and one version for Living Room and silently speaks only
-  for the coordinator. That is a real blind spot: a satellite stuck on old
-  firmware would not show up. Not worth fixing until something depends on it, but
-  worth not being surprised by.
-
-## `x2rock system`: the player view, and why it had to exist (built 2026-09-05)
-
-Everything else here speaks in rooms, deliberately - a room is a room whether
-one speaker or four back it. The cost of that only became visible when this
-file's own hardware record turned out to have been wrong for months: it
-undercounted the household and missed every bonded set, and **nothing in the CLI
-could have caught it**. Answering "what is this household made of" meant leaving
-x2rock for `curl`. So `system` is the deliberate inverse of `rooms` and
-`status`: the one command that speaks in players.
-
-- **It is the Sonos apps' "About My System", field for field.** Checked against
-  a capture of the PC app's own readout: all eleven players, and every model,
-  role, version, build, hardware revision, series id and address matched. That
-  is the bar it was built to, so a divergence from the app is a bug here.
-- **One document does almost all of it.** `device_description.xml` - already
-  fetched for `firmware_version` and then thrown away - carries `modelName`,
-  `serialNum`, `hardwareVersion`, `seriesid`, `swGen` and, the one that mattered,
-  **`displayVersion`**: the human-facing `18.7` the apps print beside the build.
-  The `/status/zp` diagnostic page carries the same serial and hardware strings,
-  but it is an HTML debug view rather than an API, so nothing here reads it.
-- **The build number is not a field.** The apps' `build 96179270` is the wire
-  version `96.1-79270` with its punctuation removed; deriving it beats hunting
-  for a field that does not exist.
-- **`GetZoneGroupState` is the only view that admits a satellite exists.**
-  `getGroups`, which the rest of x2rock is built on, has no word for a Sub. The
-  topology carries every player, a `<Satellite>` for each home-theatre member
-  and `Invisible="1"` on the hidden half of a pair - and a `SoftwareVersion` per
-  player, which is how a satellite's firmware becomes readable at all.
-- **Roles come from the channel map, not the model.** The same One SL is a left
-  surround in one room and a whole speaker in another. `LR`/`RR` are `LS`/`RS`;
-  a pair half carries its own side twice (`LF,LF`) where a soundbar carries both
-  (`LF,RF`), which is the whole distinction behind the `L`/`R` labels. The Sub
-  gets no suffix because its model name is already the word.
-- **Satellites are listed twice** - once under their group and once in their own
-  right - so the same UUID arrives more than once and the parse de-duplicates
-  rather than counting a tenth speaker.
-- **Serials and addresses are the reason for `--redact`.** The obvious use for
-  this output is pasting it into a bug report, which is exactly where a MAC-derived
-  serial should not go. The household control id is never printed at all.
-
-## Queue mutation over UPnP (verified 2026-08-29)
-
-Read from the players' own service descriptions before sending anything, then
-confirmed with deliberately invalid arguments. Nothing was mutated to learn any
-of this.
-
-- **`http://<player>:1400/xml/AVTransport1.xml` states the contract.** Fetching
-  the service description is a plain GET and answers most of what probing would,
-  at no risk. It should be the first move for any new UPnP action.
-- **Mutation lives on `AVTransport:1`**, which x2rock already talks to. The
-  Sonos-proprietary `Queue:1` service is not needed: `AddURIToQueue`,
-  `AddMultipleURIsToQueue`, `ReorderTracksInQueue`, `RemoveTrackFromQueue`,
-  `RemoveTrackRangeFromQueue`, `RemoveAllTracksFromQueue`, `SaveQueue`,
-  `CreateSavedQueue` and `AddURIToSavedQueue` are all advertised there.
-- **The argument is `UpdateID`, not `UpdatedID`** - a plausible-looking guess
-  that the description file settles.
-- **`RemoveTrackRangeFromQueue` is native**, taking `StartingIndex` +
-  `NumberOfTracks` and returning `NewUpdateID`. No client-side descending loop,
-  and so no half-removed range to explain.
-- **`Browse` returns the queue's `UpdateID`** in the same envelope as
-  `TotalMatches`, which `browse_queue` had been discarding.
-- **`UpdateID` is strictly enforced, and that is worth knowing.** A *valid*
-  index sent with a stale `UpdateID` answers **1028** and removes nothing
-  (confirmed: a 756-track queue stayed at 756). So a mutation must read the
-  version immediately before sending, not carry one across a user's
-  deliberations - otherwise every change after any other edit fails.
-- **Mutation faults are 800 and 1028, not 711.** 800 is a position that does not
-  exist; 1028 is the version mismatch above. 711 belongs to the *navigation*
-  actions. The two are easy to conflate: probing with both a bad index and a bad
-  `UpdateID` returns 1028, which makes it look like the index error until the
-  cases are separated. `NumberOfTracks: 0` is rejected as 402, so a no-op
-  removal is not a way to probe anything.
-- **`SaveQueue` wants `Title` and an `ObjectID`** (empty for a new playlist) and
-  returns `AssignedObjectID`.
-
-### Content to enqueue, and the token that must travel with it
-
-- **`Browse SQ:`** lists saved Sonos playlists as containers whose `res` is a
-  plain `file:///jffs/settings/savedqueues.rsq#N`. Nothing else is needed.
-- **`Browse FV:2`** lists favorites, and these are the awkward ones. Each carries
-  an `<r:resMD>` blob holding a second, escaped DIDL-Lite document, and inside it
-  a `<desc id="cdudn">SA_RINCON51463_X_#Svc51463-0-Token</desc>` - a reference to
-  the household's credential for that service, not the credential itself.
-  **`EnqueuedURIMetaData` must carry metadata**: passing the favorite's `r:resMD`
-  through verbatim works, and so does a synthesized DIDL with the derived cdudn
-  (see "Both open questions closed"). An empty one is accepted and then blanks the
-  queue's titles.
-- Note the escaping depth: the DIDL is escaped inside `<Result>`, and `r:resMD`
-  is escaped again inside that.
-- **`FV:2` and `favorites:1 getFavorites` agree on real favorites**, at 41 each
-  on re-check the next morning. They differ only by service shortcuts, which
-  `FV:2` carries and `getFavorites` rightly omits; see "`FV:2` carries shortcuts;
-  `getFavorites` does not".
-- **What can be enqueued is decided by the kind of thing, not by its URI
-  scheme** (corrected 2026-08-29 after an earlier reading of this got it wrong).
-  `AddURIToQueue` takes anything a player can hold a position in - an individual
-  track - and refuses stations and collections. It answers 800 for
-  `x-rincon-cpcontainer` playlists and albums and for `x-sonosapi-*` stations,
-  and accepts a `musicTrack` on those *same* schemes: a track lifted out of a
-  queue and a `TRACK` favorite both add, with their own metadata or with none.
-
-  The first pass concluded "service-backed content cannot be enqueued" because
-  every favorite tried happened to be a container or a station. Five of this
-  household's favorites are tracks, and refusing them was a bug of that
-  reasoning, not of Sonos. The discriminator to use is the `upnp:class` inside
-  the item's `r:resMD` - `object.item.audioItem.musicTrack.#TRACK` against
-  `object.container.playlistContainer` - because a favorite's own class is
-  always `sonos-favorite` whatever it points at.
-
-  Metadata was never the obstacle either way: a hand-extracted 624-character
-  `resMD` failed on a container exactly as an empty one did, and a track adds
-  with either. A saved station or collection plays through `favorites:1
-  loadFavorite` (which *replaces* the queue) or `playlists:1 loadPlaylist`; a
-  service's station found by search or browse plays as a stream instead, and a
-  service container found that way cannot be played over the LAN at all (see
-  "A service container cannot be played over the LAN at all").
-- **`EnqueueAsNext` on its own still appends.** "Next" has to be named as a
-  position in `DesiredFirstTrackNumberEnqueued` - the current track plus one -
-  or the tracks land at the end regardless (verified both ways).
-- **`ContentDirectory` advertises `CreateObject` / `UpdateObject` /
-  `DestroyObject`**, so creating a favorite may be possible after all - the
-  Control API's `favorites:1` has no such command. Untested, because proving it
-  means actually creating one.
-
-## Favorites over the local API (verified 2026-08-28)
-
-Probed directly against a player on this household, then built on.
-
-- **`favorites:1 getFavorites` works on the LAN with no login**, which was not a given — favorites
-  are account-linked content, and the concern was that they would need the cloud API. They do not.
-  It is household-scoped, so any player answers it; no coordinator needed.
-- **`favorites:1 loadFavorite` is group-scoped** and takes `favoriteId` in the *options*, not the
-  command envelope; omitting it fails with `Parsing terminated:[1].favoriteId`, and an id that does
-  not exist fails with `ERROR_INVALID_OBJECT_ID`. It also accepts `playOnCompletion`.
-- **Only `id` and `name` can be relied on.** Over a third of this household's favorites carried no
-  service at all when first read, and the resource — and so the content type — is missing from
-  some. Everything else must be optional.
-- **Favorites are not playlists.** `playlists:1 getPlaylists` is a separate namespace with separate
-  content (Sonos playlists, with a `trackCount`); a name in one is not a name in the other.
-- **A reply can exceed one WebSocket frame.** `getGroups` and `getFavorites` both arrive
-  fragmented, as an initial frame plus continuations with only the last carrying FIN. Anything
-  hand-rolling this transport has to reassemble; `tokio-tungstenite` already does, which is why
-  x2rock never had to care.
-
-## Desktop-bus facts learned wiring up restarts (2026-08-28)
-
-All observed against this laptop while testing real suspends and WiFi cycles.
-
-- **logind is on the system bus, NetworkManager too.** Neither shares the session bus connection
-  the MPRIS servers use, so the daemon holds two more.
-- **A zbus `PropertyStream` opens by yielding the value it already has** — documented, and the
-  cause of a spurious reconnect ~2s after every daemon start until the value was *compared* rather
-  than counted. Skipping the first item instead would be wrong: the opening yield only happens if
-  the property cache is already populated, so in the un-cached race the first item is a real change.
-- **NetworkManager climbs `CONNECTED_LOCAL` → `SITE` → `GLOBAL`** as its connectivity check
-  completes. Firing on "state is connected" therefore fires up to three times per arrival; fire on
-  the *transition into* connected instead.
-- **Losing the network is not worth acting on.** Both a `StateChanged` down and a
-  `PrimaryConnection` cleared to `/` arrive when WiFi drops, and reconnecting then only produces a
-  retry storm against a network that is not there. Worse, it leaves the daemon in a backoff loop
-  that races the real arrival trigger, and both land — republishing, and flapping every bus name,
-  twice. Only arrival is a reason to reconnect.
-- **The global state stays `CONNECTED_GLOBAL` while the route out changes underneath.** Docking
-  and a VPN coming up move `PrimaryConnection` without moving the state, so watching the state
-  alone misses exactly the cases that change the local address.
-
-## Protocol facts learned while building the daemon (2026-08-28)
-
-All verified against the One SL; each one shaped the transport's design.
-
-- **`cmdId` is echoed** in reply headers, so replies can be matched to callers regardless of
-  order. **Except** when the player fails to parse the command at all - then the reply has no
-  `cmdId`. The deliberately-invalid `{}` household probe hits exactly this case, so the transport
-  falls back to arrival order for id-less replies, and discards a reply whose id nobody awaits.
-- **Replies carry `success`; events never do.** That is the discriminator between the two.
-- **`groups` events omit `playbackState`** from each group and carry a `partial` flag; only
-  `getGroups` replies include playback state. Wire types must default it. The initial snapshot
-  after `subscribe` describes the topology already known - republishing MPRIS for it flaps every
-  bus name once per connection.
-- **The player answers WebSocket Ping with Pong**, so ping-based liveness works. The daemon pings
-  every 30s and treats 90s of total silence as a dead socket.
-- **Subscription snapshots arrive as events immediately after the `subscribe` reply**, in the
-  order: reply, then one event per namespace. Listen for events *before* subscribing or the
-  snapshot is missed.
-- **`track.imageUrl` is served by the player itself** (`http://<ip>:1400/getaa?...`) and works
-  directly as MPRIS `mpris:artUrl`.
-
-## Carried-over knowledge from the Kotlin project (x2rocktv)
-
-Real lessons from building and running the Kotlin CLI in production on this exact use case — don't
-rediscover these the hard way:
-
-- **Sonos accounts can have more than one household**, and the API gives households no name of
-  their own — only opaque IDs. A household with a single standalone speaker, set up separately
-  from the rest of a system, is common enough to design for from day one. The Kotlin CLI originally
-  only queried the first household `.households.firstOrNull()`-style and silently couldn't see a
-  real, existing room. Local discovery makes this easier than it was: each player reports its own
-  `householdId`, so enumerate players and group them, rather than picking "whichever household
-  comes first."
-- **CLI flag ordering matters more than it seems.** A root-level flag (equivalent to the Kotlin
-  version's `-r`/`--room`, `-H`/`--household`) needs to work whether typed before or after the
-  subcommand name (`x2rock -r Office next` and `x2rock next -r Office` should both work). `clap`
-  supports global args that propagate into subcommands more naturally than Clikt did — verify this
-  early rather than discovering the gap after users hit it, as happened here.
-- **One daemon process per room was the Kotlin version's design, and it's a real weakness** — N
-  rooms means N long-running processes, each polling independently. Multiplex several rooms as
-  several D-Bus bus names from one process instead. This is now easier: one WebSocket per player,
-  all in one async runtime, all push-driven.
-- **~~Everything polls the REST API on a fixed interval~~ — SOLVED.** The 5s polling loop was the
-  Kotlin version's biggest architectural weakness. The local WebSocket's `subscribe` gives real
-  push events, so the Rust version should never poll. This was flagged as the single
-  highest-leverage difference the rewrite could make; it is now settled and cheap.
-- **`x2rock login` is no longer required for first-time setup.** It becomes optional, only for
-  off-LAN control. If it is ever implemented, keep the `--manual` fallback (paste the redirect URL)
-  for environments where a URL scheme handler can't be registered.
-- **A rebuild wipes any "build output" directory** — install the built binary to a stable path
-  (`~/.local/bin` or `~/.local/share/x2rock` + symlink) as part of the normal dev loop, don't
-  reference `target/release/...` directly from systemd units or Quickshell plugin configs.
-- Config storage: `$XDG_CONFIG_HOME/x2rock/` (or Rust equivalent via the `directories` crate),
-  file mode 0600. **This directory is now free.**
-
-  It previously collided: the Kotlin CLI's `Xdg.configDir` resolved a hardcoded `"x2rock"`, so
-  renaming that repo to `x2rocktv` moved the source tree but not the config path. Resolved
-  2026-08-28 — the Kotlin CLI was changed to `$XDG_CONFIG_HOME/x2rocktv/` (commit `cd60aa4` in
-  `x2rocktv`) and the old directory deleted, so the Rust tool can use `x2rock/` without
-  reservation and needs no migration path.
-
-  Still shared, and worth not breaking:
-  - `X2ROCK_ROOM` and `X2ROCK_HOUSEHOLD` remain the Kotlin CLI's env vars. If the Rust tool reuses
-    them they should mean the same thing. `X2ROCK_PLAYER` (player address) is new and unclaimed.
-  - `SONOS_CLIENT_ID`/`SONOS_CLIENT_SECRET` remain the Kotlin CLI's OAuth overrides. Irrelevant
-    here while OAuth is cut.
-  - **The MPRIS bus name does not collide.** The Kotlin daemon publishes
-    `org.mpris.MediaPlayer2.x2rock` by default (overridable with `--bus-name`); the Rust daemon
-    publishes one name per group with a room suffix, `org.mpris.MediaPlayer2.x2rock-<room>`, so the
-    two can run side by side.
-  - `x2rock://` (the OAuth callback URL scheme), the `x2rock` binary name and
-    `$XDG_RUNTIME_DIR/x2rock` still belong to the Kotlin CLI. Only the runtime dir could collide,
-    and only if the Rust tool ever gains OAuth.
-
-The porting guidance that ran the other way - what an Android TV app needs from the LAN transport,
-and why the OAuth consent page cannot be completed with a remote - moved to x2rocktv's own
-`docs/porting-from-x2rock.md` on 2026-09-23. The finding it rests on stays here: see
-"Integration path".
-
-## Rust ecosystem notes
-
-Two dependency decisions that `Cargo.toml` records the outcome of but not the reason for:
-
-- **The Sonos client is written from scratch.** Every Sonos crate on crates.io when this was surveyed
-  (`sonos-api`, `sonor`, `sonos-sdk`, `wez-sonos`, `sonos.rs`) targets local UPnP/SOAP; none speaks
-  the LAN WebSocket Control API that is the spine of this design. `ronor` (github.com/mlang/ronor)
-  targets the *cloud* Control API with OAuth, and since the local transport shares its namespaces
-  and command shapes it remains useful prior art for endpoint shapes - reference, not a dependency.
-- **`mpris-server`** (on `zbus`) for MPRIS, because it *exposes* an interface, which is what a daemon
-  publishing players needs; `mpris` and `mpris-player` are client-side, for controlling one.
-
-## The picker discovers linked services (decided 2026-08-31)
-
-Open question 1 asked whether the picker should discover services itself or keep the
-configured-by-hand bargain. Decided: **both, split along the line of who chose the service.**
-
-- **Linked accounts are discovered.** `x2rock link <service>` is already an act of configuration —
-  a deliberate, per-machine statement that this household uses the service — so requiring the same
-  name typed a second time into `browseServices` configured nothing; it was only an opportunity for
-  the picker and the credentials file to disagree, and its failure mode was real: a freshly linked
-  service that never appears because nobody knew about the key. On picker open the widget now reads
-  `x2rock accounts --json` — one local file; no player, no service, no daemon — and gives every
-  linked account a Browse row after the `searchService` one, deduplicated case-insensitively,
-  sorted by name.
-- **Anonymous services stay configured by hand.** Nobody chose the 32 anonymous services, and a
-  picker that lists a catalogue answers a different question from "what should this room play".
-  `searchService` (default TuneIn) and an explicit `browseServices` remain how one of those earns a
-  row.
-- **An explicit `browseServices` wins verbatim**, `[]` included. The bargain was not removed; it
-  became an override.
-- **Search is untouched: one row, one configured service.** A search fanning out across N services
-  is a different feature — the CLI takes one service per call, and interleaving N result lists is a
-  design nobody has asked for. If it is ever wanted, the discovered list now exists to build from.
-
-Mechanics worth recording: the accounts read re-runs on every picker open, like favorites, so a
-`x2rock link` run in a terminal reaches the picker without a shell restart. Failure is silent and
-falls back to exactly the old default — a row for `searchService` — because the picker with no
-discovery is the picker as it was. And a linked account whose token has gone stale still gets its
-row: the failure surfaces only when the row is opened, confined to `browseProc`, which is "one
-failing container must not fail the listing" again at the level of services.
-
-## The YouTube Music account was disconnected, and the bookmark died at the door (2026-08-31)
-
-The household owner disconnected YouTube Music from the Sonos app on a phone. What that did,
-observed the same day, from Kitchen (idle, empty queue, volume 3):
-
-| enqueue attempt | household's account for that service | result |
-|---|---|---|
-| Espresso, YouTube Music (sid 284) — the id that enqueued and played yesterday | removed today | `AddURIToQueue` **UPnP 800** |
-| Jolene, TIDAL (sid 174) | removed yesterday (`sn_18`) | `AddURIToQueue` **UPnP 800** |
-| L-O-V-E, iHeartRadio (sid 6) — the control | still registered | enqueued and **played** |
-
-- **The player validates the URI's service against the household's registrations at enqueue
-  time.** Yesterday's DIDL experiment showed the serial is *not* checked — sid 284 with `sn=9`, a
-  serial the household never had, played. Today shows what *is* checked: the same sid with its own
-  valid id and no registration behind it is refused at the door. Together: **sid registration is
-  necessary, sn is irrelevant**, and the check runs at insertion, not retention — yesterday's 25
-  TIDAL queue entries sat in Kitchen's queue after their account died and had to be cleared by
-  hand, while today the same tracks cannot get back in.
-- **What a bookmark depends on is the household's registration, not its stored serial.** The failure
-  here is a dead *registration*, and the stored serial has nothing to do with it — the enqueue path
-  sends none. A bookmark needs the household to still hold *any* account for the service, and
-  nothing in the bookmark can say whether it does.
-- **800 is not specifically "no account".** Test E yesterday drew the same 800 for a foreign id
-  under a *live* service (a YouTube Music id under Mixcloud's sid). So 800 at `AddURIToQueue` reads
-  as "the player refuses to resolve this URI", covering at least an unregistered service and a
-  foreign id — the CLI's "no reason given" is accurate and cannot be improved from this side.
-- Serial bookkeeping: `sn_16` is confirmed as YouTube Music's last registration — named in the
-  history entry's art URL. Yesterday it showed in the harvest on a queue item; today that queue
-  entry is gone and the harvest names only `sn_2`, the pre-switch fossil in `FV:2`. So within two
-  days the harvest went from naming the wrong serial *and* the right one to naming only the wrong
-  one — the registration's death is invisible to it, and what it does show outlived what it
-  missed.
-- A third data point for the account-selection question, free with the control: the player filled
-  **`sn_15`** for iHeartRadio (read live from `getMetadataStatus` while L-O-V-E played) — the
-  higher and newer of the two serials again. Consistent with both prior observations, and still
-  confounded the same way.
-
-Kitchen was paused and its queue cleared afterwards; the household is as this found it, minus the
-account its owner removed.
-
-### Re-added the same day: `sn_20`, and the bookmark resurrected (2026-08-31)
-
-The owner then re-added YouTube Music from the phone and played Coheed and Cambria into Living
-Room. Two predictions were on the table, and both held:
-
-- **The new registration is `sn_20`** — read live from `getMetadataStatus` on Living Room, and
-  predicted in advance (`sn_19` was the highest live serial; `sn_18` stayed dead). It fits the model
-  settled 2026-09-01, `next = highest live serial + 1`; see "Household registration is per
-  *account*". That is the **second serial predicted before it existed**, after `sn_18`, and this one on
-  a service that has now held `sn_2`/`sn_3`, `sn_16` and `sn_20` on one household. Per the owner it
-  is the **same YouTube Premium subscription** each time — so this run is cleaner than the
-  `sn_3`→`sn_16` plan switch: an identical service-side account, removed and re-added, minted a new
-  serial. A serial belongs to a registration *event*, not to the service and not even to the
-  account behind it.
-- **The dead bookmark came back to life.** The same `x2rock bookmark Espresso` that answered 800
-  yesterday enqueued and **played** in Kitchen — resolved to **`sn_20`**, a registration that did
-  not exist when the item was recorded (its art URL still says `sn=16`). The enqueue-time check is
-  live in both directions: the same id flipped from playing to refused to playing again within a
-  day, tracking nothing but whether the household held *an* account for sid 284.
-
-**This closes the design question "should a bookmark store the serial at all".** It cannot matter.
-The player ignores whatever serial the enqueue path sends (`sn=9`, never registered, played) and
-resolves the household's *current* registration for the sid (`sn_16` at record time, `sn_20` at
-replay). A stored serial can neither pin a bookmark to the account it was kept from nor break the
-replay when that account dies — the player never consults it. It is provenance at most.
-
-Kitchen paused and cleared again afterwards. Living Room was read, never touched.
-
-## Plex: the first app-link service to fall (2026-08-31)
-
-Asked for by name — "Señorita" was playing from Plex in the Dining Room, and search for Plex was
-the request. Delivered the same day, and the route was nothing this document predicted.
-
-Plex in the catalogue: `sid 212`, endpoint `https://sonos.plex.tv/v2.2/soap`, `Auth="AppLink"`,
-`service_type 54279`. Its presentation map declares real search categories — `artists`, `albums`,
-`tracks`, `playlists`, `podcasts` (plus a `CustomCategory` for episodes, which `categories()`
-ignores for having no `id`) — and its manifest has no custom endpoints, so search is the classic
-SOAP `search` this project already speaks. Only the credential was missing.
-
-### Plex's SMAPI link half is dead — both flavours, whatever is sent
-
-`x2rock link` grew the generic app-link attempt first: `getAppLink`, whose reply nests the same
-`regUrl`/`linkCode` pair a device link uses (plus a `linkDeviceId`, now parsed and echoed into
-`getDeviceAuthToken`). Worth having — it is how any of the 62 will be reached if it answers — but
-Plex does not answer it:
-
-| call | answer | varied |
-|---|---|---|
-| `getAppLink` | `Server.ServiceUnknownError`, always | household alone; + WSDL's `hardware`/`osVersion`/`sonosAppName`/`callbackPath`; + empty `loginToken`; + `deviceId` |
-| `getDeviceLinkCode` | `Client.AuthTokenExpired`, always | bare; + empty `loginToken`; + `deviceId` = the player's `R_TrialZPSerial` (`34-7E-5C-31-AF-74:7`, read over UPnP `SystemProperties GetString`) |
-
-The two *different* errors say `getAppLink` is unrouted on Plex's server while `getDeviceLinkCode`
-reaches a handler that wants a token — for a call whose whole point is that there is no token yet.
-Dead end, not a parameter puzzle.
-
-### The actual door: Plex's SMAPI honours a plain Plex account token
-
-The unlock came from prior art (python-plexapi's `sonos` module talks to `sonos.plex.tv` with the
-user's own `X-Plex-Token`) plus a leak this household was already broadcasting: the player's art
-URLs carry the Sonos integration's Plex token in the clear —
-`getMetadataStatus.container.imageUrl` ends in `...&X-Plex-Token=<token>`. That token, stored as a
-normal `credentials.json` entry for service 212 with an **empty key**, made everything downstream
-work unmodified:
-
-- `search -s plex -c tracks senorita` returned the very track the room was playing, id
-  `c69ee188…::68163:track` — byte-identical to what `getMetadataStatus` reports.
-- `browse -s plex` walks the household's own server (`Prime / Music`): playlists, artists, albums,
-  hubs, `Other Sources`.
-- `search … --play 1 -r "Dining Room"` played it, through the existing enqueue path
-  (`SA_RINCON54279…` cdudn, household resolves its own `sn_13`). **The whole chain verified.**
-
-So `loginToken/token` = any valid Plex account token, and the key is unused. Which means the link
-flow does not need Sonos at all — and Plex publishes exactly the flow needed.
-
-### `x2rock link plex`: the PIN flow, the first service-specific auth path
-
-`src/sonos/plex.rs`. `POST plex.tv/api/v2/pins?strong=true` mints a pin; the person is sent to
-`app.plex.tv/auth#?clientID=…&code=…` — code in the URL, so logging in is the whole interaction —
-and the pin is polled until it carries `authToken`. From `run_link`'s point of view it is the same
-shape as every other link (open a page, poll, store), dispatched by `chosen.id == "212"`, stored
-through the same `from_device_auth` with no key and no hash. The `match` step is skipped silently
-rather than with the no-hash warning: the household's own registration is what playback rides on,
-and it already exists.
-
-Decisions worth keeping:
-
-- **The client identifier is stable**: `x2rock-<hostname>`. Plex files the token under it on the
-  account's device list, so re-linking replaces a device instead of growing one per attempt, and
-  revocation has a name to find.
-- **plex.tv is spoken in its XML default**, one `<pin>` element with everything in attributes —
-  `roxmltree` was already here and JSON would have bought nothing. An empty `authToken` attribute
-  is *pending*, exactly parallel to `NOT_LINKED_RETRY`.
-- **It earns the service-specific exception by being Plex's own published flow** — the one every
-  third-party Plex client uses — not a scraped Sonos key. The YouTube Music `apiKey` question is
-  unchanged by this: presenting Sonos's key is still a different act (see "The YouTube Music
-  `apiKey` is sealed").
-
-### Two tokens, one asymmetry: root browse (settled 2026-09-01)
-
-The first completed `x2rock link plex` run answered the caveat this section carried overnight. A
-PIN-minted token **is** honoured by `sonos.plex.tv` — `search` works and browsing any *concrete*
-container works — with exactly one exception: **`getMetadata root` answers
-`Server.ServiceUnknownError`** (after one 6s timeout on first touch), on a request byte-identical
-to one that succeeds under the household integration's own token. Omitting the `householdId` from
-the loginToken changes nothing, so the difference is the token itself: the integration token
-carries a server association Plex's bridge made when the owner linked Plex to Sonos, and root — the
-"which server, which library" enumeration — is the one call that needs it. Relevant context for
-this household: **the Plex server has Remote Access off**, so a fresh client's server discovery has
-nothing advertised to find; whether root works for a PIN token on a published server is untested
-here.
-
-So the two tokens split like this, verified side by side on 2026-09-01:
-
-| | PIN token (`x2rock link plex`) | integration token (`--from-player`) |
-|---|---|---|
-| search | works | works |
-| browse a container by id | works | works |
-| browse `root` (CLI default, widget's Browse row) | **refused** | works |
-| play a hit | works — the enqueue path never needed a token | works |
-| provenance | x2rock's own; revocable at plex.tv as `x2rock-<hostname>` | the household's Plex↔Sonos link; dies on relink |
-
-**`x2rock link plex --from-player`, built for the second column.** The same move as `keep`: read
-what the player itself built. Every Plex art URL a player hands out carries the integration's token
-(`…%26X-Plex-Token%3D<token>&width=300` in `getMetadataStatus` image URLs), readable by any LAN
-controller unauthenticated, so storing it deliberately — with the trade written down in `--help` —
-beats the hand-edit it replaces. It needs Plex on-screen in some room, and it taught one bug worth
-keeping: the first version asked `metadata()` for every group over the session's one socket and got
-nothing, because **group-scoped commands answer only on the group's coordinator** — the same rule
-`raw --scope group` learned, resurfacing in a new caller. Each group is now asked through
-`session::coordinator`.
-
-On a household like this one (Remote Access off), `--from-player` is the token that keeps the
-widget's Browse row working; the PIN token is the durable, self-owned one and covers search and
-play in full. Whichever ran last is what is stored.
-
-### Plex wraps playable tracks in `mediaCollection`, and the container rule bent
-
-A *tracks* search comes back as `mediaCollection` elements with `itemType: track` — and the id
-inside is playable (it is what the household's own playback reports). The rule "the element
-decides" — learned from Mixcloud, where `canPlay` lies — would have offered every Plex track as a
-place to open. Amended: **a declared leaf type outranks the wrapping**, for `track` and `stream`
-only. `canPlay` stays untrusted. Pinned by a test with the verbatim Plex shape; an `album` in the
-same reply stays a container.
-
-### The default category, and the widget's new `searchCategory`
-
-Plex has no `all`, so `search -s plex <term>` defaults to its first category — `artists` — and a
-song title searched there finds nothing. Two mitigations, deliberately short of changing the
-default rule (which would silently move iHeartRadio from stations to tracks):
-
-- An empty result now names the shelf: `Nothing on Plex for "senorita" in artists. Also
-  searchable: albums, tracks, playlists, podcasts.`
-- The widget grew `searchCategory` in `shell.json`, passed to the CLI as `-c`. A picker pointed at
-  Plex wants `"tracks"`; empty keeps the CLI default and every existing config keeps its behaviour.
-
-(2026-10-11: the iHeartRadio reason no longer held, since its categories are fixed at
-`stations`/`podcasts`, so the default rule was changed after all. A bare `search -s plex` now
-asks tracks, artists and albums. Not re-measured on Plex, which is not in the home household. See
-"Every household token, imported".)
-
-## The YouTube Music `apiKey` is sealed, and that closes the ~~question~~ *key* (2026-09-01)
-
-> **Header amended 2026-09-01.** This section closed the *sealed-key* question — that path is a
-> dead end and stays one. It did **not** close the *YouTube Music* question, because it assumed the
-> key was the only way past the 403. It is not: the endpoint accepts OAuth. The still-open task is
-> "TASK: the OAuth identity probe", near the end of this section.
-
-
-Open question 1 carried "decide about the API key" from the first session onward, on a premise
-recorded in "But it is per-service, and YouTube Music is not one of them": the manifest carries an
-`apiKey`, so the 403 is *probably answerable*, and the only thing in the way is a judgement call
-about presenting a key Sonos distributes for its own clients.
-
-**The premise was wrong.** The manifest does not carry a key. It carries a key sealed in an
-encrypted envelope, and the envelope is opened by something compiled into the Sonos controller app
-and the player firmware. There is no key to decide about presenting. This section records the
-bytes, because the decision only holds as long as the evidence for it is checkable.
-
-### Provenance, and how to re-fetch
-
-The descriptor entry, from the cached `ListAvailableServices` in `services.json`:
-
-```json
-{"id": "284", "name": "YouTube Music",
- "uri": "https://music.googleapis.com/v1:sendRequest",
- "auth": "AppLink",
- "manifest_uri": "https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432",
- "service_type": 72711}
-```
-
-Both documents are anonymous GETs on Sonos's CDN — no household, no token, no player involved.
-This is the same read `smapi.rs:246` already does for every service:
-
-```sh
-curl -s https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432   # manifest
-curl -s https://cf.ws.sonos.com/p/p/a3fd2ecc-6039-47fe-8ced-1939e070c432   # presentation map
-```
-
-The manifest is small. Whole thing, minus the two base64 blobs:
-
-```json
-{"schemaVersion": "1.0",
- "presentationMap": {"uri": ".../p/p/a3fd2ecc-...", "version": 278},
- "strings":         {"uri": ".../p/s/a3fd2ecc-...", "version": 278},
- "apiKey": {"cr": "iGSZygAAALoAAQAAAAAAAAEAAAAUA444pCPrP+ks…",
-            "zp": "iGSZygAAALoAAQAAAAAAAAEAAAAUA3ngEn8egjxX…"},
- "search-catalogs": [],
- "endpoints": [{"type": "reporting",
-                "uri": "https://music.googleapis.com/v1/v2.3/report/", "version": "1"}]}
-```
-
-### The envelope, byte by byte
-
-Each value is 356 base64 characters decoding to **266 bytes**. The first 21 bytes are
-byte-for-byte identical between `cr` and `zp` (`iGSZygAAALoAAQAAAAAAAAEAAAAU` in base64, a clean
-28-character boundary because 21 divides by 3). Every declared length matches the bytes that
-follow it, and the fields account for all 266 bytes with nothing left over:
-
-| Offset | Len | Content | `cr` | `zp` |
-|---|---|---|---|---|
-| `[0:4]`     | 4   | magic                       | `886499ca` | `886499ca` |
-| `[4:8]`     | 4   | u32 = 186                   | — | — |
-| `[8:13]`    | 5   | header `0001000000`         | — | — |
-| `[13:17]`   | 4   | count = 1                   | — | — |
-| `[17:21]`   | 4   | **len = 20**                | — | — |
-| `[21:41]`   | 20  | **key identifier**          | `038e38a423eb3fe92ccd9361d5350f75a51aa427` | `0379e0127f1e823c579ff956ee600c9aa3c442c8` |
-| `[41]`      | 1   | tag                         | `0xc1` | `0xb8` |
-| `[42:46]`   | 4   | count = 1                   | — | — |
-| `[46:50]`   | 4   | **len = 128**               | — | — |
-| `[50:178]`  | 128 | **RSA-1024 wrapped key**    | `64fa8be554a30ac260f58b1b…` | `8d7326356bdac23a8c4f244b…` |
-| `[178:182]` | 4   | count = 1                   | — | — |
-| `[182:186]` | 4   | **len = 80**                | — | — |
-| `[186:266]` | 80  | **AES payload**, 5 × 16B    | ciphertext | ciphertext |
-
-A hybrid crypto envelope in the textbook shape: a symmetric key wrapped under RSA, a payload under
-that symmetric key, tagged with a 20-byte (SHA-1-sized) identifier saying *which private key opens
-it*. 128 bytes is exactly RSA-1024. 80 bytes is exactly five AES blocks. Neither number is a
-coincidence and neither is a length that plaintext would land on.
-
-### Why "it might just be obfuscation" does not survive
-
-Shannon entropy of the two ciphertext regions, against controls of true random bytes at the same
-lengths (200 samples each, because entropy at short lengths is well below 8.0 by chance and a naive
-"6.9 is not 8.0, so it is not random" reading gets this backwards):
-
-| Region | Length | `cr` | `zp` | random control |
-|---|---|---|---|---|
-| RSA block | 128B | 6.50 | 6.65 | **~6.55** |
-| AES payload | 80B | 6.06 | 6.04 | **~6.03** |
-
-The control column is a sampled mean over 200 draws, so it wobbles by a few hundredths between
-runs (6.54 and 6.55 are the same number here); the `cr`/`zp` figures are exact and deterministic —
-6.4979, 6.6542, 6.0625, 6.0375. Both regions sit inside the control range, and there is no
-structure to find: no ASCII runs beyond incidental 4-character noise, no repeated blocks, no
-padding pattern. Whole-buffer entropy is
-*lower* (6.90 / 6.93 against a 266-byte control of 7.21) precisely because the header and length
-fields are full of zero bytes — which is itself confirmation that the parse above is separating
-structure from ciphertext correctly.
-
-Reproduce:
-
-```python
-import json, base64, struct, os, math, collections, urllib.request
-m = json.load(urllib.request.urlopen("https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432"))
-ent = lambda b: -sum(n/len(b)*math.log2(n/len(b)) for n in collections.Counter(b).values())
-for k, v in m["apiKey"].items():
-    b = base64.b64decode(v)
-    assert struct.unpack(">I", b[17:21])[0] == 20 and struct.unpack(">I", b[46:50])[0] == 128 \
-       and struct.unpack(">I", b[182:186])[0] == 80 and len(b) == 266
-    print(k, "keyid", b[21:41].hex(), "rsa-ent %.2f" % ent(b[50:178]), "aes-ent %.2f" % ent(b[186:]))
-print("control 128B %.2f" % (sum(ent(os.urandom(128)) for _ in range(200))/200))
-```
-
-### `cr` and `zp` — inference, not proof
-
-The two key identifiers differ, so the two envelopes are sealed to two different keys. The names
-are almost certainly Sonos's own vocabulary: **`cr` = Controller** (the CR100 and CR200 were
-Sonos's handheld controllers) and **`zp` = ZonePlayer** (every player model is ZP80/ZP90/ZP100/
-ZP120, and the UPnP device type is `ZonePlayer`). That reading fits the structure exactly — one
-envelope the controller app can open, one the speaker firmware can open, same plaintext key inside.
-
-Flagged as inference because nothing was decrypted to confirm it. What *is* proven is the part that
-matters: **two distinct private keys exist, and neither is in the manifest.**
-
-### What this makes the act
-
-Before this section, using the key looked like presenting a string anyone can fetch — bad manners
-toward Sonos at worst, and arguably not even that, since a Google API key is a project identifier
-for quota and billing rather than an authentication credential (Google's own documentation says so,
-and API keys ship in client bundles routinely). That framing was fair and it is now beside the
-point, because **we do not have the key.** Obtaining it means extracting an RSA private key from
-Sonos player firmware or the official controller binary.
-
-That is defeating a technological protection measure, not reading a public document, and it is a
-different category of act from everything else in this project. **Decided: no.** Not on
-etiquette, and not as a close call.
-
-The distinction that governs the rest of the project is unchanged and worth restating, because it
-is the line every future service decision should be tested against:
-
-- **Anonymous services** — the endpoint answers whoever asks.
-- **Device link** (Bandcamp, iHeartRadio, Mixcloud) — the service publishes a flow *for third-party
-  clients* and mints a token for you. You are yourself.
-- **Plex** — the same, via Plex's own PIN flow, and the token lands on your device list as
-  `x2rock-<hostname>` where you can revoke it. You are yourself, and you are visible.
-- **The sealed key** — you are not yourself, nothing was minted for you, nothing can be revoked
-  without breaking every Sonos player on earth, and getting it requires prying a private key out of
-  a binary.
-
-Every credential x2rock holds today was issued to x2rock or to its user. This one would be the
-first that was not, and it is also the first that could not be obtained without circumvention.
-
-### The registered-key proxy: right pattern, wrong door
-
-Proposed 2026-09-01 and worth recording, because it answers the objection that the sealed key
-cannot: run a small service holding a **registered** Google key, so traffic reads as *this project*
-rather than as Sonos. That fixes attribution completely — Google gets a named party to rate-limit,
-quota or revoke, and Sonos is out of the blast radius. If the barrier were only "whose quota is
-this spending", this would be the answer.
-
-It does not open this door, for two independent reasons:
-
-1. **There is nothing to register for.** `music.googleapis.com/v1:sendRequest` is a partner
-   endpoint provisioned to Sonos. There is no product to enable in Google Cloud Console and no key
-   obtainable through self-service that would be authorised on it. A registered key is valid for
-   APIs that are not this one.
-2. **The public API returns the wrong identifiers.** YouTube Data API v3 is registerable, quota'd
-   and entirely above board — and it answers with YouTube video ids. The Sonos object id is 48
-   opaque characters (`ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H`), not a video id and not
-   derivable from one. Search results nothing can play are not search.
-
-Keep the pattern. It is the correct architecture for any future service where a registerable key
-exists, and it is a better answer than "decide carefully" for the class of problem it fits.
-
-### The SMAPI side is complete; the wall is identity
-
-Worth knowing, so nobody re-opens this hoping the SMAPI side is also missing: the presentation map
-specifies YouTube Music search **fully**, in nine categories across two groups.
-
-```xml
-<PresentationMap type="Search">
-  <SearchCategories stringId="YouTube Music">
-    <Category id="artists" mappedId="ARTISTS"/>     <Category id="playlists" mappedId="PLAYLISTS"/>
-    <Category id="tracks"  mappedId="SONGS"/>       <Category id="albums"    mappedId="ALBUMS"/>
-    <Category id="all"     mappedId="ALL"/>
-  </SearchCategories>
-  <SearchCategories stringId="Library">
-    <Category id="playlists" mappedId="LIBRARY_PLAYLISTS"/>  <Category id="tracks" mappedId="UPLOADED_SONGS"/>
-    <Category id="albums"    mappedId="UPLOADED_ALBUMS"/>    <Category id="artists" mappedId="UPLOADED_ARTISTS"/>
-  </SearchCategories>
-</PresentationMap>
-```
-
-So the search interface is defined and waiting; the 403 is the whole of what stands in front of it.
-The manifest's `search-catalogs` is `[]` and its only endpoint is `reporting`, which is consistent
-with search living on the service `uri` rather than a custom endpoint — the classic shape. The 403
-is about caller identity, and the sealed key is only one form of it: the endpoint also evaluates
-OAuth, which is what the next section probes.
-
-### TASK: the OAuth identity probe (2026-09-01; answered 2026-09-23 — it is a project gate)
-
-Prompted by the observation that a Sonos app linking YouTube Music shows a ~9-character code and
-hands it to **Google**, which authenticates the account and approves the connection. That is the
-**OAuth 2.0 Device Authorization Grant** (RFC 8628), and it is Google's flow, not Sonos's — Sonos
-is a registered partner operating inside Google's terms.
-
-*No longer an inference (2026-09-19).* Watched directly in the Sonos desktop app: the code appears
-before the Authorize button, and Authorize opens
-`https://accounts.google.com/o/oauth2/device/usercode`, which redirects to the same path with
-`?flowName=DeviceOAuth`. Google's own device-grant entry point, named as such in the URL. The
-reading above was right, and the flow the app runs is not a Sonos flow at any point after the code
-is minted. Which reframes both the 403 and the sealed
-key: the key is Google's *project*-identity requirement (a partner key Google requires be
-protected, hence sealed in firmware), and the ~9-char code is Google's *user*-identity flow.
-
-**Probed 2026-09-01, and it shows the sealed key is not the only identity.** Three requests to
-`https://music.googleapis.com/v1:sendRequest`:
-
-| sent | answer |
-|---|---|
-| no identity | **403** `PERMISSION_DENIED` — "unregistered callers … use API Key **or other form of API consumer identity**" |
-| `Authorization: Bearer <malformed>` | **401** `UNAUTHENTICATED` — "Expected **OAuth 2 access token, login cookie** or other valid authentication credential" |
-| Bearer + dummy `?key=` | **401**, as above — the Bearer takes precedence |
-
-The moment a Bearer is present the complaint changes from *no identity* to *this OAuth token is
-invalid*. **So the endpoint evaluates OAuth as a first-class identity; the sealed API key is not
-mandatory.** It also names "login cookie" — the SAPISID cookie `music.youtube.com`'s own web client
-uses — confirming this is the YTM backend accepting the same auth its own clients do.
-
-**What that leaves as the real, single unknown:** whether a token minted by a *self-service* Cloud
-OAuth client is accepted, or whether the endpoint is pinned to Sonos's registered `client_id`
-(and/or requires the calling project to have this partner API enabled, which self-service cannot
-do — it is absent from Google's 528-entry public API discovery directory). Google can allowlist an
-API to specific OAuth clients, and a partner endpoint very likely is.
-
-**The experiment, one request decides it.** Clean — the user's own account, Google's own flow, no
-circumvention, nothing built into the repo:
-
-1. *(User action, cannot be automated.)* Create a Google Cloud project and an OAuth client of type
-   "TVs and Limited Input Devices", with a YouTube scope (`…/auth/youtube` or `youtube.readonly`).
-2. Device-grant harness (to build, kept **out of the repo** as a scratch script): request a
-   `device_code`/`user_code` at `https://oauth2.googleapis.com/device/code`, print the ~9-char
-   code and `verification_url`, poll `https://oauth2.googleapis.com/token` until the person
-   finishes — the same shape as `smapi::device_auth_token`'s poll loop.
-3. Fire one `getMetadata`/`getAppLink` SOAP body at the endpoint with `Authorization: Bearer
-   <token>`.
-4. Read the status:
-   - **200** → the wall was only the client allowlist and a self-owned account clears it. YTM
-     search becomes a normal SMAPI feature, no sealed key ever touched, and its object ids feed the
-     existing enqueue path directly (Sonos does not re-mint them; see "Object ids are the service's
-     own").
-   - **403 `PERMISSION_DENIED`** → pinned to Sonos's `client_id`; closed, but for a nameable reason
-     rather than the sealed key, and revisitable only if Google ever opens the client set.
-   - **401 / scope error** → wrong scope; retry with another before concluding anything.
-
-**A shortcut that does not exist, tested 2026-09-19 (home household).** The obvious idea, once you
-watch the Sonos desktop app link YouTube Music: it shows a code (three groups of letters, before
-the Authorize button) and that code is the device-grant `user_code`. Could x2rock simply be handed
-one and redeem it? **No.** `getDeviceAuthToken` at `music.googleapis.com/v1:sendRequest`, carrying
-a link code, answers the identical 403 `PERMISSION_DENIED` that `getAppLink` does — the caller
-check runs *before* the code is looked at, so there is nothing a code can buy. Probed with a
-made-up code precisely so the question could be answered without spending a real one. The same 403
-also came back from `x2rock link "YouTube Music"` against a household that **already has YouTube
-Music registered** through the official app, which is the other half of the point: the wall is
-about the caller's identity to Google, never the account or the household.
-
-Worth stating plainly next to it, since the 403 reads like a failure and is not the whole picture:
-that registration already buys the half that matters. Verified the same evening — a YouTube Music
-favourite played in Dining Room from the queue (`queue_position: 1`, position advancing), resolved
-by the player with the household's own `sn=2`. What the sealed key costs is search and browse from
-this machine, not playback.
-
-**Run 2026-09-23, and answered without the OAuth client.** The decision tree above expected to
-need a device-grant token. It turned out that a self-service **API key** answers the same question
-one step earlier, because both are evaluated against the *project* that owns them - and the endpoint
-named that project gate itself.
-
-Baseline first, re-run today: no identity → `403 PERMISSION_DENIED` "unregistered callers";
-malformed Bearer → `401 UNAUTHENTICATED` "Expected OAuth 2 access token, login cookie…". Unchanged
-since 2026-09-01. Then a real, self-service Google Cloud API key, sent the two ways Google accepts:
-
-| sent | HTTP | `details[].reason` | Google's message |
-|---|---|---|---|
-| `?key=<key>` | 403 | **`SERVICE_DISABLED`** | "**YouTube Music API (Partner)** has not been used in project *N* before or it is disabled. Enable it by visiting `console.developers.google.com/apis/api/music.googleapis.com/overview?project=N`" |
-| `x-goog-api-key: <key>` | 403 | `API_KEY_SERVICE_BLOCKED` | "Requests to this API music.googleapis.com method **`google.music.sonos.v1.Sonos.SendRequest`** are blocked." |
-
-Three things Google said here that nothing in this document had before. The service is formally
-**"YouTube Music API (Partner)"**. Its method is **`google.music.sonos.v1.Sonos.SendRequest`** -
-namespaced *Sonos* in the API definition itself. And the refusal is `SERVICE_DISABLED` for the
-calling project, with an activation URL - the standard "you have not enabled this API" answer, not
-a client check. (The header path hit the key's own API-restriction list first, which is why it
-reads differently; same gate, checked in a different order.)
-
-**The activation URL is a door painted on a wall.** Logged in, it redirects to the API Library page
-for `music.googleapis.com`, which shows "Failed to load … please try again" - and again on Retry -
-and a Library search for "YouTube Music" returns no card. The service's own discovery document
-answers `403 PERMISSION_DENIED` (not 404: it exists and is gated), and Google's public directory
-lists 534 APIs with no `music` among them. So the API is real, is enableable *by some projects*, and
-is not offered to a self-service one. That is the "likely fourth branch" from 2026-09-04, confirmed.
-
-**The cookie probe, and why it reopened the question (2026-09-23).** Before running the OAuth flow,
-one cheaper thing was tried, because the endpoint's own 401 named "OAuth 2 access token, **login
-cookie**, or other valid credential". A login cookie (SAPISID) is a *user* identity with no Cloud
-project behind it - so it might sidestep the project gate. It did. A live `music.youtube.com`
-session cookie (control: it authenticated to YTM's own `youtubei/v1/browse`, HTTP 200) presented to
-`sendRequest` returned **not** `SERVICE_DISABLED` but **400 `INVALID_ARGUMENT` "Origin doesn't match
-Host for XD3"** - the endpoint accepted the identity and stopped on Google's cross-domain (anti-CSRF)
-check. So a projectless user identity clears the enablement gate; the barrier for a cookie is the
-Origin allowlist, which for this endpoint has no entry any real client can present (the native Sonos
-app sends no Origin and authenticates by key). Getting past it means forging same-origin - defeating
-a security control - and the cookie path is ToS-offside besides. Recorded because it is what made the
-OAuth run worth doing: it showed *user* identity is evaluated on a different track from the
-API-key/project one.
-
-**The OAuth device grant, run and measured (2026-09-23).** Own Cloud OAuth client (device-grant, "TVs
-and Limited Input Devices"), own account, own consent - the sanctioned flow, nothing forged. Two
-scopes, and read together they give the check *order*, which is the whole result:
-
-| scope granted | HTTP | `reason` |
-|---|---|---|
-| `auth/youtube.readonly` | 403 | `ACCESS_TOKEN_SCOPE_INSUFFICIENT` |
-| `auth/youtube` (full) | 403 | **`SERVICE_DISABLED`**, project 111580529088 |
-
-Google's pipeline is authenticate → **scope** → **enablement**. The readonly token failed the scope
-check and short-circuited *before* the project check - which for one turn read like "the token
-cleared the project gate", and it had not; it had not reached it. The full-`youtube` token passes the
-scope check, the request proceeds to enablement, and it hits the **same `SERVICE_DISABLED`, attributed
-to the OAuth client's own project** - the same wall the API key hit. So the 2026-09-01 inference
-stands, now by measurement: an OAuth token is judged against its client's project, and a self-service
-project cannot enable the partner API. A useful corollary falls out - the required scope is
-`auth/youtube`, which *any* client can obtain, so **scope was never the barrier; the project is.**
-
-**What this settles for x2rocktv** (the Android TV sibling, whose whole appeal here was that a TV is
-already signed into a Google account with a YTM subscription): it does not help. `sendRequest`
-attributes the token to *x2rocktv's* OAuth client's project, not to the user's YTM entitlement, and
-x2rocktv's project can no more enable a party-to-party API than any other self-service one. Google
-Sign-In yields a valid user token with the right scope; it still `SERVICE_DISABLED`s on the project.
-The clean sanctioned path exists for the *token*; the wall is one layer past it.
-
-**So the wall is a project allowlist, not a client allowlist**, and the distinction is the finding.
-"Pinned to Sonos's `client_id`" was the closure this section was written to reach or rule out; the
-truth is one level up - Google has enabled a partner API for Sonos's project(s) and for nobody who
-can create a project themselves. Nothing self-service reaches it: not a key, not a token, not the
-public YouTube Data API v3, which is a different service and does not carry the YouTube Music
-catalogue. This is the same shape as the sealed key, seen from Google's side instead of Sonos's.
-
-**More precisely: this is a party-to-party API, not a public one with a gate.** The method is
-`google.music.sonos.v1.Sonos.SendRequest` - a service Google defined *for Sonos*, with Sonos's name
-in its namespace - and Google titles it "(Partner)". It exists under an agreement between two
-companies and is provisioned to the party to that agreement. "Enable it on your project" is
-therefore a category error for anyone who is not Sonos, which is why the Library has no card and the
-activation URL leads nowhere: there is nothing to self-serve. The 2026-09-01 tree said a
-`PERMISSION_DENIED` closure would be "revisitable only if Google ever opens the client set"; the
-condition is now "only if Google publishes a YouTube Music API to the general public", which the
-partner namespace makes the wrong thing to wait for. Closed, and closed for a structural reason.
-
-**Control, the same day, prompted by a fair objection.** The key and the project were days old, and
-`SERVICE_DISABLED` with an activation URL is exactly what a fresh project says about *any* API not
-yet enabled - on its own it would have proven nothing. So a public API went through the identical
-path. YouTube Data API v3 was enabled from the Library (it has a card) and added to the key's
-allowed list, which in the current console can only hold APIs the project has enabled. Then the
-same key, same project, same minute:
-
-| request | HTTP | answer |
-|---|---|---|
-| `youtube.googleapis.com/youtube/v3/videos?part=id&id=…` | **200** | the video, `kind: youtube#videoListResponse` |
-| `music.googleapis.com/v1:sendRequest`, key as query | 403 | `API_KEY_SERVICE_BLOCKED` for `google.music.sonos.v1.Sonos.SendRequest` |
-| the same, key as header | 403 | the same |
-
-The key works. The project works. A public API's door opens on demand. The partner API cannot be
-enabled, so it cannot be added to the key's list, so it is blocked - the same fact the first run
-surfaced through the *enablement* check now surfacing through the *restriction* check. (The first
-run's `SERVICE_DISABLED`, the answer that carried the activation URL and the "(Partner)" title, came
-before the key's restriction list had been touched; once that list was re-saved, Google reports the
-restriction first. Same gate, checked in a different order - as with the header path.) Between the
-200 and the 403 the only variable is which API.
-
-**And seen directly, not inferred.** Everything above is a refusal of one kind or another - a 403, a
-page that would not load, a search with no card, a directory without the name - and refusals always
-leave "something on our side was broken" standing as an alternative. The key's own restriction
-dropdown is a different kind of evidence: a positive enumeration, rendered by the console from the
-project's enabled services, captioned by Google itself *"This list includes only APIs enabled in
-this project."* Read to its end on 2026-09-23 it runs alphabetically through the project's defaults
-to **YouTube Data API v3**, the last entry, and stops. "YouTube Music API (Partner)" would sort
-immediately after it, and there is nothing after it. The key was created 2026-09-20 on a fresh
-trial account carrying its default APIs. Three independent surfaces - the API's own answer, the
-Library, and the enumeration of what the project has - give one answer, and the last of them is a
-listing rather than a refusal.
-
-What it leaves standing is what stood before: the household's registration plays the service, and
-`keep`/`bookmark`/favorites reach anything it has ever played. Discovery from this machine is
-closed, and the reason now has a name.
-
-**And what is *not* a route, so none of it is re-tried** (moved here from the open question when it closed, 2026-09-23): the Control API has no content
-discovery anywhere in its 53 paths (Sonos's *private* cloud content API does — see "The
-first-party web app has a third API" — and it is gated behind a Sonos account session, which is
-the axiom, not a wall), UPnP `Search` reports empty `SearchCaps`, `musicService:1 search` does
-not exist and that namespace is about accounts, and `GetSessionId` answers 806 even for a
-service that plays. And the object id cannot be derived from outside —
-`ALkSOiGTPQu20Hqb6iEmeMhGFI_jhhXgHyx7WTjmO6bs1i3H` is 48 opaque characters, not a YouTube video
-id, so searching YouTube by another route gives nothing a player would accept. **The opacity is
-Google's own** (2026-09-04), which is why no Sonos-side decoding exists to be found.
-
-### The cheaper experiment: *a* key rather than *the* key (2026-09-19)
-
-The sealed-key section closed "can we obtain Sonos's key" and said nothing about a different
-question, asked by the household this evening: **does the endpoint want a particular key, or any
-valid project identity?** Google's API-key check is a *consumer* check - it names which Cloud
-project is calling - and nothing about it is inherently partner-specific. If any enabled project
-counted, a self-service key would do.
-
-**The endpoint evaluates keys, which was not obvious and is free to establish.** A syntactically
-well-formed but fake key, sent both ways Google accepts:
-
-| sent | answer |
-|---|---|
-| nothing | **403** `PERMISSION_DENIED` — "unregistered callers … use API Key **or other form of API consumer identity**" |
-| `?key=AIzaSy…0000` | **400** `INVALID_ARGUMENT`, `reason: API_KEY_INVALID`, `metadata.service: music.googleapis.com` |
-| `X-Goog-Api-Key: AIzaSy…0000` | identical 400 |
-
-The complaint moves from *no identity* to *this key is not valid*, by the same logic that made the
-Bearer probe informative. So the key gate is live, both transports are accepted, and **a real key
-from a self-owned project gets evaluated rather than ignored.** That is a two-minute experiment -
-an API key needs no OAuth client type, no consent screen, no device-grant harness - and it should
-be run *before* the OAuth task below, because it tests the same wall from the cheap side.
-
-What the answers would mean, reading `details[].reason` rather than the status (the same
-discipline the OAuth task already insists on):
-
-- **403 `SERVICE_DISABLED`** with `metadata.consumer: projects/<n>` → the API must be enabled on
-  the calling project, and `music.googleapis.com` is absent from Google's public API discovery
-  directory, so there is no console page to enable it. The hardest no available, and the likeliest
-  outcome for a partner API.
-- **403 `PERMISSION_DENIED`** with no `ErrorInfo`, or `CONSUMER_INVALID` → an allowlist: *the* key,
-  not *a* key. Closed, but for a nameable reason.
-- **401 `UNAUTHENTICATED`** — "Expected OAuth 2 access token, login cookie…" → **the key satisfied
-  the consumer gate.** Only user identity would then be missing, which is exactly what the device
-  grant below provides, and the two halves would compose into a working link.
-- **200** → the wall was never partner-specific at all.
-
-The probe lives outside the repo, in the session's scratch directory, for the same reason the
-device-grant harness would: it takes a live credential and is not a feature.
-
-#### Run with a real key: the fourth branch, and it names itself (2026-09-20)
-
-A key from a self-owned Cloud project, sent both ways:
-
-| sent | answer |
-|---|---|
-| `?key=<real>` | **403** `API_KEY_SERVICE_BLOCKED` — "Requests to this API music.googleapis.com **method `google.music.sonos.v1.Sonos.SendRequest`** are blocked" |
-| `X-Goog-Api-Key: <real>` | **403** `SERVICE_DISABLED` — "**YouTube Music API (Partner)** has not been used in project `<n>` before or it is disabled", with an `activationUrl` |
-
-Three things worth having out of that, none of which the fake key could show:
-
-- **The API has a name and a method.** `google.music.sonos.v1.Sonos.SendRequest`, published by
-  Google as **"YouTube Music API (Partner)"**. The `v1:sendRequest` URI in the service descriptor
-  is a gRPC-transcoded method of a partner API dedicated to Sonos - so the SMAPI envelope x2rock
-  sends is being tunnelled through a Google API surface built for exactly one caller.
-- **It is the predicted fourth branch** - `SERVICE_DISABLED`, the API not enabled on the calling
-  project - **but the prediction attached to it was wrong in a useful way.** That branch was
-  written as "there is no console page to enable it, because `music.googleapis.com` is absent from
-  the public discovery directory". Google returns an `activationUrl` for it anyway. Absence from
-  the discovery directory does not mean absence from the console.
-- **So the question is now narrower than "a key or the key", and it is answerable by clicking.**
-  Whether a non-partner project may *enable* "YouTube Music API (Partner)" is a policy Google
-  enforces at activation. If it enables, the same probe re-run decides the rest; if the console
-  refuses, that is the allowlist answer arriving from the console instead of the endpoint, and it
-  closes the question properly.
-
-The two transports disagreeing is itself a detail to keep: a query-string key is evaluated against
-the *key's* own API restrictions first (`API_KEY_SERVICE_BLOCKED`), while the header key reaches
-the *project* check (`SERVICE_DISABLED`). Probing only one way would have produced half the
-picture. (And a key with restrictions set will answer `API_KEY_SERVICE_BLOCKED` on *both*
-transports, hiding the project verdict entirely - unrestrict the key before reading anything into
-a re-probe. This is not hypothetical: the console required at least one API to be selected when
-restricting the key, "Google Cloud APIs" was chosen, and the next probe changed answer for that
-reason alone rather than because anything about the service had moved.)
-
-**A third witness, from the console's own enumeration.** That restriction picker lists the APIs
-enabled on the project, and **"YouTube Music API (Partner)" was not among them to select.** So the
-verdict arrives from three independent directions: the endpoint says `SERVICE_DISABLED`, the
-activation page will not load, and the console cannot enumerate the API for the project at all.
-
-#### What the outside world knows, and the two bridges that are out (2026-09-20)
-
-The console's activation page for this API **fails to load** rather than refusing, which is what an
-API invisible to the calling project looks like from a UI that cannot render a page for it.
-Searched for corroboration and for any route round it; the useful findings are all negative, which
-is worth recording so nobody re-runs them:
-
-- **`music.googleapis.com` is absent from Google's public API discovery directory.** Queried by
-  name and across the whole directory: zero entries matching `music`. No public documentation of
-  the API exists anywhere.
-- **The integration is YouTube's, not Sonos's.** Sonos's own support material and community
-  answers say YouTube submitted and maintains the YouTube Music service on Sonos - which is exactly
-  the shape of a Google-side partner API named `google.music.sonos.v1.Sonos.SendRequest`, built for
-  one caller.
-- **Nobody bypasses it; the third-party projects replace it.** The known way to get YouTube audio
-  onto Sonos from outside is to *write an SMAPI service of your own* backed by the public YouTube
-  Data API v3 and register it with the household. That is a different service, not this one.
-- **And registering one is shut on this firmware.** `http://<player>:1400/customsd.htm`, the page
-  that historically added a custom SMAPI service to a household, answers **403** on 97.1.
-- **The cheapest bridge does not exist either, and this household's own data says so.** If
-  YouTube Music's object ids were YouTube video ids, x2rock could search with the *public* Data API
-  - which any project may enable - and hand the results to the enqueue path, never touching the
-  partner endpoint. They are not. Every YTM id in this household is an opaque 48-character
-  `ALkSOi…` token (`x-sonosapi-hls-static:ALkSOiE6oNaY79ETCNUV59yIVZix_Mdq8J1J8_Y2d01HLnFR`,
-  `x-rincon-cpcontainer:1004004cALkSOiF60SmN3aW6x6j0p5ECA5_qJlToFZPtLSwFkyBNbzYO`), nothing like an
-  11-character video id. The ids are partner-minted and cannot be synthesised.
-
-So the position is: the partner API is the only door to YouTube Music *as YouTube Music*, and it is
-allowlisted to Sonos. That is a closed question with a named mechanism, which is the best available
-outcome short of access. **Nothing about playback changes** - the household's registration resolves
-and plays YTM content from the queue, which is the half that was ever at stake.
-
-**Three refinements to step 4, worth having before the Cloud project is created (2026-09-04):**
-
-- **Read `details[].reason`, not the HTTP status.** `ACCESS_TOKEN_SCOPE_INSUFFICIENT` returns
-  **403**, not 401, so the branch table above would close the question on a scope error while
-  reporting it as a `client_id` pin. Capture the whole JSON error body.
-- **There is a fourth branch, and it is the likeliest.** `403` with `reason: SERVICE_DISABLED` and
-  `metadata.consumer: projects/<n>` means the endpoint wants the API *enabled on the calling
-  project*, and when a Bearer is presented the calling project is whichever project minted it.
-  `music.googleapis.com` is absent from the public discovery directory, so there is no console page
-  to enable it — a harder no than an allowlist, and the exact signature of a partner API.
-  `CONSUMER_INVALID` means the project identity is not resolving; a bare `PERMISSION_DENIED` with
-  no `ErrorInfo` is the allowlist hypothesis.
-- **Free pre-step:** `https://oauth2.googleapis.com/tokeninfo?access_token=…` reports the scopes
-  actually granted, separating "wrong scope" from "wrong client" at no cost.
-
-Weak evidence in favour of bothering: `ytmusicapi`'s documented setup has each user create their
-own "TVs and Limited Input devices" client, and since November 2024 that own-client flow is
-mandatory and works against InnerTube. So a self-service client is not categorically refused by
-YouTube Music's backend. Weak because InnerTube is consumer-facing and takes any YouTube-scoped
-token, while `sendRequest` is the partner door. The two facts point opposite ways, which is why one
-request settles it.
-
-**There is no second wall in the id namespace.** Sonos does not wrap or re-mint object ids (the
-first-party web app hands back Plex and iHeartRadio ids in their services' own formats), so the ids
-`sendRequest` returns are YouTube Music's own opaque strings, which the enqueue path already
-accepts. See "Object ids are the service's own, not Sonos's". The probe above is the whole remaining
-question.
-
-Related, non-Cloud discovery path worth noting so it is not confused with this one: `ytmusicapi`'s
-OAuth mode is itself a Cloud "Limited Input Device" client against InnerTube
-(`music.youtube.com/youtubei`). It reaches the real YTM catalogue as the user, but returns videoIds,
-which are not the object ids a player enqueues, and it does not test the *Sonos* endpoint at all.
-The probe above is the one that answers "does a Google Cloud account open YTM **on Sonos**".
-
-### Objections this section already answers
-
-Collected so they do not each cost a session:
-
-- *"The key is public, so nothing is being taken."* The **container** is public. The plaintext is
-  not, and the private key that reaches it is not.
-- *"Maybe it is obfuscation, not encryption."* See the entropy table and the exact RSA-1024 and
-  5-AES-block lengths. Obfuscation does not land on those numbers or those entropy values.
-- *"Google API keys are not credentials anyway."* Correct, and no longer relevant. The barrier
-  stopped being *what the key is* the moment it turned out we do not have it.
-- *"RSA-1024 is weak."* Not weak enough to factor here, and succeeding would be the same act by a
-  longer route.
-- *"The Sonos PC app does app-link too, so a desktop path exists."* True — and it was a genuine
-  correction to the older claim that app-link means handing off to the *service's* mobile app (see
-  the amended paragraph in "But it is per-service"). It does not help: the desktop controller opens
-  the same envelope with the same embedded key.
-- *"Check another service's manifest — maybe one ships a plain key."* Possibly, and it would say
-  something interesting about how uniformly Sonos seals these. It would not produce YouTube Music's.
-- *"What would re-open this?"* Sonos publishing an API for third-party controllers, Google exposing
-  a registerable endpoint that accepts Sonos object ids, or YouTube Music appearing among the
-  device-link services. None are things to wait for. **But one thing did re-open it the same day**,
-  and from inside rather than from Google or Sonos changing anything: the endpoint accepts OAuth,
-  so the sealed key is not the only identity. See "TASK: the OAuth identity probe" above — the
-  question is no longer *the key* but *the client allowlist*, and that is testable with a
-  self-service account.
-
-### What still works, and is enough
-
-Playback was never blocked by any of this. `x2rock keep` stores the object id, the player resolves
-the household's own credential at enqueue, and the track plays — demonstrated in both directions on
-2026-08-31 when the household's account was disconnected (UPnP 800 at the door) and re-added
-(`sn_20`, same id, playing again). Discovery stays in the Sonos app; repetition lives on the bar.
-That is the honest shape of this feature and it is not a consolation prize.
-
-## Telling a live stream from an item, and the mark it earns (2026-09-01)
-
-The widget showed a station exactly as it showed a track: a name, and nothing to say whether it
-ends. That difference decides whether seeking, a duration or a queue position mean anything, so it
-is worth a glyph.
-
-**What says so is `container.type`, and nothing else does.** Three captures off the Media Room the
-same day, the third of which is the control:
-
-| | YouTube Music track | TuneIn "Jazz Club" | Sonos Radio "Sound System" |
-|---|---|---|---|
-| how it started | queue | x2rock `loadStreamUrl` | **the Sonos app** |
-| `container.type` | `track` | **`station`** | **`station`** |
-| `container.id.objectId` | real | `-1` | **`97034`** (real, `sn_1`) |
-| `currentItem` | present, with `durationMillis` | absent | **present, name + artist** |
-| `durationMillis` | 179000 | — | **absent** |
-| `playbackSession` | — | x2rock's `directControl` | **none** |
-
-**The control settled it.** An earlier version of this section flagged that TuneIn station as
-started *by x2rock*, which sends `"type": "station"` in its own `stationMetadata` - so the capture
-could not rule out the player echoing back what it was handed. Sonos Radio's "Sound System",
-started from the Sonos app, carries no `playbackSession` and a real object id: nothing x2rock sent
-was in the loop, and the container type still reads `station`. **It is the player's own vocabulary.**
-
-**It also killed two signals this section used to lean on.** A missing `currentItem` and
-`objectId "-1"` were offered here as corroboration - the player's own invention rather than an
-echo. They are **TuneIn's shape, not a live stream's**: Sonos Radio streams a named track by a
-named artist, with a real id, and still has no duration and no end. Generalising from one service
-was the mistake, and one capture from a second service was enough to catch it. Only
-`container.type` and the absent duration survive all three, and the duration was never the question.
-
-**What was deliberately not used: the absent duration.** `mpris:length` missing is the closest
-thing MPRIS has, and it answers a different question. A track whose service simply did not send a
-duration looks identical, and a client marking that one a station would be wrong about the source
-rather than about the metadata. The flag says what x2rock knows, and the widget reads it strictly
-(`=== true`), so an older daemon that sends no such key leaves every room unmarked rather than
-marking them all.
-
-It goes out as `x2rock:isLiveStream`, the same namespaced-metadata route as `x2rock:members` and
-`x2rock:onTvInput` - MPRIS has no field for it and no way to add one except this. Verified end to
-end on D-Bus: `b false` on a YouTube Music track, `b true` with `xesam:title "Jazz Club"` while
-TuneIn played, and `false` again once the room was back on its queue.
-
-### A live stream can have changing artwork, and Sonos Radio does
-
-Noticed while the control was still playing, and worth writing down because the
-naive expectation is the opposite - a stream has one logo and keeps it. Sonos Radio sends art per
-*track*, and `to_metadata` already prefers `track.image_url` over the container's, so it updates on
-its own as the stream advances.
-
-How, from two captures on the same station:
-
-```
-…/fe9cd0a0bbfca70dd863c43e88e65ffa_bg_09.png ?…&mark=…dzcdn.net/…/a1c3d91c…/1000x1000….jpg
-…/fe9cd0a0bbfca70dd863c43e88e65ffa_bg_09.png ?…&mark=…dzcdn.net/…/87d89262…/1000x1000….jpg
-```
-
-Same base image, different `mark`. The station supplies one constant background and `imgix`
-composites the track's own cover onto it server-side, the cover itself coming from Deezer's CDN. So
-the URL changes on every track and the widget refetches without being told to.
-
-TuneIn, again the opposite shape: `art_url` is `null` outright. Three per-track fields separate the
-two services - name, artist and art - and none of them says anything about whether the source is
-live. Only `container.type` does.
-
-### `canPause` is not about the command, and Sonos Radio half-honours it
-
-The two live streams disagree about pausing, which is why the transport control asks the *player*
-rather than asking whether the source is a stream:
-
-| | `canPause` | `pause` gives | on resume |
-|---|---|---|---|
-| TuneIn "Jazz Club" | `false` | `IDLE` | starts again at the live edge |
-| Sonos Radio "Sound System" | `true` | `PAUSED`, position frozen | **the same track, from the top** |
-
-Measured 2026-09-01: paused at 90553 ms, held at 90813 ms across three seconds - a real hold, not a
-drifting counter - and came back at **5250 ms of the same track**. So the state is honest and the
-resumption is not. `canPause` reads as "can this be resumed where it left off", which is the
-narrower question its name does not ask; Sonos Radio answers yes and then delivers only the first
-half.
-
-**Not worth correcting in the widget.** The transition is real, the row correctly shows paused, and
-losing ninety seconds of a track that cannot be seeked anyway is a small cost. Making the button
-read `stop` here would mean hard-coding "Sonos Radio behaves oddly" - service-specific guessing of
-exactly the kind `stopRather` exists to avoid - and it would be wrong the day Sonos fixes it.
-
-The load-bearing point for anyone tempted to simplify: **being live and being pausable are
-different properties.** `stopRather` gates on `canPause` and must keep doing so. Folding it into an
-`isLiveStream` check would put a stop button on this station, which pauses perfectly well.
-
-### Sonos Radio names the track, so the station needs saying
-
-`to_metadata` prefers `track.name` over `container.name`, which is right - the track is the more
-interesting fact - but on Sonos Radio it means the row reads `Intervallo (from "Veruschka") (II) —
-Ennio Morricone` and never says what it is playing *on*. TuneIn has the opposite shape: no track at
-all, so the title already **is** the station and saying it twice is noise.
-
-So the daemon decides rather than the widget: `x2rock:stationName` carries the container name only
-when the stream is live *and* the name is not already the title. Empty otherwise, and the row's
-extra line appears only when there is something in it.
-
-### The picker asks a different question, and one answer is unverified
-
-A picker row is a thing that is *not* playing, so it cannot read the daemon's flag. `isStreamRow`
-reads the row's own `type` instead, and the three sources that feed the picker share field names
-without sharing vocabularies - each passes through whatever its origin called the item:
-
-| Source | A station reads | Status |
-|---|---|---|
-| `search`, `browse` | `stream` (SMAPI's `itemType`) | **verified** - a TuneIn jazz search answers 19, and browsing into Trending answers 50, all `container: false` |
-| `favorites` | an **upper-case enum**: `STREAM`, `AUDIOBOOK` | **verified 2026-09-01** - and the prediction was wrong, see below |
-| `bookmarks` | `stream`, being what x2rock stored | covered by the same check |
-
-Three marks now come out of one `markFor`, all verified against live CLI output rather than reasoned:
-`stream`/`STREAM` and the untested `audiobroadcast` take the radio antenna, `show` takes a
-microphone, and anything containing `audiobook` takes an open book - a substring because a favorite
-says `AUDIOBOOK` while a playing Audible track says `chapter.audiobook`. Everything else, `track`
-and `container` included, takes nothing.
-
-Unknown reads as "no" - an unmarked station is a smaller wrong than a marked album, and an older
-CLI sending no `type` must not mark the whole list.
-
-### The favorites half, tested - and the prediction was wrong
-
-Run 2026-09-01 with the first favorite this household has ever had: "Virgin Radio Chilled UK",
-saved from the Sonos app. `favorites --json` reports **`"type": "STREAM"`**, in capitals - not the
-DIDL-Lite `object.item.audioItem.audioBroadcast` this document expected, and not lowercase either.
-
-The mark appears correctly regardless, because `isStreamRow` lowercases before comparing and
-`STREAM` falls through to the same `=== "stream"` branch the search and browse rows use. So the
-feature was right by construction rather than by the reasoning written down beside it - which is
-worth saying plainly, because the reasoning is what a later reader would trust.
-
-A second favorite the same day settles the shape: an Audible audiobook reports **`AUDIOBOOK`**. So
-the field is an upper-case enum of its own - `STREAM`, `AUDIOBOOK` - and not a DIDL-Lite class at
-all. The `audiobroadcast` clause is therefore **untested, not reasoned**. It is kept in case some
-service answers that way, but nothing on this household has produced it and the vocabulary now
-looks like the wrong family entirely.
-
-**A third shape, and the detector holds.** Audible's *playback* metadata reports
-`container.type: "audiobook"` with `track.type: "chapter.audiobook"` and a real `durationMillis`
-(58000 on "Book One: Dune"). Not `station`, so `is_live_stream` correctly leaves it unmarked - an
-on-demand item with a duration and an end, which is the thing the radio glyph exists to distinguish
-from. Four services have now been read live: `track`, `station` (twice, two very different shapes),
-and `audiobook`. To check another service, save one of its items as a Sonos favorite, read `type`
-from `x2rock favorites --json`, and confirm the mark in the picker.
-
-## `queueVersion` does not exist, and the queue view was stale because of it (2026-09-01)
-
-Reported as "it got weird when I added a favorite twice then tried to remove it from a queue", and
-the report was exactly right.
-
-**The field the daemon reads is not sent.** `RoomState::queue_version` comes from
-`playbackStatus.queueVersion`, and firmware 95.0-77060 does not send it. `getPlaybackStatus`
-answers with `playbackState`, `positionMillis`, `itemId`, `playModes`, `availablePlaybackActions`,
-`isDucking`, `previousItemId`, `previousPositionMillis` - and nothing else. Nor does it arrive in an
-event: forcing a real pause and a real play left `x2rock:queueVersion` an empty string through both,
-so it is absent from the event body too rather than merely from the polled response.
-
-**So the widget's refresh never fired.** `onQueueVersionChanged: if (queueFor !== "") loadQueue()`
-has never run. Queue edits were fire-and-forget on the strength of it, which left the panel showing
-the list from before the edit.
-
-**That is a correctness bug, not a cosmetic one.** Queue rows carry *positions*. Acting on a stale
-list removes or moves a different track than the one on screen - which is what happened: two adds
-while the panel was open, then a remove that took the wrong entry.
-
-**Fixed the proportionate way first.** Every edit the widget makes now re-reads the list when the
-process exits - `queueEditProc` for remove/move, `queueItemProc` for the `+`. Edits made elsewhere
-needed the real fix below.
-
-**And then the real fix as well, at the owner's request.** The queue's true version *is* available -
-the `UpdateID` on a `Q:0` browse, which `Upnp::update_id` already reads before every mutation. The
-daemon now publishes it as `x2rock:queueVersion`, so the mechanism the widget was written against
-finally exists.
-
-**Where the trigger came from.** The local API has no queue namespace to subscribe to: `queue:1` and
-`playbackQueue:1` both answer `ERROR_UNSUPPORTED_NAMESPACE`, and `playbackSession:1` has no queue
-command. So the read rides a playback event the daemon was already handling, which keeps the
-no-polling promise honest - a room doing nothing costs nothing, and the price is one small SOAP
-browse per state change or track boundary.
-
-Verified: the key went from `""` to `"84"`, and to `"85"` when a track was added.
-
-**What it catches, and what is still missed.** Anything that moves playback is seen - the Sonos
-app's Play Now, a track advancing, a queue cleared under a playing room. A *silent* append to a room
-that keeps playing what it was emits no event, so it waits for the next one. Closing that needs UPnP
-GENA eventing, which needs the players to reach an HTTP callback on this machine, which Omarchy's
-default-deny firewall does not allow - the same wall the cloud-queue note runs into.
-
-### A queue row with no metadata, and whose fault it is
-
-Seen while the above was being fixed: one queue row rendered blank while the rows either side of it,
-from the same service and added minutes apart, carried title, artist, album and duration. `now`
-agreed - `title`, `artist` and `service` all `null` - so nothing was being dropped on the way
-through; the player genuinely held no metadata for it.
-
-**It is the Sonos app that makes these.** Per the owner, its `...` menu's **Play Now** adds an entry
-carrying no metadata, while tapping the track on the now-playing view adds a normal one. Two paths
-in first-party software, one of which produces a row nothing can describe. Worth writing down
-because the obvious suspect was x2rock's own synthesized DIDL in `bookmarks::service_didl`, and that
-is not it - items queued through `queue-item` come back with their titles intact.
-
-Nothing here can repair such a row: there is no title to fetch. So both surfaces name it instead of
-leaving a gap - `(no title from the player)` in `x2rock queue` and in the widget's queue panel,
-where a blank line reads as corruption rather than as an answer. The wording says *whose* silence it
-is, which is the useful part.
-
-### What first-party Sonos does, for whenever this is picked up
-
-Per the owner, and matching the split x2rock already implements: **playing to a device does not
-change the queue** - a station or a podcast episode runs alongside it - **but playing an album adds
-all of its tracks to the queue and plays them.** x2rock has the first half and not the second: a
-container is somewhere to browse into, and there is no "play this album" that fills the queue with
-its contents. `queue-item` adds one row at a time. That is the gap to close if queue work resumes.
-
-## x2rock as an agent substrate (2026-09-02)
-
-A distinct arc, and worth its own section because it changed what the CLI is *for*. The starting
-premise was that Omarchy is "AI first", so the person driving x2rock is as likely to be an agent as
-a human at a prompt. That reframes the CLI's output and errors as an API, and most of the work below
-is making that API honest. It was built, then **dogfooded by a second Claude session driving the
-CLI as an agent** - which turned up roughly a dozen concrete gaps a human never would, because a
-human reads prose and an agent parses fields. The dogfooding loop is the most useful process finding
-here: an agent leaning on the contract finds exactly the places the contract lies.
-
-### The one-call snapshot: `status --json`
-
-An agent's first move is almost always "what is the whole household doing", and answering it with
-`rooms` then `now` per room then `vol` per room is N+ round trips with no atomic view. `x2rock
-status` returns every group in one call, each room modelled on `now --json` (so a consumer that
-parses `now` needs no new shape) plus volume, grouping, coordinator and `has_tv`. Two decisions
-carried:
-
-- **Query each group through its own coordinator.** A group command answered on the wrong socket is
-  the same failure the daemon hit early ("one connection per coordinator"); the snapshot resolves a
-  connection per group, reusing the session's where it coincides.
-- **One unreachable coordinator is that room's problem, not the snapshot's.** Each room's fetch is
-  fallible on its own; a failure tags that room with an `error` field carrying its identity,
-  grouping and TV, and the other rooms still report. Proven by unplugging a speaker mid-`status`:
-  the room came back error-tagged after the 5s connect timeout, the rest answered, and the whole
-  array still returned. The per-room build is a pure function (`room_value`) so the error branch is
-  tested without a network.
-- **Bare array by default, envelope on `--full`.** A bare array is nicer at a `jq` prompt and is
-  what existing callers expect, so it stays the default; `--full` wraps it in `{household, network,
-  total, reachable, warnings, rooms}` for an agent that wants to know *which* household and network
-  it is on and whether every room answered. The household round trip and the fingerprint are
-  gathered only when `--full` asks.
-
-### Errors an agent can act on, not parse
-
-The error prose was already written to name its own fix (the unregistered-network message says to
-run `x2rock discover`). The agent turn was to make that a *field*: a `Hint` (src/hint.rs) is an
-ordinary `std::error::Error` carrying a stable `code`, an optional runnable `fix`, and optional
-structured `data`. It flows through `anyhow` like any error - its `Display` is just the message, so
-the daemon and the plain CLI are unchanged - and at the top level `main` splits into `main`/`run`:
-a `--json` invocation that fails prints `{error, code, fix, …data}` on stderr and exits non-zero,
-reading the code and fix by downcasting the error chain. A plain error is `{"code":"unknown",
-"fix":null}` - still structured.
-
-Codes hinted so far: `unregistered_network`, `unknown_room`, `needs_link`, `no_player`,
-`too_many_rooms`. Two lessons in the shape:
-
-- **`no_player` inherits a sharper inner code.** Wrapping a connect failure as "no player to play it
-  on" would bury an `unregistered_network` underneath; the wrapper keeps a *connection-layer* inner
-  code when there is one (better diagnosis; at the time both carried the same `discover` fix) and defaults to `no_player`
-  otherwise. Restricted to connection-layer codes after a review noted the general version could
-  pair a mismatched fix with the wrapper's message.
-- **The `data` payload lets an error hand back what the caller would re-fetch.** `unknown_room`
-  fills it with `rooms` (the whole list) and `did_you_mean` (Levenshtein near-misses), so a mistyped
-  `-r "bedoom"` comes back with `["Bedroom"]` in one call instead of a fail / `x2rock rooms` / retry
-  round trip. The `data` object cannot shadow `error`/`code`/`fix`, pinned by a test that tries.
-- **A `fix` must not invite a harmful auto-run - so `unregistered_network` has none.** It originally
-  offered `x2rock discover`, but a testing agent pointed out that the "when `fix` is non-null, run it
-  and retry" contract then means: a laptop on a café network is asked to pause, gets
-  `unregistered_network`, and *scans the café's network* - the exact road-warrior behaviour the
-  design avoids. The fix is now `null`; the message says discovery is deliberate and offered, not
-  reflexive. The rule is general: a `fix` is a *safe, local* remedy, and a command that scans someone
-  else's network is not one to hand an agent that will run it unprompted. A later review generalized
-  it to `no_player`: `connect` has already rescanned a known network by the time it reports one, so
-  the fix just repeated the scan that came back empty — and the wrapper's fallback arm was minting a
-  scan for failures nothing had classified (a stale `--ip` on café wifi). `x2rock discover` now
-  appears only in messages, as an offer, never in `fix`; the hint constructors live in `hint.rs` and
-  a test pins that neither network error carries a runnable scan. The generic no-remedy code
-  was also renamed `error` -> `unknown`, so `{"error": …, "code": "unknown"}` no longer reads a code
-  named `error` inside a field named `error`.
-- **"Verbatim and runnable" was not true for most services (fixed 2026-09-04).** `needs_link` had
-  been emitting `fix: "x2rock link Classical Archives"` unquoted since it was written, which is two
-  positionals: clap answers `unexpected argument 'Archives'` and exits 2 before anything is
-  contacted. Roughly 76 of the 108 service names have a space in them, so the field was broken for
-  most of the tier it exists to serve - and broken in the worst direction, since an agent following
-  the run-it-and-retry contract gets a usage error rather than a link flow. Both quoted hints now
-  go through `hint::shell_arg`, which single-quotes only what needs it (`x2rock link Deezer` stays
-  bare, because that is what a person would type) and does the `'\''` dance for a name containing a
-  quote. Found while fixing the searchable list, whose own new hint was written quoted the same day
-  - which is how the older one came to look wrong by comparison.
-
-  The lesson worth keeping is about *how* it was found: nothing tested that a `fix` runs. The tests
-  asserted the string's content, and the string was exactly what its author intended - it was the
-  shell that disagreed. Now pinned by cases (`Classical Archives`, `TuneIn (New)`, `Rock'n'Roll`)
-  rather than by re-asserting the format, and verified by taking the emitted `fix` and running it:
-  `x2rock link 'Classical Archives' --no-open` now reaches the service and comes back with the
-  service's own refusal (`str3`), which is the failure of a command that arrived.
-
-### The daemon stops narrating an unchanged state
-
-A road-warrior daemon on an unrecognised network logged the same "unregistered network" line every
-60s - ~2880 identical lines a day, burying the events worth seeing. A `StatusLog` coalesces on a
-key that carries the **network fingerprint**, so a network switch flushes at once (the move is
-exactly what a reader wants), and re-logs a held state once an hour with the count it held,
-journald-style. A successful connect resets the coalescing so a later failure logs fresh. The
-decision core takes the clock as an argument, so the window and heartbeat are pinned by tests
-without waiting an hour. `X2ROCK_LOG_VERBOSE` restores every line and the backoff ramp for
-debugging the reconnect machinery, which is the finickiest part of the daemon. `X2ROCK_LOG_EVENTS`
-is its sibling rather than part of it - raw event bodies, at a rate that would bury the ramp.
-
-Why this is safe against the AI-first goal: the *pull* (`x2rock rooms`, the sharpened
-`unregistered_network` message that names `x2rock discover`) is the agent's actionable surface, so
-the *push* log can go quiet without hiding anything. The log is observability; the CLI is the API.
-
-### Repeatable `-r`: multi-room in one invocation
-
-Setting three rooms' volume was three cold process starts, each re-resolving topology. `-r` is now
-repeatable for the per-room-state commands - `vol`, `repeat`, `shuffle`, and transport - so `-r
-Kitchen -r Bedroom vol 10` connects once and fans out, one result line per room; `--all` fans the
-same across every group (resolved by each group's coordinator name, since the composite group name
-is not addressable). A third agent asking for "quieter everywhere" is what surfaced `--all` as a
-real gap rather than a doc fix - N `-r` flags derived from a prior call is not a clean answer to a
-whole-house request. Worth stating for whoever documents grouping: `-r <any member>` of a group
-resolves to the *group* (transport and group volume), and `--player` is the only way to reach one
-speaker inside it - verified, and the reason the skill now leads its grouping section with it. Deliberately
-agentic and nowhere else: a human uses `party` or one `-r`; an agent orchestrating "set the
-downstairs to 10" wants one call. Several `-r` on a command that does not fan out is a
-`too_many_rooms` error, not a silent act on the first; a fan-out stops at the first room that fails
-and names it. Mechanically, `--room` became a `Vec` (the single room bound from the field, disjoint
-from the moved `command`), and the vol/repeat/shuffle handlers were extracted into `apply_*` shared
-by the single arm and the fan-out - so the `--player` scoping, fixed-volume refusal and mute rules
-live in `apply_vol` once.
-
-### The skill ships in the binary
-
-An agent benefits from a written contract, but a skill only helps where it is installed. So the
-agent skill is embedded (`include_str!`), one source of truth that cannot drift from the CLI, and
-`x2rock skill` writes it into `~/.claude/skills/x2rock/` (or `$CLAUDE_CONFIG_DIR/skills/`, or
-`--dir`), `--print` for a non-Claude agent. It leads with the two contracts this arc built:
-`status --json` first, and read the error `code`/`fix`.
-
-### What dogfooding surfaced (and the shape of it)
-
-Two agent sessions driving the CLI found gaps a human review missed, all of the same shape - *a
-field an agent would read is missing or lying*:
-
-- `on_tv` and `audible` as fields, so "is the TV on" and "will this make a sound" are reads, not a
-  `"TV Audio"` title match or a volume-vs-mute deduction.
-- `service_id` alongside `service`, because the player leaves `service` null for some sources while
-  carrying the sid; and then `status`/`now` resolving that sid to a name from the cached catalogue,
-  because favorites names YouTube Music and now-playing did not. (Favorites was not "resolving" - the
-  player simply populates the field there and not in now-playing metadata.) A second agent then found
-  the sid itself wrong for **HLS/stream content**: two rooms on YouTube Music at the same moment, one
-  reporting `serviceId` 284 (a track URI) and one 65435 (an `x-sonosapi-hls-static` stream), while
-  *both* art URLs carried the correct `sid=284`. So the **art URL is the reliable sid** - the player's
-  metadata object carries a wrong or internal id for HLS - and `service_id` now reads from the art
-  URL first, the metadata object only as a fallback. One `status` call reproduced it, which is the
-  whole argument for the snapshot: an A/B across rooms in a single reply.
-- `favorites --json` marking `playable: false` for empty shells (no service and no type) - the
-  dead-streaming-service favorites a long-lived household accrues. A heuristic, and it says so: it
-  cannot see a live service that **recycled an id** (iHeartRadio swaps stations for seasonal ones at
-  the holidays), which nothing can detect.
-- `favorite "<name>"` naming the ids of two favorites that share a name rather than silently picking
-  the first.
-
-The through-line: the fixes were cheap; *finding* them needed an agent, because each is invisible
-until something parses the contract instead of reading it.
-
-## TuneIn (New): the first front-door AppLink completion (2026-09-04)
-
-`x2rock link "TuneIn (New)"` (sid 333, `Auth="AppLink"`) completed end-to-end: `getAppLink`
-answered with a `regUrl`/`linkCode` pair, the browser step was an ordinary consent page, and
-`getDeviceAuthToken` minted a token on the first poll after approval. **This is the first of the 62
-app-link services to fall through `getAppLink` itself** — Plex fell *around* it, through its own
-PIN flow — and it vindicates the ask-anyway design: the generic attempt that Plex refused and
-YouTube Music 403'd is exactly what linked here, unmodified.
-
-### The URL says how the flow actually works
-
-The post-approval confirm page was captured live, and its query string is the whole mechanism in
-one line:
-
-```
-https://tunein.com/authorize/confirm/?client_id=oVzZq8nb&pairauthflow=true
-  &redirect_uri=https%3A%2F%2Fsonos.platform.prod.us-west-2.tunein.com%2Faccount%2Flink
-  &response_type=code&serial=<householdId>&showupsell=true&state=<base64>
-```
-
-- `response_type=code`, `client_id=oVzZq8nb` — a textbook OAuth authorization-code grant, with
-  Sonos's client identity at TuneIn sitting in the open. What is *absent* matters most: no secret
-  gate before consent. This is the exact spot where YouTube Music demands its sealed `apiKey` —
-  TuneIn's client identity is a name tag, YTM's is a locked door.
-- `state` decodes (plain base64 JSON) to `{HouseholdId, LinkCode, RedirectUri: null}` — the pairing
-  nonce from `getAppLink` rides in the OAuth `state` parameter. The consent leg and the polling leg
-  are joined by nothing but that 32-hex nonce.
-- `redirect_uri` is **TuneIn's own Sonos-integration backend**
-  (`sonos.platform.prod.us-west-2.tunein.com/account/link`), not sonos.com and not any device. The
-  OAuth loop closes entirely server-side at TuneIn: browser consents → TuneIn issues the code to
-  its own backend → the backend exchanges it, reads the `LinkCode` out of `state`, and marks the
-  household's link approved → the `getDeviceAuthToken` poll flips from `NOT_LINKED_RETRY` to a
-  token. **x2rock never touches the OAuth leg at all.**
-
-TuneIn's success page reads "All set! Now use the Sonos app to listen to TuneIn — TuneIn account
-linked to your device." Its backend cannot tell x2rock from the Sonos app; the link is fully
-ordinary on their side. So "app-link expects the service's mobile app" is per-service *policy*,
-not tier structure — the PC-controller correction (2026-09-01) predicted this, and a Linux desktop
-browser has now demonstrated it. The flow-shape taxonomy grows to five: Bandcamp (code in
-`regUrl`), iHeartRadio (typed code), Mixcloud (OAuth, `linkCode` in `redirect_uri`), Plex (SMAPI
-link dead; own PIN flow), TuneIn (OAuth, `linkCode` in base64-JSON `state`, service-side redirect).
-
-**Six, with Saavn (2026-09-22): a typed code that an existing session does not shortcut.** Relinked
-deliberately after an `unlink`, it took **39 seconds over 13 polls**, most of that the person rather
-than the service - Saavn confirmed within a poll or two of the browser step finishing, so it is not
-slow on its side. What makes it feel different, in the household's words, is that "most other
-services haven't had me click on something if I'm already logged in and running. Saavn did, and the
-Facebook integration seemed clumsy."
-
-That is the distinguishing property and it is visible in the protocol: Saavn sends
-`showLinkCode: true`, so the code has to be read off one screen and entered on another, and it
-requires an explicit approval even for an already-authenticated session. The flows that feel
-invisible are the ones where the code rides in the URL (`showLinkCode: false` - Bandcamp, TuneIn,
-Qobuz), where an existing session can carry the user straight through. Worth knowing when judging a
-link flow: **`showLinkCode` predicts how much work the person is about to do**, and it is in the
-`getDeviceLinkCode` reply before anyone opens a browser.
-
-The relink also re-confirmed two things at no cost: `match` returned **the same `sn_13`** rather
-than minting a new serial, so the association is stable across relinks (a fourth confirmation that
-it associates and never creates); and search worked immediately afterwards, so the local token is
-genuinely disposable - forgetting it and minting another disturbs nothing, because the household
-registration is what playback rides on.
-
-### What worked, and the one loose end
-
-Search verified the same minute: `search -s "TuneIn (New)" "radio paradise"` returns the station
-and its Mellow/Rock/Global mixes (all hits `type: stream`, `queueable: false`). The loose end:
-**the `getDeviceAuthToken` reply carried no `userIdHashCode`**, so the household could not be told
-about the account (`link` says so at the end). That does not matter for TuneIn: its items are
-streams, which go through the stream path rather than the enqueue path's credential substitution.
-Tested the same day from the office household; see the Radio Paradise section following.
-
-Two small observations for the file: `serial=` hands the household id to TuneIn *before* consent —
-a mild privacy leak inherent to the flow shape — and `showupsell=true` is TuneIn's, not Sonos's.
-
-Next probes, priced by this result: Radio Paradise (308) and iBroadcast (310) as the small-operator
-bets, Pocket Casts (233) for the podcast content type, and Spotify (12) as a one-call wall-pricing
-probe for the major-streamer class (does it 403 like YTM, or answer like TuneIn?).
-
-## Radio Paradise, and what plays without a household registration (2026-09-04)
-
-Radio Paradise (sid 308) linked minutes after TuneIn — the second front-door `getAppLink`
-completion — and it was linked **anonymously**: its consent page offers a "login anonymously"
-button, and the token minted behind it has no account at all. That is a third client posture for
-the taxonomy: TuneIn asks for a real account through ordinary OAuth, YouTube Music walls the
-endpoint on a sealed client key, and Radio Paradise hands a token to anyone who asks. (Two small
-practical notes: the catalogue's name is "Radio Paradise" — `link "Paradise Radio"` finds nothing —
-and the reply again carried no `userIdHashCode`.)
-
-It is also the first linked service where **search is impossible by design**: RP publishes no
-search categories, so `search -s "Radio Paradise"` correctly refuses with "publishes no search
-categories". The service is browse-only, and browse works fully: three bitrate containers (128k,
-320k, FLAC), each holding seven channels — The Main Mix, Mellow Mix, RockIt!, The Globe, Beyond…,
-Serenity, KFAT — `type: program`, `queueable: true`.
-
-### The office household answered the registration question, in both directions
-
-The laptop moved to the office the same morning — a *different* household, one that has certainly
-never been told about either new account — which made the `userIdHashCode` caveat testable
-directly. (The move itself was routine and worth a line: both gateway fingerprints were remembered,
-the daemon reconnected 8 seconds after resume, and its one transient failure logged as
-`no player: could not identify this network (no default gateway)` — correctly prefixed, since the
-wifi simply had no gateway yet. The per-controller SMAPI tokens travel with the laptop: search and
-browse for both services work from the office unchanged.)
-
-- **Radio Paradise (`program` item): fails both paths.** `AddURIToQueue` → UPnP 800 — the exact
-  signature of the disconnected-YouTube-Music case: no registration, so the player has no
-  credential to substitute. The stream fallback then dies harder: RP answers `getMediaURI` with
-  "Function 'getMediaURI' doesn't exist" — it implements no direct stream resolution, so its
-  programs are playable only by a player that can resolve them itself.
-- **TuneIn (`stream` item): plays.** `search -s "TuneIn (New)" "npr" --play 1 -r "Media Room"` went
-  BUFFERING → PLAYING with `position_ms` advancing — real sound, no registration anywhere.
-
-So the link-time warning "search works; playback through the household may not" resolves
-precisely: **playback without a household registration works iff the service implements
-`getMediaURI` and the item is a stream.** Anything the player must resolve itself needs a household
-registration, made in the Sonos app. The anonymous RP link buys browse-only without one; the TuneIn
-link is usable end to end.
-
-## `playback:1` carries errors too, and they parsed as statuses (found 2026-09-04)
-
-`X2ROCK_LOG_EVENTS` was added to catch a partial `playbackStatus` in the act - a body with no
-`playbackState`, seen four times in a day on firmware 95.0-77060 and made harmless by treating the
-missing field as *unchanged*. Sixteen hours and 143 bodies later it has caught **none**. What it
-caught instead was a different body on the same namespace, and a worse bug.
-
-**`playback:1` delivers two shapes, and only `_objectType` tells them apart.** A stream failure
-sends a `playbackError`:
-
-```json
-{"_objectType":"playbackError","errorCode":"ERROR_PLAYBACK_FAILED","reason":"ERROR_CANT_REACH_SERVER",
- "serviceId":-1,"serviceName":"https:","trackName":"Apple Music Chill","itemId":"VXiDuCcc…"}
-```
-
-Note `serviceId: -1` and `serviceName: "https:"` - a direct stream URL, not a linked service. A
-second error followed three seconds later carrying no `itemId` at all, so none of these fields can
-be relied on.
-
-**Why it mattered.** Every field of `PlaybackStatus` is optional and *none of them appears in an
-error body*, so a `playbackError` deserialized perfectly into a status full of `None`s. Making the
-event tolerant of a missing `playbackState` had therefore made it tolerant of a body that is not a
-status at all: the error folded in silently as "nothing changed", and the only notice that the
-music had stopped was discarded. Before that tolerance existed it at least failed serde loudly.
-
-**And it did more than lose the error.** `availablePlaybackActions` and `playModes` were
-`#[serde(default)]` - all-false - and were assigned *unconditionally*. All-false is not "unknown",
-it is "this source allows nothing": the room published `CanPlay(false)`, `CanPause(false)`,
-`CanGoNext(false)`, `CanSeek(false)`, and reported a repeating, shuffling queue as doing neither.
-Media keys and desktop applets went dead for that room on every failed stream. The fix for the
-missing `playbackState` had covered two fields of five and left these two resetting.
-
-So both halves are now `Option`, `None` means unchanged for all five, and `playback_error()` reads
-`_objectType` before anything tries to parse a status. The error is logged rather than published -
-MPRIS has no property for "that did not play", and the journal is where the answer to "why did the
-music stop overnight" belongs. The properties MPRIS is told about are read back off the room's
-state *after* the update rather than off the body, so a field the body omitted re-announces what is
-still true.
-
-**Severity was limited by luck rather than by design.** Both times, a full `playbackStatus` arrived
-in the same second, so the blanked window was under a second. Nothing guarantees that ordering, and
-in the 04:34 burst the error came *last* - which would have left the wrong capabilities standing
-until the next event.
-
-The original quarry is still unaccounted for: a partial `playbackStatus` has been reproduced only
-synthetically. The grep that hunts it needs the type filter too, or `playbackError` answers it:
-
-```sh
-journalctl --user -u x2rock.service --since today \
-  | grep 'playback:1 {"_objectType":"playbackStatus"' | grep -v '"playbackState"'
-```
-
-## EQ is UPnP-only, and loudness was on the whole time (verified 2026-09-04)
-
-A parity pass against the legacy Windows controller started with one checkbox: its EQ panel for
-Media Room showed **Loudness ticked**, bass and treble centred. The speaker agreed - `GetLoudness`
-answers `1` - so it has been on since the day it was unboxed, which is the factory default and not
-something anyone here chose.
-
-**The Control API cannot *write* any of this - but it can read it, which this section first got
-wrong (corrected 2026-09-05).** `playerVolume:1` carries only volume, muted and fixed, and there is
-no EQ *namespace*. But `settings:1 getPlayerSettings` (player-scoped, no account, no parameter -
-see "settings:1's unidentified parameter is identified now") returns an `eq` block with `bass`,
-`treble` and `loudness` and a `homeTheater` block with `nightMode`, `enhanceDialog` and
-`enhanceDialogLevel`. So the earlier flat claim "the Control API cannot reach any of this" was
-false on the read side: the tone and home-theatre state is right there. What the Control API
-cannot do is *set* them - `settings:1 setPlayerSettings` answers `ERROR_NO_PERMISSION` to an
-anonymous LAN connection - so the **write** door is still UPnP `RenderingControl:1` on port 1400
-alone, and every `SetBass`/`SetEQ`/loudness write below goes there. Reading, x2rock uses UPnP too,
-for symmetry with those writes and because it predates finding the Control API read;
-`getPlayerSettings` is the
-alternative read path, and the one that also exposes night mode and dialog, which UPnP only reaches
-through the extended `GetEQ` types.
-
-**The service publishes its own contract, so nothing here was guessed.**
-`http://<ip>:1400/xml/RenderingControl1.xml` gives the argument names and the ranges:
-
-| action | arguments | out |
-|---|---|---|
-| `GetBass` / `GetTreble` | `InstanceID` | `CurrentBass` / `CurrentTreble` |
-| `SetBass` / `SetTreble` | `InstanceID`, `DesiredBass` / `DesiredTreble` | - |
-| `GetLoudness` | `InstanceID`, **`Channel`** | `CurrentLoudness` |
-| `SetLoudness` | `InstanceID`, **`Channel`**, `DesiredLoudness` | - |
-
-- **`Bass` and `Treble` are `i2` with `allowedValueRange` -10..10, step 1.** Read off the device
-  rather than inferred, and the CLI checks both levels before sending either, so a rejected treble
-  cannot leave an accepted bass already applied.
-- **Loudness alone takes a `Channel`** (`Master`), which bass and treble do not. Omitting it gets a
-  UPnP 402, which reads like a bad value rather than a missing field - worth knowing because the
-  asymmetry is invisible until the call fails.
-- **The wire says `1` and `0`, not `true`/`false`**, so `parse::<bool>()` rejects it. The reply is
-  compared as text instead.
-- **The setters answer with an empty body**, so the CLI reads the tone back after writing rather
-  than echoing what was asked for. What the speaker now holds is the only truthful report.
-- **It is per player, never per group.** The app's own panel is titled "EQ Settings for <room>";
-  two speakers playing together share a group volume and keep their own tone. So `x2rock eq`
-  resolves `--room` to the *speaker*, the way `vol --player` does, and `--all` - which is
-  per-group - does not apply to it.
-
-Why the checkbox mattered beyond parity: loudness is a low-frequency lift that does most of its
-work at low listening levels, which is exactly where this household listens - the earlier question
-was whether a room could go quieter than volume 1. It cannot, in Sonos steps; turning loudness off
-is the control that actually changes what volume 1 sounds like.
-
-### What `eq` does *not* cover, and the surface still unread
-
-`RenderingControl:1` publishes more than the three tone controls. Some of the rest is wired up now -
-TruePlay disable (`SetRoomCalibrationStatus`) and night mode / dialog (`SetEQ`, via `eq --night` /
-`--dialog`), both below - and the remainder is what this section walks through:
-
-- **`GetRoomCalibrationStatus` / `SetRoomCalibrationStatus`** - TruePlay. This is a *separate*
-  mechanism from bass/treble/loudness: the iPhone app measures a room and stores a per-speaker
-  correction curve, which the speaker applies underneath whatever tone settings are set. So
-  `x2rock eq` can report a room as flat while TruePlay is reshaping it, and turning loudness off
-  does not touch it. Owner's note (2026-09-04): TruePlay is set in much of the five-room home but
-  believed unset on the standalone Media Room - **yet Media Room answers
-  `RoomCalibrationEnabled=1`, `RoomCalibrationAvailable=1`**. Those two booleans are the whole of
-  the reply, so on their own they cannot distinguish "a calibration is applied" from "the toggle is
-  on and nothing was ever measured".
-
-  **Swept the whole home household 2026-09-05, and it did not settle.**
-  `GetRoomCalibrationStatus` was read on all eleven players - every room coordinator, both halves of
-  the Dining Room stereo pair, the Sub and all four surrounds - and *every one* answered
-  `Enabled=1, Available=1`. The experiment wanted a speaker known never to have been TruePlay'd, and
-  the sweep found no candidate.
-
-  What it does add is a thumb on the scale for **"supported"** rather than "stored": `Available=1`
-  comes back from the Sub, and from the invisible half of the stereo pair, and neither of those is a
-  thing anyone calibrates on its own - TruePlay measures a bonded set as one unit. Suggestive, not
-  decisive, since a set-wide measurement could still be written to each member. **Still open**, and
-  it now needs either a speaker whose history is certain or a factory-reset one.
-
-  **`RoomCalibrationState` is not the disambiguator - checked and ruled out (2026-09-05).** The
-  topology carries a `RoomCalibrationState` per player with more than two values, which looked like
-  it might separate "stored" from "supported" where the two RenderingControl booleans cannot. It
-  does not: read across all eleven players, it is **1 for every room primary and standalone, 5 for
-  every bonded secondary** - all three Living Room satellites, both Bedroom surrounds, and the
-  invisible half of the Dining pair. It tracks a player's *role* in a bond, not whether a curve is
-  stored, and it does not vary between a calibrated and an uncalibrated standalone (there is only
-  the one, Kitchen, at 1). So it adds nothing to the question; the factory-reset or known-history
-  speaker is still what it takes.
-
-  **Do not reach for the Kitchen One SL as the control.** It is the obvious candidate - the one
-  standalone, un-bonded speaker in the household - and it is a bad one. Owner's recollection,
-  offered with some uncertainty and not verifiable from the LAN, is that it **used to be half of a
-  stereo pair**, whose other half is the One SL now standing alone in the office as Media Room. If
-  that is right then both of the two speakers that look like clean controls are in fact ex-pair
-  members carrying a curve measured for a bond neither is in any more, which is the same trap Media
-  Room was already recorded as. Treat a lone speaker's history as unknown unless someone remembers
-  it clearly; "it is standalone now" says nothing about what it was when it was measured.
-
-  **Settled far enough to act on (2026-09-04).** `SetRoomCalibrationStatus` turned it off cleanly,
-  and `RoomCalibrationAvailable` stayed `1` afterwards - so a stored curve survives being
-  unapplied, and this speaker has one. Whether `Available` means "a calibration exists" or only
-  "this model supports one" is still not provable from the LAN, but the reading that fits is the
-  first: a One SL calibrated at home, carried to a new office room, still applying a curve measured
-  for a room it no longer sits in. That is worse than no correction, which is why `eq` reports both
-  booleans rather than one, and why enabling TruePlay where nothing is available is refused instead
-  of quietly accepted.
-
-  **It is a plain reversible toggle (tested 2026-09-04).** Off, on, off, on - accepted every time,
-  confirmed by an independent `GetRoomCalibrationStatus` after each, and never a refusal. So
-  unapplying a calibration does not discard it: whatever is stored survives and comes back. What
-  the test does *not* settle is what `Available` means, because it read `1` throughout and never
-  moved - it is either "a curve is stored" or merely "this model supports one", and those cannot be
-  told apart on a speaker that has one. The home-household sweep above did not settle it either, for
-  want of a speaker known never to have been calibrated.
-
-  **There is no way to list or discard a calibration, and x2rock deliberately does not want one.**
-  `SetRoomCalibrationStatus` takes the boolean and nothing else; no clear, no delete. The service
-  declares `RoomCalibrationID`, `RoomCalibrationCoefficients` and `RoomCalibrationCalibrationMode`
-  but gives none of them a `Get` action - they reach a client only through the evented `LastChange`,
-  so "which curve is this, and what is in it" cannot be *asked*. `ResetBasicEQ` returns bass,
-  treble, loudness and the channel volumes, naming no calibration; `ResetExtEQ` wants an `EQType`,
-  and `SonarEnabled`, `SonarCalibrationAvailable`, `RoomCalibration` and `TrueplayEnabled` are all
-  UPnP 402 here. So the app uploads and replaces curves over a channel that is not in this SCPD.
-  That `RoomCalibrationID` is singular rather than a list fits the owner's reading: the app
-  overwrites one slot rather than keeping a library. **The scope decision (2026-09-04): x2rock wants
-  only the disable, so BasicEQ takes over. Management stays out until there is a control for it.**
-
-  Sonos Fabric is the thing that could change that - its Positioning Technology senses placement
-  with high-frequency sound, which is TruePlay's own measurement machinery, so per-role profiles
-  would plausibly arrive as new actions here. **Baseline for that diff, read 2026-09-04 from a One
-  SL on firmware 96.1-79270** - the 27 actions `RenderingControl:1` publishes today:
-
-  ```
-  GetBass, GetEQ, GetHeadphoneConnected, GetLoudness, GetMute, GetOutputFixed,
-  GetRoomCalibrationStatus, GetSupportsOutputFixed, GetTreble, GetVolume, GetVolumeDB,
-  GetVolumeDBRange, RampToVolume, ResetBasicEQ, ResetExtEQ, RestoreVolumePriorToRamp, SetBass,
-  SetChannelMap, SetEQ, SetLoudness, SetMute, SetOutputFixed, SetRelativeVolume,
-  SetRoomCalibrationStatus, SetTreble, SetVolume, SetVolumeDB
-  ```
-
-  Re-enumerate after the update and compare.
-
-### The extended EQ set, and what to probe at home
-
-`GetEQ`/`SetEQ` are one action pair over an `EQType` string, so the surface is whatever types a
-given speaker accepts - and it is gated by hardware. On the One SL here: `SubGain` answers `0`,
-while `NightMode`, `DialogLevel`, `SurroundEnable`, `SonarEnabled`, `SonarCalibrationAvailable`,
-`RoomCalibration` and `TrueplayEnabled` all return UPnP 402.
-
-**`SubGain` answering on a speaker that cannot have a Sub is the useful part**: presence of a type
-is *not* proof of capability, so a client must not read "GetEQ answered" as "this room has one".
-Whatever capability detection ends up looking like, it needs `capabilities` off the player or a
-bonded-device read, not an EQ probe.
-
-The owner's controller knowledge, for the household where this can actually be tested - a Sub
-and/or surrounds add tabs the standalone speaker does not have, and a **Sonos Amp** (not owned,
-untestable unless one turns up) exposes a Sub checkbox, Sub Level, Crossover Frequency and Phase
-Control in degrees. Phase in *degrees* is the interesting one, because a plain polarity flip would
-be a boolean; a range implies a numeric type.
-
-**Probed at home 2026-09-05, and every predicted name was right.** All ten types were swept with
-the `GetEQ` one-liner below against three configurations: the Living Room Beam (bonded to a Sub and
-two Play:1 surrounds), the standalone Kitchen One SL, and the Dining Room SYMFONISK stereo pair.
-Not one guess had to be corrected, so the table below is now a reading rather than a prediction:
-
-| Controller setting | `EQType` | Beam + Sub + surrounds | One SL | SYMFONISK pair |
-|---|---|---|---|---|
-| Sub on/off | `SubEnable` | `1` | `1` | `1` |
-| Sub level | `SubGain` | **`5`** | `0` | `0` |
-| Crossover frequency | `SubCrossover` | `0` | `0` | `0` |
-| Phase control | `SubPolarity` | `0` | `0` | `0` |
-| Surround on/off | `SurroundEnable` | `1` | UPnP 402 | UPnP 402 |
-| Surround level (TV) | `SurroundLevel` | `0` | UPnP 402 | UPnP 402 |
-| Surround level (music) | `MusicSurroundLevel` | `0` | UPnP 402 | UPnP 402 |
-| Night mode | `NightMode` | `0` | UPnP 402 | UPnP 402 |
-| Speech enhancement | `DialogLevel` | `0` | UPnP 402 | UPnP 402 |
-| Height channels | `HeightChannelLevel` | `0` | `0` | `0` |
-
-Three things fall out of that grid, and two of them sharpen rules this file already had.
-
-- **The "answering is not capability" rule is wider than one type.** It was recorded from `SubGain`
-  alone. In fact the whole Sub family — `SubEnable`, `SubGain`, `SubCrossover`, `SubPolarity` — and
-  `HeightChannelLevel` answer on *every* speaker here, including a One SL and a SYMFONISK that can
-  have neither a Sub nor a height channel. `SubEnable` reads `1` on a speaker with no Sub at all.
-  So five of the ten types carry no capability information whatsoever.
-- **The other five are a clean discriminator.** `SurroundEnable`, `SurroundLevel`,
-  `MusicSurroundLevel`, `NightMode` and `DialogLevel` answer on the soundbar and return UPnP 402 on
-  both non-soundbars. That is a sharper result than "an EQ probe cannot detect capability": it
-  cannot for the Sub/height types, but these five separate a soundbar from a non-soundbar exactly.
-  `capabilities` off `getGroups` is still the right door because it costs no probe and already
-  distinguishes `HT_PLAYBACK`, but the EQ surface is not uniformly uninformative.
-- **`SubGain` is the one type that read a real configured value.** It answered `5` on the only room
-  with a physical Sub and `0` everywhere else. Presence proves nothing; the *value* tracked reality.
-  `SubCrossover` was predicted "Amp only" and does answer on a Beam — with `0`, which is consistent
-  with the setting simply not applying rather than the type being absent.
-
-### `DialogLevel` is a level, and the Beam is not the device that shows it (2026-09-08)
-
-`eq --dialog` writes `DialogLevel` as `0` or `1` and `eq --json` reports back an
-`enhance_dialog_level` that has been seen as `2` in a captured body. That looked like x2rock reading
-a graduated setting it could not write. It is narrower than that, and the CLI is right for the
-hardware here.
-
-The community reference for `RenderingControl` (svrooij.io, reverse-engineered - Sonos documents the
-Control API but not this service) puts it as: **`DialogLevel` is `1`-`4` on supported devices** - 1
-low, 2 medium, 3 high, 4 max - and **on newer devices (Arc Ultra is the example) the on/off state
-moves to a separate `SpeechEnhanceEnabled` type**, with `DialogLevel` carrying intensity only and
-not returning `0` when disabled.
-
-Measured against the Bedroom Beam while speech enhancement was on:
-
-| EQType | Beam |
-|---|---|
-| `DialogLevel` | `1` |
-| `NightMode` | `0` |
-| `SpeechEnhanceEnabled` | `0` |
-
-`SpeechEnhanceEnabled` reads `0` at the same moment `getPlayerSettings` reports `enhanceDialog:
-true`, so **that split is not operative on a Beam**: `DialogLevel` is the control, used as a
-boolean, which is also what the Sonos app draws for this model - a plain toggle, no levels. So
-writing `0`/`1` is correct here, and the ceiling above `1` belongs to hardware not present in this
-household. Whether a Beam clamps, ignores or accepts `2` is **untested**, because settling it means
-a real write.
-
-Two cautions for whoever picks this up on an Arc or Arc Ultra. `SpeechEnhanceEnabled` **answered**
-rather than returning UPnP 402, exactly like the Sub family above - so its presence in the reply
-says nothing about whether it does anything, and the "answering is not capability" rule covers it.
-And the Beam's own SCPD types `DialogLevel` as `string` and `NightMode` as `boolean` with **no
-`allowedValueList` or `allowedValueRange` on either**, so the device advertises no range to
-validate a write against; the 1-4 ceiling is documentation and measurement, never something the
-player will tell you.
-
-There is no CLI door to `GetEQ` as a generic probe, so exploring the full type list is still a
-shell one-liner - but two of the types now have a first-class home: **`NightMode` and `DialogLevel`
-are set by `eq --night on|off` / `--dialog on|off`** on a soundbar (built 2026-09-05, over `SetEQ`;
-`eq` reads them back through `getPlayerSettings`, which reflects a `SetEQ` write at once). The rest
-of the extended set stays a probe. Sweep a room and record what answers:
-
-```sh
-for t in SubEnable SubGain SubCrossover SubPolarity SurroundEnable SurroundLevel \
-         MusicSurroundLevel NightMode DialogLevel SpeechEnhanceEnabled HeightChannelLevel; do
-  printf '%-20s ' "$t"
-  curl -s "http://<ip>:1400/MediaRenderer/RenderingControl/Control" \
-    -H 'Content-Type: text/xml; charset="utf-8"' \
-    -H 'SOAPACTION: "urn:schemas-upnp-org:service:RenderingControl:1#GetEQ"' \
-    -d "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetEQ xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID><EQType>$t</EQType></u:GetEQ></s:Body></s:Envelope>" \
-    | grep -oE '<CurrentValue>[^<]*<|<errorCode>[^<]*<'
-  echo
-done
-```
-
-Nothing is built on any of this until it answers on real hardware - the same rule the rest of this
-file follows. Two other experiments ran on the same 2026-09-05 trip:
-
-- **`RoomCalibrationAvailable` stayed unsettled**, for want of a speaker known never to have been
-  calibrated; the sweep is written up under "What `eq` does not cover".
-- **`htInputFormat` against a surround source: confirmed live 2026-09-05.** The hardware-session
-  entry above had this blocked on the television being off; with the Living Room TV on and playing
-  Dolby Digital 5.1 content, the Beam reported it end to end. Raw event:
-  `{numGroundChannels: 5, numLFEChannels: 1, numHeightChannels: 0, streamDescription: "Dolby Digital
-  Surround"}`; x2rock rendered `Dolby Digital Surround 5.1`, `surround: true`, `on_tv: true`. Three
-  things it proves on the actual 5.1 bonded set (Beam + Sub + two surrounds), not on a fixture:
-  - **The `.1` survives with a real LFE channel.** `numLFEChannels: 1` came through, so the
-    `rename_all = camelCase`-would-derive-`numLfeChannels` bug the LFE note below warns about is
-    genuinely fixed against live data - it read `5.1`, not `5.0`.
-  - **`surround` is correct** - `numGroundChannels > 2` plus LFE → `is_surround()` true.
-  - **`numHeightChannels: 0` holds even on real surround** - the Beam (S14) has no Atmos, so the
-    height branch stays zero regardless of content. That is the hardware ceiling, not a content
-    gap: nothing here can push it above 0, and an Arc or Beam gen 2 is still what a `5.1.2` reading
-    would need.
-  So the whole `HomeTheaterFormat` path - channel math, LFE rename, surround flag, summary string -
-  is now confirmed against real 5.1 hardware. The **No Signal** path (below) was already confirmed;
-  the transition itself was watched too: pulling the HDMI reads identical to a dark TV (`No Signal`,
-  `signalDetected: false`, and the Beam holds TV input), and on replug `signalDetected` flips
-  `false → true` with the format moving `No Signal → Silence 2.0 → Dolby Digital Surround 5.1` as a
-  real signal, then real audio, arrived.
-- **`GetEQ` / `SetEQ`, taking an `EQType` and an `EQValue`.** The extended set - where night mode,
-  speech enhancement, sub gain and surround level live on a soundbar. Since probed in full (2026-09-05,
-  see "The extended EQ set, and what to probe at home"): all ten predicted types answer, and
-  `NightMode`/`DialogLevel` are now set through `eq --night`/`--dialog`. The Media-Room caveat this
-  bullet once carried - a non-soundbar, so its types were unknown - is settled: a non-soundbar
-  answers UPnP 402 for the soundbar-only types.
-- **`ResetBasicEQ` / `ResetExtEQ`** - the app's "Reset" button, for the two tiers respectively.
-
-## `loadPlaylist` appends unless told otherwise (verified 2026-09-04)
-
-`playlists:1` is a real Control API namespace and answers on the LAN: `getPlaylists` lists the
-household's saved queues, `getPlaylist` returns one with its tracks (`name`, `artist`, `album`),
-and `loadPlaylist` starts one on a group. Three facts cost a queue four times its length to learn.
-
-- **The id is bare.** `getPlaylists` reports `id: "0"` where UPnP's `SaveQueue` answers
-  `AssignedObjectID: SQ:0`, and `queue sources` shows that second form. They are not
-  interchangeable: `loadPlaylist` refuses `SQ:0` with `ERROR_INVALID_OBJECT_ID`. A caller holding
-  the UPnP form must resolve it through `getPlaylists` rather than trimming the prefix and hoping.
-- **`action` defaults to `APPEND`, not `REPLACE`.** Omit it and the playlist is added to the end of
-  the queue with playback jumping there, so "play this playlist" twice on a four-track queue leaves
-  twelve tracks - observed, in exactly that way. `REPLACE`, `APPEND` and `INSERT_NEXT` are all
-  accepted. `loadFavorite` replaces without being asked, which is what made the default surprising:
-  the two sibling commands do not agree. `x2rock playlist` sends `REPLACE` explicitly, so playing
-  one is idempotent.
-- **`SaveQueue` takes `ObjectID` as an *input*** (`InstanceID`, `Title`, `ObjectID` ->
-  `AssignedObjectID`). Sent empty it means "what is queued now"; the assigned id comes back rather
-  than being derivable. `ContentDirectory::DestroyObject` on the `SQ:` form removes one, and the
-  ids increment rather than filling gaps - a saved queue destroyed as `SQ:0` does not free that id
-  for the next save.
-
-## `itemId` is the queue position, and it renumbers (verified 2026-09-04)
-
-Four things the controller shows that x2rock had the data for and threw away - the cheap half of
-the parity list. Three were pure exposure: `metadataStatus.nextItem` was parsed and never read,
-`playModes.crossfade` was parsed and never set, and `track.explicit` was not in the wire type at
-all though the player sends it (with `tags: ["TAG_EXPLICIT"]` beside it). The fourth needed a fact.
-
-**"Song [2/4]" has no field.** No namespace carries a queue position, and the length needs the
-queue itself over UPnP. But `playbackStatus.itemId` turns out to be the position:
-
-| itemId | when |
-|---|---|
-| `"1"`, `"2"`, `"9"` … | the queue is driving - 1-based position |
-| `"5zyo+/67QgriUYJZ8nB8ZwWcmqg="` | anything else: a stream, a service station |
-
-The counts across a day of captured events fit that exactly (58 × `"1"`, 17 × `"2"`, and a `"9"`
-appearing only while the test queue was sixteen tracks long). **It follows position rather than
-identifying an item**: removing the queue's second entry left "Zero to Hero" at position 2 instead
-of 3, and its `itemId` read `2`. So it renumbers on an edit and cannot be used as a stable handle
-for a track - only as "where am I".
-
-Parsing is therefore the discriminator, and a good one: an opaque hash never reads as a number, so
-`queue_position` is `null` on a stream without anything having to ask what the source is. One
-exception to "1-based" (seen 2026-09-13): a room whose source is its queue while the queue is
-*empty* reports `itemId` `"0"`, so `queue_position` reads `0`. The *total* is deliberately absent -
-it would cost a UPnP browse per room on every snapshot, and `queue --json` already carries both
-halves for anyone who wants them, plus `in_use` for whether the queue is the source at all (read from
-UPnP `CurrentURI`, not from `itemId`).
-
-## The sleep timer, and how it says "none" (verified 2026-09-04)
-
-`AVTransport:1` on port 1400, group-scoped like the queue, and absent from the Control API
-entirely - `ConfigureSleepTimer(InstanceID, NewSleepTimerDuration)` and
-`GetRemainingSleepTimerDuration(InstanceID) -> RemainingSleepTimerDuration,
-CurrentSleepTimerGeneration`.
-
-- **`HH:MM:SS` and nothing else.** `NewSleepTimerDuration` is typed `A_ARG_TYPE_ISO8601Time`, and a
-  bare count of seconds (`900`) is refused with UPnP 402 - so the friendly forms have to be
-  converted before they reach the wire, which is what `parse_sleep` is for.
-- **Cancelling is an empty string to the same action.** There is no separate cancel, which is why
-  the setter takes an `Option` rather than having a sibling.
-- **An unset timer answers with an empty element**, not a zero, and
-  `CurrentSleepTimerGeneration` reads 0. Setting one takes the generation to 1, and cancelling puts
-  it back to 0. Either can be read as "is a timer armed", but the empty duration is the one that
-  cannot be confused with a timer about to fire.
-- **It counts from acceptance, not from the read.** Two seconds after arming 30m the player
-  reported 1798000 ms. So the honest answer is always the player's own, which is why the CLI reads
-  back after writing instead of echoing what was asked for - the same rule the tone controls follow
-  for a different reason (there the setters answer with an empty body).
-- **`00:00:00` is a state, and it lingers.** A 20-second timer run end to end counted down
-  cleanly (19s, 16s, 14s ... 1s) and then read `00:00:00` **while still playing for about seven
-  seconds** before the transport actually moved. So `sleep_ms == 0` means "expired, about to stop"
-  and is a different answer from `null`, which means "no timer" - anything polling has to tell them
-  apart or it will report a room as un-timed while it is seconds from silence. Observed on a One SL
-  on 96.1-79270; whether the seven seconds is fixed or incidental is unknown.
-- **It pauses; it does not stop.** The room came to rest in `PAUSED`, keeping its place in the
-  queue, so resuming is `play` and nothing is lost.
-
-Worth noting for the alarms work, since they share this service: `RunAlarm`, `SnoozeAlarm` and
-`GetRunningAlarmProperties` live on `AVTransport` too, but the alarms themselves are the separate
-`AlarmClock:1` service - these three are only about one that is currently going off.
-
-## Alarms: `AlarmClock:1`, and why a toggle is a whole rewrite (verified 2026-09-04)
-
-A fourth UPnP service, at `/AlarmClock/Control`, household-wide - any player answers for every
-alarm, and each alarm names its room by `RoomUUID`. Nothing in the Control API touches alarms.
-
-- **`ListAlarms` answers with an escaped XML document inside the reply.** `CurrentAlarmList` is
-  text, not markup, so reading it is two parses: the envelope, then the `<Alarms>` it carries. Each
-  entry is a single element, every field an attribute.
-- **`UpdateAlarm` requires every field.** Omitting `Volume` is UPnP 402, not "leave it as it was" -
-  and the alarm is left untouched, so the failure is at least atomic. Turning one alarm off is
-  therefore a read-modify-write of the whole record: list, clone, set `Enabled`, hand all ten fields
-  back. Anything that sends a partial record silently does nothing.
-- **`StartTime` on the way out, `StartLocalTime` on the way in.** The same field under two names,
-  and only the write side uses the longer one.
-- **`Recurrence` accepts more than its own description lists.** The SCPD's `allowedValueList` names
-  `ONCE`, `WEEKDAYS`, `WEEKENDS`, `DAILY`; `ON_13` was accepted and read back intact, so the
-  `ON_<digits>` day bitmap the app offers is real and undocumented here. It does still validate -
-  `SOMETIMES` is a 402 - so the vocabulary is wider than the list, not absent. x2rock carries the
-  string through rather than checking it against the four, since checking would reject what the
-  player accepts.
-- **`x-rincon-buzzer:0` is the built-in chime**, which is what makes a test alarm safe: it needs no
-  stream and no queue. Creating one **disabled** is safer still, and is how all of this was probed
-  without any risk of a speaker going off in an office.
-
-### Creating one, and what firing it revealed (verified 2026-09-04)
-
-`CreateAlarm` takes the same ten fields as `UpdateAlarm` with `ID` as an output, and the hard two
-are `ProgramURI` and `ProgramMetaData`. They needed no new work: `browse_content("FV:2")` and
-`("SQ:")` already yield a `uri` and a `metadata` per item, which is exactly the pair `queue add`
-enqueues - so "wake me with this favorite" is that resolution reused, and the default is
-`x-rincon-buzzer:0`, the built-in chime, which needs neither.
-
-An alarm was then created 82 seconds before its own start time and watched. It **fired** - the room
-played the chime at the alarm's volume - and this came out of it, none of which any document says:
-
-- **A just-created alarm fires late.** Set for 14:34:00 and created at 14:32:38, it went off at
-  14:36:14: two minutes and fourteen seconds after its time. Alarms are presumably scheduled off a
-  periodically refreshed index rather than checked continuously, so one created moments before it is
-  due misses its slot. Not a problem for a 7am alarm; fatal for a test that polls for two minutes
-  and concludes it never fired, which is exactly what happened first.
-- **It sets the room's volume and leaves it there.** The room was at 2; the alarm's volume was 1;
-  afterwards the room was at 1. The journal shows it go 0 then 1 as the alarm took over. So an alarm
-  is a lasting change to a room's volume, not a temporary one.
-- **That 0-then-1 is a ramp, not a step (measured again 2026-09-08).** At a target of 1 the
-  distinction is invisible - one increment either way. Repeating it with `--volume 16` on a Bedroom
-  showed the room at **6 four seconds after firing and 16 by fourteen seconds**, climbing in
-  between. So the alarm ramps to its volume over ten-odd seconds, and the earlier `0 then 1` was
-  the same behavior seen at a volume too low to show it. The consequence is for readers, not
-  listeners: anything that asserts the alarm's volume immediately after it fires reads a number
-  lower than what was set and will look like `--volume` was ignored. Re-read once it settles.
-- **Removing a running alarm does not stop it.** `DestroyAlarm` on the alarm that was playing left
-  the chime playing. Only `pause` stopped it.
-- **A favorite works as the program, and lead time is what decides punctuality.** Tested with the
-  CBC "Unreserved" stream: created 10:13:44 for 10:16:00 and it fired at **10:16:08** - eight
-  seconds late, where the earlier chime alarm created 82 seconds before its time fired two minutes
-  fourteen late. Two lead times, two outcomes, and the difference is about two minutes: an alarm
-  created less than roughly that before it is due misses its scheduling slot and waits for the next
-  one. So `alarms add` for a time under two minutes away is not a reliable test of anything.
-- **The duration runs from the alarm's scheduled time, not from when it actually fired**, and it
-  leaves the room `IDLE`. The one-minute alarm above was scheduled for 10:16:00, started at
-  10:16:08 and stopped at 10:17:00 - fifty-two seconds of audio, not sixty. A late alarm therefore
-  plays for less than its duration, and one late by more than its duration would presumably not
-  play at all. Note the contrast with the sleep timer, which leaves the room `PAUSED` keeping its
-  place: an alarm ends `IDLE` on the program it was playing.
-- **`StartLocalTime` is local to the *household*.** `GetTimeZone` answers `Index -1` here - unset -
-  and `GetTimeNow` reports a clock five hours ahead of the machine, i.e. UTC. So `alarms add 07:00`
-  in this household means 07:00 UTC, 02:00 where the user is. The first attempt at a live test was
-  scheduled against the *machine's* clock and would have fired at 04:34 local. `alarms add` now
-  prints the household's own clock on stderr, and says outright that times are UTC when no timezone
-  is set.
-
-### The timezone table, and the sign that is backwards (settled 2026-09-04)
-
-The household's timezone *is* settable over the LAN - `SetTimeZone(Index, AutoAdjustDst)` - so the
-UTC problem above was fixable from here rather than needing the app. Finding the right index took a
-wrong turn worth recording, because the obvious reading of the table is inverted.
-
-`GetTimeZoneRule(Index)` answers with a hex string, e.g. `01680b000102000003000202ffc4`:
-
-- **The first four hex digits are a signed 16-bit offset in minutes, POSIX-style: positive is
-  *west* of Greenwich.** So `0168` (+360) is **UTC-6** and `fe98` (-360) is **UTC+6**. Reading it as
-  a plain UTC offset gets every zone backwards. That was not a theory: index 50 decodes as `fe98`,
-  was picked as "UTC-06:00", and setting it moved the household clock from 14:49 UTC to 20:49 -
-  twelve hours the wrong way. The clock is what settled it.
-- **The next twenty digits are the DST rule**, or zeros for none. `0b000102000003000202` reads as
-  end in month 11 week 1 Sunday 02:00, start in month 03 week 2 Sunday 02:00 - the current US rule.
-- **Indices ascend eastward**: index 0 is UTC-12, index 25 is UTC+0, index 72 is UTC+12.
-- **Several indices share an offset and the DST rule is what separates them.** UTC-6 appears at 8,
-  9, 10 and 11; only **9** carries the US rule, which makes it America/Chicago, while the others are
-  the non-observing zones at the same offset. Likewise 13 and 14 are US Eastern.
-
-So: **index 9, `AutoAdjustDst=1`** for Central Time. Verified by reading the clock back -
-`CurrentUTCTime` 14:50:26, `CurrentLocalTime` 09:50:26, and the machine agreeing to the second.
-
-This household ran with `Index -1` until then, which is why every alarm it had was on UTC. There is
-no x2rock command for this yet; it was set with a direct SOAP call, and whether it deserves one
-depends on whether a second household ever turns up unset.
-
-## How good the serial proxy actually is (measured 2026-09-04)
-
-`accounts --content` reports the account serials named by the household's favorites and queue,
-and has always carried a disclaimer that this is not the registry. A screenshot of the Windows
-controller's Service Settings finally made that measurable, because the app *does* show the
-registry. Ground truth, eight accounts:
-
-> Audible ("Audible 2"), CBC Radio & Music, Mixcloud ("Rahga"), Sonos Radio, TuneIn,
-> TuneIn (New) ("TuneIn Work"), YouTube Music ("be84985f"), YouTube Music
-
-What the proxy recovered: `sn_2` and `sn_3` (both YouTube Music, sid 284), `sn_7` (CBC Radio &
-Music, sid 256) - and `sn_6`, **Virgin Radio UK, sid 336, which is not in the app's list at all**.
-
-**Three of eight, plus one phantom.** Audible, Mixcloud, Sonos Radio and both TuneIns are invisible
-because nothing in the current favorites or queue was played from them, which is precisely the
-failure the disclaimer describes. The phantom is the other half of it: a serial outlives the account
-in content that still names it.
-
-**And the serial-to-service mapping is not stable across readings.** The table taken on 2026-08-31
-recorded `sn_6` as sid 201 (Amazon Music) and `sn_7` as sid 151; four days later the same serials
-read as sid 336 and sid 256. That is what the allocation model predicts: a new serial is the highest
-*live* serial plus one, so numbers come back into use once higher accounts are removed, and a serial
-means nothing across time (see "Household registration is per *account*"). Another reason to treat
-the proxy as evidence about *content* rather than about accounts.
-
-**The registry itself is not readable from the LAN on 96.1-79270.** Two doors were tried and both
-are shut: `http://<ip>:1400/status/accounts` answers with an empty `<ZPSupportInfo></ZPSupportInfo>`,
-and `musicServiceAccounts:1` refuses `getAccounts`, `listAccounts`, `getMusicServiceAccounts` and
-`getAccountList` alike with `ERROR_UNSUPPORTED_COMMAND` - it takes `match` and nothing else.
-
-**Re-probed on 97.1-80312, at home, 2026-09-17, and nothing has moved** - worth doing because the
-original probes were one household and two firmwares ago. Eleven verbs on `musicServiceAccounts:1`
-(`getAccounts`, `getAccountList`, `getHouseholdAccounts`, `list`, `getAll`, `getRegisteredServices`,
-`getServices`, `refresh`, `getVersion`, `getHousehold`, `getMusicServiceAccounts`) answer
-`ERROR_UNSUPPORTED_COMMAND`; `accounts:1`, `userAccounts:1` and `serviceAccounts:1` are not
-namespaces; `households:1` and `settings:1` exist and have no account verb. `MusicServices:1` still
-publishes exactly three actions and `SystemProperties:1` still publishes mutations only, so the
-firmware grew nothing. `GetString` still refuses all six account keys with 800, and `S:` still
-browses to nothing.
-
-**Two corrections to what was written above about `/status`**, both found in that re-probe:
-
-- **There *is* a `/status` index.** It lists eight pages - `enetports`, `leds`, `wireless`, `zp`,
-  `VERSION`, `proc/ath_rincon/status`, `ifconfig`, `showstp` - and not one of them is about
-  accounts or services, so the conclusion is unchanged and only the "no index to enumerate" line
-  was wrong.
-- **`/status/accounts` is not a surviving-but-empty endpoint.** `/status/services`, `/status/msvcs`,
-  `/status/mslist` and even `/status/perf` return the *same* `<ZPSupportInfo></ZPSupportInfo>`: any
-  unknown name under `/status` does. So the empty reply is this server's 404, and reading it as
-  "the endpoint survives, its content does not" credited it with more than it says. The negative
-  result is cleaner than it was recorded as, not weaker.
-
-So `accounts --content` stays as it is. It is the best available answer and its own output says
-what it is not; what changed here is that "not the account list" now has a number attached.
-
-## The firmware update is dated, and the hunt has its answer (2026-09-04)
-
-A port scan turned up the speaker's own banner, which disagreed with this file:
-`Server: Linux UPnP/1.0 Sonos/96.1-79270 (ZPS22)`, `softwareVersion 96.1-79270`, `displayVersion
-18.7`, where the 2026-08-31 probe recorded `95.0-77060 / 18.4`. Three attributions were wrong and
-are corrected - the `RenderingControl` action baseline, the sleep-timer timing and the
-account-registry negative result were all read today and belong to 96.1.
-
-**The update is dated to the minute, by the daemon's own journal.** The owner flashed it at 07:30;
-the log shows `192.168.77.94: connection lost` at **07:24:57**, four rescans finding nothing, and
-`Media Room -> org.mpris...` again at **07:26:22**. So a firmware update looks, from the daemon's
-side, exactly like a speaker being switched off for eighty-five seconds - which is worth knowing,
-because it is the only timestamp available for correlating a finding with a version.
-
-**And it gives the partial-`playbackStatus` hunt a real answer.** Splitting the capture at 07:25:
-
-| firmware | window | `playbackStatus` bodies | partial | `playbackError` |
-|---|---|---|---|---|
-| 95.0-77060 | Sep 03 14:27 - Sep 04 07:24 | 149 | **0** | 3 |
-| 96.1-79270 | Sep 04 07:26 - 10:08 | 90 | **0** | 0 |
-
-Seventeen hours and 149 status bodies **on the very firmware the bug was reported against**, and it
-did not appear once - against a reported rate of four a day. That is a genuine non-reproduction, not
-a test invalidated by a version change, and it points at conditions rather than firmware. The
-likeliest condition is in plain sight: the room was **paused for most of that window**, and a paused
-room emits an order of magnitude fewer events than a playing one. The original sighting was
-presumably during sustained listening.
-
-It is also the last word that will ever be had on 95.0 here, since the speaker is now past it. What
-the capture caught instead - three `playbackError` bodies, all in the 95.0 window - turned out to be
-the more consequential bug, and is fixed in 1418f13.
-
-### "Update Now" is the firmware updater, not a library reindex
-
-The legacy controller's music-source list opens with **Update Now**, which the parity pass filed as
-`ContentDirectory::RefreshShareIndex` - the music-library reindex. Wrong, per the owner: that is
-what they used to flash 96.1 at 07:30. The tell is in the screenshot and was missed: every other
-entry in that list carries a chevron and navigates into a container, and this one has none. It is an
-action sitting among sources. That the household has no music library configured at all should have
-settled it too.
-
-Both readings do have a real action behind them, which is why the mistake was easy:
-`ContentDirectory:1` has `RefreshShareIndex` (with `ShareIndexInProgress` and `ShareIndexLastError`
-beside it), and `ZoneGroupTopology:1` has `CheckForUpdate` and `BeginSoftwareUpdate`.
-
-**`CheckForUpdate` is read-only and answers the useful question.**
-`CheckForUpdate(UpdateType, CachedOnly, Version) -> UpdateItem`:
-
-```xml
-<UpdateItem xmlns="urn:schemas-rinconnetworks-com:update-1-0" Type="Software" Version="96.1-79270"
-  UpdateURL="http://update-firmware.sonos.com/firmware/Prod/96.1-79270-v18.7-4b07MiHfnw-RC-2/^96.1-79270"
-  DownloadSize="0" ManifestURL="http://update.sonos.com/firmware/Prod/2026-Sonos-17-aiVIZ66IGK-GA-1/update.upm"
-  Swgen="2" LatestSwgen="2" ManifestRevision="440de5db-d97a-4ee3-888e-4b98d5ab07a7"/>
-```
-
-- **`UpdateType` must be `Software`** when `CachedOnly=1`; `All` and `Firmware` are UPnP 402 cached
-  and silently answer as `Software` uncached.
-- **Up to date reads as the offered `Version` matching the installed one, with `DownloadSize="0"`.**
-  That is the whole check - there is no boolean.
-- `Swgen`/`LatestSwgen` are the software generation, both 2 here, so a generation jump would show as
-  a mismatch rather than as a version one.
-- The `ManifestURL` names a release train verbatim - `2026-Sonos-17-aiVIZ66IGK-GA-1` - recorded
-  without interpretation, since its numbering matches neither `96.1` nor `displayVersion 18.7`.
-
-### `BeginSoftwareUpdate` is a permanent no, not a backlog item
-
-`BeginSoftwareUpdate(UpdateURL, Flags, ExtraOptions)` sits beside `CheckForUpdate` and **x2rock will
-never offer it**. That is a decision rather than an omission, so it is recorded as one: nobody should
-come back to this file in a year and read it as unfinished work.
-
-The reason is the vendor's own, which is the strongest argument available. Clicking "Update Now"
-does not update anything - it opens a modal that starts the process and warns against unplugging the
-speakers. **The sentence is the point of that dialog**, and no CLI can carry it. `--yes` would not
-close the gap either, because a flag collects a keystroke where the modal collects a moment of
-reading. A household part-way through a firmware flash is not a state to reach from a shell, and
-what would be gained is one convenience against the small chance of a bricked speaker in someone
-else's office.
-
-**And this is not a security boundary, so it should not be dressed as one.** `raw upnp` reaches
-every action on all sixteen UPnP services, `BeginSoftwareUpdate` included, and the SOAP call is a
-dozen lines of `curl` anyway - the probing recorded in this very file used exactly that. The policy
-governs **what x2rock offers**, not what anyone can do to their own speakers. `raw` is a deliberate,
-two-word, no-guardrails probe that the skill tells an agent to use only when explicitly asked; it is
-not a one-word command anyone reaches by accident. The read-only half is built: `x2rock update` is
-`CheckForUpdate` and the device description, and nothing else.
-
-### What stays with the Sonos app (the scope boundary, one place)
-
-`BeginSoftwareUpdate` is one of a family, and the family has a rule: **x2rock controls speakers; it
-does not provision, reconfigure, or physically re-shape the household.** Those are the Sonos app's
-own jobs - most of them gated behind a confirmation dialog, a phone microphone, or the setup flow,
-none of which a shell reproduces - and the line is drawn on purpose, not for want of an action.
-Recorded here as one list so a reader (or an agent) does not re-derive it item by item:
-
-- **Installing firmware** - `BeginSoftwareUpdate`; see the decision just above. `update` reads and
-  never writes.
-- **Pairing or onboarding a new speaker** - Sonos's private, secure setup flow; no public Control
-  API or UPnP action exists for it (`RegisterMobileDevice` registers a controller app, not a
-  player). x2rock drives speakers already on the LAN.
-- **Removing a speaker from the household**, and **factory reset** - a physical button or an app
-  menu. Not in the Control API; no factory-reset action in any UPnP service the player advertises.
-- **Editing bonds** - `RemoveBondedZones` (stereo pairs) and `RemoveHTSatellite` (a soundbar's Sub
-  or surrounds) exist as UPnP actions, but they *reconfigure* the household rather than control it,
-  with a real blast radius if fumbled. Out of scope for the same reason as the rest. `x2rock system`
-  *reports* the bonds; it does not edit them.
-- **Running TruePlay** - the measurement itself needs the app and a phone microphone. x2rock's
-  interest is narrower and settled (see "What `eq` does not cover"): **know whether TruePlay is
-  enabled, and turn it off** so BasicEQ takes over. It reads `trueplay`/`trueplay_available` and
-  disables via `SetRoomCalibrationStatus`; it does not measure, store, or manage curves. The disable
-  earns its place on a real case: a speaker carried from one room to another is still applying the
-  curve measured for the room it left, which is worse than none - and if the owner has lost app
-  access for a while, x2rock (LAN-only, no account) is the one tool that can switch that stale
-  correction off until the app is back to remeasure. Disabling a bad curve is control; measuring a
-  new one is the app's job.
-- **Content discovery / search** - closed separately as a Control-API limit, not an app-only job;
-  see "the Control API will never search". **Cloud queue** likewise - declined, see
-  "`loadCloudQueue` is a permanent no".
-- **Managing favorites** - creating or removing them. Probed on real hardware 2026-09-13: the
-  `favorites:1` namespace supports exactly `getFavorites` and `loadFavorite`; every mutation name
-  (`createFavorite`, `removeFavorite`, `deleteFavorite`, add/save/reorder/move) answers
-  `ERROR_UNSUPPORTED_COMMAND`, and `favorite:1` is an alias whose reply header canonicalises to
-  `favorites:1`. So the Control API reads and plays favorites, never edits the set - favorites are
-  app-managed content, not a control operation. Deletion is reachable only through UPnP
-  `ContentDirectory DestroyObject` on `FV:2/<id>` (a bogus id returns UPnP 701, object-not-found,
-  so the action is accepted), and it stays a `raw` escape hatch on purpose: the decision rule is
-  "if the Control API does not sanction it, x2rock does not add it as a command." An agent that
-  truly needs it can drive `raw upnp` itself.
-
-The through-line: x2rock's surface is *operating* the speakers - playback, volume, grouping,
-tone, TruePlay on/off, chimes, TV input, the queue - and reading their state. Anything that
-creates, destroys, or re-wires a speaker or its bonds belongs to the app.
-
-### What the speaker actually listens on (scanned 2026-09-04)
-
-A TCP connect scan of the One SL, against Sonos's own firewall guidance. Their published list of
-ports that "shouldn't be blocked" is TCP 445, 1400, 1410, 1443, 1843, 3400, 3401, 3445, 3500, 4070,
-4444 and UDP 136-139, 1901, 2869, 5353, 6969, 10243, 10280-10284. **Open on this speaker: 1400,
-1410, 1443 and 7000. Nothing else in 1-1100, and none of 3400, 3401, 3500, 4070, 4444, 445 or
-1843.**
-
-So the published list is firewall guidance across the whole product line and history, not an
-inventory of one speaker: the S1-era control ports (3400/3401/3500), the SMB ports (445, 136-139)
-and 4070/4444 are simply not listening on an S22 on 96.1. Worth remembering before reading that
-list as a description of anything.
-
-Two that need saying:
-
-- **1410 is on Sonos's own list**, so it is long-standing rather than new in 96.1 - which is what
-  the scan could not settle on its own, having no earlier baseline to compare with. It is a second
-  HTTP server whose `SERVER` header carries an **empty** version where 1400 gives the full
-  `96.1-79270 (ZPS22)`, and it answers 404 to every path tried: `/`, the UPnP control paths,
-  `/status`, `/xml/device_description.xml`. What it serves is still unknown.
-- **7000 is open and is *not* on the list** - AirPlay 2, which postdates the guidance.
-
-The scan is worth keeping as a baseline for the same reason the `RenderingControl` action list is:
-if Fabric or Sonos 27 opens a port, the only way to notice is to have written down what was open
-before.
-
-## The first-party web app has a third API, and it is neither of the two this document ruled out (verified 2026-09-04)
-
-`play.sonos.com` was driven by hand in a signed-in browser while `fetch`, `XMLHttpRequest` and
-`WebSocket` were wrapped at the page level, with `authorization`, `cookie` and `x-sonos-api-key`
-replaced by a length-and-prefix stub before anything was read — the same bargain `X2ROCK_DUMP_SMAPI`
-makes. Household id is written `<HH>` throughout. Everything below was observed on the wire or read
-from a live response; the inferences are marked as such.
-
-### What it is
-
-```
-https://play.sonos.com/api/content/v1/...
-https://play.sonos.com/api/content/v2/...
-```
-
-Authenticated by the **Sonos account session cookie**. No `Authorization` header, no API key, no
-device certificate. The only other request headers the app sends are `accept-language`,
-`x-sonos-corr-id` (a client-generated uuid), `x-sonos-debug: use-section-text=true` and
-`x-sonos-timezone`.
-
-Endpoints captured just from loading the app, searching once, and playing one album:
-
-```
-GET /api/content/v1/households/<HH>/integrations
-GET /api/content/v1/households/<HH>/integrations/registrations
-GET /api/content/v1/households/<HH>/search?query=&services=<csv of sids>
-GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/favorites
-GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/favorites/resources
-GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/playlists/10/images
-GET /api/content/v1/households/<HH>/services/16751367/accounts/124750326/history
-GET /api/content/v1/integrations/<reverse-dns-id>/configurations/<uuid>/images/icon
-GET /api/content/v2/households/<HH>/services/<sid>/accounts/<acct>/albums/<objId>/browse
-GET /api/content/v2/households/<HH>/services/<sid>/accounts/<acct>/tracks/<objId>/nowplaying
-```
-
-**So "the Control API has no content discovery anywhere in its 53 paths" stays true and stops being
-the whole story.** Sonos does content discovery, just not there. Favorites, playlists, history,
-browse, search and per-track metadata all live on this private surface.
-
-`16751367` / account `124750326` is **not among the 107 services** the cloud catalogue lists, and it
-took a `history` call immediately after playback started. It is the household's own internal
-favorites/playlists/history store, in an id space unlike the real services' small integers.
-
-Integrations are keyed by reverse-DNS id with a UUID configuration per service:
-`com.googleapis.music.sonos`, `com.iheart.sonos`, `com.tunein.sonos`, `com.mixcloud.sonos`,
-`radio.sonos.sali` — matching the `integration-id` field in the catalogue.
-
-### Search: one federated call
-
-```
-GET /api/content/v1/households/<HH>/search?query=coheed&services=72711,1543,46343,85255,77575,54279
-```
-
-148 results in six blocks, each with `info.count`, `offset` and `pageSize` 20. The `services` list is
-exactly **the household's registered accounts** — which is x2rock's own linked set, plus the one
-service it cannot link:
-
-| sid | service | tier | cert | hits | types returned |
+| `deviceProvider` | always, `Sonos` |
+| `loginToken` (`token`, `key`, `householdId`) | for a service that authenticates |
+| `deviceCert` | never needed: the per-service "requires device certificate" flag gates nothing |
+| `deviceId` | never needed; a player sends its `R_TrialZPSerial`, which is household-wide |
+
+- **Send no XML declaration and no BOM.** A declaration produces a misleading
+  `Expecting state 'Element'` fault, and incoming BOMs are stripped.
+- **Faults are read from the body, not the status.** A pending link arrives as a fault at HTTP 200.
+  SOAP 1.2 faults (`Code/Value`, `Subcode/Value`, `Reason/Text`) are read too.
+- **Always send a `User-Agent` and decode gzip.** Deezer answers an empty 200 without a
+  `User-Agent`, and gzips replies unasked, ignoring `Accept-Encoding: identity`. `http::gunzip`
+  strips the RFC 1952 header for `miniz_oxide`.
+- **A service's `count`/`total` can lie.** Parse what arrived and cut pages to the count asked for
+  (`smapi::at_most`).
+- **`X2ROCK_DUMP_SMAPI=1`** prints every request and reply with the whole credentials header
+  replaced, not the fields inside it.
+- **A service id is not a constant.** Spotify is 12 here and 9 in a European snapshot of the same
+  endpoint. Ids are always read from the household's own descriptor list. `SecureUri` is preferred;
+  no live service gives a different `Uri`.
+
+### The catalogue, categories and what is searchable
+
+- **`services.json`** caches the descriptor list. It is invalidated by `AvailableServiceListVersion`
+  (the same number `musicServicesChanged` carries), never by a timeout, and carries a `SCHEMA`
+  constant whose mismatch discards the file. Search works offline from the cache; only `--play`
+  needs a player. A corrupt cache reads as empty, since it is regenerable. A service name resolves by
+  exact match, then a unique prefix.
+- **Policy `Auth`:** `Anonymous`, `DeviceLink` and `AppLink`. Sonos's cloud calls the same tiers
+  `ANONYMOUS`, `OAUTH_WEB_ONLY` and `OAUTH`. A household catalogue holds about 108 services, roughly
+  32 anonymous, 14 device-link and 62 app-link. The live answer is always bare `x2rock search` and
+  bare `x2rock link`.
+- **Reachable is not searchable.** `Catalogue::usable` (anonymous, or a token held) governs `browse`,
+  `play-item` and `queue-item`. `Catalogue::searchable` also needs a published search category,
+  learned and cached per service. Twelve anonymous services publish none and are browse-only. Asking
+  one to search gives `no_search_categories`, with `browse` as the fix.
+- **Categories** come from the presentation map's `PresentationMap type="Search"`. The id a person
+  types maps to the id sent on the wire (TuneIn: `stations` -> `search:station`). Never split a
+  mapped id on its colon. `<CustomCategory stringId mappedId>` takes `stringId` as its id (Hype
+  Machine's Blogs). A category id repeated across `SearchCategories` blocks (Apple Music's and YouTube
+  Music's library halves) takes its `mappedId` as its name (`librarysong`, `UPLOADED_SONGS`).
+- **`all` is rare.** Universal Search (a category with id `all`) is what Sonos's mobile apps get
+  through Sonos's cloud. Only 3 of 35 services here declare one. So x2rock does over Classic Search
+  what Sonos does in its cloud.
+- **`pick_categories`:** named categories in the caller's order, skipping any a service lacks; else
+  a service's `default` categories (set only where x2rock fixes them, as for iHeartRadio); else
+  `all`; else `tracks`, `artists`, `albums` where present; else the first. Several categories split
+  `--count` and `--index` between them and interleave round-robin, dropping a repeated id.
+  `--all-categories` asks for whatever a service publishes.
+- **Merged search** (no `-s`) asks every searchable service at once. Categories are warmed
+  concurrently and remembered afterwards; a failed warm is not recorded. Linked catalogues sort
+  before stations, and stations before blog aggregators (Hype Machine indexes blog posts, carries
+  tracks only, and its titles are unreliable). The sort is stable within a service. Timeout 12 s,
+  with a slow service named on stderr. Five rows per service by default, three per service under a
+  heading. `--only-linked` skips the long tail. A failure is per service and category, and partial
+  results are normal. The envelope adds `asked`, `searches`, `answered`, `slow` and `refused`.
+  Refreshed tokens are saved one at a time after the join.
+- **`container` decides playability, never `canPlay`.** An item that arrived as a `mediaCollection`
+  is a container, except that a declared `track` or `stream` inside one is a leaf (Plex wraps tracks
+  that way). `Item::opens()` is a container that is not a `program`, since a station plays rather than
+  opens. That one rule decides both `--play` gates, the trailing slash in `browse` and the JSON
+  `container` field. A row that says `canPlay false` *and* `canEnumerate false` (Amazon's
+  "Content Unavailable" sentinel) is dropped.
+
+### Browse, and the front page
+
+`getMetadata` and `search` return the same payload, so one parser serves both. Many services' app
+front pages do not come from SMAPI's `root`. A service's manifest can name a `browse` endpoint, and
+`frontpage.rs` reads it:
+
+- **`root` becomes** the page's shelves in its order, then SMAPI root entries the page lacks
+  (deduplicated by id and by title).
+- **SMAPI's root is read first**, because that call refreshes a stale token.
+- **A bearer refused with 401 or 403 is retried bare.** Sonos Radio's page needs no credential and
+  refuses one.
+- **A view's id is an ordinary SMAPI container id.** A shelf `getMetadata` refuses is answered from
+  the page's inline items.
+
+Spotify, Deezer, TuneIn (New), SiriusXM and Sonos Radio match the Sonos app shelf for shelf, and
+services with no endpoint match because SMAPI root is the page. Amazon's home endpoint refuses a
+bearer (401) and Apple's answers 500. The Sonos app shows full pages for Amazon Music, Apple Music
+and YouTube Music only through Sonos's cloud; see the terms note.
+
+**A curated shelf is not the addressable set.** Saavn's Top Shows lists 92 shows, yet any show id
+from the service's own website browses. "Not in the browse tree" does not mean unreachable.
+
+### Linking: how a token is obtained
+
+1. `getDeviceLinkCode` (device-link) or `getAppLink` (app-link, whose reply nests the same
+   `regUrl`/`linkCode`) returns a URL and a code. `showLinkCode` says whether the person must type
+   the code, so it predicts how much work they are about to do.
+2. The browser opens on Linux with `xdg-open`, or `--no-open` prints the URL over ssh.
+3. `getDeviceAuthToken` is polled about every 3 s for up to seven minutes. Pending is the fault
+   `NOT_LINKED_RETRY` (SonosError 5); 6 is fatal. A transport error during polling is evidence about
+   the poll, not the link: it prints `?` and keeps going. A service refusal stops at once
+   (`link_refused`).
+4. Success returns `authToken`, `privateKey` (sometimes junk or empty; accepted) and sometimes
+   `userIdHashCode`.
+
+`PollInterval` in a descriptor is not a link rate limit. Every link service declares one (30 to
+3600), and honouring it would break every link; it is how often a player re-asks for content
+changes. `linkDeviceId` is minted per attempt by the service, so x2rock echoes what the reply
+carried.
+
+Flows seen: a code in the URL (Bandcamp, TuneIn), a typed code (iHeartRadio, Saavn), OAuth
+authorize with the code in `redirect_uri` or `state` (Mixcloud, TIDAL, TuneIn (New)), and Plex's own
+PIN flow. **Refusal shapes:**
+
+- by caller (YouTube Music);
+- by subscription tier (Saavn without Pro, which the Sonos app hits too);
+- a working login page whose token exchange always answers `NOT_LINKED_FAILURE` (Qobuz; Sonos's
+  cloud completes app-link and the service never implemented the controller poll);
+- stubbed link methods (Classical Archives);
+- refused outright (Apple Music, SoundCloud, SiriusXM).
+
+A refusal at `getAppLink` rules out x2rock's own flow, not the service: the household import below
+reaches several of these.
+
+**`match` associates and never creates.** `musicServiceAccounts:1 match` (`nickname`, `serviceId`,
+`userIdHashCode`) returns the household's serial for an account the Sonos app already registered,
+and refuses otherwise ("Link code required to add guest account", or a bare
+`ERROR_COMMAND_FAILED`). The order that fills `account_id` is the Sonos app first, then
+`x2rock link`. It is provenance only: playback never needs it.
+
+**Credentials** (`$XDG_STATE_HOME/x2rock/credentials.json`, mode 600, keyed household -> service ->
+account):
+
+- Not a keyring: a locked or absent keyring would sit between a person and their music, over ssh or
+  in a widget subprocess.
+- The mode is set at creation, and a loose file is tightened on read.
+- A corrupt file is an error, not an empty store.
+- Several accounts per service are kept, one preferred (`accounts --prefer`); `token_for` resolves
+  the preference.
+- An account key is the household serial, else `userIdHashCode`, else `link`; a write whose token
+  already exists lands on that record.
+- Every read resolves the current household first (the reached player's, or the only one when
+  offline).
+- `unlink` forgets a service from every household; `accounts` groups by household when there are
+  several.
+- Schema 2 migrates; schema 1 and newer schemas are refused rather than read as empty.
+- The token is saved before `match` runs, since a link code is single-use.
+- Tokens are never stored on the speaker (`SystemProperties SetString`), where every LAN client
+  could read them.
+
+### Household registration is what playback needs
+
+**A local token buys search and browse, and nothing of playback.** On-demand content is enqueued, and
+the *player* resolves it with the household's own registration for that service, made in the Sonos
+app. Measured both ways:
+
+- Deezer and TIDAL linked first: search works, enqueue answers 800.
+- The same services added in the app, with the token unchanged: queued and playing.
+
+What follows from that:
+
+- **Enqueue validates the service at insertion.** With no registration it answers 800. Entries
+  already queued stay after an account dies. A stream with no registration plays only if the service
+  implements `getMediaURI` and the item is a stream.
+- **Registration is per account.** A household can hold several accounts for one service, and they
+  coexist.
+- **Serials are `highest live serial + 1`.** They are unique only among live accounts, fall when the
+  top account is removed, and mean nothing across time. Re-adding the same subscription mints a new
+  one.
+- **No verb lists a household's accounts**, on any Control API namespace, UPnP service or
+  `/status` page (`/status/accounts` and every unknown `/status/*` name answer an empty
+  `ZPSupportInfo`). `registeredServicesVersion` on the `musicServicesChanged` event moves when the
+  account set changes. Harvesting `sid`/`sn` from `FV:2` and `Q:0` is neither a lower nor an upper
+  bound (it keeps dead serials and misses stations); the household import reads the real set.
+- **Preferred Service** (the app's setting) is not stored on the household, and x2rock cannot read
+  it.
+
+### Which account an enqueue plays from
+
+The enqueue URI's `sn=` picks the account. The cdudn's selector
+(`SA_RINCON<type>_X_#Svc<type>-<selector>-Token`) does not, but on the queue path the queued row's
+`sn` is rewritten from the selector, so a mismatched pair leaves the row disagreeing with what plays.
+The Sonos app always sends a matched pair, and so does x2rock (`content::Naming`, carried on the
+`Token` by `Account::token`, so the account asked and the account named come from one lookup). A
+missing or unknown `sn=` falls back to the household's default account, which is not sticky. Set
+Primary in the app governs the app's own playback, not the player's default. The account in use is
+`accountId` from `playbackMetadata:1 getMetadataStatus`, at group scope.
+
+### Household token import (`link --from-household`)
+
+Each player keeps every account's SMAPI credentials and puts them in a variable named
+`ThirdPartyMediaServersX`. It appears only in the **initial** `ZoneGroupTopology` event sent to a new
+subscriber. It is not in `GetZoneGroupState`, and `QueryStateVariable` answers 401. So reading it
+needs the player to connect back (TCP 3401, `--callback-port`, `0` for ephemeral). The envelope
+(`2:` prefix) is keyed to the household id. The method is SoCo's, published in
+[SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010), and holds across firmware generations.
+x2rock's implementation is `src/sonos/stored.rs`: `decrypt_accounts` is pure and tested with
+synthetic vectors, and `capture_envelope` does the network part.
+
+The plaintext has one record per account:
+
+- `Token0`, `Key0`, `Nickname0`, `Tier0`, `SerialNum0`, `Md0`;
+- `Username0`, the account selector `X_#Svc<type>-<key>-Token`, which can be an email address
+  elsewhere, so it falls back to the whole value;
+- `Flags0`: `0` if the account was the service's first when registered, `4` if it was added beside
+  another; the form is fixed at registration;
+- `NumAccounts`: always 1 so far, with a second account arriving as a second record.
+
+It is Sonos's legacy `/status/accounts` field set, flattened into attributes. The selector also
+appears in plaintext in favorites' cdudns and is not secret; the household id is.
+
+What it opened:
+
+- Qobuz, SiriusXM and SoundCloud, whose link flows refuse, search, browse and play with the imported
+  token.
+- YouTube Music's imported token still gets 403 (the block is the caller, not the account).
+- Apple Music's token has an empty key and is refused (`InvalidTokenException`).
+- Bandcamp's household token is refused from x2rock while working for the speakers, so x2rock's own
+  link token stays preferred for Bandcamp.
+
+The import has no `match` step, and `--dry-run` shows the records without keeping any. x2rock never
+*writes* household accounts.
+
+### Playback routes
+
+`play-item` (and `search --play`, `browse --play`, `bookmark`, `replay`) picks a route by kind:
+
+1. **`stream`** goes through the session (`loadStreamUrl`), or to the transport if the URL is a file.
+2. **`program`** (a station, an artist radio) becomes the room's source: `x-sonosapi-radio:` with an
+   `audioBroadcast` DIDL. The queue is never tried. A program that refuses the radio route (SiriusXM
+   live channels) falls back to the stream.
+3. **`audiobook`** resumes: one `getMetadata` (`smapi::resume_point`) gives
+   `positionInformation` (the chapter and a chapter-relative `offsetMillis`). The chapter plays as a
+   track, then `playback:1 seek`. The speaker reports the position back to the service itself.
+   `--from-start` starts over. `queue-item` on a book adds every chapter.
+4. **Anything else** is enqueued with the service's cdudn, and a refusal falls back to the stream.
+   A refusal is the whole sequence (add, point the group at the queue, seek, play): a row accepted
+   and then refused at play is taken back out (`not_queue_material`). The fallback runs only in that
+   direction, since a stream's failure is silent.
+5. **`loadContent`** is the last resort, when the household holds an account; see below.
+
+**Enqueue URIs follow the player's own scheme for the service.** The default is
+`x-sonosapi-hls-static:<percent-encoded id>?sid=<sid>&flags=65544&sn=<serial>`. Spotify needs
+`x-sonos-spotify:` (`native_scheme`); without it the row queued and then answered 711 on seek. The
+object id is percent-encoded in lowercase hex, in both the URI and the DIDL `id` (a raw colon broke
+Mixcloud). `flags` is not load-bearing. The player rewrites what it is given into its own form
+(`x-sonos-http:<id>.flac`, `.mp3`, `.mpd`).
+
+**Containers:** an album or playlist enqueues as
+`x-rincon-cpcontainer:<prefix><id>?sid&flags&sn` with a container DIDL, and the player expands it
+into tracks. The 8-hex prefix (`10` + class + flags in hex) varies by service. An artist (a container
+of containers) is refused with a sentence, not a UPnP code (804). A service container cannot be
+*started* by URI with `SetAVTransportURI` (714), only enqueued, or played as a favorite.
+
+**The synthesized DIDL** names the account through the cdudn
+`SA_RINCON<type>_X_#Svc<type>-<selector>-Token`, where `type` is the service type from
+`AvailableServiceTypeList` (`sid*256+7`), and the trailing `Token` is a placeholder the player
+resolves against its own credential. That is why x2rock enqueues content without ever holding the
+service's token.
+
+**`playback:1 loadContent`** (group-scoped) takes `{serviceId, accountId, objectId}` and a `type`, and
+the player resolves the rest:
+
+- It loads and does not start (`playOnCompletion` is ignored). `load_and_start` pauses, loads, then
+  presses play until the content changes or the container is the item named.
+- It cannot append.
+- It refuses anonymous services and accounts the household does not hold.
+- It accepts a dead account and plays nothing.
+- **It restarted a speaker on Mixcloud**, so `replay` goes through `play_item`'s routes instead. Only
+  a Sonos playlist (`65435`) still loads, and Mixcloud never reaches `loadContent`.
+- `replay` keeps a history item's own account unless the household no longer holds it, because a
+  listener's custom station plays only as that listener.
+
+### Token refresh, and re-reading the household
+
+- **In-band refresh.** A fault carrying `refreshAuthTokenResult` (for example
+  `Client.TokenRefreshRequired`) is a replacement token. `smapi::call` retries once with it and
+  saves it through `Credentials::update` to the record it refreshed (household and account ride on
+  `smapi::Token`). The original `linked` timestamp is kept.
+- **Household re-read** (`rereads.rs`). When a service refuses a token that came from the household
+  and offers none, x2rock re-reads the household's store, at most once per household every
+  10 minutes per process, serialized. If the store holds a different token for the same account, it
+  saves that and retries. This applies to imported accounts only, and to any refusal, since a garbled
+  token's refusal can be a service-side `TypeError`.
+
+### Per-service notes
+
+The table below is the measured state; these are the facts that do not fit a cell.
+
+- **YouTube Music.** Search is closed. Its SMAPI endpoint is Google's "YouTube Music API (Partner)",
+  method `google.music.sonos.v1.Sonos.SendRequest`, enabled only for Sonos's own projects. A
+  self-service key or OAuth token is judged against its own project and gets `SERVICE_DISABLED`; read
+  `details[].reason`, not the HTTP status. The manifest's `apiKey` is encrypted to Sonos's apps and
+  players and is not presented. Its object ids are opaque partner ids, so the public YouTube Data API
+  cannot bridge. Playback through the household registration works (`keep`, favorites, bookmarks).
+  The same is true for x2rocktv.
+- **Apple Music: playback yes, search no.** `getAppLink` is refused, and the household's token has an
+  empty key that never worked. Search goes through Apple's public iTunes Search API
+  (`src/itunes.rs`): `song:<trackId>` and `album:<collectionId>` are exactly the ids the player
+  plays. It covers tracks and albums only, with no library or playlists. The storefront is the
+  locale's region, else US. Offset is ignored, so a page is sliced from one answer. Playback needs the
+  household import, for the service record (`find_usable`).
+- **Plex.** Its SMAPI link methods are dead. Its SMAPI endpoint accepts any Plex account token
+  (empty key). `link plex` runs Plex's own PIN flow (`plex.tv/api/v2/pins`, client id
+  `x2rock-<hostname>`, revocable at plex.tv). Without Remote Access, that token searches but cannot
+  browse `root`. The household's token (import, or `--from-player`, read from an art URL's
+  `X-Plex-Token`) browses everything and dies on relink, so it is preferred. Plex on Sonos breaks if
+  the Plex server's host runs a VPN: `publicAddressMatches: false` in `plex.tv/api/v2/resources` is
+  the tell.
+- **iHeartRadio.** It is device-link. Search has three sections, as the app shows them: Stations
+  (sent as `artists`), Live (sent as `stations`) and Podcasts (`iheart.rs`). `artist_radio_track`
+  ids are per-listener and stream-only. Podcasts queue across accounts.
+- **Spotify.** Its enqueue scheme is `x-sonos-spotify:`. `getMediaURI` returns `x-spotify://`, which
+  no stream path can play.
+- **Amazon Music.** On a paid tier an album is a real tracklist. Its stream fallback is a presigned
+  HLS URL that plays without a registration. It ignores `count`.
+- **Deezer.** Ratings are a heart and a ban (see *Ratings*). It needs a `User-Agent` and gzip.
+- **Saavn.** Without Pro, everything is refused, the Sonos app included. Podcasts are browse-only
+  (`SHOWS:` -> `SEASONS:` -> `EPISODE:`). Radio ids embed JSON with `**` for its colons.
+  Non-Latin (Devanagari) metadata survives query, DIDL, queue and playback.
+- **Qobuz.** It can be linked only by import. A Sonos Favorite of a Qobuz track fails in the app,
+  because queued Qobuz rows carry no cdudn.
+- **Bandcamp.** A token opens the account's own collection, not a catalogue.
+- **Audible.** Root is the seven marketplaces; resume is above.
+- **Pandora.** Every hit is a station (`canEnumerate false`) and plays as radio. Playing a search hit
+  adds it to My Stations.
+- **SiriusXM.** Live channels are streams; artist and Xtra channels are programs.
+- **SoundCloud** ignores `index`, so its second page repeats the first.
+- **Radio Paradise** implements no `getMediaURI`, so it needs a registration to play.
+- **Classical Archives**' link methods are stubs. It is not tested (decided 2026-10-11).
+- **Pandora CloudCover** is out of scope.
+
+### Music services: what has actually been tested
+
+"Playback" depends on the household having added the service in the Sonos app; see *Household
+registration is what playback needs*. Rows describe the direct path. Dates are the last check.
+
+| service | tier | how x2rock gets a token | search / browse | playback | verified |
 |---|---|---|---|---|---|
-| 72711 | YouTube Music | OAUTH | **true** | 20 | ARTIST, ALBUM, PLAYLIST |
-| 1543 | iHeartRadio | OAUTH_WEB_ONLY | false | 46 | PROGRAM, PODCAST |
-| 46343 | Mixcloud | OAUTH_WEB_ONLY | false | 60 | ARTIST, TRACK, PLAYLIST |
-| 85255 | TuneIn (New) | OAUTH | false | 2 | CONTAINER |
-| 77575 | Sonos Radio | OAUTH_WEB_ONLY | false | 0 | — |
-| 54279 | Plex | OAUTH | false | 20 | TRACK |
-
-Resources carry `id.{objectId,serviceId,accountId,serviceName,serviceNameId}`, `name`, `type`,
-`playable`, `images[]`, and a base64 `defaults` blob. Note `playable: false` on ARTIST and PLAYLIST
-rows — the container/thing distinction `browse` already draws, reported here as a flag.
-
-### The catalogue, read from the cloud side — and Sonos's own names for the tiers
-
-`/integrations` returns the whole service catalogue as clean JSON: the same manifests x2rock reads
-off the player, without SOAP. Keys per service include `authentication`, `api-endpoints`,
-`search-capabilities`, `browse-options`, `resource-types`, `supported-features`,
-`playlist-editing-enabled`, `page-size-default`, `request-header-device-cert`, `integration-id`,
-`service-id`, `distribution-type`, `availability-restrictions`.
-
-| cloud `authentication` | cloud count | player `<Policy Auth>` | player count |
-|---|---|---|---|
-| `ANONYMOUS` | 31 | `Anonymous` | 32 |
-| `OAUTH_WEB_ONLY` | 14 | `DeviceLink` | 14 |
-| `OAUTH` | 62 | `AppLink` | 62 |
-| | **107** | | **108** |
-
-**Two sources, one service apart, and neither is wrong.** The player's descriptor list is the
-authority for what x2rock can reach and still reads 108/32 exactly (re-counted 2026-09-04 from the
-cached catalogue); the cloud omits one anonymous service. Which one is unidentified — the cloud
-list needs a Sonos login to read, so this cannot be settled from the LAN side. It is a one-service
-discrepancy between two vendor lists, not an error in either count.
-
-**The names are worth adopting.** `OAUTH_WEB_ONLY` is Sonos's own label for the tier that completes
-in a browser, which is exactly the door `x2rock link` walks through. That is a better legitimacy
-footing than "it answered when we asked".
-
-YouTube Music's endpoints confirm, from the cloud side, what the player already said:
-
-```
-soap:   https://music.googleapis.com/v1:sendRequest   (version 1.1)
-report: https://music.googleapis.com/v1/v2.3/report/  (version 1)
-```
-
-### `request-header-device-cert` gates nothing, on either path (settled 2026-09-04)
-
-A per-service boolean, **true for exactly 8 of 107**: Apple Music, Bookmate, Classical Archives,
-YouTube Music, Pocket Casts, Radio Paloma, SoundCloud, Neon. It is orthogonal to `authentication`:
-Radio Paloma is `ANONYMOUS` and cert `true`, with a third-party SMAPI route
-(`sonos.konsole-labs.com/radiopaloma.php`).
-
-**It is not a client-side gate on the cloud path.** The browser presented no certificate and
-searched YouTube Music successfully. So the certificate — and the sealed `apiKey` — sit between
-**Sonos's cloud and Google**, not between a client and Sonos.
-
-**And it is not a gate on the SMAPI-direct path either.** Radio Paloma was the control: anonymous,
-cert-flagged, non-Google endpoint, and the only one of the eight in x2rock's reachable set. The
-experiment as written was `x2rock search -s "Radio Paloma"`, which cannot run it — that refuses
-locally, before any SMAPI call, because the service publishes no search categories. `x2rock browse
--s "Radio Paloma"` does run it, and one `getMetadata` for `root` with no certificate and an empty
-credentials header returns **HTTP 200 and eight streams**:
-
-```
-3   stream  Radio Paloma - Live              15  stream  Radio Paloma - Volksmusik
-6   stream  Radio Paloma - Fresh             18  stream  Radio Paloma - Kuschelschlager
-9   stream  Radio Paloma - Kuschelschlager   21  stream  Radio Paloma - Weihnachtsschlager
-12  stream  Radio Paloma - Partschlager      23  stream  Radio Paloma - PartyEXTREM
-```
-
-So the flag is **declarative** — a statement of what first-party Sonos sends — and not access
-control anywhere. Nothing in the tree needs to grow a certificate to satisfy it.
-
-Two smaller facts from the same reply, both worth having:
-
-- **A service's `count`/`total` can lie.** Radio Paloma declared `count 3, total 3` and delivered
-  eight items. x2rock ignores both and parses what arrived, which is why all eight show; anything
-  paginating on the declared `total` would have silently dropped five.
-- **`browse` is the better cert probe than `search`**, because it needs nothing of the service
-  except an endpoint. Worth remembering the next time a per-service flag wants testing.
-
-### Registration versus use, which is the real split
-
-Probed four services the household has **not** registered, one from each interesting cell:
-
-| probe | tier | cert | result |
-|---|---|---|---|
-| Hit Network | ANONYMOUS | false | **200, count 0** |
-| Radio Paloma | ANONYMOUS | true | **200, count 0** |
-| Apple Music | OAUTH | true | **200, count 0** |
-| Radio Javan | OAUTH | false | **200, count 0** |
-
-No error, no refusal — silently empty. The Bandcamp shape again: working perfectly, looks broken.
-
-So cloud search is scoped to registrations, **even for services needing no credential**. Which
-produces the first of three inversions:
-
-> **On the anonymous tier x2rock reaches services the web app returns nothing for.** The
-> SMAPI-direct path needs no registration; the cloud path does. Parity runs backwards here.
-
-### Object ids are the service's own, not Sonos's — and this corrects a hypothesis
-
-Sample ids pulled from one search across five services:
-
-| service | id |
-|---|---|
-| YouTube Music | `ALkSOiFWk0JUuJ-f31-M86gn4gQp6S-EI_JfXS8TxFR0q9xSkiNNm-VkwfbyWMRw…` (87 for artists, 48 for albums/tracks) |
-| iHeartRadio | `artist_radio.89592`, `podcast_show.339277002` |
-| Mixcloud | `user:cohenmickle`, `cloudcast:520464348` |
-| TuneIn (New) | `search:show:coheed:topic--8b3c7a4c4c27435693ff93db54f1cfd1` |
-| Plex | `c69ee188b0215613ed754152d214c16c2e89aeb5::67268:track` |
-
-Five services, five formats: readable `type.id`, `type:slug`, a path, Plex's
-`machineIdentifier::ratingKey:type`.
-
-**Sonos does not wrap or re-mint object ids.** Plex's arrive in plain Plex format, iHeartRadio's in
-plain iHeartRadio format. So the opacity of `ALkSOi…` is **Google's**, not a Sonos envelope, and
-the ids a YouTube Music search would return are ones the enqueue path already accepts.
-
-`artist_radio.89592` is the same shape as the iHeartRadio container this document already warns
-about for its lying `canPlay` flag, and `cloudcast:…` is the Mixcloud shape — byte-identical to
-what x2rock already gets from SMAPI-direct. **Same namespace, same source, reached by a route that
-costs a Sonos login.**
-
-### The web app cannot add a service. Any service.
-
-Observed: no affordance anywhere in the web app to add YouTube Music.
-
-Sonos's support pages were then sampled for the "Add … to Sonos" section across 16 services
-spanning all three tiers — Apple Music, Plex, Pocket Casts, Neon, Bookmate (`OAUTH`); iHeartRadio,
-Mixcloud, Classical Archives, Sonos Radio, Bandcamp, Deezer, TIDAL (`OAUTH_WEB_ONLY`); Hit Network,
-80s80s (`ANONYMOUS`); plus Audible and Pandora.
-
-**All 16 are byte-identical.** One reusable CMS block (Sanity, sheet id `msdp`) with the service
-name substituted. Two surfaces only — the mobile app via Account → Content Services → Add Content
-Service, and the **Sonos Desktop Controller** via Add Music Services. No web path. Distinct step
-texts across the sample: **1**.
-
-**Read this correctly.** The support page is boilerplate, so the YouTube Music page's lack of a web
-path is *not* evidence about YouTube Music — it says the same thing about iHeartRadio and Mixcloud,
-which x2rock links through a browser flow, and about Hit Network, which needs no account at all. The
-support docs carry **no tier information whatsoever**, and cannot corroborate `OAUTH_WEB_ONLY`
-versus `OAUTH`. That distinction rests on the catalogue field and on x2rock's own probe results,
-where it already rested.
-
-What the uniformity *does* establish is better: Sonos treats "add a service" as one uniform act with
-exactly two client surfaces, and the web app is not one of them **for anything**. It is a pure
-consumer of registrations minted on a phone or the desktop controller. It also independently confirms
-the correction already in this document — the desktop controller completes app-link, so "app-link
-needs a mobile hand-off" was never real, and Sonos now says so in writing.
-
-Which gives the second and third inversions:
-
-> **x2rock beats the first-party web app on service registration.** TuneIn (New) (`sid 85255`) and
-> Plex (`54279`) are both plain `OAUTH` — the 62-service tier the web app cannot add — and x2rock
-> links both, one through `getAppLink` and one through Plex's own PIN flow.
-
-> **"Parity with the first-party app" is the wrong frame.** The web app is a thin client. The target
-> is the mobile app or the desktop controller.
-
-### Control is not on this API
-
-Playback of a YouTube Music album into a room produced **exactly one HTTP request** — a
-`tracks/<objId>/nowplaying` metadata GET — and no command traffic at all. Resource timing confirms
-nothing further was sent: last request at 765s, playback started, still nothing at 843s. No service
-worker, no worker script, and across 224 resource entries the only hosts touched are
-`play.sonos.com`, Typekit, Sentry and image CDNs.
-
-**Inference, not observation:** the control channel is a persistent socket opened at app boot, which
-the page-level hook missed because it was installed after the bundle had taken its reference to the
-constructor. WebSockets do not appear in resource timing either, so it is invisible from both
-angles. Confirming it needs the hook injected at document start.
-
-**Not worth chasing.** The control half is the half x2rock already does better — locally, on push
-events, with no cloud and no account. Nothing the cloud control plane does would improve on it.
-
-Two capture caveats for whoever picks this up:
-
-- The app is Next.js and some content fetching happens **server-side via RSC**
-  (`/en-us/search?_rsc=…`), so those calls never appear in the browser. The Plex album page
-  fetched nothing client-side at all. Absence of a request is not absence of a fetch.
-- A single click on a track row does nothing, even though the row *is* the button
-  (`aria-label="Play Welcome Home"`, 890x56, opacity 0.9, pointer-events auto). It takes a
-  double-click.
-
-### Per-service search, and the category question closed
-
-There is a second search endpoint, per service rather than per household:
-
-```
-GET /api/content/v1/households/<HH>/services/<sid>/accounts/<acct>/search?query=<q>&count=<n>
-```
-
-**There is no category parameter.** The response is keyed by category at the top level, and every
-category comes back in one call:
-
-```
-{ "info": {"count": 41},
-  "errors": [],
-  "resourceOrder": ["ARTISTS","TRACKS","ALBUMS","PLAYLISTS"],
-  "ARTISTS": {…}, "TRACKS": {…}, "ALBUMS": {…}, "PLAYLISTS": {…},
-  "externalLinks": [] }
-```
-
-`resourceOrder` gives display order. `errors` is an array, present and empty here, so per-category
-partial failure is expressible. Observed for YouTube Music (`sid 72711`) and Plex (`54279`):
-
-| sid | `resourceOrder` | per-category counts at `count=50` |
-|---|---|---|
-| 72711 YouTube Music | ARTISTS, TRACKS, ALBUMS, PLAYLISTS | ARTISTS 1, TRACKS 20, ALBUMS 10, PLAYLISTS 10 (info.count 41) |
-| 54279 Plex | TRACKS | TRACKS 20 (info.count 20) |
-
-So `resourceOrder` is per-service and follows that service's own `search-capabilities`.
-
-**`count` is a total budget, not a per-category limit.** At `count=10` only ALBUMS and ARTISTS came
-back; at `count=50` all four did. Which retires the earlier reading that YouTube Music's missing
-TRACK block implied a category parameter: there is none, and the missing TRACKS was the count budget
-being spent before that category was reached. The app sends `count=50`.
-
-**The category keys are the SMAPI category `id`, uppercased — not the `mappedId`.** The presentation
-map declares `<Category id="tracks" mappedId="SONGS"/>`, and the cloud API returns `TRACKS`. Same
-for artists/albums/playlists, where id and mappedId happen to agree. Only the Library group's four
-(`LIBRARY_PLAYLISTS`, `UPLOADED_SONGS`, `UPLOADED_ALBUMS`, `UPLOADED_ARTISTS`) never appeared, which
-this query cannot distinguish from simply being empty.
-
-Note also the singular/plural split between the two endpoints: the household-level search reports
-each resource as `type: "ARTIST"`, while the per-service one uses `ARTISTS` as a container key.
-
-`view=TRACKS` is **not** an API parameter. Clicking "View All" on a category navigates the Next.js
-route `/en-us/search?service=72711&account=21&view=TRACKS&_rsc=…` and the content call happens
-server-side — a live example of the RSC hole noted above, where a visible UI state change produces
-no browser-side API request at all.
-
-### A third of the anonymous tier cannot be searched at all (found 2026-09-04)
-
-Chasing the cert control experiment turned up a bug of this document's own making. `x2rock search`
-listed Radio Paloma among the services that can be searched, and `x2rock search -s "Radio Paloma"`
-then refused it. Both were reading a real fact and only one of them was the right fact:
-
-- **Reachability is a credential question and is free.** Anonymous, or a token on disk.
-- **Searchability needs a published search category**, which lives in the presentation map — two
-  HTTP GETs per service, so it cannot be asked while printing a list of 108.
-
-Radio Paloma's manifest and presentation map, fetched by hand, settle what it is:
-
-```
-manifest:          "search-catalogs": {},  "endpoints": [],  "apiKey": {}
-presentation map:  <Presentation><BrowseOptions PageSize="100"/></Presentation>
-```
-
-No `SearchCategories`, not one `Category` element. A **browse-only service** — and `browse` walks it
-happily, which is how the cert experiment ran at all.
-
-**It is not a one-off.** All 32 anonymous services were then asked for their categories, which is
-the survey the list had never done:
-
-| | count | |
-|---|---|---|
-| searchable | 20 | TuneIn, SomaFM, Hype Machine, Audacy, Global Player, Radio France, myTuner, NRK, PowerApp, Sveriges Radio, Hit Network, Triple M, radioPup, Community Radio Plus, 90s90s, 80s80s, 80er-Radio harmony, HIT RADIO FFH, planet radio, RauteMusik.FM |
-| **browse-only** | **12** | CBC Radio & Music, Convoy Network, LITT Live, NTS Radio, Piraten.FM, Radio Energy, Radio Paloma, Relisten, Reservatet.fm, Schlager Radio, The Lot Radio, Virgin Radio UK |
-
-**So "32 of 108 services can be searched without an account" was overstated by twelve.** The
-anonymous tier is 32 services reachable with no credential, of which **20 can be searched** and 12
-can only be walked. Every earlier count in this document and the README said 32, and meant
-reachable.
-
-The fix splits the two questions rather than picking one:
-
-- `Catalogue::usable` — anonymous or tokened. What `browse`, `play-item` and `queue-item` resolve
-  names through. **This had to stay wide**: the comment at that call site used to assert "a service
-  that can be searched can be walked, and one that cannot, cannot", and filtering it would have
-  removed the one route that works for a browse-only service.
-- `Catalogue::searchable` — the same set less any service known to publish no categories, learned
-  by having asked and cached. A cold cache still over-promises once, which is the price of not
-  fetching 108 presentation maps to print a list.
-- The refusal became a [`Hint`](#errors-an-agent-can-act-on-not-parse): code
-  `no_search_categories`, with `x2rock browse -s "<name>"` as the runnable `fix`. It had been
-  falling through as `{"code":"unknown","fix":null}` — the exact shape the error contract exists to
-  avoid, on a condition that is entirely knowable. Both paths to it — a cold cache, and a warm one
-  where the service has already dropped off the list — now mint the same hint, so the two cannot
-  drift.
-
-`x2rock search` then said **24 of 108** (20 anonymous + 4 linked) and `x2rock browse` said **36**,
-and the difference between those two numbers is exactly the twelve. (The linked half grows with
-every `x2rock link`, so the absolute numbers drift; the twelve is the fact.)
-
-### The standing position, restated
-
-The cloud content API gives x2rock **nothing it does not already have**, except the services it
-cannot authenticate — essentially the cert-flagged three, YouTube Music, Apple Music and SoundCloud.
-Everything else it reaches by a better route: on the LAN, with no login of any kind.
-
-And building on it would cost the axiom — **not because it is cloud, but because it is gated behind
-a Sonos account session**, which is the one dependency this project does not take. For an
-undocumented surface Sonos owes no stability, at that. Recorded as a map of where the gates are,
-which is what it was gathered for — not as a route.
-
-**The gate, finally located:** service search is not gated behind Sonos code, a developer key, SMAPI
-credentials, or the device certificate. It is gated behind a **Sonos account session**. Any
-logged-in client gets YouTube Music search. x2rock is excluded by its own design axiom — no Sonos
-account, ever — and not by a technical barrier. That is a much stronger sentence than the open
-question it replaces, and it is the axiom's clearest test case: the door is unlocked, the key is a
-Sonos login, and the project declines to carry one.
-
-## A stream URL needs no service, and `play-url` is the whole feature (verified 2026-09-04)
-
-Prompted by a design question - is there a "discover more services" feature worth building? - whose
-first two readings turned out to be already answered. There is nothing more to *discover*:
-`ListAvailableServices` already returns all 108 services Sonos knows about rather than the
-household's subset, so x2rock enumerates the ceiling. And "services that need no registration" is
-the anonymous tier, which x2rock has reached from the start and which the cloud path cannot reach at
-all. The third reading is the one with something in it: **a URL is not a service.**
-
-### `x-rincon-mp3radio://` works, and `http://` does not
-
-The codebase already believed in the scheme. `can_enqueue` in `sonos/upnp.rs` treats four schemes
-as enqueueable for an item with no metadata to judge by:
-
-```rust
-"file" | "x-rincon-mp3radio" | "http" | "https"
-```
-
-That belief was never tested - the scheme appeared exactly once in the tree, in that predicate, and
-nowhere in this document. Nothing had ever sent one. So, against a live player, with a control:
-
-| URI | `SetAVTransportURI` | `AddURIToQueue` |
-|---|---|---|
-| `x-rincon-mp3radio://ice1.somafm.com/groovesalad-128-mp3` | **accepted** | **accepted**, 1 track, queue 3 → 4 |
-| `http://ice1.somafm.com/…` | 714 | 804 |
-| `https://ice1.somafm.com/…` | 714 | — |
-| `x-not-a-scheme://example.invalid/nope` | 714 | 804 |
-
-**The control is what makes this useful.** `http://` fails identically to a scheme invented for the
-occasion, on both paths. It is not degraded or partially supported; the player does not recognise it.
-So `can_enqueue` is right about `x-rincon-mp3radio` and **wrong about `http` and `https`** - and
-wrong in exactly the branch it was written for, since the test sent no metadata, which is that
-branch's own stated condition. A metadata-less favorite carrying a bare `http://` URI would be
-offered as enqueueable and then refused 804. Latent rather than live: nothing in this household has
-one. Left as it is for now, recorded here so the next reader does not trust the list.
-
-`file` is untested and probably means a path in the *player's* namespace rather than this machine's;
-`x-file-cifs:` is the spelling that appears in real favorites.
-
-### It plays, and the player rewrites the URI
-
-`SetAVTransportURI` then `Play`: `TRANSITIONING` for several seconds, then `PLAYING` with `RelTime`
-advancing 0:00:34 → 0:35 → 0:36. Real audio, no service, no account, no registration.
-
-Two details from the reply. **First audio is not immediate** - it was still `TRANSITIONING` after
-about four seconds of polling, which is long enough that a first attempt at watching for `PLAYING`
-gave up too early and briefly looked like a negative result. Anything waiting on this must not read
-`TRANSITIONING` as failure.
-
-And the player normalises the URI. Given `x-rincon-mp3radio://ice1.somafm.com/…`, its own `<res>`
-comes back as:
-
-```
-x-rincon-mp3radio://http://ice1.somafm.com/groovesalad-128-mp3
-```
-
-It re-inserts the `http://`, so the canonical internal form is the scheme wrapping the entire URL.
-Either input is accepted.
-
-### The title problem, and where the ICY metadata actually lives
-
-`dc:title` for a bare stream is the URL's last path segment - `groovesalad-128-mp3`, which is a
-bitrate slug and not a station name. The real now-playing arrives separately, because **the player
-reads the stream's ICY metadata itself**:
-
-```xml
-<r:streamContent>Eguana - Kineta Lounge</r:streamContent>
-<dc:title>groovesalad-128-mp3</dc:title>
-```
-
-x2rock was discarding it. `grep -rn streamContent src/` returned nothing, and a room playing this
-way reported a bare `PLAYING` with `title`, `artist`, `album`, `art_url`, `duration_ms`, `service`
-and `service_id` all null. Service streams do not need it - their per-track name and artist come off
-the Control API's metadata channel - but a service-less stream has nothing on that channel, so this
-was its only track information and nothing read it.
-
-**And it does not need a UPnP call.** The same string is already in the metadata reply x2rock
-fetches for every `now` and `status`, as `streamInfo`:
-
-```json
-{ "container": { "name": "SomaFM Groove Salad", "type": "station" },
-  "playbackSession": { "clientId": "com.rahga.x2rock", "isSuspended": false },
-  "streamInfo": "Eguana - Kineta Lounge" }
-```
-
-So `MetadataStatus` gained a `stream_info` field and `now`/`status --json` a `stream_info` key, at
-the cost of no extra round trip. It is **deliberately not parsed**: "Artist - Title" is an Icecast
-convention rather than a format, and stations put show names and slogans in the same field, so
-splitting on a hyphen would invent an artist wherever the guess happened to fit. The human line
-appends it only when it says something the title does not - the same rule the daemon's
-`stationName` already uses for the opposite half of this problem.
-
-It also arrives a few seconds *after* playback starts, so `play-url --json` deliberately does not
-report it: at that instant it is null and would mean "this station says nothing" rather than "not
-read yet".
-
-### Built: `play-url`, on the session rather than the transport
-
-`x-rincon-mp3radio` proved the player will take a bare URL, but it is not the right mechanism for
-the feature. `SetAVTransportURI` **replaces** what the room was doing and loses the queue's
-position; `playbackSession:1 loadStreamUrl` plays alongside the queue and leaves it untouched, which
-is what a radio station should do, and it is already the path a service's live stream takes.
-
-The open question was whether `loadStreamUrl` would accept a URL that came from no service. It does
-- verified end to end, with the queue intact afterwards:
-
-```
-$ x2rock play-url http://ice1.somafm.com/groovesalad-128-mp3
-Media Room — ice1.somafm.com
-
-$ x2rock now
-PLAYING  ice1.somafm.com · Smooth Genestar - Me and the jazzman
-```
-
-And the two routes converge: the session's own `<res>` is `x-rincon-mp3radio://http://…`, so
-`loadStreamUrl` is implemented on top of the same scheme. The transport route is the mechanism; the
-session is the manners.
-
-Three decisions worth keeping:
-
-- **`stationMetadata.service` is omitted for a bare URL.** It is where the room's displayed name
-  comes from, so the name goes in `name`, but naming a service that is not involved would put a
-  wrong sid in the room's now-playing.
-- **The default title is the host, not the path.** `ice1.somafm.com` rather than
-  `groovesalad-128-mp3`. The player picks the slug when given nothing, which is what makes the
-  default worth having at all; `--title` overrides it.
-- **`play-url` takes `--json`, alone among the play commands.** Its one refusal is about the
-  argument rather than the household - `bad_stream_url`, for anything that is not `http`/`https` -
-  and a code that can only ever print as prose is a contract with nobody on the other end. The
-  refusal carries no `fix`: nothing here can mint a working URL for the caller.
-
-**What the player does not report:** `loadStreamUrl` accepts a URL it cannot play and then sits at
-`IDLE` without erroring - the trap `play_item` already documents. So `play-url` does not trust the
-acceptance: it waits up to ten seconds for the room to reach `PLAYING`, and a room still idle is
-reported as `stream_did_not_play` (or `stream_unverified` when the room's state could not be read).
-The player fetches the URL, so it must be reachable from the *speaker* rather than from this
-machine, which is the other half of the same asymmetry.
-
-### What this changes about scope
-
-The 108 services are a ceiling on what *Sonos* carries, and until now they were the ceiling on what
-x2rock could play. They are not any more. Anything that serves audio over HTTP is now playable
-without an account, a registration or a sid - which also means a station catalogue is a client-side
-concern rather than something to be negotiated with Sonos. That is the first content axis this
-project has that is not bounded by the household's service list.
-
-## A station catalogue that is not Sonos's: `x2rock stations` (built 2026-09-04)
-
-`play-url` made any HTTP stream playable and left the obvious gap: knowing a URL. So the catalogue
-that fills it has to come from outside Sonos, because Sonos's own is the 108 services this document
-has spent a fortnight mapping, and that list is the ceiling `play-url` exists to get past.
-
-[Radio Browser](https://www.radio-browser.info) is the directory: community-maintained, **no API
-key, no account, no registration**, and its rows already carry the one field that matters.
-
-### Why this does not spend the axiom
-
-Worth stating plainly, because "x2rock now calls a cloud service" is the wrong reading. **Calling a
-cloud service is fine; living off a Sonos cloud login is not** - see "The axiom, stated precisely"
-under Scope. x2rock already makes outbound calls to music services for every single search, and
-SMAPI is somebody's server in another country. Radio Browser is one more of those, and it asks for
-no account at all, from Sonos or from anyone.
-
-The rule that does apply is the existing one: **talking to a service never enters the daemon.**
-`stations` runs from the CLI, on demand, and the daemon never calls it.
-
-Nothing is cached to disk either, unlike the service catalogue. A directory answer is a query
-result, not a fact about the household - there is no `AvailableServiceListVersion` to invalidate it
-against, and a stale copy of somebody else's database is worse than a round trip.
-
-### What a row carries, and the one field that matters
-
-```
-name              SomaFM Groove Salad (128k MP3)
-url               https://somafm.com/groovesalad.pls          <- registered
-url_resolved      https://ice5.somafm.com/groovesalad-128-mp3  <- playable
-codec / bitrate   MP3 / 128
-countrycode       US
-tags              ambient,chillout,downtempo,groove,lounge,sleep
-votes             47541
-hls               0
-```
-
-**`url_resolved`, never `url`.** A station's registered `url` is often a `.pls` or `.m3u`
-*playlist*, as SomaFM's is, which a Sonos player will not take. `url_resolved` is the directory's
-dereferenced stream URL. Getting this wrong would produce the silent `IDLE` failure below for a
-third of the catalogue, and it would look like the feature not working rather than the wrong field
-being read.
-
-The `--json` output renames it to `url` on the way out, because by then it is *the* URL - the one to
-hand to `play-url` - and carrying a field called `url_resolved` past the module that resolved it
-would only invite the same mistake later.
-
-### https plays, and so does HLS - tested rather than assumed
-
-Two things had to be checked before the directory could be trusted, because most of its rows are
-one or both.
-
-**https:** `x2rock play-url https://ice5.somafm.com/groovesalad-128-mp3` plays, with ICY metadata
-arriving as it does over plain http (`Lemongrass - What You Believe`). This is not in tension with
-the earlier finding that a bare `https://` URI is refused 714 by `SetAVTransportURI` - that was the
-*transport* rejecting an unwrapped scheme. `loadStreamUrl` takes a URL as a URL.
-
-**HLS:** the directory flags it, 14 of the top 400 stations carry it, and the answer is that it
-depends on the station rather than the format:
-
-| station | result |
-|---|---|
-| BBC Somali Radio (`hls: 1`, AAC+, GB) | **IDLE** - never played |
-| الجزيرة صوت (`hls: 1`, Qatar) | **PLAYING** |
-
-One HLS station failing would have been enough to conclude "Sonos does not do HLS radio" and filter
-the whole flag out of the listing. A second one, picked only because it was also `hls: 1`, plays
-fine. **So the flag is reported and not acted on** - `[hls]` appears in the listing and `hls` in the
-JSON, as the directory's own claim, and nothing pretends to know whether a given row will play. The
-BBC failure is more likely geo-blocking or that stream's own arrangement than the container format.
-
-### The listing, and what `--play` reuses
-
-```
-$ x2rock stations --tag jazz --limit 5
-  1  MP3 320k  US  Classic Vinyl HD
-  2  MP3 320k  US  Adroit Jazz Underground
-  3  MP3 192k  US  101 SMOOTH JAZZ
-  4  OGG 192k  US  Adroit Jazz Underground HD Opus
-  5  MP3 128k  FR  Jazz Radio Blues
-
-$ x2rock stations soma --limit 1 --play 1
-Media Room — SomaFM Groove Salad (128k MP3)
-
-$ x2rock now
-PLAYING  SomaFM Groove Salad (128k MP3) · Lemongrass - What You Believe
-```
-
-`--play` goes through the same `stream_url` that `play-url` and a service's live stream use, so a
-directory station plays alongside the queue and leaves it alone, and its ICY text arrives through
-`stream_info` exactly as any other stream's does. Nothing new was needed on the playback side at
-all, which is the sign that `play-url` was cut at the right joint.
-
-**No player is needed to search**, only to `--play` - the same bargain `search` strikes, and for a
-better reason here: the directory has nothing whatsoever to do with the household, so a listing
-works with every speaker off. The connection is made lazily, after the directory has answered.
-
-### Decisions worth keeping
-
-- **Sorted by `votes`, descending, with `hidebroken=true`.** The directory last-checked every row
-  and knows which answered; asking for stations known not to play would be a strange default. Votes
-  are the only popularity signal it has, and unsorted community data is unusable.
-- **No arguments lists the most-voted stations** rather than erroring, which is the directory's
-  nearest thing to a front page and mirrors `x2rock search` with no arguments listing services.
-- **`_api._tcp.radio-browser.info` SRV round-robin is deliberately not implemented.** Radio
-  Browser's guidance is to resolve the SRV record and pick a mirror at random; that needs a DNS
-  resolver this tree does not have, and `all.api.radio-browser.info` already round-robins. Recorded
-  so the shortcut is a decision rather than an oversight.
-- **A `User-Agent` is sent** (`x2rock/<version>`), because the operators ask third-party clients to
-  identify themselves. It is not enforced - requests succeed without one, tested - which is exactly
-  why it is worth sending. Since 2026-09-17 `http::AGENT` sends the same string on every request
-  that does not carry its own, so this one is the directory's stated requirement rather than the
-  thing that makes it work.
-- **`urlencode` moved from `sonos/plex.rs` to `sonos/http.rs`** and is shared. It was written for
-  Plex's client identifier and a search term needs identical treatment; a second copy would have
-  been a second chance to get it wrong. `http::get_with` is new for the same reason - one GET that
-  can carry headers, rather than a second client.
-- **Every field of `Station` is `#[serde(default)]`.** This is somebody else's community-edited
-  schema: half the fields are routinely absent, and a missing `country` is not a reason to fail a
-  search. Pinned by a test that parses a row carrying nothing but a name and a URL, and another
-  carrying an unknown field.
-
-### The failure a directory makes routine
-
-`loadStreamUrl` accepts a URL it cannot play and goes to `IDLE` without erroring - already recorded
-for `play_url`, and a directory makes it routine rather than rare, because now the URLs come from
-strangers. When first built, `x2rock stations --play` reported what it asked for, not what happened:
-the BBC Somali row above printed `Media Room — BBC Somali Radio` and produced silence. Both
-`stations --play` and `play-url` now wait for `PLAYING` and fail with `stream_did_not_play` when the
-room stays idle, so an agent can try the next result on the error code rather than re-reading state.
-
-## Sweeping the AppLink tier: three outcomes, not two (2026-09-10)
-
-The taxonomy after TuneIn (New) and Radio Paradise expected app-link services to sort into "403s
-like YouTube Music" or "answers like TuneIn". A full sweep of the household's `AppLink` services —
-`x2rock link <name>` against Apple Music (204), Amazon Music (201), SoundCloud (160), Pandora
-(236), Pandora CloudCover (296), plus Spotify (12) and a re-check of YouTube Music (284) — found a
-**third** outcome, and it is the one that matters most:
-
-| Service | `getAppLink` | Playback |
-|---|---|---|
-| YouTube Music | 403, sealed key | — |
-| Apple Music | refused (`There was an error processing your request`) | — |
-| SoundCloud | refused (`Client.NOT_AUTHORIZED`) | — |
-| Amazon Music, Pandora, Pandora CloudCover | real browser page | Amazon Music verified playable (below) |
-| Spotify | real browser page | **links and searches, cannot play** (below) |
-
-Amazon Music and Spotify were both linked for real (browser login completed, not just the code
-probed). On this first attempt both landed where `Radio Paradise` did: `musicServiceAccounts:1
-match` failed with `ERROR_COMMAND_FAILED (no reason given)`, so the household did not learn about
-either account. (A later Spotify re-link, after the household had registered Spotify through the
-Sonos app, did get `match` to answer; see "The real fix: the enqueue URI itself was wrong".)
-
-### Amazon Music plays. Spotify does not. Same failure, different `getMediaURI`.
-
-Both fail the same first path: `AddURIToQueue` → UPnP error 800, no registered credential to
-substitute — identical to Radio Paradise's `program` item. The fallback (the stream path
-`play-url`/`stations` already use, `playbackSession:1 createSession` + `loadStreamUrl`) is where
-they diverge, and the divergence is entirely in what `getMediaURI` hands back:
-
-- **Amazon Music** returns a real, presigned CloudFront `.m3u8` URL
-  (`https://…cloudfront.net/api/manifest.m3u8?...&Signature=...&Key-Pair-Id=...`) — the credential
-  is baked into the URL itself, so `loadStreamUrl` plays it with no account registration needed at
-  all. Verified end to end on a real room (Kitchen): position advanced 1308ms → 4742ms over 3
-  seconds, a real stream, not a stuck `PLAYING`.
-- **Spotify** returns `x-spotify://spotify:track:<id>` — not a stream URL, a pointer only a
-  Spotify-Connect-aware player can resolve, and only for an account it already trusts.
-  `loadStreamUrl` refuses it outright: `ERROR_INVALID_PARAMETER (streamUrl has unsupported
-  scheme)`. There is no fallback left once this one is exhausted — this *is* the fallback.
-
-So "does app-link work" is not a per-service yes/no; it is a per-service question of what
-`getMediaURI` is willing to answer with. A service whose content already lives behind a
-self-authorizing URL (Amazon Music, and presumably most of the legacy/radio-shaped catalogue) plays
-end to end with no Sonos account at all. A service whose content requires the player to already
-know the account (Spotify, and by construction anything using the same native-URI-scheme pattern)
-needs that registration first — **and is not a dead end once the registration exists.** See "The
-real fix: the enqueue URI itself was wrong" below —
-`getMediaURI`'s `x-spotify://` answer was never going to be playable directly, but that turned out
-to be beside the point, because x2rock never plays a `getMediaURI` answer for a queueable track in
-the first place; it builds its own enqueue URI, and *that* URI was wrong in a fixable way.
-
-### Why the fallback can never be extended to reach it
-
-The natural next question — build out `createSession`/`loadStreamUrl` further, or reach for
-`loadCloudQueue` — was asked and closed on the spot. Both are already fully built
-(`stream_url()` in `src/commands/stream.rs`, shared by `play-url`, `stations --play`, and `notify`)
-and were
-exercised against this exact Spotify track today with the exact failure above; there was nothing
-left to build. `loadCloudQueue` is a **permanent no** per "`loadCloudQueue` is a permanent no, not a
-backlog item" above — it is scoped to registered Sonos content integrations, which x2rock is not
-and will not become. This reasoning still stands for the `getMediaURI`/stream-fallback path
-specifically, and a Spotify Connect client is still the only route to a `getMediaURI` URL playing
-directly. It does not, however, bear on the enqueue path at all, which is where the real fix landed
-— seed the queue, in one of the schemes the player already understands, rather than asking the
-service to hand over a directly-playable URL.
-
-### What this leaves working today
-
-- **Spotify**: `x2rock link Spotify`, `search -s Spotify`, `browse -s Spotify` all work fully —
-  real `spotify:album:…`/`spotify:track:…` ids, deterministic tracklists (stable across repeated
-  `getMetadata` calls, unlike Amazon Music below). **Playback works too** — see "The real fix"
-  below.
-- **Amazon Music**: link, search, browse, and playback all work, verified on real hardware. One
-  catalogue-shape caveat worth knowing before building anything on top of it: the `getMetadata`
-  container id an album search hit carries (`sp:container:station:catalog:album:asin:…`) is a
-  *station*, not the album's tracklist — three repeated calls against the same album id returned
-  three different single tracks (`Freddie Freeloader`, `Take Five` — not even on the same album,
-  `Flamenco Sketches`), not a stable list of five. This account is a Prime membership rather than
-  Amazon Music Unlimited, which likely explains both the station-shaped browsing and the failed
-  `match` — worth re-testing against an Unlimited account before concluding the shape is universal.
-- **The DeviceLink tier not previously linked** (AccuRadio, Bandcamp, Mixcloud, Murfie,
-  NhacCuaTui, TIDAL, Tribe of Noise, FIT Radio) all answered `getDeviceLinkCode` with a real
-  code/URL (`--no-open`, not completed). Sonos Backgrounds and Classical Archives refused outright;
-  Deezer repeated its already-documented empty-body answer; Sonos Radio repeated its already-
-  documented SOAP 1.2 `TypeError` fault; Saavn returned a code but then answered
-  `getDeviceAuthToken` with an immediate HTTP 500 rather than a pending fault — worth a slower,
-  deliberate re-test rather than trusting one aggressive poll.
-
-### Even the household's own registration doesn't fix it
-
-The obvious next move was tried the same session: the user linked Spotify for real through the
-**official Sonos app**, giving the household a legitimate registration this time (which x2rock's own
-link flow does not create). That changed the failure mode, but did not fix it.
-
-With x2rock's own token still present, `AddURIToQueue` for a Spotify track **succeeded** for the
-first time — `queue --json` showed the item with real metadata (album, artist, `duration_ms`) —
-whereas it had always been UPnP 800 before. But playing it failed differently: `Seek` answered UPnP
-711 ("no such track in the queue") against a queue that visibly held exactly one item at that index,
-and a bare `play` answered `ERROR_PLAYBACK_NO_CONTENT`.
-
-To separate "x2rock's own token is interfering" from "Spotify itself is the problem," x2rock's
-Spotify token was removed entirely (`x2rock unlink Spotify`) and the test redone through the
-*household*-only path that already works for other services: play a Spotify track from the official
-app, `x2rock keep`, then `x2rock bookmark` it into a different room. **Same failure** — UPnP 711,
-zero position, `state: IDLE` — with no x2rock credential anywhere in the chain. A same-session
-control test with the identical code path against a YouTube Music track (`keep` on Guest TV,
-`bookmark` into Living Room) played correctly, position advancing normally, proving the queue/seek
-machinery itself is not broken and the room is not at fault — Kitchen had already played Amazon
-Music cleanly earlier in the same session.
-
-So the finding was narrower and more surprising than "x2rock's Spotify token can't play things": **a
-Spotify track added to the Sonos queue was not seekable/playable through this queue+seek mechanism at
-all, regardless of which account added it or whether it's the household's own legitimate
-registration.** That ruled out the token and the account — which turned attention to the one thing
-neither test had varied: the URI x2rock itself builds when it enqueues a track.
-
-### The real fix: the enqueue URI itself was wrong
-
-`bookmarks::service_uri()` (`src/bookmarks.rs`) builds the playback URI x2rock hands to
-`AddURIToQueue` for *every* linked service, and it hardcoded one scheme:
-`x-sonosapi-hls-static:<id>?sid=<n>&flags=65544&sn=<serial>`. That is genuinely what the player
-writes for YouTube Music and Mixcloud — verified against real queue items for both — which is
-exactly why it had never been questioned. It is not what the player writes for Spotify.
-
-The officially-added Kitchen queue item (from "Even the household's own registration doesn't fix
-it", above) carried its own answer the whole time, sitting unread in its `art_url`'s `u=` query
-parameter: `x-sonos-spotify:spotify%3atrack%3a…?sid=12&flags=8232&sn=22`. A different scheme
-entirely — `x-sonos-spotify`, not `x-sonosapi-hls-static`. x2rock's generic URI was accepted by
-`AddURIToQueue` (which explains the correct-looking metadata: the DIDL title/artist came from
-x2rock's own `didl()`, built independently of the URI) but described a resource the player could
-never actually resolve, which is exactly the shape of "looks queued, answers 711 on Seek."
-
-The fix (2026-09-10) is a two-line scheme lookup: `native_scheme(service_id)` returns
-`"x-sonos-spotify"` for Spotify's service id and the existing `"x-sonosapi-hls-static"` for
-everything else, and `service_uri()` uses it instead of the hardcoded string. **Verified end to
-end, three ways, across three rooms:**
-
-1. **`keep`/`bookmark` replay**, the exact reproduction from above — track playing via the official
-   app in Kitchen, `keep`, `bookmark` into Dining Room. Played correctly this time: position
-   advanced 1082ms → 5570ms over 4 real seconds.
-2. **A fresh direct play**, the case that never touched a bookmark — re-linked x2rock's own Spotify
-   token (this time `match` answered with `sn_22` — the first `match` ever to succeed, and the same
-   serial the household's Sonos-app registration already carried, so it matched that existing
-   account rather than creating one), searched
-   for an album the household had never played, browsed into it, and played a track straight into
-   Living Room. Position advanced 613ms → 5007ms over 4 real seconds.
-3. **The original failing case**, replayed: Kitchen, `browse -s Spotify … --play`, the same call
-   that produced UPnP 711 before the fix.
-
-All three played. Search, browse, link, and playback are now all confirmed working for Spotify, the
-first major-streaming service on this list to reach that state.
-
-### Sweeping Amazon Music and Pandora for the same bug (2026-09-10)
-
-The natural next question: does `bookmarks::service_uri()`'s hardcoded scheme bite any other
-service, the way it did Spotify? Checked directly rather than guessed at, and both came back
-negative - but for two different, instructive reasons.
-
-**Amazon Music: the bug is latent, not active.** `AddURIToQueue` for a real, non-station track
-(`catalog:track:asin:…`, browsed out of a Prime "station" container the way earlier testing
-did) still answers UPnP 800 - the household never registered this account (see "Amazon Music
-plays" above; its `match` failed the same way Spotify's first link attempt did, and unlike
-Spotify it has never been re-linked through the official app to fix that). So the enqueue path -
-the one `service_uri()` feeds - is never reached at all; every Amazon Music play still goes
-through the `getMediaURI` stream fallback, which works today for the reason already documented
-(a self-authorizing CloudFront URL). If this account is ever linked through the official app the
-way Spotify's was, `AddURIToQueue` might start succeeding under the same wrong generic scheme,
-and nobody yet knows what Amazon Music's real native scheme is - there is no officially-added
-queue item to read it off, the way Spotify's was found. Worth re-checking the moment that
-changes, not before. **Settled 2026-10-11** on a family trial added in the Sonos app: enqueue
-works on that registration. The player rewrites x2rock's `x-sonosapi-hls-static` track URI to
-`x-sonos-http:<asin>.mpd` and expands an album into `x-sonosapi-hls-static` rows, and an album is a
-real tracklist. See "Every household token, imported".
-
-**Pandora: blocked one step earlier.** The user signed up for a real (free-tier) Pandora account
-mid-session and linked it through x2rock's own `getAppLink` flow. Search works and returns real
-results - but every one of them is a `type: program` station container (`SF:16722:125644` for the
-artist), which is Pandora's actual product shape for this search, not an artifact of the account
-tier the way Amazon Music's station-shaped browsing was suspected to be. Opening one goes further
-wrong: `getMetadata` refuses outright with **"Unsupported action for account type"** - the free
-tier cannot browse a station's content via SMAPI at all, so there is no track id to build an
-enqueue URI for in the first place. The scheme question is moot until a paid Pandora account is
-available to test with. **Corrected 2026-10-11**: a trial tier gets the same refusal, because a
-Pandora station declares `canEnumerate` false. It is not a place to open, and it plays as radio.
-See "Every household token, imported".
-
-**Pandora CloudCover** was started (`x2rock link "Pandora CloudCover"`) and abandoned - the user
-declined a second sign-up mid-session ("not doing CloudCover signup right now"). Left for a later
-session; see the `pandora-cloudcover-deferred` memory note in the assistant's memory store, which
-exists specifically so a future session asks before restarting it.
-
-### What this changed in the module doc
-
-`sonos/smapi.rs`'s module comment used to read app-link as "the tier that mostly stays out of
-reach". It now records the sweep: most of what has been *tried* answers with a real browser page.
-`link`'s no-args listing deliberately stays at DeviceLink + Plex, with the "ask anyway" note
-covering app-link. The code change that followed was narrower: `bookmarks::service_uri()`'s scheme
-lookup, above.
-
-## `bookmark` gets the same stream fallback `play_item` already had (2026-09-10)
-
-A gap fell out of live testing a Sonos Radio track dispatched from the official app: `keep` could
-capture it (a real, resolvable Deezer-backed object id - Sonos Radio's "Hit List" turned out to be
-Deezer content under a Sonos-branded wrapper, readable straight off the kept id:
-`sonos:…-DZR:28:…:dzrs.trk.4105889521:…`), but replaying it with `bookmark` always failed outright
-with a raw `UPnP 800`.
-
-The item is the same *shape* Radio Paradise's `program` containers already are - `queue_position:
-null`, `duration_ms: null`, nothing discrete for a queue position to point at - which is exactly the
-case `play_item` already has a rule for: "fall back to the session on any refusal, because a refusal
-is the player saying this is not queue material." `Command::Bookmark`, unlike `play_item`, never had
-that fallback; it called `AddURIToQueue` directly and gave up on any error.
-
-Fixed by splitting the enqueue-and-play sequence into `play_bookmark()` and wrapping it the same way
-`play_item` wraps `enqueue_item` - on failure, `stream_item()` with the bookmark's own service and a
-looked-up token. One deliberate asymmetry: `bookmark --next` (queue for later) does **not** get the
-fallback, because streaming starts playback immediately, which would silently break what `--next`
-promised. Verified against the Sonos Radio bookmark: the fallback now triggers and fails with a
-clear `needs_link` error (Sonos Radio's own `link` is separately broken, so it stays unplayable)
-instead of surfacing only the bare UPnP code - proof the wiring is right even though this one
-service still can't complete the chain.
-
-### AccuRadio's server is broken, not x2rock's request (2026-09-10)
-
-Also surfaced while sweeping more DeviceLink services: AccuRadio linked cleanly (search works per
-the link reply), but both `search` and `getMetadata` refuse with a raw Python `TypeError` -
-`sonosSearch() takes exactly 7 arguments (6 given)` and `getMetadata() takes exactly 6 arguments (5
-given)`. Worth stating plainly since it looks, at a glance, like x2rock sending a malformed request:
-it is not. `X2ROCK_DUMP_SMAPI` dumped against Spotify in the same session with the **identical**
-`search` body shape (`<id>…</id><term>…</term><index>…</index><count>…</count>`) was accepted fine -
-Spotify answered with an unrelated fault (a stale token, see below), not an argument-count error. The
-same envelope-building code (`call`, `envelope`) is shared by every service; an error this specific
-to one service's own handler, in a shape typical of a Python SOAP framework calling a handler with
-one more or fewer positional arguments than its own dispatcher passes, points at a mismatch inside
-AccuRadio's server between a handler signature and its own framework - not at anything in the
-request. Nothing to fix here; recorded so a future session does not re-litigate it.
-
-## A service can hand back a working token instead of just refusing (2026-09-11)
-
-Found chasing the AccuRadio comparison above: Spotify's session had gone stale, and its `search`
-fault wasn't a plain refusal -
-
-```
-faultcode: Client.TokenRefreshRequired
-faultstring: tokenRefreshRequired
-detail: <refreshAuthTokenResult><authToken>…</authToken><privateKey>…</privateKey>
-         <userInfo><userIdHashCode>…</userIdHashCode>…</userInfo></refreshAuthTokenResult>
-```
-
-- a full replacement token, the same shape `getDeviceAuthToken` returns on a fresh link, riding in
-the very fault that reported the old one dead. Before this, x2rock's `call()` (the one function
-`search`, `metadata` and `media_uri` all funnel through) treated every fault the same way: format
-the message, bail. That meant failing - or telling someone to re-link through the browser - for a
-problem the service had already handed the fix for.
-
-**Fixed with one retry, spent transparently.** `Fault` gained a `refresh: Option<RefreshedToken>`
-field (`refresh_in()`, keyed on the *presence* of `refreshAuthTokenResult` rather than the fault
-code or message text, both of which are undocumented and likely vary by service). `call()` now
-retries once with the refreshed token when a fault carries one, and only bails for real on either a
-refusal with nothing to retry or a retry that fails too. The new token comes back to the caller
-through an out-parameter (`&mut Option<RefreshedToken>`, threaded through `search`/`metadata`/
-`media_uri`) rather than a changed return shape, and the three call sites - `search` and `browse`
-in `commands/services.rs`, `stream_item` in `commands/stream.rs` - persist it to
-`credentials.json` on success via a new `save_refreshed_token()` - best-effort and silent, since the
-refresh already did its job in memory for the call that triggered it either way. The original
-`linked` timestamp is kept: a refresh is not a new link event.
-
-**Verified live, not just in the test suite.** The real, actually-expired Spotify token from earlier
-in the session was still on disk. `X2ROCK_DUMP_SMAPI=1 x2rock search -s Spotify jazz` showed the
-whole sequence: first request → `TokenRefreshRequired` fault → retry with the new token → HTTP 200
-with real results, printed with **no error surfaced at all**. `credentials.json` then held the new
-`authToken` with the old `linked` value intact, and a second search afterward needed no further
-refresh - proof the persistence half works, not just the in-memory retry.
-
-Deliberately scoped narrow: this is a retry on one specific, self-identifying fault shape, not a
-general "retry anything" policy - the existing `NOT_LINKED_RETRY` / device-link-poll handling stays
-completely separate, and a fault with no `refreshAuthTokenResult` still bails exactly as before.
-
-## A service container cannot be played over the LAN at all (settled 2026-09-11)
-
-Prompted by a sweep of [svrooij/sonos-api-docs](https://github.com/svrooij/sonos-api-docs), whose
-`docs/_data/metadata.json` looks like a recipe for playing an album or playlist by id - the thing
-`browse` and `search` refuse today, telling the user to walk in and play a track. It is not a
-recipe. **Four routes were tried against a real household and all four fail**, so the refusal is
-correct and the only thing worth improving is what it says.
-
-### The id prefix decodes, which is what kills the documented approach
-
-Every container URI carries an eight-hex-digit prefix before the service's own object id -
-`1004206c`, `1004004c`, `100c2068`. The docs present six hardcoded Spotify strings and no rule.
-Reading all 43 favorites out of `FV:2` on a real household gives one:
-
-```
-10        04          206c
-^^        ^^          ^^^^
-constant  class        the `flags` query parameter, in hex
-          (04 album, 06 playlist, 09 stream, 0c radio, 03 track, 0e listView)
-```
-
-`flags=8300` ⇔ `206c`, `flags=76` ⇔ `004c`, `flags=8296` ⇔ `2068`, `flags=40` ⇔ `0028`. Twelve out
-of twelve, across seven services. Which is precisely the problem: **`flags` varies per service** -
-Amazon Music writes 8300 where YouTube Music writes 76 for the same container class - and nothing
-in a SMAPI browse response says which value a service wants. There is no constant to hardcode and
-no way to derive one, so a frozen table of six Spotify strings could never have generalized.
-
-### All four playback routes refuse
-
-| Route | Result |
-|---|---|
-| UPnP `AVTransport SetAVTransportURI`, `x-rincon-cpcontainer:` | **714** |
-| UPnP `AVTransport AddURIToQueue`, same URI | **800** |
-| Control API `playback:1 loadContainer` | `success: true`, **no effect** |
-| Control API `playbackSession:1` after `createSession` | namespace has **no** `loadContainer` |
-
-The first is the one that settles it: a **byte-exact replay** of the player's own favorite - the
-`<res>` URI and the `r:resMD` metadata copied verbatim out of `FV:2`, not reconstructed - is
-refused 714 by the very player that stores it. Nothing about the URI construction is wrong, because
-there was no construction. Tried across Amazon Music (a dead account, 714), YouTube Music (a live
-one, 714/800) and Relisten (anonymous, so no account to resolve at all, 800), which rules out
-account resolution as the cause.
-
-`playback:1 loadContainer` deserves its own warning, because it is the most misleading result here.
-It exists, it validates its arguments (walking the schema out of its own error messages gives
-`containerId.objectId` required, then `containerMetadata`), and it answers `success: true` - for a
-**garbage object id**, and for real ones, changing nothing either way. It was briefly believed to
-work on the strength of one room whose queue was never recorded beforehand; a control on a second
-room holding exactly one known track, unchanged after the same call, is what caught it. **A
-`success: true` from this command means nothing.** It belongs with `play-url`'s accepted-then-idle
-trap in the list of replies that have to be verified by reading state back.
-
-`playbackSession:1` is the documented Sonos route for apps, and a session does connect from the LAN
-with an arbitrary `appId`. But it offers only `loadCloudQueue` - which requires *you* to host a
-queue server the player polls - and `loadStreamUrl`, which is what `play-url` already does. Neither
-touches a music service's own catalogue.
-
-### What does play a container, and what to say instead
-
-`favorites:1 loadFavorite` and `playlists:1 loadPlaylist`, both of which take an id for something
-already saved in the household. That is why container favorites play fine today while an identical
-container from `browse` cannot: `favorite` never builds a URI at all, it hands the player an id and
-the player resolves everything itself.
-
-So this is not a missing feature. Browsing a service and playing a container from it is not
-something the local API offers, and no amount of metadata construction reaches it. The refusal in
-`browse`/`search` stays, and it names the way through - **save it as a favorite in the Sonos app,
-and `x2rock favorite` will play it** - rather than only offering to descend into the container.
-
-## Audit: re-testing this document's claims against the household (2026-09-12)
-
-Prompted by finding that the UPnP guidance string had named the wrong Sonos menu since the initial
-commit - `Settings > Privacy & Security`, where it is actually under **Account** - which is the kind
-of error nothing in the build can catch. (The fix still had it one level too deep: there is no
-`Legal and Privacy` step. It is **Account > Privacy and Security > Connection Security** on iPhone
-and Android alike, per the person, 2026-09-28; `Settings` beside `Account` is for the speakers.) So the testable claims here were re-run against the real
-system rather than re-read.
-
-**Held, re-measured:**
-
-| claim | result |
-|---|---|
-| 108 services on the descriptor list | 108 |
-| split **32 Anonymous / 14 DeviceLink / 62 AppLink** | exact |
-| `SystemProperties GetString` refuses the account keys with UPnP 800 | 6 of 6, unchanged |
-| the Control API has **no EQ namespace at all** | `eq:1`, `equalizer:1`, `renderingControl:1`, `playerSettings:1` all `ERROR_UNSUPPORTED_NAMESPACE`; `settings:1` exists but has no `getEq` |
-| `settings:1` reads night/dialog and **refuses to write them** | read returns the whole `homeTheaterOptions` block; `setPlayerSettings` answers `ERROR_NO_PERMISSION` |
-| iHeartRadio publishes six search categories | stations, artists, tracks, albums, playlists, podcasts |
-| the browse-only filter is **learned and cached**, and a cold cache over-promises once | reproduced live: `search` listed 40, searching Radio Paloma returned the `no_search_categories` hint, and the next listing said 39 |
-
-**Moved, because they were snapshots of live things rather than facts:**
-
-- *"`jazz` returns 55 stations"* (iHeartRadio): **50** today. A catalogue that changes under us. Note
-  that reproducing it needs `--count 100` - the default is 20, which makes the figure look wrong
-  when it is not.
-- *"`x2rock search` now says 24 of 108 (20 anonymous + 4 linked)"*: this machine holds 8 linked
-  accounts now, so a warm cache says 28. The arithmetic is right; the constant was never going to
-  stay.
-
-**Wrong, and corrected in place:** two stale forward-looking notes - the UPnP 800 gloss, fixed
-elsewhere in this same document, and the proposal for a read-only `update` command that has since
-been built. Plus the claim that x2rock has no raw UPnP escape hatch, which `raw upnp` ended; see
-"`BeginSoftwareUpdate` is a permanent no", because that one was carrying a safety argument.
-
-**Second pass, 2026-09-13: contradictions between sections.** This audit re-tested claims against
-hardware; the second pass read the file end to end for claims that a *later section* of the file had
-already overturned, and removed or rewrote them in place. The largest groups: `match` "never
-succeeding" (it matched Spotify's existing account on 2026-09-10); plans and runbooks for probes
-that had since run (`GetSessionId`, the favorites stream type, the home-household EQ sweep);
-hypotheses recorded as "kept for the shape of the mistake" once the right answer sat beside them;
-the serial-allocation paragraphs written before the decisive test; and descriptions of code that had
-moved on (the source layout, the scan stopping at its first hit, `play-url` not verifying,
-paging "to do"). The reversals worth remembering are listed under "Superseded claims" at the top.
-
-**The lesson worth keeping:** every claim that turned out to be wrong was about something *outside*
-the code - a third-party menu, a live catalogue, or a to-do that another section had quietly
-completed. The claims about what speakers actually answer have all held. Statements of the first
-kind should be dated and re-checked; statements of the second kind have earned their confidence.
-
-## How a player reaches the household, and the attribute that no longer says (2026-09-12)
-
-`system` reported what every speaker *is* and never how it is *connected* - which is the first thing
-worth knowing when several rooms go quiet together. Read live off this household's
-`ZoneGroupTopology GetZoneGroupState`:
-
-| | `ConnectionType` | `EthLink` | what it was |
-|---|---|---|---|
-| Living Room (Beam) | 1 | 1 | the only ethernet cable in the household |
-| Kitchen, Guest TV, Bedroom, Dining Room | 2 | 0 | SonosNet, channel 1, bridged through that Beam |
-| 2 Play:1 surrounds, Sub, 2 One SL surrounds | 6 | 0 | home-theatre satellites |
-| the SYMFONISK stereo-pair half | **2** | 0 | bonded, and still an ordinary SonosNet speaker |
-
-Two things fall out of that table.
-
-**`satellite` is a link, not a bond.** The pair half is bonded and reports `2`; only home-theatre
-satellites report `6`, which is the private link they hold to their soundbar. So `connection` and
-`bonded`/`role` answer different questions and neither substitutes for the other.
-
-**`WirelessMode` is dead on S2 and the legacy reading of it is wrong.** The widely-repeated legend
-is "0 = wired, 1 = SonosNet, 2 = WiFi". On this household it reads **`0` on every player**,
-including the four that are demonstrably on SonosNet. `EthLink` and `ConnectionType` are the live
-fields; anything keying on `WirelessMode` is reading a constant. Worth stating plainly because it is
-exactly the class of external claim the audit above found rots - a legend that was true once, for
-hardware or firmware nobody here runs.
-
-**What is not known:** a speaker joined to the home WiFi rather than SonosNet was never observed,
-because this household has none - Sonos moves the wireless players onto its own mesh as soon as one
-player is wired. So there is no fourth row, and `connection()` answers `unknown` for any value it
-has not seen rather than inventing one. `--json` keeps the raw `connection_type` beside the word for
-whoever hits it first.
-
-## Deezer was never broken; this client was (2026-09-17, office household)
-
-Deezer had been recorded here twice as a service that answers `getDeviceLinkCode` with an empty
-HTTP 200 — "the service says nothing at all". It was answering every time. Two bugs in
-`sonos/http.rs`, both invisible until the reply was compared against `curl`:
-
-1. **No `User-Agent`.** Deezer returns an empty 200 to a request carrying none. Any non-empty value
-   is accepted — verified with the literal string `a`. `http::AGENT` now sends
-   `x2rock/<version>` unless the caller supplies its own, which is what `stations.rs` still does.
-2. **No gzip.** Deezer sets `Content-Encoding: gzip` on *some* replies without being asked
-   (`getDeviceAuthToken` yes, `getDeviceLinkCode` no) and **ignores `Accept-Encoding: identity`**,
-   so declining is not on offer. This client sends no `Accept-Encoding` at all, and HTTP/1.1 reads
-   that as "any encoding is acceptable" rather than "none", so Deezer is within its rights.
-
-The second was the damaging one. The unreadable body meant `fault_in` could not parse the fault, so
-an ordinary `Client.NOT_LINKED_RETRY` — *the user has not finished in the browser yet* — fell
-through to `parse_fault` and became a hard HTTP 500. The link aborted on its first poll, seconds
-after opening the browser, every time.
-
-`miniz_oxide` decompresses raw deflate and zlib but has **no gzip entry point**, so `http::gunzip`
-strips the RFC 1952 header (ten bytes, plus FEXTRA/FNAME/FCOMMENT/FHCRC when flagged) and hands the
-rest to `decompress_to_vec`. The eight-byte trailer needs no handling: inflate stops at the final
-block. That is the whole reason for the dependency, and `default-features = false` drops the
-compressor half, which nothing here sends.
-
-**What Deezer turned out to be worth.** It is the first linked service with a *real catalogue* —
-artists, albums, tracks, playlists and stations, in FLAC (`tr-flac`, `protocolInfo`
-`sonos.com-http:*:audio/flac:*`) — rather than Bandcamp's personal library. And unlike Bandcamp it
-returns a `userIdHashCode`, nested in a `userInfo` element alongside a nickname.
-
-### What the household match actually buys, settled
-
-That hash made the long-standing `musicServiceAccounts:1 match` question testable, and the answer
-is that x2rock cannot make `match` succeed by any route tried:
-
-- The namespace answers **only** `match`. `getAccounts`, `getMusicServiceAccounts`, `listAccounts`,
-  `getHouseholdAccounts` and `refreshAccounts` are all `ERROR_UNSUPPORTED_COMMAND`, which is why
-  `accounts --content` has to infer serials from favorites and queue items.
-- Required parameters are `nickname`, `serviceId`, `userIdHashCode`, refused in that order.
-- Anonymous services and unknown ids get `Unsupported account authentication method`. **Both**
-  DeviceLink and AppLink get `Link code required to add guest account` — the household is willing
-  to register an app-link service too, so the tier is not the barrier.
-- Supplied a link code, failures lose their `reason` entirely and arrive as bare
-  `ERROR_COMMAND_FAILED`.
-- **The spent-code theory is dead.** A code was minted, authorized in a browser, and handed to
-  `match` without x2rock ever calling `getDeviceAuthToken` on it; it failed identically, and the
-  code was proven still live afterwards by redeeming it and getting the same hash back.
-
-What *does* work is adding the service in the Sonos app. Before that, `play-item` on a Deezer track
-got `AddURIToQueue` → UPnP 800 and fell back to a direct stream; after it, the identical call queued
-cleanly. So the sentence `run_link` prints is exactly right: search and browse ride on the local
-token, and on-demand content queues only when the household holds its own account.
-
-**The URI shape is not involved**, an earlier suspicion worth recording as disproved. The player
-normalises whatever it is handed: `x-sonosapi-hls-static:<id>?sid=2&flags=65544` with no `sn=` was
-accepted and rewritten to `x-sonos-http:<id>.flac?sid=2&flags=8232&sn=10` — byte-identical to what
-the Sonos app writes. `sn=` really is optional, as `bookmarks::service_uri` already said.
-
-## Cross-service search: one term, every service that can answer (built 2026-09-17)
-
-`x2rock search "travis scott"` with no `--service` now asks every searchable service at once and
-merges the answers. That grammar was previously dead - a bare term printed the service list and
-silently dropped the word typed - so nothing had to be given up to take it.
-
-**Three passes, and the middle one is why it is not just a loop.** `Catalogue::categories_for` takes
-`&mut self`, so only one category fetch can ever be in flight; a fan-out needs them all. So
-categories are warmed concurrently through `smapi::categories` and handed to the new
-`Catalogue::remember_categories` afterwards, the plan is built from the cache through the new
-read-only `Catalogue::cached_categories`, and only then do the searches themselves fan out. A warm
-that *fails* is deliberately not recorded: `remember_categories` would write "asked, and it has
-none", which is what drops a service out of `searchable` permanently.
-
-**Linked services sort first, and that is a judgement about quality rather than speed.** Measured
-against the same term on the same day:
-
-| tier | example | albums | plays as | metadata |
-| --- | --- | --- | --- | --- |
-| linked catalogue | Deezer | yes | queued, FLAC | the service's own |
-| station | iHeartRadio, Audacy, TuneIn | no | live stream | station names |
-| blog aggregator | Hype Machine | **never** | expiring 128k MP3 | the blog post's, unverified |
-
-Hype Machine is worth spelling out, because it looks like a catalogue and is not. It indexes
-hand-picked music blogs by RSS and accepts uploads from SoundCloud, Bandcamp and Audiomack; it
-documents that it cannot carry "EPs, albums, playlists, or videos", only individual tracks under
-20 MB and 15 minutes. So it can never answer "what albums are there". Its titles come from the blog
-post rather than the file, and they disagree: `TRACK:384m5`, which both Hype Machine and x2rock
-label "Butterfly Effect (Draye Remix)", plays a Sicko Mode remix. One of five ids sampled was a dead
-404. It belongs in the results as discovery, never above a catalogue hit.
-
-Sorting is stable, so each service keeps the order it answered in - services rank their own hits and
-reordering within one would throw that away.
-
-**The rest of the shape.** `FAN_OUT_TIMEOUT` is 12s, shorter than the single-service budget because
-the slowest of thirty-five decides when anything appears; a service that overruns is named on stderr
-rather than passed off as having found nothing. `--count` became `Option<u32>`, defaulting to 20 for
-one service and `FAN_OUT_COUNT` (5) merged, because twenty rows each across thirty-five services is
-not a list. `--only-linked` skips the long tail. `pick_category` skips a service that has no category
-by the requested name rather than substituting its first, so `-c albums` cannot answer with a radio
-service's stations. Ids are never truncated - they are what `play-item` is handed - so the id column
-is sized to the widest *ordinary* id and a service with 58-character ids pushes only its own rows.
-A refreshed token is saved sequentially after the join, because several tasks rewriting the
-credentials file is a good way to lose one.
-
-Measured on the office household: 0.6s for `--only-linked`, 2.8s for all 35 including a cold
-category warm-up of 32 of them.
-
-## Several categories at once, because `all` is almost never there (built 2026-09-18)
-
-The merged search asked each service in exactly one category, chosen by preferring its `all`
-and falling back to whatever it listed first. Searching the linked tier for "Garth Brooks"
-then returned no artist: the picker pinned `tracks`, and Deezer keeps artists elsewhere.
-Unpinning only swapped the fault, since Deezer's *first* category is artists and nothing
-would then be directly playable.
-
-**What Sonos documents.** There are two search methods. *Universal Search* "enables users to
-search across multiple content categories simultaneously" and is required for iOS, Android
-and the web app; *Classic Search* is category-by-category and is what desktop and S1 use.
-The marker for the first is a category whose id is `all` — "use `all` as the ID to inform
-Sonos that this category should be used for search experiences that support it". And the
-mobile experience is not assembled by the controller at all: "all mobile app search requests
-are routed through a central Sonos cloud service". x2rock has no access to that, so it does
-client-side over Classic Search what Sonos does in its cloud. That is the documented path,
-not a workaround.
-
-**Why the fallback carries the weight.** Of 35 services with cached categories here, **3**
-declare an `all` (NRK Radio, Radio France, Sveriges Radio), **20** publish categories without
-one, and **12** publish none and are not searchable. Deezer was checked directly: its
-`PresentationMap type="Search"` lists `artists, albums, tracks, playlists, stations` and no
-`all`, and its manifest's `search-catalogs` is `[]`. So the grouped Deezer results the mobile
-app shows are that cloud service doing per-category searches.
-
-`getMetadata` on the `search` id is the documented second route, and the docs say both lists
-"should be identical". Probed against the 12 that publish nothing, in case any implemented
-only the desktop half: NTS Radio faults with "Item for ID Not Found Error", Relisten and CBC
-answer with nothing, and Virgin Radio UK ignores the id and returns its own stations as
-`itemType=stream`. **No fallback was added for them.** A service that publishes neither list
-has not implemented search, and that is its decision.
-
-**The rules `pick_categories` follows**: named categories in the caller's order, skipping any
-a service lacks and dropping the service entirely if it has none; else `all`; else
-`DEFAULT_CATEGORIES` (`tracks`, `artists`, `albums`) where present; else its first category,
-which is the arm that keeps the thirteen stations-only services answering as they did.
-
-**Cost.** One call per service is 23; every category of every service is 57; the priority
-list is **32**, and measured wall-clock is unchanged — 2.3s against a 2.6s baseline, because
-they all run concurrently. The cap is load-bearing rather than tidiness: PowerApp alone
-declares 11 categories.
-
-**Interleaving, not concatenation.** `interleave` round-robins a service's categories so
-three rows are three kinds of thing. It drops a repeated id within the service (the `all`
-services also publish the individual categories, so the same track can arrive twice; first
-wins, which given the priority order is the more specific one) and drops an item with no id,
-which nothing can be done with. `--per-service` caps what survives — 3 by default, matching
-what the mobile app shows under a service heading.
-
-**A named service asked for several categories takes the merged path**, scoped to that one
-service. Everything that makes several categories readable already lives there, and a second
-implementation beside it would be a second thing to keep in step. One category keeps the
-older, plainer output, which is what a script piping a single search still expects. This
-exists because the picker's drill-in needs it: `search -s Deezer --all-categories
---per-service 0` is how "everything this service found" is asked for.
-
-**Partial is the normal case.** A failure is per (service, category): a service asked for
-five whose third times out keeps the other four. It is named once on stderr however many of
-its categories failed. `total` sums only the categories that replied, and both printed counts
-are *distinct services*, never `plan.len()`, which is searches — for "jazz" that is 23 asked
-against 32 searches. A refreshed token is written once per service, because the second write
-would say the same thing and risks saying it badly.
-
-### The picker, grouped the way the mobile app groups (2026-09-18)
-
-Two surfaces, because that is what the model needs. At the top level a `serviceHeader` row
-per service, its `searchPerService` rows beneath (3, matching the mobile app), and a
-`moreFromService` row when it filled that quota - which is the only signal available that it
-had more, since the cap is applied in the CLI before the widget ever sees the rows. Drilling
-in opens `serviceResultsFor`, a surface of its own rather than a browse frame: a frame holds
-a container path and this holds search results, and "back" from it means the merged list
-rather than one level up a tree.
-
-Three things were wrong on the first pass and are worth keeping written down. The drill-in's
-grouping **buckets** rather than scanning for runs, because the CLI interleaves and
-consecutive runs are one row long - scanning printed a heading above every single result.
-Headings are not selectable, so the arrows step over them (`stepSelection`) and a rebuilt
-list selects `firstActionable` rather than index 0, which is now a heading. And the category
-headings are keyed by **category id**, which is not always the word shown: the id is `tracks`
-and Sonos's heading is "Songs", so keying it as `kindSongs` silently showed the raw id.
-
-The drill-in deliberately does **not** apply the picker's filter box to its rows, unlike
-every other list there: that box still holds the search term, and filtering "garth brooks"
-over his own results would hide "The Dance" for not repeating his name.
-
-## A missing hash is not what keeps a service out of the queue (TIDAL, 2026-09-18)
-
-TIDAL was added in the Sonos desktop app and then linked with `x2rock link tidal`, and the
-pair of facts it produced separates two things this document had been treating as one.
-
-**TIDAL sends no `userIdHashCode`**, exactly as Bandcamp does not, so `match` was never
-attempted and `link` printed the message written for that case. **And its content queues
-anyway**: `play-item` on `track/84777633` went into the queue at position 13 with a real
-duration, no stream fallback, and the player wrote
-
-```
-x-sonos-http:track%2f84777633.flac?sid=174&flags=24616&sn=11
-```
-
-`sn=11` is the household's own TIDAL serial, which the Sonos app created and which
-`accounts --content` now harvests beside Deezer's `sn_10`.
-
-So the registration and the hash are independent:
-
-- **`match` is not the mechanism, only one route to it.** The Sonos app is the other, and it
-  is the one that *creates* a registration. *Superseded the same day - see "`match` works,
-  and the name was literal all along" below.*
-- **A service that cannot send a hash is not locked out of the queue.** Bandcamp streams
-  because nobody has registered it with the household, not because its reply lacks a field.
-  Registered, it would queue like TIDAL.
-
-An earlier reading here had the missing hash *causing* the stream fallback. It does not. It
-causes `match` to be unattemptable, which is a different sentence, and only matters at all
-because `match` is the one route x2rock could in principle drive itself.
-
-**What TIDAL is, practically.** DeviceLink in the descriptor but OAuth2 in fact: its
-`getDeviceLinkCode` answers with a `login.tidal.com/authorize` page,
-`showLinkCode: false`, and the link code smuggled through OAuth's own `state` parameter as
-`<code>//<householdId>` rather than in a parameter of its own the way Deezer does. The
-`regUrl` is byte-identical to what the Sonos app opens, down to
-`client_id=0g8Ygsaw3ZrKCOI9Xlet`, which is the clearest evidence available that `link` is
-doing what a controller does. Four search categories - artists, albums, tracks, playlists -
-and no `all`, so a merged search asks it for tracks, artists and albums. FLAC.
-
-## A category Sonos never standardised (found 2026-09-18, by reading the spec)
-
-`smapi::categories` read `<Category>` elements and nothing else. The presentation map has a
-second kind: **`<CustomCategory stringId="…" mappedId="…"/>`**, a shelf the service invented,
-carrying no `id` at all because there is no canonical name for it. Every one was dropped.
-
-Three of the twenty-four services whose maps were fetched publish one, and they are not
-obscure corners: **Hype Machine** searches *Blogs* (`SBLG`), **Sveriges Radio** searches
-*RadioShows* (`programs`), **PowerApp** has two. None had ever been searched. Both now
-answer - `-c Blogs "indie"` returns blog playlists, `-c RadioShows "jazz"` returns
-*Jazzradion*.
-
-A custom category takes its `stringId` as its id, which is the service's own word rather
-than a canonical one; that is the point, since nothing else knows what a "Blog" is here. It
-is matched case-insensitively like any other, so `-c blogs` works.
-
-**`--all-categories` exists because of this.** A fixed list of the six standard names can
-never reach a custom category, by construction - the widget's drill-in was sending exactly
-such a list and so could not show them. The flag asks for whatever the service publishes,
-and puts that knowledge on the side that reads the presentation map.
-
-Parsing is now also scoped to `PresentationMap type="Search"` where there is one, falling
-back to the whole document otherwise. No service here puts a `Category` in another map, but
-one is free to, and the maps that would - display types, artwork sizes - are about showing
-rather than searching.
-
-**Multiple Library Search.** Sonos documents declaring the same category id twice, `mappedId`
-suffixed `:0` and `:1`, to search a global and a personal library in one category.
-`pick_categories` resolves a name with `find` - first match only - so one library would be
-searched and the other silently ignored.
-
-~~No service in this catalogue does it.~~ **Wrong, corrected 2026-09-22 by fetching all 108
-maps.** Two do, in a notation the spec does not describe: **two separate `<SearchCategories>`
-blocks**, each with its own `stringId`, repeating the canonical ids across them.
-
-| service | catalogue block | library block |
-|---|---|---|
-| Apple Music | `tracks`→`song`, `albums`→`album`, `artists`→`artist`, `playlists`→`playlist`, `all`→`all` | `tracks`→`librarysong`, `albums`→`libraryalbum`, `artists`→`libraryartist`, `playlists`→`libraryplaylist`, `all`→`LibraryAll` |
-| YouTube Music | `tracks`→`SONGS`, `albums`→`ALBUMS`, `artists`→`ARTISTS`, `playlists`→`PLAYLISTS` | `tracks`→`UPLOADED_SONGS`, `albums`→`UPLOADED_ALBUMS`, `artists`→`UPLOADED_ARTISTS`, `playlists`→`LIBRARY_PLAYLISTS` |
-
-Ten categories between them, every one unreachable. **Storytel** has two blocks too
-(`SEARCH_STORYTEL_BOOKSHELF`, `SEARCH_STORYTEL_GLOBAL`) and no repeated id, which shows the
-second block is not itself the problem - the collision is.
-
-Fixed by giving a repeat its `mappedId` as its name, which is the rule `<CustomCategory>`
-already follows: with no canonical word left to use, the service's own word is the honest one.
-So Apple Music's uploads are `-c librarysong` and YouTube Music's are `-c UPLOADED_SONGS`,
-and both now appear under `--all-categories` instead of vanishing. An entry that sends what an
-earlier entry already sends is dropped rather than renamed, so a map that merely repeats itself
-still yields one category.
-
-Honesty about the test: **neither affected service can be searched from this machine** -
-YouTube Music refuses the caller, Apple Music is not linked - so this is verified against their
-real presentation maps and the unit tests built from them, not against a live search. Nine other
-services put a colon inside a `mappedId` (`search:station`, `catalog:tracks:search`); nothing
-here splits on it, and nothing should start.
-
-## Every searchable service was played, and every one works (2026-09-18)
-
-All 24 services `x2rock search` lists were exercised against the Media Room — the **office**
-household, whose linked set is what makes 24 searchable in the first place: find something
-playable, play it, then read `GetPositionInfo` twice four seconds apart and require the
-position to have moved. A command exiting 0 is not evidence.
-
-**All 24 played.** Fourteen from a search for "love" - 80s80s, 90s90s, Audacy, Deezer,
-Global Player, iHeartRadio, myTuner, NRK Radio, Radio France, RauteMusik.FM, Sveriges Radio,
-TIDAL, TuneIn. The other ten needed only a different way in: browsing the root with no term
-covered eight, and Bandcamp, PowerApp and radioPup needed one or two levels of their own
-trees (`tracks`, `/radios/`, `genres` → `genre_AC`).
-
-**The two false failures were in the method, and both are worth remembering**, because they
-are the shape of mistake this survey exists to catch:
-
-1. **Searching with no `--category` uses the service's *first* one.** For Deezer, TIDAL and
-   Bandcamp that is `artists`, every artist is a container, and a harness looking for the
-   first playable hit finds none - reporting the three best services in the household as
-   dead. `--all-categories` is the fix, and this was its first real use.
-2. **"No hit for *love*" is not "service broken".** Nine services simply lack the word;
-   SomaFM names its stations Groove Salad and Synphaera Radio. A term-free browse cleared
-   eight of them at once.
-
-Two known weaknesses were reproduced rather than discovered. Hype Machine failed on its
-first item and played on its second, which is the link rot already measured at roughly one
-in five. Community Radio Plus's first track did not start where a station did - the same
-aggregator-and-station pattern.
-
-**Nothing in the pipeline is broken for any reachable service.** Where one looks empty it is
-the search term or the default category, and both are adjustable - which is what the merged
-search and `--all-categories` were built for.
-
-## An album is queued by a different scheme from a track (built 2026-09-18)
-
-`queue-item` on an album answered `UPnP error 804`, and the hint it printed told people to
-save the thing as a favorite in the Sonos app instead. Both were wrong: the player queues
-albums perfectly well, and 804 was it calling our URI malformed rather than refusing the
-content.
-
-A track is **fetched** - `x-sonos-http:<id>.flac?sid=..&sn=..`. A container is **expanded**:
-the player walks it and adds each track it holds, through a different scheme entirely.
-
-```
-x-rincon-cpcontainer:1004206c<encoded object id>?sid=2&flags=8300&sn=10
-```
-
-with DIDL `<upnp:class>object.container.album.musicAlbum</upnp:class>` and the cdudn naming
-the account. Verified against Deezer: an album expanded into 51 rows, a playlist into 70.
-
-**Not every container can be queued, and the line is what it holds.** An `album` and a
-`playlist` are lists of tracks. An `artist` is a list of albums and playlists, so there is
-nothing to enqueue, and the player says 804 for that too. `container_holds_tracks` names the
-first set and `container_of_containers` the second - deliberately not each other's inverse,
-because a kind neither recognises belongs to the player to refuse rather than to us to guess
-about. An artist now gets a sentence explaining itself rather than the bare UPnP code.
-
-Two things the probing turned up that the convention does not mention. The query string is
-**optional** - a bare `x-rincon-cpcontainer:1004206c<id>` with no `sid`, `flags` or `sn` was
-accepted, the player resolving the service from the cdudn, which is the same finding
-`service_uri` already records about `sn=`. And the `1004206c` prefix was interchangeable with
-`0004206c`. Both are sent as the player writes them, on the principle that matching what a
-controller does costs nothing.
-
-## `match` works, and the name was literal all along (2026-09-18)
-
-`musicServiceAccounts:1 match` succeeded, for the first time in a week of asking, and the
-reason is the word this document kept reading as "register".
-
-**On the office household**, where this whole Deezer arc happened; the home household has no
-Deezer account at all, in the Sonos app or anywhere else (checked 2026-09-18), so the same
-commands there refuse exactly as they should and that is not a regression.
-
-Deezer was unlinked and linked again, through the bar widget's new **Link** row. The link
-flow ran `match` as it always has, and this time it returned `sn_10` - that household's own
-Deezer serial - which `credentials.rs` stored as the account id. `accounts` now prints
-**"registered from here as sn_10"** where every other service still says "no registration
-from this machine".
-
-What was different was not the request. It was that **the household already had a Deezer
-account**, created in the Sonos app the day before. Every earlier attempt - Deezer in the
-morning, iHeartRadio, the bogus-hash probes, the fresh unredeemed link code - was made
-against a household with no account for that service, so there was nothing to match
-*against*, and the refusal was the reasonless `ERROR_COMMAND_FAILED` recorded above.
-
-So the corrected model, which is simpler than the one it replaces:
-
-| | what it does |
-| --- | --- |
-| the Sonos app | **creates** the household registration; still the only thing that can |
-| `match` | **associates** this machine's account with a registration that already exists |
-| `x2rock link` | mints the local token, then calls `match`, which succeeds when the app has been there first |
-
-**Re-tested the same evening on a household with two accounts for one service, and it holds.**
-`match` there answered with a serial neither known nor previously seen, which looked like creation
-until a second link returned the same serial and the Sonos app's account list stayed at two - it was
-an existing registration this file had only ever seen through an older, fossil serial. See "Two
-accounts for one service, one per person".
-
-This is exactly what the comment in `run_link` had recorded as the single case ever seen to
-work - "an account the household already held (Spotify, after the Sonos app added it)" - and
-what README.md has said all along. The mistake was in the sections here that read a
-never-yet-succeeded call as a call that *cannot* succeed.
-
-**The order matters, then**: Sonos app first, then `x2rock link`. Linked first and registered
-after, `match` runs against nothing and the account id stays empty until the next relink. That was
-then run deliberately backwards on a second household, which is where it stops being an inference -
-see "Deezer in reverse: what a household registration is actually for".
-
-TIDAL is the counter-example that keeps the two apart: its household registration exists and
-its content queues, but it sends no `userIdHashCode`, so `match` cannot be attempted at all
-and its account id is still `None`. Registration and association are separate, and a service
-can have the first without the second. Run deliberately as an experiment on the home household
-afterwards, which is where it stops being a curiosity of one service - see "TIDAL, the same way
-round, where the association can never happen".
-
-## Two accounts for one service, one per person (home household, 2026-09-18)
-
-The case the 09-17 slate said nothing here had covered: **one household, one service, two
-accounts, two people**. This household holds two iHeartRadio accounts — the owner's and their
-wife's — and both were playing at once, which is what makes the measurements below possible
-rather than inferred. Firmware 97.1-80312 throughout.
-
-**They coexist, and each room plays under one of them.** Read live from
-`getMetadataStatus`, both rooms playing simultaneously:
-
-| room | whose account | serial | playing |
-|---|---|---|---|
-| Bedroom | wife's | **`sn_24`** | Love Songs Radio |
-| Dining Room | owner's | **`sn_25`** | 98.7 WMZQ |
-
-Meanwhile `accounts --content` harvested `sn_15` for iHeartRadio out of saved favorites — a third
-serial for the same service, with nothing playing under it. That one is a **fossil**: an older
-registration of the owner's account that saved content still names, whose live serial is `sn_25`.
-So the harvest mixes dead serials among the live ones exactly as recorded, and on a household with
-two accounts that is no longer a curiosity - it is what made the live pair hard to read.
-
-**The two Sonos apps disagree about what is there.** The iPhone app lists the two accounts. The
-Android app listed **one** - until the owner opened *Add iHeartRadio → Add a new account*, reached
-the "I have an account" screen and backed out, after which it listed both and offered **Set
-Primary**. Nothing was added; entering the flow is what refreshed the list. Neither app ever showed
-a third.
-
-Two things follow, and the second is the uncomfortable one:
-
-- The app lists *accounts* while this file reads *registrations*. Not the same count, which is
-  worth holding on to before treating a serial as an identity.
-- **An app screen is not a census either.** This file has leaned on one for exactly that - "How
-  good the serial proxy actually is" measured the content harvest against a screenshot of the
-  Windows controller's Service Settings and scored it "three of eight". That comparison is only as
-  good as the controller's own list, and one controller here under-reported until it was nudged. It
-  stays the best ground truth available; it is not an oracle, and a household that looks like it
-  holds fewer accounts than the serials suggest may simply not have been asked the right way.
-
-### `match` answered with a serial we had not seen, and it was one of the two
-
-`x2rock link iHeartRadio` completed against this household and `match` answered **`sn_25`** - not
-`sn_15`, not `sn_24`, and `sn_24 + 1`, exactly where the allocation model puts a *new*
-registration. For an hour that looked like `match` creating one, against the Deezer finding of the
-same morning.
-
-It was not. Two checks settled it:
-
-- **A second link returned `sn_25` again**, not `sn_26`. So nothing is minted per link.
-- **The Sonos app still lists two accounts**, with no entry named for this machine's nickname
-  (`x2rock on x2lap`), which a registration created for us would have carried.
-
-So `sn_25` *is* the owner's account, and the puzzle was an artifact of what had been read. Before
-the link this file had only ever seen that account as **`sn_15`, a fossil in saved favorites** - the
-Dining Room was idle when the serials were harvested, so its live registration was never read. The
-household's live pair is `sn_24` (wife) and `sn_25` (owner); `sn_15` is an old registration of the
-owner's that content still names, exactly the staleness "How good the serial proxy actually is"
-measures.
-
-**`match` associates and does not create**, as "`match` works, and the name was literal all along"
-concluded. Worth keeping as a lesson about this file's favourite mistake: a serial nobody has seen
-is not a serial that did not exist, and the harvest is the reason - it shows an account only once
-that account has saved or queued something.
-
-### An artist-radio track will not queue, and the account has nothing to do with it
-
-This started as the opposite claim, and the experiment that was supposed to confirm it refuted it
-instead. Written up in that order, because the wrong version is the one a reader would otherwise
-reinvent.
-
-**What was seen first.** `browse -s iHeartRadio artist_radio.44512 --play 1` queued a track, the
-room never started, and `play` named it **`ERROR_CANT_REACH_SERVER`**. The id had come from a
-search made with *this machine's* token (`sn_25`), while `getMetadataStatus` showed the player
-resolving the queued item as **`sn_24`** - the other person's account. Two accounts, an id minted
-under one and resolved under the other, and a refusal: it read as a cross-account failure, and the
-stream path playing the same id through our own token seemed to confirm it.
-
-**Three controls killed that reading.**
-
-- **Naming the account changes nothing.** The same id was enqueued twice by hand over
-  `raw upnp AVTransport AddURIToQueue`, once with `sn=25` and once with `sn=24`. *Both* were
-  accepted, both resolved their real title from the service, and **both refused to play** with the
-  identical error. So `sn=` is not the lever here, exactly as `bookmarks::service_uri` has always
-  said, and the account is not what the failure turns on.
-- **A different content type queues and plays cross-account.** An iHeartRadio **podcast episode**
-  (`podcast_show.96972136.101839702`) enqueued through the ordinary `play-item` path and played -
-  position advancing 6.7s → 12.4s - while resolving as `sn_24`, still not our account. Same
-  household, same two accounts, same path, different kind of id.
-- **The failing kind is per-listener.** `artist_radio_track.…` ids are minted for a listening
-  session rather than being catalogue items, which is why `getMediaURI` will serve one to the token
-  that asked and the queue will not serve it at all.
-
-**So the rule is about content, not identity:** iHeartRadio's artist-radio tracks are stream-only,
-and x2rock already does the right thing by falling back to the session (`play-item` on one plays;
-`browse --play` on one does not, because it reaches the queue first). Live stations are streams
-anyway; podcasts and the household's own favorites queue normally.
-
-**And a favorite carries its own account, which is the way round all of this.** The owner saved the
-*wife's* personal station - `jamielhoelscher Favorites Radio`, a `custom_radio.favorites-…` program
-belonging to `sn_24` - as a Sonos favorite, and `x2rock favorite 89` played it in a third room with
-position advancing. `getMetadataStatus` reported **`sn_24`**: not the primary (`sn_25` by then), not
-this machine's token (`sn_25`), but the account the favorite was saved from. `loadFavorite` hands
-the player an id and the player resolves everything, account included, from what the favorite
-stores. So on a household where several people's personal content matters, **saving it as a favorite
-is the reliable route** - it is the one path that neither depends on which token searched nor on
-whichever serial the enqueue path prefers.
-
-**And Set Primary does not govern the enqueue path.** The owner set their own account primary in
-the Android app; the app's own playback followed immediately (a station started there resolved
-`sn_25`), while every enqueue from x2rock kept resolving `sn_24` - four minutes later and again
-after that. `sn_24` is the lower of the two live serials, which fits "oldest registration wins"
-better than "primary wins", but one household cannot separate those. So "Choosing between several
-accounts is an open question" is **still open** for the enqueue path; what is settled is that the
-app's chooser and the player's are not the same chooser.
-
-### What linking did *not* do
-
-An earlier draft of this section warned that linking had changed the household - the owner's room
-played under `sn_25` afterwards, where its saved content named `sn_15`. That reading is withdrawn:
-`sn_25` was the owner's live registration before the link too, and the link only associated this
-machine's token with it. A second link changed nothing either, so **linking is idempotent from the
-household's side** and `unlink`'s "local only" wording is accurate. What a link does reach is this
-machine's `credentials.json`: relinking replaced the stored token and moved its `linked` stamp.
-
-## Deezer in reverse: what a household registration is actually for (home household, 2026-09-18)
-
-Everything above about registrations was learned in the order a person would naturally do it - the
-Sonos app first, then `x2rock link` - which conflates two variables, because by the time anything
-is measured both have moved. So this was run **backwards on purpose**, on a household that had no
-Deezer account in any form, with each step measured before the next was allowed to happen.
-
-| # | what changed | `match` | search / browse | `play-item` on `tr-flac:74456737` |
-|---|---|---|---|---|
-| 1 | `x2rock link Deezer`, no household account | refused, bare `ERROR_COMMAND_FAILED` | **work** | - |
-| 2 | nothing | - | - | `AddURIToQueue` **UPnP 800**, stream fallback **stalls** |
-| 3 | Deezer added in the **iPhone app**, nothing else | not re-run | unchanged | **queues and plays**, resolved `sn_26` |
-| 4 | `x2rock link Deezer` again | **`sn_26`** | unchanged | unchanged |
-
-**Step 3 is the whole point.** The stored token was byte-identical across steps 2 and 3 - same
-`authToken`, same `linked` stamp, `account_id` still `null` - and the room went from a hard refusal
-to a clean queued play with position advancing 8.6s → 18.4s. Nothing this machine holds had moved;
-only the household's registration had appeared. **The registration is what playback needs, and the
-local token is not part of it.**
-
-Three things fall out of that, each worth more than the claim it replaces:
-
-- **`account_id` is provenance, not a capability.** Playback worked in step 3 while it was still
-  `null`, and step 4 filled it in without changing a thing about playback.
-- **A stream fallback cannot stand in for a registration** - for this service. Deezer's
-  `getMediaURI` answered, the room took the URL, and it never got past about a second: PLAYING and
-  BUFFERING alternating with the position resetting to zero. So Deezer sits with Spotify and Radio
-  Paradise rather than with Amazon Music, whose presigned CloudFront URL plays unregistered. The
-  fallback is a bonus that some services give and others do not, never a substitute.
-- **`match` is a lookup, reproduced on a second household.** It refused when there was nothing to
-  find and returned `sn_26` the moment there was, without the request changing. The office Deezer
-  result was one household; this is the control.
-
-One practical note for anyone reading this to decide what to do: the reverse order costs nothing
-permanent. Linking first simply leaves `account_id` empty until a later relink picks it up, and
-search and browse work throughout - which is exactly what a household wanting search but not
-playback should do.
-
-### TIDAL, the same way round, where the association can never happen (2026-09-19)
-
-Deezer left one objection standing: its `account_id` did fill in at the end, so someone could argue
-the association mattered after all and step 3 merely ran ahead of it. **TIDAL closes that**, because
-TIDAL sends no `userIdHashCode` - `match` is not refused there, it is never attempted - so
-`account_id` is `null` before, during and permanently after.
-
-| # | what changed | `match` | `play-item` on `track/36313419` |
-|---|---|---|---|
-| 1 | `x2rock link TIDAL`, no household account | **skipped**, no hash to attempt it with | - |
-| 2 | nothing | - | `AddURIToQueue` **UPnP 800**, stream fallback **stalls** at 0ms |
-| 3 | TIDAL added in the Sonos app, nothing else | still impossible | **queues and plays**, `sn_27`, 8.2s → 17.6s |
-
-`account_id` read `null` with the same `linked` stamp across every row, including the one where the
-music started. So the local token buys search and browse and **nothing whatsoever** of playback,
-which is as cleanly as this can be shown: no association existed to take the credit.
-
-It also answers the older note that kept TIDAL as the counter-example "whose registration exists and
-whose content queues, but whose account id is still `None`" - that is not a curiosity of the office
-household, it is what every no-hash service does everywhere.
-
-**And the queue behaves normally on it**, which is the first time the whole cycle has been run on
-ordinary tracks - Deezer's step 3 above played one, but only one, and before that the cycle had only
-been exercised on iHeartRadio podcast episodes. With one track playing,
-two more were queued without disturbing it, `play 3` jumped to the third, and removing track 1
-renumbered the playing track 3 → 2 with playback continuing uninterrupted (12.5s and climbing).
-`queue clear` emptied it and left the room `IDLE`. Nothing about the queue is service-specific once
-the household holds the account.
-
-**Run again on Deezer to check that** (home household, Dining Room, 2026-09-19): `tr-flac:2711778`
-queued into an empty queue, `play 1` started it (`position_ms` 31089 of 562000, URI carrying
-`sn=26`), a second track queued behind it, `next` moved to it cleanly, and removing track 1
-underneath renumbered the playing track 2 → 1 with playback never breaking. Identical to TIDAL on a
-different service's catalogue, which is what "not service-specific" has to mean. One difference
-worth knowing about: `queue clear` left the room `PAUSED` with `in_use` still `true` rather than
-`IDLE`, because it was paused before the clear - emptying the queue does not take the room off
-`x-rincon-queue:`, so an empty queue can still be the group's source.
-
-**The stream fallback was 1-for-4** *as x2rock played it then*. Amazon Music plays unregistered on
-a presigned CloudFront URL; Spotify, Radio Paradise, Deezer and TIDAL all failed, TIDAL exactly as
-Deezer did - the room takes the URL, reports `PLAYING`, and never passes 0ms. **The reason turned
-out to be this client's, not the services'**, and it is now fixed: Deezer and TIDAL play. See the
-two sections below. Radio Paradise remains a real failure, for its own reason - it implements no
-`getMediaURI` at all - and Spotify has not been re-tested since.
-
-### The fallback stalls because we call every URL a station (2026-09-19)
-
-The line above says "whatever the reason, the fallback does not play". The reason is now known, and
-it is ours. Two things were measured that had never been looked at directly:
-
-**1. What `getMediaURI` actually returns.** The long-standing open question - "TIDAL is the only
-route to the one architectural unknown left: whether `getMediaURI` ever returns `httpHeaders` or a
-`contentKey` that `loadStreamUrl` cannot carry" - is **answered: no.** TIDAL's reply, read raw off
-the wire rather than through `media_uri()`, which keeps only `getMediaURIResult` and discards any
-sibling:
-
-```
-<getMediaURIResult>http://lgf.audio.tidal.com/mediatracks/CAEaKwgDEic3NWM4…/0.flac?token=1789868645~…</getMediaURIResult>
-```
-
-One element. No `httpHeaders`, no `contentKey`, no `positionInformation`. Deezer's is the same
-shape - a `cdnt-stream.dzcdn.net` `.flac` with an `hdnea=` signature. And the URLs are not merely
-well-formed: fetched from this laptop with no credentials of any kind, TIDAL's answers `206 Partial
-Content`, `audio/flac`, `Accept-Ranges: bytes`, `Content-Range: bytes 0-1048575/52299553`. **A
-52 MB seekable FLAC file, served to anyone holding the signed URL.** So the protected-stream
-barrier this document has carried since the service survey is not there for these two services, and
-the guess it rested on can be retired.
-
-**2. Why a perfectly good URL produced silence.** `stream_url()` hands every URL to
-`playbackSession:1 loadStreamUrl` with `stationMetadata` of `{"type": "station"}` - which tells the
-player this is a live broadcast. It is not; it is a finite file with a duration and a seek table.
-Handed to the *same room, seconds apart*, the same Deezer URL behaves in two different ways:
-
-| how it was handed over | result |
-|---|---|
-| `SetAVTransportURI` + `Play` (plain UPnP, no metadata) | `TrackDuration 0:09:22`, `RelTime` 0:00 → 0:05 → 0:11 - **it plays** |
-| `x2rock play-url` (`loadStreamUrl`, station-shaped) | `PLAYING`, `RelTime` **0:00, 0:00, 0:00** - the documented stall |
-
-TIDAL reproduced it exactly: `track/4915514` over `SetAVTransportURI` reported `TrackDuration
-0:09:04` with `RelTime` advancing 0:44 → 0:49 → 0:54. Volume 0 in Dining Room throughout; the
-household heard none of it.
-
-**What this changes:**
-
-- **The scoreboard was measuring the wrong thing.** "Deezer and TIDAL cannot play unregistered" is
-  wrong as stated. Their content plays unregistered, from a URL our own token bought, through a
-  transport x2rock was not using.
-- **Amazon Music was never the exception it looked like.** Its fallback works because a presigned
-  `.m3u8` *is* station-shaped - an HLS playlist is exactly the continuous thing `loadStreamUrl`
-  expects. It agreed with the transport we chose; Deezer and TIDAL disagreed with it. Radio
-  Paradise stays a genuine failure for its own reason: it implements no `getMediaURI` at all.
-- **Everything the registration sections conclude still stands, unchanged.** Those rest on the
-  *enqueue* path (`AddURIToQueue` → UPnP 800 without a registration, a clean queued play with one),
-  which this does not touch. What moves is only the consolation prize: the fallback is a poorer
-  stand-in than it needs to be, not because services withhold anything but because we ask the
-  player for the wrong kind of playback.
-
-### A queue that accepts a station and then will not play it (2026-09-19)
-
-Found while regression-testing the section above, and older than it: `play-item` on an iHeartRadio
-`live_stations.*` id failed with `playback:1 play failed: ERROR_PLAYBACK_FAILED`, leaving the room
-idle. The same call failed identically on the pre-change binary, so it was nothing to do with the
-fallback work.
-
-**The fallback to a stream session never fired, because nothing refused.** `play_item` enqueues
-first and treats a refusal as "this is not queue material" - which is exactly right for the
-services that refuse. `AddURIToQueue` *accepts* an iHeartRadio live station: asked directly,
-`queue-item` put three of them in Dining Room's queue, each showing "KOST 103.5" as a proper row.
-The player only objects at the play, by which time the code had stopped looking for an objection.
-Hence a hard error on an item the stream path plays perfectly.
-
-So the refusal that earns the fallback is now the whole sequence's - add, point the group at the
-queue, seek, play - rather than `AddURIToQueue`'s alone. A failure after the add carries the code
-`not_queue_material`, which `is_refusal` accepts alongside a UPnP fault, **and the row is taken
-back out of the queue on the way past.** Leaving it would reproduce the mess already on record from
-the TIDAL account removal - dead rows to be cleared by hand - except one per attempt.
-
-The two events are worth telling apart in the message, since they now share a word:
-
-```
-x2rock: "KOST 103.5" went in the queue and then would not play (...); streaming it
-x2rock: "Radio Paradise" would not go in the queue (UPnP 800 ...); streaming it
-```
-
-Verified on hardware, Dining Room at volume 0: the station falls back and plays with position
-advancing, the queue is back to 0 rows afterwards, `--kind stream` still skips the queue entirely,
-and an ordinary Deezer track still enqueues and plays at queue position 1. `play-item --help` had
-promised this behaviour all along - "Omitted, the queue is tried first and a refusal falls back to
-streaming" - so this is the code catching up with its own documentation.
-
-### Fixed, and what the fix had to learn first (2026-09-19)
-
-**`loadStreamUrl` has no non-station `type`.** That was the cheap hope and it is dead: probed
-through x2rock's own client with the metadata type set to `"track"`, and again with the field
-omitted entirely, the same Deezer file stalled exactly as `"station"` does - `PLAYING`, `RelTime`
-0:00, `TrackDuration 0:00:00`. The command means *stream* in the strict sense and no field softens
-it. So the fallback now sends a finite file to `SetAVTransportURI` with a DIDL-Lite
-`object.item.audioItem.musicTrack` (`Upnp::play_url_as_track`), and a live stream keeps the
-playback session it has always had.
-
-**Which a URL is gets asked, not guessed** - and the first rule written for that was wrong, which
-hardware caught inside a minute. The rule was "a one-byte range request; a `206` with a
-`Content-Range` is a file". **Icecast honours range requests on live streams**, answering
-`206 Content-Range: bytes 0-0/1073741823` - 2³⁰-1 as a stand-in for "endless". NPR's stream
-therefore took the file path. It *played*, which is the part that makes this worth writing down:
-the bug was invisible in the only place anyone would look. What gave it away was
-`CurrentURI` - `http://npr-ice.streamguys1.com/live.mp3` where the session path writes
-`x-rincon-mp3radio://…` - and the cost was the room's queue, replaced by a radio station that had
-never needed to touch it.
-
-So the test is now three things agreeing, because Icecast fails each of them independently:
-
-| signal | Deezer / TIDAL | Icecast live |
-|---|---|---|
-| `icy-*` headers | absent | `icy-br`, `icy-name` |
-| `ETag` / `Last-Modified` | both (TIDAL's reads 2017) | neither |
-| length | 55933354 / 52299553 | `1073741823`, the sentinel |
-
-A playlist `Content-Type` (`mpegurl`, `dash+xml`, `x-scpls`) stays on the stream path whatever else
-it says, which is what keeps **Amazon Music's presigned HLS fallback working** - it is cacheable and
-finite and belongs in a session. Anything unclear - a non-2xx, a redirect (iHeartRadio answers
-`302`), an unreachable host, a timeout - stays on the stream path too: the wrong guess there costs
-the stall that was already the status quo, while the wrong guess the other way costs a queue.
-`shaped_like_file` is a pure function over the response head, unit-tested against the real header
-blocks from all four.
-
-Verified on hardware afterwards, Dining Room at volume 0:
-
-| played | transport taken | result |
-|---|---|---|
-| Deezer FLAC via `play-url` | `SetAVTransportURI` (URL is `CurrentURI`) | `TrackDuration 0:09:22`, position advancing |
-| NPR 24 Hour Program Stream | session (`x-rincon-mp3radio://`) | plays, queue untouched |
-| iHeartRadio favourite | unchanged | plays |
-
-What it costs, stated plainly because `play-url --help` now says it too: **a file replaces what the
-room was playing.** A session plays alongside the queue; the transport does not. That is the worse
-of two behaviours and better than the only alternative, which was silence. One loose end left
-**fixed 2026-09-22**: `now --json` used to report `duration_ms: null` on a file played this way,
-because the LAN API's metadata for a transport-set URI carries none. Waiting does not help - measured
-against a Deezer FLAC, the metadata reported no duration for the whole track while `GetPositionInfo`
-said `0:09:22` throughout. `now` therefore makes one extra UPnP call, but **only when there is a gap
-to fill**: the Control API gave no duration *and* the room is PLAYING or PAUSED. Ordinary queue
-playback already carries a duration and costs nothing extra (measured: `now --json` still answers in
-0.44s), and a live stream, which genuinely has no duration, correctly stays null.
-
-`status` deliberately does **not** do this. It answers for every room in one call, and a conditional
-per-room UPnP request would turn the household snapshot into N+1 of them - so a file played through
-the fallback shows its duration in `now` and `null` in `status`. That asymmetry is the price of
-keeping the sweep cheap, and is the one place the two JSON shapes disagree.
-
-**Why Amazon might be the odd one out.** The household's reading, on the evidence of what that
-account is: it is a Prime membership, not Amazon Music Unlimited, and a free tier has a reason to
-hand out tracks that play but cannot be steered - a taste of the catalogue that makes the paid tier
-look like the thing that gives you control. That is a motive, not a measurement, and it is not
-needed to use any of the above. But it fits what was already recorded independently - the
-station-shaped browsing, the `match` that failed, and now a self-authorizing stream URL that plays
-for a caller the household never registered - and it predicts something testable: on an Unlimited
-account, the station shape and the freely-playing stream URL should both change. Worth re-running
-if that subscription ever changes.
-
-## A link does not always buy search: Saavn, Classical Archives and Qobuz (2026-09-21/22)
-
-**A link does not always buy search, either.** That was stated as a rule everywhere in this project
-until Saavn broke it on 2026-09-21: the device link completes, a real token is stored, and then
-*every* content call is refused with `Client.LoginInvalid` / `User not Pro` over HTTP 500 - all four
-search categories and `getMetadata root` alike. The refusal is at account level, so there is no
-station or free shelf to fall back to. A free JioSaavn account therefore yields a valid credential
-and nothing whatsoever to spend it on. (It also retro-explains the older note that Saavn answered
-`getDeviceAuthToken` with an immediate HTTP 500 "rather than a pending fault": 500 is simply how
-this service says things. The deliberate re-test linked cleanly, polling ~75s.)
-
-**And the same account cannot register with the household either - which is what proves the gate is
-the service's, not this client's.** Adding Saavn through the *official Sonos app* the same evening
-reached "Sonos Connected!" and then stopped: *"Before you can use JioSaavn on Sonos, you must
-download the JioSaavn app and sign up as a JioSaavn Pro user."* The household registry afterwards
-lists Deezer, iHeartRadio ×2, Sonos Radio, TIDAL and YouTube Music - **no Saavn** - and no saved
-content carries `sid=164`. So Sonos's own first-party client, holding whatever credentials it
-holds, gets no further than x2rock did.
-
-That is worth stating because it is the opposite of the YouTube Music case, and the two are easy to
-confuse. YouTube Music **discriminates by caller**: its endpoint answers Sonos and refuses us.
-Saavn **discriminates by subscription tier**: it refuses everyone equally, the Sonos app included.
-Only the first is a wall this project could ever have been on the wrong side of.
-
-It also adds a third place a service can say no, after "refuses the token" and "refuses the
-content": **refusing to be registered at all.** Every other service tested either completed a
-household registration (Deezer, TIDAL, iHeartRadio) or was never asked; Saavn is the first to
-accept an authorization and then decline to provision one.
-
-### With Pro, the same day: everything works, and two findings fall out
-
-The account was upgraded to JioSaavn Pro and connected again through the Sonos Android app - which
-landed the registration on the **office** household rather than home, a detail worth keeping
-because it is what made the next part legible. Relinking from the laptop then printed:
-
-> Linked Saavn. … **The household knows this account as `sn_13`.**
-
-**`match` succeeded**, which is the third independent confirmation that it *associates* with a
-registration the Sonos app made and never creates one - after Spotify (`sn_22`) and Deezer
-(`sn_26`). Search and browse worked immediately; the `User not Pro` refusal is purely the
-subscription tier, and nothing about the token or the client changed between the two states.
-
-Playback is ordinary. A track queued behind what was playing and a podcast episode queued after it,
-both on `x-sonos-http:` with `flags=8232` and `sid=164&sn=13` - the same shape YouTube Music and
-Mixcloud use. The episode was played to be sure rather than assumed: *"Shaan"*, 8.6s and climbing
-against a 28:36 duration.
-
-**Podcasts are browse-only, and search cannot see them.** Saavn declares four search categories -
-tracks, albums, playlists, artists - and `--all-categories` returns nothing else. Its shows live
-behind `getMetadata` alone, four levels down:
-
-```
-root → TOPSHOWS:hindi,tamil,telugu → SHOWS:62 ("Talking Music") → SEASONS:1<>62 → EPISODE:pbp1vvHK
-```
-
-This is the clearest case yet for the rule already stated elsewhere - **`browse` reaches more of a
-service than `search` does** - because here an entire content type is invisible to one and routine
-to the other. An agent that only searches would conclude Saavn has no podcasts.
-
-A smaller note on encoding, since Saavn was linked partly to test it: a **Devanagari query** round
--trips correctly (`कैसरिया` → `Kesariya`), so the term reaches the service intact. The catalogue
-answers in romanised Latin, though, so the harder half - non-Latin *titles* through DIDL, the queue
-and the widget - is still untested. Saavn was the cheap candidate for it and does not deliver it.
-
-### A curated shelf is not the addressable set (Saavn podcasts, 2026-09-21)
-
-`Top Shows` holds exactly **92** shows - the whole list, fetched with `--count 100`. A podcast the
-household wanted, *Kidsstoppress Podcast*, was not among them, and the first conclusion drawn here
-was that such a show is simply unreachable. **That was wrong**, and the way it was disproved is
-worth keeping.
-
-JioSaavn's own web page for an episode carries a numeric id in its HTML - `"id":"182716"` - in the
-same id space SMAPI uses (`SHOWS:62`, `SHOWS:175427`). Handing it straight to `getMetadata`:
-
-```
-SHOWS:182716 → SEASONS:1<>182716 … SEASONS:5<>182716   "Kidsstoppress Podcast - Your Parenting Happy Hour"
-SEASONS:5<>182716 → EPISODE:pWv0JyH5   "EP 527: Do You Have A Storage Or Burner Physique ?"
-```
-
-Queued and played: 2:23, matching the web page exactly. So the id space is open and only the
-*directory* is limited. **`Top Shows` is a curated shelf, not the set of addressable shows** - a
-distinction worth carrying to every other service, because "not in the browse tree" has been read
-as "not reachable" more than once in this document.
-
-Confirmed from the other side by a screenshot of jiosaavn.com's own Podcasts page: of eight shows
-trending there, exactly **one** (*Shri Krishna Amritvani*) appears in SMAPI's 92. The two are not
-the same list abridged - they are different curations over one catalogue.
-
-**Web ids transfer for shows and not for episodes**, which is the asymmetry nobody would guess:
-
-| id | source | queued | played |
-|---|---|---|---|
-| `EPISODE:pWv0JyH5` | SMAPI browse | with title and duration | **plays** |
-| `EPISODE:g2yVMb0HtgU_` | the jiosaavn.com URL | accepted, **empty title, no duration** | **skipped**, the player wrapped to position 1 |
-| `SHOWS:182716` | the jiosaavn.com page's HTML | - | browses perfectly |
-
-Two lessons in that table. **`AddURIToQueue` validates nothing** - it took a web token and produced
-a row that could never play, the same trap iHeartRadio's live stations set from a different angle;
-a queue row with an empty title is the tell. And **`getMetadata` does validate**: a made-up show id
-was refused cleanly with `Item not found (SEASONS:g2yVMb0HtgU_)`, which also leaks that the server
-rewrites `SHOWS:x` into `SEASONS:x` internally.
-
-Podcasts remain **unsearchable**: Saavn declares tracks, albums, playlists and artists, and
-`--all-categories` finds nothing else. Its playlists are songs only - even one named "Suno Toh Sahi
-Podcast Playlist" is 18 `TRACK_NEW:` rows. So an agent that only searches concludes Saavn has no
-podcasts at all, and the Sonos app, consuming the same tree, sees the same 92.
-
-### Four favorite shapes from one service, and a new escape (2026-09-21)
-
-Favorites saved from the Sonos app for radio, album, playlist and track, read off `FV:2`, then each
-played to confirm - all four work:
-
-| favorite | URI | flags | result |
-|---|---|---|---|
-| Happy Radio (`program`) | `x-sonosapi-radio:CHANNEL_STATION%3A76%3C%3E…` | 28780 | plays, no queue position |
-| Irumudi (`album`) | `x-rincon-cpcontainer:1004206cALBUM%3A79488223` | 8300 | expands into the queue |
-| Top Kuthu (`playlist`) | `x-rincon-cpcontainer:1006706cplaylist%3A109815423` | 28780 | expands into the queue |
-| Mallepoola Pallaki (`track`) | `x-sonos-http:TRACK_NEW%3A_Op_JFcG.mp4` | 8232 | one queue row |
-
-**The radio id embeds JSON, and the colons inside it are written `**`:**
-
-```
-CHANNEL_STATION%3A76%3C%3EHappy%20Radio%3C%3E%7B%22mood%22**%5B%22Happy%22%5D%7D%3C%3Ehindi%2Ctamil%2Ctelugu
-                                              {   "mood"  **  [ "Happy" ]  }
-```
-
-Every colon this document has met before was percent-encoded (the Mixcloud `cloudcast:` fix turned
-on exactly that). Here the *separator* colons are `%3A` and the one inside the JSON payload is
-`**`, while `<>` separates fields as `%3C%3E`. Worth knowing before anyone tries to construct one.
-
-Also note the container prefixes: `1004206c` for an album and `1006706c` for a playlist, where
-YouTube Music writes `1004004c` and `1006004c`. **That prefix is per-service**, not a universal
-type code - consistent with what "Object ids are the service's own" already says.
-
-### Non-Latin metadata survives the whole path (verified 2026-09-21)
-
-The question Saavn was linked to answer, finally testable because its `Top Shows` list includes
-Devanagari-titled shows (`दिनभर: पूरा दिन,पूरी ख़बर (Dinbhar)`, `फिल्मी खबर्ची`, `गोतावळा`,
-`दास्तान खौफ की`) even though its music catalogue answers in romanised Latin.
-
-`EPISODE:YmU1NWM2` from that show, queued and played:
-
-- **browse** returned `दिन भर` intact,
-- the **queue row** read back `{"title":"दिन भर","album":"दिनभर: पूरा दिन,पूरी ख़बर (Dinbhar)"}` - so
-  it survived being written into DIDL-Lite and parsed out again,
-- **playback** reported the same, position advancing.
-
-Nothing mangled it at any stage, combining marks included (`ख़बर`). A Devanagari *query* also
-resolves correctly (`कैसरिया` → `Kesariya`, `मुझे कौन पूछता था` → the bhajan). So the encoding path -
-query in, metadata out, DIDL round trip - is clean, and the earlier worry that it was merely
-untested rather than working can be retired.
-
-### Classical Archives is a catch-22, not a refusal (2026-09-21)
-
-Picked as the cheapest remaining test of a *metadata shape* rather than a service - classical
-repertoire is work/movement/composer/performer, which is the structure most likely to break code
-that assumes artist/album/track. It cannot be reached at all, and the reason is worth separating
-from every other "no" in this document.
-
-**Both link methods are stubbed.** `getDeviceLinkCode` answers HTTP 500 with
-`s:Server.ServiceUnknownError` and a faultstring of exactly `str3` - reproducing the 2026-09-10
-sweep to the character. Asking `getAppLink` instead, by hand, gets **the identical `str3` fault**,
-so there is no second door. `str3` reads like an untranslated string key or a placeholder left in.
-
-**But the content side is alive and authenticating**, which is what makes this a catch-22 rather
-than a dead service. Walking the envelope in by hand, it validates field by field:
-
-| sent | answer |
-|---|---|
-| no `loginToken` | `path not found: /Envelope/Header/credentials/loginToken/token` |
-| token + key, no household | `path not found: /Envelope/Header/credentials/loginToken/householdId` |
-| complete envelope, bogus token | **`s:Client.AuthTokenExpired`** - a proper SMAPI fault |
-
-So `getMetadata` is implemented and checks credentials; the only thing missing is any way to mint
-one. Content requires a token, and both documented flows for obtaining a token answer with a stub.
-
-Two things fall out of it:
-
-- **A broken service is not a closed one, and the difference is visible.** Murfie is a zombie whose
-  company shut down; YouTube Music refuses *this caller* while serving Sonos; Saavn refuses a free
-  *tier* and says so plainly. Classical Archives is alive, implemented, and broken in one place -
-  and nobody outside can route around it, the Sonos app included, since the app has the same two
-  methods to choose from.
-- It corroborates a comment in `app_link_code`: the note that omitting the `loginToken` block reads
-  to Plex as an *expired* credential rather than a missing one. The same shape shows here from the
-  other end - a complete block with nonsense inside it is what produces `AuthTokenExpired`, while
-  an absent one produces a structural complaint.
-
-The work/movement metadata question therefore stays open, and the cheap candidates for it are now
-exhausted: every remaining service with a catalogue shaped unlike pop (Qobuz's classical tier,
-Audible's chaptered long-form, SiriusXM's linear channels) costs a subscription.
-
-### Qobuz: a working login page over a token exchange that never honours it (2026-09-22)
-
-Subscribed to on the strength of the free `getAppLink` probe above, which Qobuz passes: it answers
-with a real page, `https://www.qobuz.com/signin/external?linkToken=…`, and a `linkDeviceId`. The
-browser step then genuinely succeeds - Qobuz's own page reports **"You are successfully signed in
-to Qobuz"**. And `getDeviceAuthToken` refuses anyway:
-
-```
-<faultcode>ns1:Client.NOT_LINKED_FAILURE</faultcode>
-<faultstring>Link Code invalid...</faultstring>
-<ns1:SonosError>6</ns1:SonosError>  <ns1:ExceptionInfo>Retry link process..</ns1:ExceptionInfo>
-```
-
-**The error carries no information at all**, which is what made this take several passes to pin
-down: a deliberately fake code (`ZZZZZZZZ`) produces byte-identical output. Unapproved, approved
-and nonsense are one answer.
-
-So each variable was eliminated in turn, and the refusal never moved:
-
-| what was true | answer |
-|---|---|
-| fresh code, not yet approved | `NOT_LINKED_FAILURE` |
-| approved in the browser | `NOT_LINKED_FAILURE` |
-| garbage code, never minted | `NOT_LINKED_FAILURE` |
-| **paid trial subscription live** | `NOT_LINKED_FAILURE` |
-| **household registered via the Sonos Android app** (`sn_14`) | `NOT_LINKED_FAILURE` |
-| **minted and polled against the right household** | `NOT_LINKED_FAILURE` |
-| browser reports "successfully signed in" | `NOT_LINKED_FAILURE` |
-| **first poll deferred 128s**, honouring the declared `PollInterval="120"` | `NOT_LINKED_FAILURE` |
-| **`deviceId` + `linkDeviceId` sent as the speaker's `R_TrialZPSerial`** (2026-09-22) | `NOT_LINKED_FAILURE` |
-| **polled seconds after minting**, before any browser step (2026-09-22) | `NOT_LINKED_FAILURE` - the code is invalid from birth |
-
-Three of those were real mistakes on this side rather than tests: the first probes carried the
-*home* household id while the laptop sat on the office household; the subscription state was assumed
-rather than confirmed; and every poll until the last fired ~3s after minting, against a service
-whose descriptor asks for 120. Each was corrected in turn and none was the cause.
-
-**The poll-interval attempt deserves its own note, because the hypothesis was good and wrong.**
-Qobuz's descriptor reads `<Policy Auth="AppLink" PollInterval="120"/>`, and `"Retry link process.."`
-is exactly what a service would say if a premature poll had burnt the code - which would also have
-explained why an approved code looks identical to garbage, the code having been killed before the
-browser step. It is not that: a code minted, left alone, approved, and polled once at 128 seconds
-refuses the same way.
-
-**And the "gap" it looked like exposing is not one - honouring `PollInterval` would break every
-working link.** x2rock does not read the field (it appears in this codebase only inside test
-fixtures), which looked like an oversight worth fixing until the household's own descriptors were
-read. Every service linked successfully here declares a *non-zero* interval, and every one was
-polled at 3s regardless:
-
-| service | declares | linked at 3s polling? |
-|---|---|---|
-| iHeartRadio | **3600** | yes |
-| Deezer | 300 | yes |
-| Saavn | 120 | yes, in ~75s |
-| TIDAL, Bandcamp | 60 | yes |
-| Mixcloud | 30 | yes |
-
-Honouring those literally would mean polling iHeartRadio **once an hour** and Deezer every five
-minutes - no device link could ever complete. Saavn's took about 75 seconds of polling and would
-not have survived a first poll deferred to 120s.
-
-So `PollInterval` is not a rate limit on the link flow, and no service enforces it as one. It is
-the interval at which a *player* should re-ask a service whether its content has changed - the
-`getLastUpdate` side of SMAPI, which x2rock does not implement and has no session for. Ignoring it
-is correct here, and a change to honour it was written, tested against the real descriptors, and
-reverted before it shipped. Worth the note so nobody else reads the missing parser as a bug.
-
-**What this is.** Qobuz is app-link, and in that tier *Sonos's own cloud* completes the exchange -
-the nested `deviceLink` is a courtesy for controllers with nothing to hand off to. Qobuz populates
-it and does not implement the controller-side poll behind it. The Android app links perfectly well
-because it never takes that path. So `NOT_LINKED_RETRY` (SonosError 5) is never sent, x2rock's
-spec-correct treatment of 6 as fatal is right, and no client-side change can help.
-
-**A third refusal shape, then**, after "refuses the token" (YouTube Music, by caller) and "refuses
-the tier" (Saavn, by subscription): **hands over a login page it will never honour.** Classical
-Archives is its cousin - it refuses at the previous step instead.
-
-### What the subscription did buy, and one thing Sonos cannot do with it
-
-Not nothing. The household registration is what playback rides on, and Qobuz content plays:
-
-```
-Your Freedom Is the End of Me - Melanie De Biasio, "Lilies"
-x-sonos-http:track%3a41805683%3a7.flac?sid=31&flags=8232&sn=14   (hi-res FLAC)
-```
-
-`now --json` reads all of it - title, artist, album, service, duration, queue position - and
-transport, volume and queue control all work on a 114-row queue the phone filled.
-
-**And an id can be enqueued with no local token whatsoever.** Hand-built and sent by
-`AddURIToQueue` with the cdudn `SA_RINCON7943_X_#Svc7943-0-Token`, a Qobuz track was accepted and
-**the player overwrote the placeholder title with the real metadata** - proof it resolved the id
-against the household's own account. Which exposes a gate that is *x2rock's*, not Sonos's:
-`queue-item --service Qobuz <id>` refuses with "no searchable service matching Qobuz", because
-`play-item` and `queue-item` resolve the service from the *linked* list. The enqueue path needs
-only the sid, the `service_type` for the cdudn (both already in `services.json`) and an id. Every
-app-link service the household has registered but we cannot link - Qobuz, YouTube Music, Apple
-Music - could take an id today. Not changed yet; recorded as a real gap.
-
-**The one thing that genuinely fails is a Sonos Favorite**, and the household saw it as an error in
-the app. A favorite is not a URI: it carries an embedded `<r:resMD>` whose inner DIDL needs a
-numeric-prefixed object id, a `parentID`, and a `<desc id="cdudn">` naming the account - as a
-working Deezer favorite shows:
-
-```xml
-<item id="10032028tr-flac%3a2386586085" parentID="00020000search-track:fe!n">
-  <upnp:class>object.item.audioItem.musicTrack.#DEFAULT</upnp:class>
-  <desc id="cdudn">SA_RINCON519_X_#Svc519-0-Token</desc>
-</item>
-```
-
-Qobuz's queue rows carry **none of it** - no cdudn, no prefixed id, no parentID; the account is
-named only by `sn=14` inside the URI query. So Sonos has nothing to build `resMD` from and the
-favorite fails, while every *Qobuz-specific* action in the same menu (add to Qobuz favourites, add
-to a Qobuz playlist, album info, browse artist) works, because those are SMAPI calls forwarded to
-Qobuz using ids Qobuz already knows. Sonos only struggles when it must **author** metadata about
-Qobuz, never when it plays it.
-
-That also removes the usual workaround: "save it as a favorite in the app" is how YouTube Music
-content becomes reachable, and for Qobuz it is unavailable - which promotes the `play-item`-by-id
-gap above from a convenience to the only route.
-
-### The link poll used to throw away a finished login (fixed 2026-09-21)
-
-Found by being bitten: `wait_for_link` returned on *any* `Err`, so a single six-second socket
-timeout to `www.saavn.com` ended the flow **after** the browser step had already been completed -
-and a link code is single-use, so the only recovery was to walk through the login again for a blip
-that would have cleared on the next poll two seconds later.
-
-The fix is the principle `stream_url` already followed and this path had not: **a failed poll is
-evidence about the poll, not about the link.** A transport failure now prints `?`, keeps polling to
-the deadline, and is reported in the give-up message if nothing ever succeeds. A *refusal* - the
-service answering with a fault - still stops at once, since asking again cannot help; it is
-distinguished by a `link_refused` hint code rather than by matching error text.
-
-## Re-reading the community SMAPI reference against the household (2026-09-22)
-
-[svrooij's music-services page](https://sonos.svrooij.io/music-services) is the only public write-up
-of the SMAPI authentication flows, and it is where this project's understanding of `getAppLink` /
-`getDeviceLinkCode` / `getDeviceAuthToken` originally came from. Read end to end again now that
-there is a dozen services' worth of live experience to check it against. Four claims in it had never
-been tested here, one describes something x2rock already built, and two of its numbers are
-contradicted by the household itself.
-
-### The one sentence in it worth quoting
-
-> You'll still need to connect the service to your speaker with a supported Sonos application to be
-> able to play music from this service.
-
-That is the discovery/playback split, stated by someone who arrived at it independently and years
-earlier. Everything this document records the long way - `match` associating and never creating, a
-token buying search while a household registration buys playback, YouTube Music playing ids it will
-not search - is one line in a disclaimer at the top of that page. Worth citing rather than
-re-deriving, and worth noticing that it has been true long enough to be a known limitation.
-
-### `deviceId`: a header field x2rock has never sent, and does not need
-
-The page is emphatic that **every** authenticated request carries the speaker's own identity:
-
-```xml
-<s:credentials>
-  <s:deviceId>{DEVICE_ID}</s:deviceId>     <!-- SystemProperties GetString R_TrialZPSerial -->
-  <s:loginToken>…</s:loginToken>
-</s:credentials>
-```
-
-x2rock sends `<deviceProvider>Sonos</deviceProvider>` and a `loginToken`, and **no `deviceId` at
-all** - and has linked, searched and played a dozen services that way. So the field is what a
-*speaker* sends, not a minimum any service enforces. The value is real and cheap to get, for the
-day some service does insist:
-
-```
-$ x2rock -r 'Media Room' raw upnp SystemProperties GetString VariableName=R_TrialZPSerial
-48-A6-B8-18-53-E0:5          # the player's MAC, plus a counter
-```
-
-**Tested, not assumed**, because Qobuz was the obvious candidate for "refuses an anonymous caller".
-Two link codes minted seconds apart, one envelope per shape, immediate poll on each:
-
-| shape | `deviceId` header | `linkDeviceId` sent | answer |
-|---|---|---|---|
-| x2rock's | absent | `8e712761` (echoed from the reply) | `Client.NOT_LINKED_FAILURE`, SonosError 6 |
-| the page's | `48-A6-B8-18-53-E0:5` | `48-A6-B8-18-53-E0:5` | **identical** |
-
-Byte-for-byte the same fault, same `"Link Code invalid... Retry link process.."`. Device identity is
-not what Qobuz is missing - **a ninth variable off that list**.
-
-### `linkDeviceId` is minted by the service, not read off the speaker
-
-The page says `<linkDeviceId>` is that same `R_TrialZPSerial`. It is not, at least not here: Qobuz
-returns a **fresh eight-hex value in every `getAppLink` reply** - `8e712761`, then `a7e92253` - which
-is a per-attempt handle, not a device name. x2rock's rule (echo what the link-code reply carried,
-send nothing when it carried nothing) is the right one, and is now tested against the alternative
-rather than merely reasoned about.
-
-### Two more Qobuz variables, closed
-
-`getDeviceLinkCode` is not a fallback path: Qobuz answers `SOAP-ENV:Server` /
-**`Function 'getDeviceLinkCode' doesn't exist`**. App-link is the only door, so there is no
-second flow left untried.
-
-And the sharpest framing of the refusal yet, from the A/B above: a code polled **seconds after
-Qobuz minted it** is already `"Link Code invalid"`. Not *unredeemed* - invalid from birth. Whatever
-the `regUrl` login does, it is not attaching an account to that code, which is consistent with the
-conclusion already recorded (Sonos's cloud completes the app-link exchange, and Qobuz never
-implemented the controller-side poll behind the courtesy `deviceLink` block).
-
-### `PollInterval`: settled against the whole catalogue, not just the linked five
-
-The reverted "fix" (see "Qobuz: the poll-interval hypothesis") rested on five services this
-household happens to have linked. The full descriptor settles it outright. Reading
-`MusicServices ListAvailableServices` off the Media Room player:
-
-| | count |
-|---|---|
-| services advertised | **108** |
-| of those, app-link or device-link | **76** |
-| declaring `PollInterval` of **0 or absent** | **0** |
-
-Every link-flow service in the catalogue declares a positive interval: minimum 30, mode 60 (38 of
-them), up to 3600. Honouring the field as a link-poll rate limit would have broken **every link in
-the catalogue**, not just the five already known. svrooij's own 2021 snapshot agrees - 59 link-flow
-services, none at zero - and adds a shape the live list has no example of: TuneIn declares
-`PollInterval="-1"`. A rate limit cannot be negative; a "never re-ask" sentinel can.
-
-### A service id is not a constant, and the published table proves it
-
-| | svrooij's snapshot | this household |
-|---|---|---|
-| Spotify | Id **9** | Id **12** |
-| endpoint | `https://spotify-v5.ws.sonos.com/smapi` | *identical* |
-
-Same service, same endpoint, different id. The sid is what goes into `?sid=N&sn=M` on every content
-URI and into the `SA_RINCON…` cdudn, so anyone hardcoding "Spotify is 9" off that table builds URIs
-the household will not resolve. x2rock has always read ids out of the household descriptor; this is
-the first hard evidence of *why* that was worth doing rather than merely tidy.
-
-The rest of the drift is regional more than temporal - the two lists differ by 23 services present
-here and absent there (iHeartRadio, SiriusXM, Amazon Music, Pandora, Audacy: a US household against
-a European one) and 6 the other way. Two endpoints have genuinely moved since: FIT Radio
-(`www.fitradio.com` → `prod-sonos.fitradio.com`) and Klassik Radio Plus (`/sonos` →
-`/sonos/smapi/v2`). The table is a useful map, not an address book.
-
-### What the page gets exactly right
-
-**Token refresh.** "If the key and token became invalid … you will get a new key and token in the
-response body in the soap error message and should retry the request." That is precisely the
-`refreshAuthTokenResult`-in-the-fault-detail handling already built and verified live against a
-genuinely expired Spotify token (see "A service can hand back a working token instead of just
-refusing"). Independent agreement on a mechanism that looks too strange to be real.
-
-**`SecureUri` over `Uri`.** x2rock already prefers it. Worth recording that the distinction is
-vestigial: **0 of 108** live services and 0 of 91 in the snapshot give different values for the two.
-
-### The one suggestion declined
-
-> Since you'll need to save the key and token somewhere, why not use the SystemProperties →
-> Get/SetString methods to save them?
-
-Deliberately not. `SetString` writes to the *speaker*, so a token stored there is readable by
-anything on the LAN that can speak UPnP, is shared across every controller in the household rather
-than belonging to the person who linked, and outlives uninstalling x2rock with no way to notice.
-`credentials.json` under the user's own config directory is worse for portability and better for
-every other property that matters.
-
-## YouTube Music, attempted again: where the key actually lives (2026-09-22)
-
-Asked to try linking it once more. It refuses exactly as before - and this time the household
-registration was made **minutes earlier**, from the Sonos Android app, with a podcast playing to the
-Media Room while the attempt ran:
-
-```
-Error: YouTube Music refused getAppLink: HTTP 403.
-```
-
-That is worth having. x2rock's own error message asserts *"adding the service in the Sonos app does
-not change it"*, and until now that sentence was reasoning rather than a measurement. A registration
-under ten minutes old, live and playing, changes nothing about the 403. **The sentence is true and
-now tested.**
-
-### "Sealed in firmware" was the wrong phrase: it is sealed in public
-
-Every service descriptor names a manifest on Sonos's CDN, and it is fetchable by anyone with no
-credential at all:
-
-```
-<Manifest Version="278" Uri="https://cf.ws.sonos.com/p/m/a3fd2ecc-6039-47fe-8ced-1939e070c432"/>
-```
-
-That document holds the presentation map, the strings file, a reporting endpoint - and this:
-
-```json
-"apiKey": { "cr": "iGSZygAAALoAAQAAAAAAAAEAAAAU…", "zp": "iGSZygAAALoAAQAAAAAAAAEAAAAU…" }
-```
-
-**Two copies of the same secret, encrypted to two different recipients.** Both decode to 266 bytes
-with the same header - magic `886499ca`, a declared length of 186, a 20-byte identifier, a 128-byte
-wrapped key and an 80-byte payload: ordinary hybrid encryption, one blob per audience. `cr` is the
-controller, `zp` the zone player, and the private halves live respectively in Sonos's own apps and
-in the speakers. That is why the desktop controller can call
-`https://music.googleapis.com/v1:sendRequest` and this cannot: not because the key is hidden, but
-because it is enciphered to two parties x2rock is not.
-
-No attempt was made to break either blob and none should be - it is a content key, and the interest
-here is architectural. But the correction matters for what x2rock *says*: the key is not sealed
-inside a speaker's flash where no one can see it. It is published, and addressed to someone else.
-
-### The player will not make the call on x2rock's behalf
-
-The obvious follow-up, since the speaker *does* hold the `zp` key: ask it to do the talking. The
-`MusicServices` UPnP service has exactly three actions, and only one looks like a door:
-
-```
-GetSessionId ( ServiceId:in, Username:in, SessionId:out )
-```
-
-It is not one. **UPnP error 806 for every service id tried** - YouTube Music, Qobuz, Saavn, Deezer,
-both Spotify ids - including services this household has registered and is actively playing. A
-vestige of the session-based SMAPI tier, not a credential the player will lend out. `GetSessionId`
-can be crossed off.
-
-### What a registration does buy, in this household's own bytes
-
-The half that works, captured from the queue row that was playing:
-
-```xml
-<res protocolInfo="sonos.com-http:*:application/x-mpegURL:*" duration="0:24:49">
-  x-sonosapi-hls-static:ALkSOiE_5bsFlwh…?sid=284&flags=24616&sn=15</res>
-<upnp:class>object.item.audioItem.podcast</upnp:class>
-<r:podcast>The Real Eisman Playbook</r:podcast>
-<r:releaseDate>2026-09-18T20:15:24Z</r:releaseDate>
-```
-
-Three things recorded there. The scheme is **`x-sonosapi-hls-static:`** over
-`application/x-mpegURL` - HLS, not the `x-sonos-http:` track form every other service here uses.
-The registration is **`sn=15`**, the office household's third (Saavn 13, Qobuz 14). And the DIDL
-carries `<r:podcast>` and `<r:releaseDate>`, neither of which anything here read.
-
-That last one was a real gap rather than a curiosity: the Control API sends the same fact as
-`track.podcast.name`, an episode has no `artist` and no `album`, and so `now`, its JSON and the
-MPRIS metadata the desktop reads all showed a title and nothing else. Now fixed - `album` falls back
-to the show, and a `podcast` field keeps the distinction - and confirmed against the room that
-prompted it:
-
-```
-PLAYING  Stock Picking in Difficult Times with George Noble | … (The Real Eisman Playbook)
-         · on YouTube Music  6:18 / 50:52
-```
-
-A fourth lock, then, to go with the three already recorded - and the only one that ever moved was
-the one on this side.
-
-## The household stores every token, and they can be read (SoCo #1010, tested 2026-09-22)
-
-For weeks this document treated a service's stored token as unreachable: when x2rock's own link
-flow refuses (Qobuz's `getDeviceAuthToken`, always), the conclusion was that the token completes in
-Sonos's cloud and is never handed to a controller. [SoCo PR
-#1010](https://github.com/SoCo/SoCo/pull/1010) shows there is another door, and it was verified end
-to end on this household. **The token is not unreachable. It is stored on the speaker, encrypted to
-the household, and the household id is the key.**
-
-### The mechanism
-
-Every zone player, in the **initial `ZoneGroupTopology` event** it sends to a fresh subscriber,
-includes a variable named `ThirdPartyMediaServersX`: an encrypted envelope whose key derives from
-the household id. The method is SoCo's, published in #1010; x2rock's implementation is
-`src/sonos/stored.rs`. It carries an integrity check, which is how a correct decrypt is recognised.
-
-`household_id` is the short form (`Sonos_GcdFiXIXfOOLEUgvoDRG2rtPN9`), which any device answers
-unauthenticated via `DeviceProperties GetHouseholdID`. The plaintext is XML: one `<... UDN="SA_RINCON<type>_" Token0="…" Key0="…" Nickname0="…" Tier0="…" SerialNum0="…">` per configured
-account, where `type // 256` is the service id.
-
-### Verified, with a built-in control
-
-On the office household the envelope arrived at 5166 chars, decrypted to 3846 chars of account XML,
-and the integrity check **passed**. Seven accounts, and the decrypt carries its own proof it is
-right: three of them are services x2rock had *already* linked, and their token/key lengths match
-`credentials.json` **byte for byte**.
-
-| sid | service | token / key (decrypted) | x2rock's own store | note |
-|---|---|---|---|---|
-| 303 | Sonos Radio | 193 / 225 | - | |
-| 2 | Deezer | 50 / 6 | **50 / 6** | control: matches |
-| 174 | TIDAL | 805 / 376 | **805 / 376** | control: matches, though x2rock "never registered" it |
-| 164 | Saavn | 391 / 44 | **391 / 44** | control: matches |
-| **31** | **Qobuz** | **86 / 8** | absent (link always failed) | the prize |
-| **284** | **YouTube Music** | **260 / 152** | absent (403) | the test |
-
-The decrypt does not produce something token-*shaped*; it produces the exact bytes x2rock already
-searches Saavn and TIDAL with. So the Qobuz and YouTube Music tokens are the real thing, in the same
-format, for two services x2rock could never obtain itself.
-
-### The experiment, and its split result
-
-Both tokens were written into `credentials.json` in the shape a completed link produces
-(`auth_token` ← `Token0`, `private_key` ← `Key0`, `household` ← the long form the SMAPI header
-wants), and a plain `x2rock search` was run against each:
-
-| | result |
-|---|---|
-| `x2rock search -s Qobuz "miles davis"` | **121 results.** Fully searchable. |
-| `x2rock search -s "YouTube Music" "miles davis"` | **HTTP 403.** Unchanged. |
-
-**Qobuz is the whole thesis in one line:** the service whose link flow refused eight ways in a row
-is searchable the instant it holds the token the Android app stored. "Can't get the token" was never
-a wall - it was a door being knocked on from the controller side, when the answer was already sitting
-on the speaker.
-
-**YouTube Music settles the other half.** A valid, household-issued account token changes nothing
-about its 403. That confirms the two locks recorded earlier are independent: Qobuz refused at the
-*account* layer (fixed here), YouTube Music refuses at the *caller* layer - the API key sealed in its
-manifest, encrypted to Sonos's own apps and speakers (see "the key ships in the open, addressed to
-someone else"). No account credential reaches that lock. YouTube Music stays search-locked; only its
-queue-resolution half, which the household registration already drives, works.
-
-### Two account models, not quite aligned
-
-Worth recording because it is a trap. The serials in `ThirdPartyMediaServersX` (Saavn 13, Qobuz 14,
-YouTube Music 15) match the `sn_N` the docs already use - but not everywhere. Deezer reads serial
-**10** here against `sn_26` in x2rock's Control-API account view, and **iHeartRadio (sid 6) is not in
-the blob at all**, though x2rock lists it as registered. So `ThirdPartyMediaServersX` is the set of
-SMAPI-token accounts on the speaker, and the Control API's `/status/accounts` (`sn_N`, "registered
-from here") is a different, overlapping set. Where they agree they agree exactly; where they diverge,
-neither is wrong, they are answering different questions.
-
-### What this could become, and what it costs
-
-This is the missing half of the discovery/playback split. Playback already rides on the household
-registration; **search and browse could ride on the household's stored token**, with no `x2rock link`
-flow at all - which would open Qobuz, Apple Music, Amazon Music and any app-linked service the person
-has added in the Sonos app, exactly the services whose own flows this tool cannot complete. The costs
-are real and worth stating before building:
-
-- **UPnP eventing, inbound.** The token arrives only in a `ZoneGroupTopology` event, which needs the
-  player to reach a callback port on this machine. x2rock has never opened one - the Control API is
-  outbound-only on :1443 - and this test needed a `ufw` hole to receive the NOTIFY at all. A built-in
-  version needs its own short-lived listener and has to survive a firewall that a laptop sensibly has
-  up.
-- **Crypto and a magic constant.** AES-128-CBC and MD5 (via the `aes`/`md-5` crates, or an `openssl`
-  shell-out as #1010 does), plus the hardcoded salt - a reverse-engineered value that a firmware
-  update could in principle change.
-- **It reads a secret Sonos encrypts.** Legitimate - it is the person's own account, their own
-  household, their own LAN - but it is credential access, and it should look like it: explicit,
-  opt-in, never a silent background sweep. (The session's own tooling classifier blocked every step
-  of this test for exactly that reason, which is the right instinct.)
-
-### Built: `link --from-household` (2026-09-22)
-
-The decision was made to build it, and it shipped the same day. `src/sonos/stored.rs` holds the
-mechanism in two halves that the module keeps deliberately apart:
-
-- **`decrypt_accounts` is pure** - `2:` envelope in, `Vec<StoredAccount>` out - so the whole crypto
-  path (base64 → AES-128-CBC → PKCS#7 → the four-byte MD5 integrity tail → account XML) is unit-tested
-  against synthetic vectors that a test seals with a made-up household id. No live household, no real
-  token, so the tests carry no secret and a tooling classifier watching for credential access has
-  nothing to catch. AES/MD5 come from the `aes`/`cbc`/`md-5` crates - `ring`, this tree's other
-  crypto, offers neither - and base64 is a dozen hand-rolled lines, its only caller being the envelope.
-- **`capture_envelope` is the only network-touching part.** It subscribes to the player's
-  `ZoneGroupTopology` events, catches the initial state the player POSTs back, pulls the one variable,
-  and unsubscribes.
-
-The command is a sibling of `--from-player`: **name a service** to import just its stored token,
-**omit it** to import every service the household holds a usable token for in one pass. There is no
-`match` step - this path carries no `userIdHashCode`, and playback rides the registration the Sonos
-app already made. Verified against the office household: `link Qobuz --from-household` reproduced the
-hand-injected token exactly, and Qobuz searched.
-
-**The firewall cost turned out to be the real design point.** The first cut bound an ephemeral
-callback port, which is unusable on the one host that needs a firewall rule - the port changed every
-run, so there was nothing stable to allow. It now binds a fixed default (3401), with `--callback-port`
-to move it and `0` to ask for an ephemeral one where there is no firewall to open. So the honest
-shape is: a host with no inbound firewall needs nothing; a host with one opens a single documented
-port once. The constraint itself cannot be removed - the token lives only in an event the player
-sends *back*, and the plaintext `/status/accounts` path is 403 on current firmware - so something has
-to accept an inbound connection; the design just makes it a one-time, opt-in, named thing.
-
-One lock this does *not* pick, exactly as predicted: **YouTube Music imports a valid token and still
-`403`s on search.** Its block is the caller API key, not the account, and an account credential does
-not reach it. The token is kept because it is real; the 403 is unchanged.
-
-### The credential store became household-aware, because the import made it have to (2026-09-22)
-
-`link --from-household` exposed a latent flaw the moment it existed. The store was keyed by service
-id alone - one Qobuz slot, one Saavn slot - which was fine while a machine only ever saw one
-household. A laptop that imports the office household's tokens and then, at home, imports the home
-household's, was overwriting each with the other on every trip. Worse, the **auto-refresh** would
-have made it silent and permanent: a search on the home network refreshes the home token and writes
-it back to the one Qobuz slot, so the office token is gone without anyone unlinking anything.
-
-So the store is now keyed **household → service → account**. Both halves of the fix are the same
-change and had to ship together:
-
-- **Every read resolves the current household first.** Search, browse, play, rate, and the
-  linked-or-not listings all ask "which household am I on?" - the reached player's, or (for a command
-  run offline against the cached catalogue) the store's sole household when it holds exactly one -
-  and look the token up under it. A machine on the home network uses the home token; the office token
-  sits untouched two hundred miles away.
-- **Auto-refresh writes back to the slot it refreshed.** The refreshed token carries its own
-  household, so the write lands on `(that household, service)` and never on another network's copy.
-  This is the part that would have corrupted things quietly if the storage change had shipped alone.
-
-Two commands have no live player and so no single household: `unlink` forgets a service from *every*
-household that holds it ("stop using this service" rather than "on this network"), and `accounts`
-lists across households, grouped with a header only when there is more than one - so the ordinary
-single-household output is exactly as it was.
-
-### A household can hold two accounts for one service (2026-09-22)
-
-It does here. `link --from-household` against the home household read **two iHeartRadio accounts** -
-serials 24 and 25, `Username0` keys `81dee58d` and `885ebbcc`, nicknames `iHeartRadio` and
-`iHeartRadio 885ebbcc` - and the store, keyed `household -> service -> account`, kept one. The
-import printed a "Kept" line for each while `accounts` then listed one, which is how it was caught.
-
-Three things the decrypted blob turned out to be saying that the parser was not reading. What
-follows separates what has been *measured* from what is *inferred*, because an earlier draft of
-this section stated two inferences as facts and they did not survive a second household.
-
-- **`Username<i>` is an account selector**, `X_#Svc<type>-<key>-Token`, and the Sonos app's
-  auto-nickname for a second account is built from the key inside it - which is why
-  `iHeartRadio 885ebbcc` looks the way it does. A nickname is renameable (this household has a
-  Deezer account called `Deeznuts`), so the nickname is for display and the key is for keying.
-
-  **It is not a stable identity for an account at its service**, which an earlier draft claimed.
-  The same Deezer account is `X_#Svc519-0-Token` in one household and `X_#Svc519-23e2bc11-Token`
-  in the other, and YouTube Music has different keys in each. It is assigned per registration,
-  per household. Nor is it always synthetic: SoCo #1010's own documentation shows
-  `Username0="user@example.com"`, a shape neither household here produced, so a parser that
-  splits on `-Token` needs a fallback that returns the value whole.
-- **`Flags<i>`** is `4` where `Username<i>` carries a real per-account key and `0` where it carries
-  a literal zero or nothing - and what decides *that* is now measured: **registration order**. A
-  controlled experiment on 2026-09-24 against the office household's Amazon Music (`sid 201`): the
-  first account of a service is registered `Username0="X_#Svc<type>-0-Token"`, `Flags0="0"`; a
-  second account added beside it gets a distinct hex key and `Flags0="4"`
-  (`X_#Svc51463-139f5452-Token`). Removing the primary left the survivor hex - the form is fixed at
-  registration, not recomputed for whoever is now first - and re-adding the *very same* account
-  brought it back as another additional account (`X_#Svc51463-fe30b018-Token`/`4`) at a new serial,
-  never reclaiming its old `-0-`. So the `-0-`-vs-key form and `Flags` are one fact: was this the
-  primary account at the moment it was registered. That is why **Deezer appears on both sides** -
-  primary in one household, additional in the other - and why iHeartRadio shows two keyed accounts
-  and no `-0-`: its `-0-` primary was registered first and later removed, leaving two that were each
-  added beside an existing one. Nothing here reads the field; it is recorded because it explains
-  where the `-0-` cdudn comes from - it is the primary account's own key.
-- **`NumAccounts` exists, and the `0` suffix is *consistent with* an index** - not proof of one.
-  Every record in both households declares `NumAccounts="1"`, and a service with two accounts is
-  served as two records, one per account. A controlled test on 2026-09-24 sharpened this: *adding* a
-  second Amazon Music account made it arrive as a second record (`NumAccounts="1"`), not bump the
-  first to `"2"` - so the split is what the player does when an account is added, not merely how
-  these two households happened to be arranged. The legacy format did the same: one `<Account>` element
-  per account (see below), which makes the count and the suffix look like leftovers from a shape
-  that could array several accounts into one record. The parser walks `0..NumAccounts` anyway,
-  because being immune costs four lines and a synthetic vector; but **no household has yet produced
-  a record holding two accounts**, and this document should not pretend otherwise.
-
-#### It is Sonos's own legacy account format, flattened (2026-09-23)
-
-SoCo's long-standing `music_services/accounts.py` documents the XML that `/status/accounts` used to
-serve: `<Account Type="2311" SerialNum="1">` with child elements `UN`, `MD`, `NN`, `OADevID`, `Key`.
-Line that up with the blob and the encrypted format is the same field set moved into indexed
-attributes:
-
-| `/status/accounts` | `ThirdPartyMediaServersX` |
-|---|---|
-| `UN` | `Username0` |
-| `MD` | `Md0` - which is what that otherwise unexplained attribute is |
-| `NN` | `Nickname0` |
-| `Key` | `Key0` |
-| `SerialNum` (attribute) | `SerialNum0` |
-| `Type` (attribute) | the encoded type inside `SA_RINCON<type>_` |
-
-`Token0`, `Flags0` and `Tier0` have no legacy counterpart; `OADevID` has no modern one. The legacy
-`<Accounts … NextSerialNum="5">` also fits the serials: a **household-wide** counter rather than a
-per-service one, which is what is observed - `1, 9, 10, 11, 13, 14, 15` in one household and
-`10, 23, 24, 25, 26, 27` in the other, a new service landing at the next number rather than at 1.
-Not monotonic, though: an earlier draft of this paragraph said so and was wrong by this document's
-own testing - the counter is `highest live serial + 1` and *falls* when the top account is removed,
-so a serial is unique among live accounts and means nothing across time (see "Household
-registration is per *account*"). The gaps are accounts removed below the current top. It is the
-same namespace `musicServiceAccounts:1 match` answers in, which is why an imported account and a
-matched browser-linked one can be keyed identically.
-
-**`/status/accounts` still responds and returns nothing** - 111 bytes of
-`<ZPSupportInfo></ZPSupportInfo>` on S2 18.8 (`97.1-80312`). It is not being singled out:
-`/status/topology`, `/status/perf` and `/status/upnp` are equally empty, while `/status/zp` (1547
-bytes) and `/status/ifconfig` (2600 bytes) still serve real data. A batch of diagnostic endpoints was
-emptied, `accounts` among them - which is what makes the decrypt the only route rather than a
-convenience.
-
-#### The event subscription is the only way to read it (tested 2026-09-23)
-
-The inbound callback is the one awkward part of this mechanism, so it is worth recording that it
-cannot be avoided:
-
-- `ThirdPartyMediaServersX` appears in **exactly one of the fourteen** service descriptions the
-  player publishes, `/xml/ZoneGroupTopology1.xml`, declared `sendEvents="yes"`.
-- That service publishes eight actions. `GetZoneGroupState` and `GetZoneGroupAttributes` are the
-  only two that read anything, and neither response contains it.
-- UPnP `QueryStateVariable` for it is refused with `<errorCode>401</errorCode>`.
-
-So `--from-household` needs the firewall hole because there is no request that returns this, not
-because subscribing was the first thing tried.
-
-#### The account key is not a secret, and cannot be
-
-It is in the **cdudn of every favorite that plays from that account**, in plaintext, readable over
-ContentDirectory with no household id and no decryption. Browsing `FV:2` here returns
-`X_#Svc41991-acdaed4d-Token` (Saavn) four times, `X_#Svc7943-6c0ffea0-Token` (Qobuz) once, and
-`X_#Svc519-0-Token` (Deezer) once. It has to be plaintext: the player needs to know which account to
-resolve a track with, and that decision happens outside the encrypted blob. The key authenticates
-nothing - `Token<i>` does - so these strings are safe to paste into a bug report in a way the
-household id, which is the decrypt key, is not.
-
-**Schema 3 holds several accounts per service, and one of them is preferred.** The Sonos app's own
-answer to two accounts is to let a person prioritise one, so a search returns one set of results
-rather than two interleaved, and this is that. The preference is resolved *inside* the store, so
-`token_for` kept its signature and not one of the fifteen-odd read sites - search, browse,
-`play-item`, the `usable`/`searchable` gates - learned that a service can have two accounts. Only
-`accounts`, `unlink` and the import did.
-
-The account key is assigned once, at first write, and never rewritten except to *upgrade*: the
-household serial (`sn24`) when the import knows it, else the service's `userIdHashCode`, else the
-constant `link` for a browser-linked account that identifies itself with neither. Two guards keep
-those three from ever making two records out of one account: a write whose `authToken` already
-exists lands on that record whatever key it would otherwise have taken, and a record filed under the
-fallback moves to the stable key the first time a route that knows the serial writes it. That second
-one is what a migrated schema-2 record does on its first re-import - observed here, `link` becoming
-`sn24`/`sn25`.
-
-`smapi::Token` gained an `account` field beside `household`, for the same reason `household` was
-there: a service that answers with a replacement token has to have it written back to the account it
-refreshed. Without the key, a refresh would land on whichever account the service currently resolves
-to - which is right only by accident, and stops being right the moment a preference moves.
-
-**Schema 2 migrates rather than being refused**, and that is a change of policy from the day before.
-The refusal added with the household rekey was correct when the only schema-2 stores were
-re-importable; it stopped being correct the moment one could hold a household this machine is
-nowhere near. The office set here cannot be re-imported from home at any price, so a refusal would
-have meant losing it. Schema 1 is still refused - it predates the household key, so there is nothing
-in it to place.
-
-Schema 1 is refused because it cannot be *placed*, not because refusing is a policy. It predates the
-household key entirely, and serde ignores unknown fields, so its flat `services` map parses
-cheerfully into zero households - which would report every service as unlinked, send someone back
-through a link flow, and then be overwritten by the first save that followed, taking the only copy
-of those tokens with it. The refusal names both ways out: the re-import, or deleting the file, since
-`unlink --all` loads the store too and so cannot be the escape hatch. A schema *newer* than this
-build is refused for the mirror-image reason - whatever it holds that this cannot read would not
-survive the round trip. The accepted range is therefore `2..=3`, and anything outside it stops the
-command rather than being read as empty. Which is the discipline the whole feature runs on: the
-household's own stored tokens are the source of truth, and the local store is a cache of them for
-the household you are standing in.
-
-### What #1010's review found about writing accounts (read 2026-10-04)
-
-The PR's reviewer, goldyfruit, retested it on a third household on 2026-10-01: six players on
-older firmware (86.10-81100, display 17.2.7). All eight configured accounts decrypted, through the
-`cryptography` package and through its openssl fallback alike. That is independent confirmation that
-the hardcoded salt above holds across firmware generations, the risk this section flags.
-
-The rest of that review concerns *writing* household accounts, which x2rock does not do (see "What
-stays with the Sonos app" in the README). Two findings are worth keeping so nobody repeats them:
-
-- **`ReplaceAccountX` reissues the account's identity on 86.10.** Relinking a Deezer account through
-  it succeeded, kept the nickname and played afterwards, but the record came back as
-  `SA_RINCON519_X_#Svc519-0-Token`: a new UDN, and an account UID of **0**. The SCPD declares
-  `NewAccountUDN` as an *output*, which the PR was sending as an empty input and discarding. An
-  account with UID 0 can no longer be refreshed with `RefreshAccountCredentialsX`, which wants a
-  positive UID - a quiet break that nothing reports at the time.
-- **`RefreshAccountCredentialsX` takes credentials only inside the household's `2:` envelope.** Raw
-  token and key values are refused with UPnP 402; enveloped, the refresh kept the serial, UDN, UID,
-  username, nickname and tier exactly. goldyfruit's fix (a PR against the author's branch, 2026-10-03)
-  relinks positive-UID accounts that way and keeps `ReplaceAccountX` for UID-0 and legacy records.
-
-Deezer also accepted the same device-link code three times, so a retry that works there proves
-nothing about a stricter provider.
-
-None of this changes the position. A failed read is an error message; a failed write damages the
-household's own records, here silently and in a way that depends on firmware. Re-authorizing an
-account is a prompt the Sonos app already shows, and that is where it stays.
-
-## Apple Music: playback yes, search no - the household holds no usable search credential (2026-09-24, office)
-
-The last app-link service left untested, now tested. A fresh Apple Music subscription was added in
-the Sonos app; `link --from-household` imports what the household stores for it, and that turns out
-to be a credential the speaker cannot search with.
-
-**Both routes to a search credential are closed.**
-
-- **The browser flow does not start.** `getAppLink` is refused - "There was an error processing your
-  request" - re-confirmed 2026-09-24 with the fresh account, exactly as on 2026-09-10. No login page,
-  no token to mint.
-- **The household token imports but is invalid.** The decrypt reads Apple Music (`sid 204`) cleanly -
-  `Token0` 180 bytes, `Key0` **empty** - and every authenticated SMAPI call refuses it: `search` and
-  `browse` both answer `com.apple.its.commerce.sonos.resource.error.InvalidTokenException`. The
-  `loginToken` header x2rock sends is correct - services with tiny non-empty keys work, and the error
-  names the *token*, not the key - so this is not a usage bug.
-
-**The read is fresh and byte-accurate, which is what makes the token itself the problem rather than
-the reading of it.** Re-running the decrypt's own control on this read, every imported service's
-decrypted token/key lengths match `credentials.json` exactly (Sonos Radio 193/225, Deezer 50/6, TIDAL
-805/376, Saavn 391/44, Qobuz 86/8, YouTube Music 260/152); the same decrypt reads Apple's 180/empty.
-The blob is the speaker's live initial-event value, re-read on each subscription, and the household is
-visibly rotating tokens under it - Amazon's read 718 bytes in one dry-run and 733 by the time it
-stored. A re-auth in the app changed nothing. The decisive tell is the empty `Key0`: a *stale* token
-would still carry whatever key it was minted with, so an empty key is a private key that was **never
-provisioned**, not one gone out of date. Apple Music is the only authenticated account in either
-household with no `privateKey`.
-
-**What it means.** Apple hands the speaker a playback *registration* - the app plays Apple Music, and
-already-known ids (favorites, bookmarks) enqueue through it - but never a complete SMAPI *search*
-credential. This is the second "playback yes, search no" service, blocked for the opposite reason to
-the first:
-
-| service | search blocked at | by |
-|---|---|---|
-| YouTube Music | the *caller* layer | Google's project gate (`SERVICE_DISABLED`); no account token helps |
-| Apple Music | the *account* layer | an invalid, incomplete credential (empty key); no controller link mints one either |
-
-Same outcome for a user, opposite mechanism: YouTube Music imports a syntactically-valid token that a
-project gate rejects, while Apple Music is denied a usable credential by *every* route - browser link
-refused, blob credential incomplete. It reads as Apple keeping the third-party control surface
-playback-only by design, which fits a partner of that scale. Not searchable via x2rock, and there is
-no fresher or different read left to try.
-
-*Note on the account form:* this Apple Music record came back hex-keyed with `Flags0="4"` as an
-apparently-first account, which looks like a counterexample to "the first account of a service is
-`-0-`" recorded above. Its registration is incomplete (the empty key) and its auth was flapping when
-read, so it is a poor case to judge that rule by; the rule stands until a *complete* first-account
-registration contradicts it.
-
-### Apple's public catalogue search names the same ids the player plays (home, 2026-09-26)
-
-Search through Sonos is closed, but the catalogue is not. Apple's public iTunes Search API
-(`itunes.apple.com/search`, `/lookup`: no key, no account, only the term leaves the machine) returns
-`trackId` and `collectionId` numbers, and those are the Sonos item ids with a prefix:
-
-- **Tracks: `song:<trackId>`.** A lookup of 1850810467 returns The xx, "Heart Skipped A Beat" - the
-  office household's own bookmark `song:1850810467`.
-- **A never-seen id plays.** Apple Music was added to the home household in the app and imported with
-  `link --from-household` (its token is as unusable for search here as at the office). Then
-  `play-item --service "Apple Music" song:1299241646`, taken straight from a search for "khruangbin"
-  and never played in this household, played on Dining Room at once, and the player filled in the
-  real artist and album ("August 10 - Khruangbin (Con Todo El Mundo)").
-- **Albums: `album:<collectionId>`.** `queue-item --kind album album:1299241642` expanded into all
-  ten tracks of *Con Todo El Mundo*.
-- **The control run.** Before the import, the same `play-item` stopped inside x2rock ("no searchable
-  service matching") without reaching the player: resolving the service needs the household's
-  record even though its token is useless for search.
-
-**Built the same day** (`src/itunes.rs`). `smapi::search` hands Apple Music to it, and the catalogue
-answers Apple Music's categories with a fixed `tracks`→`song`, `albums`→`album` rather than its
-presentation map, whose other entries (artists, playlists, the library half) this search cannot
-take. Enqueue is the existing path, with `Naming` supplying the household's serial. The API
-ignores `offset`, so a page is sliced from one answer of up to 200 rows, one more than the page
-needs, which is what tells a caller whether there is more. The storefront is the locale's region,
-else the US. It does not cover the person's library or Apple's `pl.…` playlists; neither is in the public API,
-and the Apple Music API that has them wants a paid developer token. The API also answers per
-storefront (`country=`, US by default), so an id can exist there and be unavailable in the household's
-own country. The first playback-yes, search-no service with a way round the search half. YouTube
-Music has no equivalent: its public Data API is keyed and returns videos, not the music catalogue.
-
-**Three messages this showed wrong, all fixed with it.** `play-item`'s refusal said "searchable" when
-it meant "has a record" (now `find_usable`, which gives a real service's link advice - for Apple Music
-the household import); the `link --from-household` success line promised that search and browse work,
-false for Apple Music; and `queue-item` of the album said "queued ... at 11" - the last of its ten
-tracks - when the album began at 2.
-
-**The third was a bug, not a wording.** `add_to_queue` returned `NewQueueLength`, and `play-item`
-seeks to what it returns: right for one track, which lands at the end, and wrong for a container,
-so every album or playlist `play-item` started played its *last* track first. It now returns
-`FirstTrackNumberEnqueued` and `NumTracksAdded` beside the length; the album starts at its first
-track (verified on Dining Room), and a refusal after enqueue takes the whole added range back out
-instead of one row.
-
-## Which account an enqueue plays from: `sn=` picks, the cdudn has to agree (home, 2026-09-25)
-
-The last open piece of multi-account support. The store has held several accounts per service with
-one preferred since 2026-09-22, but only search followed the preference: every enqueue built the
-`-0-` cdudn, which names the service, and sent no `sn=`. The question was which account that lands
-on when a household holds two, and whether naming one explicitly moves it.
-
-**Setup.** Home household, two iHeartRadio accounts: `sn_24` (selector `81dee58d`, nickname
-`iHeartRadio`) and `sn_25` (`885ebbcc`, `iHeartRadio 885ebbcc`), the second preferred in x2rock.
-The Sonos app's own play in another room fixed the pairing: `x-sonosapi-stream:…&sn=24` with
-cdudn `SA_RINCON1543_X_#Svc1543-81dee58d-Token` - the app always sends a matched pair. The account
-actually in use is `accountId` from `playbackMetadata:1 getMetadataStatus` at group scope (not
-`playback:1`, which answers `ERROR_UNSUPPORTED_COMMAND`). Everything was sent by hand through
-`raw upnp`, one variable at a time, in an idle room.
-
-**Radio path** (`SetAVTransportURI`, a live station):
-
-| cdudn selector | `sn=` | `accountId` |
-|---|---|---|
-| `0` | - | `sn_24` |
-| `885ebbcc` | - | `sn_24` |
-| `0` | 25 | `sn_25` |
-| `81dee58d` | 25 | `sn_25` |
-| `885ebbcc` | 24 | `sn_24` |
-| `0` | 99 | `sn_24` |
-| `bogus` | - | `sn_24` |
-
-`sn=` alone picks. The selector is ignored for that choice, even a made-up one, and no `sn=` or one
-the household does not hold falls back to `sn_24`. The fallback is not sticky: an `sn=25` play
-followed by one with no `sn=` goes back to `sn_24`. The player stores what it was sent, filling in
-`sn=24` where none came.
-
-**Queue path** (`AddURIToQueue`, a podcast episode - the path `play-item` uses for on-demand
-items). `accountId` still follows `sn=`, with the same fallback, but the queued row's own `sn` is
-**rewritten from the cdudn's selector**: `885ebbcc` makes the row say `sn=25` whatever was sent, and
-`0`, `81dee58d` or a bogus selector make it say `sn=24`. A mismatched pair - `885ebbcc` with
-`sn=24` - reports playing from `sn_24` while its row says `sn=25`. Which of the two actually fetched
-the audio is not observable here; a free podcast plays from either account. A **matched** pair
-(`885ebbcc` with `sn=25`) came back `sn_25` everywhere.
-
-**Why `sn_24` is the default** is not settled: it is both the lowest live serial and the one
-registered first here, so the two rules cannot be told apart in this household.
-
-**What changed.** An enqueue now names the store's chosen account with both halves - its selector in
-the cdudn and its serial in `sn=` (`content::Naming`) - and a bookmark names the account behind the
-serial it already carries, by looking that serial up in the store. Verified end to end: with
-`885ebbcc` preferred, `play-item` played from `sn_25` and the row said `sn=25`; with the preference
-moved to the other account, `sn_24` both ways. Before this, both plays landed on `sn_24` - the
-account x2rock did **not** prefer.
-
-**What still falls back.** An account with no selector sends `-0-` - correct for a primary, which
-really is `-0-` - and one with no serial sends no `sn=`. The serial comes from the import
-(`SerialNum`) or, for a browser link, from `match` (`account_id`, `sn_N`); a browser link that was
-never matched knows neither and plays from the household's default. A browser link never learns a
-selector, so a matched one sends its serial with `-0-`: `sn=` still picks the account, and only
-the queued row disagrees. Accounts imported before this build are in the same state (the selector
-was not stored until the 2026-09-24 guard work); a re-run of `link --from-household` fills it in
-place, since the import matches on the token, and a later browser re-link keeps it. For a service
-with one account none of this matters - the default is that account.
-
-**One resolution, not two.** The first cut read the credential store a second time to build the
-naming, beside the read that had already chosen the token, and a bookmark's stream fallback went
-on using the preferred account's token while its cdudn named the bookmark's own. The serial and
-selector now ride on the `Token` itself - built only by `Account::token` - so the account a service
-is asked with and the account the player is told about come from the same lookup.
-
-## Doing and printing, separated: outcomes, a pooled session, the TUI in-process (2026-09-26)
-
-Until this, every command in `src/commands/*` took a `&Session` and a `json` flag and printed as it
-went; what a command did existed only as the text it wrote. That is why the TUI ran this binary as
-a subprocess for grouping, party, the TV input, mute, crossfade and every volume key, why the
-widget and TUI parsed stderr for errors, and why a D-Bus interface on the daemon
-(`docs/dbus-interface.md`) would have needed the command layer rewritten first. It is also most of
-why a CLI call costs ~420 ms: 3 ms is process start; the rest is opening sockets to players that
-something else on the machine already holds open. Four commits, in order, each with the CLI's
-output diffed byte-for-byte against captures taken before it (`scripts/output-baseline.sh`, which
-captures 33 commands against two idle rooms and restores them; it is what the next refactor of the
-command layer should diff against too):
-
-- **Outcomes** (`34656be`, `aec4f8f`). A command returns a typed outcome implementing
-  `commands::Report` - a `Serialize` struct plus `text()` and `notes()` - and one `emit()` in the
-  CLI layer prints it: the text or one JSON line on stdout, notes on stderr. `vol` answers with
-  `VolumeOutcome` or, for the `normalize` word, `NormalizeOutcome`; repeat, shuffle and crossfade
-  with a `ModeOutcome`; group and ungroup with a `GroupOutcome` (the group as it now stands, plus
-  who left); party with that or a `PartyOffOutcome`; tv with the soundbar that switched. `emit`
-  serialises through `serde_json::to_value`, because this crate's `serde_json` has no
-  `preserve_order`: a `Value` prints its keys sorted, as every `json!` literal did, where a struct
-  would stream them in field order and change every documented line. `fan_out` keeps printing each
-  room as it is done (a failure on the third of five leaves the first two applied *and* reported),
-  and `vol --each` hands it a `PerRoom` directly instead of building a `cli::Command` for it to
-  re-read. `tv`'s line before its fourteen-second call is not an outcome of anything yet, so it
-  goes through `session::progress`, the hook connect's rescan lines already used. The four
-  grouping/TV commands gained `--json`. The first live `group --json` showed `members` in the
-  player's own order, not coordinator-first as first written: `modifyGroupMembers` answers with a
-  different order from `getGroups`.
-- **A pool on the session** (`c27fa24`). `Session` holds a `Pool` of connections to the players it
-  reaches beyond the one it was opened on, keyed by address. `session::coordinator` and the five
-  places that opened a socket by hand (`--player` volume, the member reads behind `normalize` and
-  `balanced`, the soundbar's Control API read, chime/notify, `raw --scope player`) go through it.
-  The lock is never held across the `open`; a race opens twice and the loser closes its socket; a
-  socket the keepalive gave up on is evicted before it is closed; `Session::close` closes
-  everything, because `Connection` has no `Drop`, and `run()` is split so the CLI closes on every
-  return. The daemon kept the same map by hand until 2026-09-26 and now holds its sockets here as
-  well; see "The daemon on `Pool`" below.
-- **The TUI in-process** (`31d1de6`). `tui::action::Speakers` opens a session on the first write
-  and keeps it, re-reads the topology before every write (one `getGroups` on the held socket,
-  which is the whole answer to a regroup making the last read wrong), and closes the session on
-  any failed write so the next starts from nothing - what recovers a socket a suspend left dead,
-  at the cost of one visible error. The subprocess code went, and with it the `current_exe` /
-  " (deleted)" resolution an upgrade under a running screen used to need. Notes reach the status
-  line; connect's progress lines are silenced, since they would draw over the alternate screen;
-  `--household` is passed through, where the child never got it.
-
-**Measured**, key sent to Kitchen's MPRIS `Volume` event arriving (so including the speaker's own
-event path): CLI `vol -5` 417 ms; the first TUI write 544 ms (it opens the session); every write
-after that 181-191 ms. Installing a new build under the running TUI, then pressing a volume key,
-worked - the case the deleted code existed for.
-
-**Seen along the way, fixed the next day:** after a regroup the daemon republishes every MPRIS
-name and the TUI's cursor went back to the first row, so a `+` pressed right after joining a room
-nudged whatever was at the top. The TUI already followed the cursor's room by name; what it
-followed was the *current row's* name, and the daemon re-adds players one at a time, so a snapshot
-taken midway lacked the room, the clamp put the cursor on row 0, and the next snapshot faithfully
-followed Bedroom. `App::following` now records the room a key last chose and `apply` locates that,
-leaving it alone when a snapshot lacks it. Checked live: the overlay stayed on Kitchen through the
-republish and the next `+` went to `Kitchen + 1`.
-
-**Exercised live later the same night** (Guest TV as the party's coordinator): `tv` on two
-Beams, text and `--json`, both fine; `party off` and its idempotent "No rooms were grouped." fine.
-The `party` call itself surfaced something new, not a regression: pulling four rooms onto the Guest
-TV Beam *while it sat on its TV input* stalled that Beam past the 5 s reply timeout - the
-grouping landed, the CLI reported the timeout - and for the next ~20 s it accepted no command and
-no new socket, then applied the `party off` it had been sent meanwhile. The fourteen-second figure
-`speaker.rs` gives for a TV-input switch is the same stall from the other side. The false failure
-is fixed (2026-09-26): a group change the coordinator does not answer in time is checked against a
-fresh `getGroups` from the session's own player - everyone added in, everyone removed out, the group
-found by its coordinator since a group's id can move - and reported as done with a `note:` when it
-is there (`household::change_group`); a refusal is not re-read. The stall itself could not be
-provoked again that night: a party onto the Beam on its TV input showing "No Signal" took 1.4 s
-both ways, twice (the night before it showed "TV Audio [Unavailable]", so a live HDMI/CEC state
-may be part of it). The confirmation branch is exercised by its unit test only. The `party` text
-line therefore still has no live capture (the timeout ate it); its `--json` shape was seen only on
-the already-grouped no-op path. The TUI's `P` from Guest TV, run afterwards, joined all five and
-then broke them up, each within five seconds - the Beam did not stall that time - so its
-twenty-second timeout was not hit either. A second timed run gave 426 ms for the write that opens
-the session and 173-181 ms for the three after it.
-
-**A write that fails on a held session, exercised by killing the TUI's sockets** (`ss -K`, as
-root, on each of the two TCP connections the TUI held to speakers on :1443; the TUI itself can
-provoke no command-level failure - `t` on a room without a TV is refused before anything is sent,
-the overlay offers only joins and leaves that succeed, and volume, mute and crossfade are accepted
-on every room here, TV audio included):
-
-- *The pooled socket* (Kitchen's coordinator, opened by `Pool::reach`) killed: the next nudge
-  landed with no error - `reach` saw `!is_alive()`, evicted it and opened another, on a new port -
-  in 307 ms against ~180 on a held socket. The rule works silently, as designed.
-- *The primary* killed: the next nudge failed within a second - "connection to player at
-  192.168.86.24 was lost", the read loop having seen the reset rather than waiting out the 5 s
-  reply timeout - and the session was dropped. The nudge after that reconnected and landed in
-  423 ms; the one after that, 177 ms. One visible error, then recovery, which is also the
-  suspend/resume path. The pooled socket the drop closed lingered in `ESTAB` afterwards - still
-  there after the reconnect, on the second run. Not the read loop, which `close` wakes at once:
-  the *write* half of the socket lives in the connection's shared state, which the keepalive task
-  holds until its next tick, up to thirty seconds. Sending a WebSocket Close frame from the read
-  loop's exit did not do it (checked live: still `ESTAB`), because a split socket closes only
-  when *both halves are dropped*; the sink is now an `Option` the read loop takes and drops on
-  its way out. Checked live the same way: the released pool socket was gone by the first sample,
-  255 ms after the failed write, and the reconnect opened exactly two.
-
-**Reviewed, and reworked the same day.** A review of the TUI commits found the held session's
-rules right in outline and wrong in three details, each fixed: a failed write closed whichever
-session was *currently* held, not the one it ran on, so two writes in flight could close each
-other's sessions in turn (the held session now carries a generation, and a failure releases only
-its own); *any* error dropped the session, a player's refusal or an unresolvable room included,
-costing a full reconnect for nothing (only `sonos::local::Unreachable` - a socket that would not
-open, closed under a command, or never replied, now one typed error - or a socket found dead
-does); and the connect ran under the lock, so keys pressed during a slow one queued behind it
-and a key given up on could drop the connect mid-discovery, leaking the sockets it had opened
-(the connect is now a spawned single-flight task that stores its own result, shared by every
-write that arrives while it runs). The seven write methods became one `write()` carrying that
-policy. On the cursor side, the fix above still let a key pressed *during* the partial snapshot go
-to the clamped row; the selection is now unresolved while the followed room is missing (keys do
-nothing, nothing is highlighted), a key on an empty list no longer forgets the room, one re-read
-covers a burst of failures - and the overlay stays open through the republish its own join
-caused, which the first cut of the unresolved rule closed, handing the next Esc to the room list,
-where Esc quits. Re-checked live after the rework, the primary socket killed again: the red
-footer within 254 ms with the bar already back at 9%, the next `+` reconnecting through the
-single-flight connect and landing, both sockets replaced.
-
-Seen in passing, and fixed: the volume bar moves on the keypress, before the write, and a failed
-write did not move it back - the screen said 14% while the speaker stayed at 9 until the next
-successful write. A failed write now asks the daemon for the household again at once (the same
-read the thirty-second heartbeat does), which puts the bar where the speaker is. Checked the same
-way, the primary socket killed under the TUI: by 300 ms after the keypress the row already read 9%
-again under the red footer, and the next `+` reconnected and landed.
-
-**What this makes cheap next:** the daemon adopting `Pool` (its `HashMap` is one, and `reach`'s
-returned `bool` is where it hangs a forwarder); a `lib.rs` split, now that nothing in the command
-layer prints; and the D-Bus interface, whose phase-1 methods are each an outcome mapped onto
-properties. The first is done (below); the other two are not started.
-
-### The daemon on `Pool` (home, 2026-09-26)
-
-The daemon's `HashMap<IpAddr, Connection>` is gone. `serve` owns the `Session` and ends with
-`Session::close`; `connection_to` is `pool.reach` plus a forwarder on a socket that call opened -
-the returned `bool` - and on nothing else. A republish empties the pool with `close_all` where it
-used to close every entry but the primary by hand: the pool never holds the primary, since `reach`
-answers its address with it directly. Two things come with it. A pooled socket the keepalive has
-given up on is now evicted and reopened rather than handed out dead, the rule the CLI and TUI
-already had. And **`session.groups` is kept current** from every `groups` event that parses, not
-only the ones that change the topology - a rename or a player's new address changes nothing
-`same_topology` compares. No `refresh_groups` is needed here, unlike the TUI: the household
-subscription already delivers the topology. Nothing in the loop reads `session.groups` back yet;
-it is what a D-Bus method asking about the household would read, instead of the connect-time
-snapshot.
-
-Checked live: restarted, five rooms and five sockets on :1443; Kitchen joined into Dining Room's
-group, a republish to four rooms, still five sockets (Kitchen keeps a member socket for its own
-volume); ungrouped, a republish back to five rooms, still five sockets. No socket leaked across
-two republishes, and the republished players answer `PlaybackStatus` over the bus. Not checked
-live: a pooled member socket found dead and reopened - the same `reach` the CLI and TUI use, whose
-eviction was verified under `ss -K` on 2026-09-25.
-
-## The Control API, enumerated; Preferred Service is not on the household (home, 2026-09-26)
-
-### Namespaces resolve by prefix, so they can be listed
-
-The player **canonicalises a namespace by prefix**, not only by alias: `home:1` answers as
-`homeTheater:1`, `room:1` as `roomDetection:1`, `system:1` as `systemReporting:1`, `network:1` as
-`networkTest:1`. A real namespace rejects an unknown *command* (`ERROR_UNSUPPORTED_COMMAND`, with
-the canonical name echoed in the header) and a nonsense one rejects the *namespace*
-(`ERROR_UNSUPPORTED_NAMESPACE`). Walking prefixes `a`..`z` and extending each one that matched, to
-four letters, listed 41:
-
-`alarms` `areas` `audioClip` `authorization` `catalog` `devices` `diagnostics` `effectiveSettings`
-`entitlements` `favorites` `global` `groups` `hardwareStatus` `hdmi` `history` `homeTheater`
-`households` `info` `ircontrol` `localContentLibrary` `management` `musicServiceAccounts`
-`networkTest` `pinewood` `platformInternal` `playback` `positioning` `power` `roomDetection`
-`settings` `sleepTimer` `smartplay` `soundSwap` `svc` `systemReporting` `time` `topology`
-`trueplay` `virtualLineIn` `voice` `zones`
-
-A lower bound: a prefix answers with one namespace only, and four letters did not reach the ones
-that share a long prefix with another (`playbackMetadata`, `playbackSession`, `playbackExtended`,
-`playerVolume`, `groupVolume`, `playlists` are all known and all missing from the walk).
-
-### What answers
-
-Probed with generic verbs (`get`, `getInfo`, `getSettings`, `getStatus`, `list`, `subscribe`, and
-`get<Name>`); a command that exists answers with something other than `ERROR_UNSUPPORTED_COMMAND`,
-often the target it is missing.
-
-| namespace | answers | notes |
-|---|---|---|
-| `history:1` | `getHistory` (household) | **the household's recently played**, 40 items, each `{name, type, playable, explicit, id: {serviceId, accountId, objectId}, metadata.metadataBlob}` - the app's "Recently played" |
-| `devices:1` | `subscribe` | an event with every device: model, display name, hw/api versions, 9 capabilities, 22 `deviceFeatures`, serial |
-| `zones:1` | `subscribe` | bonded setups: stereo pairs and home theater, with `channelMap`, a `disconnected` flag per member and `gainTrimDB` |
-| `areas:1` | `getAreas`, `subscribe` | areas with `playerIds`; one area holding all five here |
-| `entitlements:1` | `getEntitlements`, `subscribe` | an empty list and a `sonosId` - the Sonos account's id |
-| `alarms:1` | `getAlarms`, `subscribe` | the Control API's own alarm list (empty here) |
-| `localContentLibrary:1` | `subscribe` | share list status |
-| `settings:1` | `getSettings` wants a **`userId`** | with the `sonosId` as `userId`: household permissions - `allowAirplay`, `allowLineIn`, `allowDirectControl`, `enableContentAccess` - and nothing about services |
-| `effectiveSettings:1` | `subscribe` wants `playerId`, `locationId`, `userId` | not reached; nothing here knows a `locationId` |
-| `info`, `hdmi`, `hardwareStatus`, `diagnostics`, `trueplay`, `voice` | want a `playerId` | not followed up |
-| `positioning:1` | `ERROR_UNSUPPORTED_NAMESPACE ... has no actor` | declared, not implemented on this firmware |
-
-`history`, `areas` and `entitlements` events carry a `version` only - the same cache-invalidation
-role `musicServiceAccounts:1` has. `raw api --header KEY=VALUE` was added for this: `--scope` cannot
-derive a `userId`.
-
-**Worth building on:** `history:1 getHistory` is a recently played list the widget could show, with
-ids already in the form `play-item` takes; `zones:1` would let `system` show pairs and surrounds
-with their channels; `devices:1` is a richer `system` than UPnP gives.
-
-### Recently played, and `loadContent` (home, 2026-09-26)
-
-`history:1 getHistory` became `x2rock recent`, `x2rock replay`, and a **Recently played** door in
-the widget. (**2026-10-11: `replay` no longer loads, except a Sonos playlist.** `loadContent` on a
-Mixcloud item restarts the coordinator, so a replay now takes `play_item`'s routes. See "Replay
-queues, because `loadContent` restarts a speaker on Mixcloud". What follows is still true of
-`loadContent` itself.) Playing an item back went through **`playback:1 loadContent`** (group-scoped), which
-takes the item's own `{serviceId, accountId, objectId}` and its `type` - no DIDL, no cdudn, no
-queue arithmetic; the player resolves it. Found by the same probe: `loadContent` exists and wanted
-`id` (`Parsing terminated:[1].id`), where `loadItem`, `playContent` and every `history:1` verb do
-not. Learned playing forty items back on Dining Room:
-
-- **It loads and does not start.** `playOnCompletion` is accepted and ignored. A `play` sent at
-  once is either refused as `ERROR_PLAYBACK_NO_CONTENT` or - worse - accepted and lost, the room
-  settling at IDLE when the load lands (a YouTube Music album, twice). A play two seconds later
-  started everything tried, so `replay` presses play once a second until the room reads PLAYING,
-  for up to twelve seconds.
-- **Loaded over a playing room, it sits at BUFFERING** until a play arrives; a `pause` in that
-  state is refused with `ERROR_PLAYBACK_NO_CONTENT`, which looks like a hang and is not one.
-- **It plays every kind the history holds**: albums and playlists (Apple Music, Deezer, YouTube
-  Music, TIDAL), iHeartRadio live stations and custom and artist radio, Deezer mixes, Sonos
-  playlists (service `65435`, the playlist's bare id, no account).
-- **The account an item names is the one it was played from**, and forty items here named eleven
-  YouTube Music serials, one live. `loadContent` accepts a dead one and plays nothing; swapped for
-  the household's preferred account the same item played. **But only a dead one may be swapped**:
-  an iHeartRadio custom station loaded under the household's *other* live iHeartRadio account
-  played nothing, because it belongs to the listener who made it. So `replay` keeps an account the
-  household still holds and swaps only one it does not.
-- Six of forty were unplayable here: Spotify, Plex, TuneIn (New) and Mixcloud items from accounts
-  this household does not hold, and two with no service at all. `recent` marks them and the widget
-  leaves them out.
-
-**History is a household setting (office, 2026-09-28).** With **Personalization Services** off in
-the Sonos app (under Account > Privacy and Security), `getHistory` is refused with
-**`ERROR_DISALLOWED_BY_POLICY` ("History is disabled")** - not `ERROR_NO_PERMISSION`, and the same
-whichever service is playing (Apple Music and Amazon Music alike). Switched on, the same call with
-the same sign-in answered at once with an empty history: nothing is recorded retroactively.
-
-### `loadContent` for `play-item` and `bookmark`: evaluated, kept as a last resort (home, 2026-09-26)
-
-The question was whether `loadContent` could replace the hand-built UPnP enqueue - DIDL, cdudn,
-`sn=`, `AddURIToQueue`, seek - behind `play-item` and `bookmark`. Tested on Dining Room:
-
-| | `loadContent` | the UPnP path |
-|---|---|---|
-| tracks: Deezer, YouTube Music, Apple Music, an iHeartRadio podcast episode | ✓, playing in ~2 s | ✓ |
-| albums, playlists, iHeartRadio live stations, Sonos Radio, Sonos playlists | ✓ | ✓ (playlists by their own command) |
-| iHeartRadio `artist_radio` | ✓ | ✗ 800 from the queue, and iHeartRadio's `getMediaURI` refuses the id - but it plays as the room's source, which is now its first route (see "iHeartRadio searched the way the Sonos app shows it", 2026-10-07) |
-| an **anonymous** service (Audacy `station:5234`) | ✗ `ERROR_ACCOUNT_INVALID_ID` "Could not find default account for serviceId", however no account is written (absent, `""`, `sn_0`, `0`) | ✓, streamed |
-| a service the household holds no account for | ✗ the same | the stream fallback, where the service allows it |
-| **appending** (`queue-item`, `bookmark --next`) | ✗ replace only: `action` `APPEND`/`INSERT_NEXT`, `enqueue`, `queueMode` are all ignored | ✓ |
-| what `play-item` leaves of the queue | replaced | kept; the item is appended and played |
-| a dead account in the id | accepted, then plays nothing | the serial is chosen from the store up front |
-| starting | pause first, load, press play until PLAYING | seek and play |
-| time to playing | 1.7-2.9 s (3-6.5 s with the pause) | 1.3-2.8 s |
-
-**Not a replacement.** It cannot append, so `queue-item` and `bookmark --next` stay where they are;
-it cannot reach an anonymous service or one the household does not hold, which the stream path
-does; and moving `play-item` onto it would change what "play" does to the queue. The UPnP path
-also stays the one that works on a household where x2rock holds a token the household does not.
-
-**Kept for what only it can do.** `replay` uses it, because the history names items by the triple
-it takes. And `play-item` now tries it **last**, when the queue and the stream have both refused
-and the household holds an account for the service: that is exactly the iHeartRadio artist radio
-case, which played. `load_and_start` is the shared tail - pause, load, press play until PLAYING -
-and the pause is itself a fix: loaded over a playing room, the previous item reads PLAYING for a
-moment, and `replay` had declared success on it while the new load settled at IDLE.
-
-### `zones:1` in `system` (home, 2026-09-26)
-
-`system` already showed bonding - `L`/`R`, `LS`/`RS`, the Sub - from the UPnP topology, so
-`zones:1` was read for what the topology lacks: **whether each bonded speaker is connected**, and
-its **gain trim**. The namespace has no `get`; a `subscribe` is answered by two events, one carrying
-each member's `state.disconnected` and one its `settings.gainTrimDB` (the second omitted Living
-Room here - its trim reads `null`, not `0`). `Connection::zone_bonds` subscribes, merges the two for
-up to two seconds, and unsubscribes; it runs beside the per-speaker `device_info` fetches, so
-`system` took the same ~330 ms as before. Best effort: no answer leaves the listing as it was.
-
-Shown as `[disconnected]` and `[trim ±N dB]` at the end of a text row, only when there is something
-to say, and as `disconnected` / `gain_trim_db` in the JSON. A bonded speaker `zones:1` calls
-disconnected that the topology no longer lists gets a line of its own - the case worth the whole
-change, and the one not seen live: nothing here was unplugged to provoke it, so the merge, the note
-and the lost-speaker line are unit-tested against event bodies in the shape observed.
-
-### Player-scoped finds (home, 2026-09-26)
-
-Followed up with `--scope player` on Living Room's Beam, reads and `subscribe` only:
-
-| namespace | how | what it gives |
-|---|---|---|
-| `info:1` | `getInfo` | the speaker's `discoveryInfo`: **`locationId`** (what `effectiveSettings` wants), `restUrl` (`https://<ip>:1443/api` - a REST form of the same API), `credentialTypeAllowed: API_KEY`, `allowGuestAccess`, Control API **1.54.1** (min 1.1.0), 9 capabilities (`HT_POWER_STATE`, `HDMI`, `IR_CONTROL`, `VOICE`, ...) and 22 `deviceFeatures` (`HDMI_ARC`, `HP_SWAP_TARGET`, `ROOM_DETECTION_CHIRP`, `SUPPORTS_HEADPHONE_LAN_PLAYBACK`, ...) |
-| `hdmi:1` | `subscribe` | **TV power** (`tvPowerStatus`), `connection`, ARC/eARC/CEC/SAM state and their errors. Live here: Living Room's TV on with ARC `TERMINATING`; Bedroom's on, ARC `INITIATING`; **Guest TV `NO_CONNECTION`**, and confirmed: nothing is plugged into its HDMI. So "TV Audio [Unavailable]" on that Beam is an empty port, not a TV misbehaving; whether it had a part in the one 20 s party stall is unproven |
-| `homeTheater:1` | `subscribe` | `signalDetected` (is the TV sending audio), and headphone-swap state (`accessorySwapState`, `accessoryList`) beside the night/dialog settings x2rock already reads |
-| `hardwareStatus:1` | `subscribe` | radio `channel`, `frequency`, `rssi`, `mode`, `netmode`. On SonosNet every speaker reads channel 1 and **RSSI 0**, wired or not, so it says nothing here; it may on a household joined to WiFi |
-| `trueplay:1` | `getTrueplayStatus` | `orientation`, `sonarState` (`ENABLED_AVAILABLE`) |
-| `ircontrol:1` | `getIRControl` | `enabled` |
-| `effectiveSettings:1` | `subscribe` with `locationId` + `userId`, then `getSettingsGroup {groupName}` | five groups: `global` and `playback` empty; `playerUI` (`statusLight`, `buttonLockState`); `playerBasic` (`zoneName`, `icon`, `configuration`); and **`security`: `allowUnauthenticatedControl: true`, `allowInsecureUPnP: true`, `allowGuestAccess: true`** |
-
-**These are the Sonos app's own switches.** Account > Privacy and Security > Connection Security lists them for
-the person: **Authentication: Off** is `allowUnauthenticatedControl: true`, **UPnP: On** is
-`allowInsecureUPnP: true`, **Guest Access: On** is `allowGuestAccess: true` (read off both sides,
-2026-09-26). Anyone in the household can flip them.
-
-**With Authentication on** (flipped in the app for the test, 2026-09-26): every Control API command
-from x2rock is refused with **`ERROR_NO_PERMISSION`** - the first one, `groups:1 getGroups`, on every
-player - while **UPnP on :1400 keeps answering**. Sockets opened before the switch were left alone:
-the running daemon went on publishing, and only its next connect was refused. x2rock read the refusal
-as "did not answer", rescanned the subnet, and five seconds later blamed players "mid-reboot, or not
-players at all". Now `attach` maps it to **`authentication_required`**, the connect loop returns it
-at once rather than trying the next address or rescanning (151 ms), discovery reports it rather than
-"none completed a session", and the message names the switch and the support page. The daemon logs
-it and keeps retrying, which is right: the switch going off is the fix, and the next retry connects.
-
-**What Authentication-on asks for (probed 2026-09-27).** Everything but discovery is refused, and the
-refusals name the scheme:
-
-- `GET /api/v1/players/local/info` (REST, the sample API key, no token) still answers - discovery is
-  the one open read - and its **`credentialTypeAllowed` changes from `API_KEY` to `GUEST_TOKEN`**
-  (`allowGuestAccess` true). `AIRPLAY` drops out of the capability list; Sonos's support page says
-  the switch covers AirPlay too.
-- **REST with `Authorization: Bearer <dummy>`** answers **401** with `WWW-Authenticate: Bearer
-  realm="service",error="invalid_token",error_description="Access token is invalid"` - the header is
-  read and the token validated.
-- **The WebSocket**, with a dummy token in `Authorization` (Bearer or Basic) or any `X-Sonos-*-Token`
-  header, answers `ERROR_NO_PERMISSION` carrying `wwwAuthenticate: Bearer realm="service",
-  error="insufficient_scope"` whatever is sent, so it takes its token some other way or wants a
-  scope the dummy could not have.
-- `authorization:1` is reachable before authenticating (unknown commands answer
-  `ERROR_UNSUPPORTED_COMMAND`, not `ERROR_NO_PERMISSION`), but none of fourteen token-shaped names
-  exists, and command names, unlike namespaces, do not resolve by prefix.
-
-So the credential is an **OAuth 2 bearer access token** in the Sonos cloud's realm - a Sonos account
-token, with `GUEST_TOKEN` most likely a restricted kind the cloud issues for guests. The authenticated
-mode the amended axiom allows would therefore be: an OAuth authorization-code login against Sonos's
-developer integration (a client id and secret registered at developer.sonos.com), the access token
-kept and refreshed, and presented as `Authorization: Bearer` on the local REST API - with the
-WebSocket's form still to be found. Untested with a real token: nothing here holds one.
-
-**Built and verified the same day, with a real token** (Authentication on, `GUEST_TOKEN` in
-discovery). An integration registered at developer.sonos.com, the OAuth code flow through
-`api.sonos.com/login/v3/oauth` with the redirect caught by a static page
-(`rahga.github.io/x2rock/callback.html`, which then only showed the address to paste back), and the
-token exchanged at `/oauth/access` with the integration's Basic credentials: `playback-control-all`,
-24 hours, a refresh token. Against the speakers:
-
-- **REST**: `Authorization: Bearer <token>` -> **200**, all five groups - with x2rock's sample API
-  key or the integration's own, alike.
-- **WebSocket**: the token is **not** read from the handshake's `Authorization`; it goes in **each
-  command's header as `"authorization": "Bearer <token>"`** -> `ok: true`. A bare token there is
-  `ERROR_NOT_AUTHORIZED`.
-
-So `Connection::command` adds that one field when a sign-in is held, and nothing else changed:
-`status`, `vol` (read and write), `recent`, `system`, and the daemon's whole publish all worked with
-Authentication on. `src/sonos/login.rs` holds the rest - `x2rock login` (the link, the paste, a
-`state` check), the token at mode 600 in the state directory, and a refresh ten minutes before
-expiry, cached per process. The daemon's refresh is a call to Sonos's cloud from inside it, the one
-exception to "talking to a service never enters the daemon", and for the same reason as the axiom's:
-a daemon that cannot refresh loses the household a day after sign-in. Not signed in, nothing is
-sent and nothing read but a missing file, once.
-
-**The paste became a loopback hop (2026-09-27, `dd5ac51`).** Sonos redirects only to a registered
-public HTTPS page, so the usual `127.0.0.1` redirect URI is not available directly. Instead
-`x2rock login` listens on a free `127.0.0.1` port and puts it at the front of the OAuth `state`, as
-`<port>.<random>`; Sonos echoes the state untouched, the callback page reads the port back out and
-`location.replace`s the tab to `http://127.0.0.1:<port>/callback` with the same query, and x2rock
-checks the state, exchanges the code and answers the tab. The page still makes no request of its
-own (its CSP is `default-src 'none'`); a navigation to 127.0.0.1 never leaves the machine. It also
-still shows the address, so a browser on another machine - whose 127.0.0.1 is not this one - can
-paste it into the waiting `x2rock login`, or finish with `x2rock login '<address>'`. The state
-round-trip is unit-tested (`the_listening_port_leads_the_state_and_survives_the_round_trip`).
-
-**Verified end to end on the office One SL (2026-09-28)**, Authentication switched on for the test
-(`credentialTypeAllowed: GUEST_TOKEN`). `x2rock login` opened the browser and listened on
-`127.0.0.1:43321`; after Allow it finished by itself, exit 0, with no terminal to paste into - so
-the callback hop was the only way it could have. A new token was written at mode 600 and the
-listener closed. With it, `status`, `vol` (read, and a write of the same value), `recent`, and a
-restarted daemon's publish (MPRIS `PlaybackStatus` and title read over D-Bus) all worked; with the
-token moved aside, the same `status` was refused as `authentication_required`.
-
-**The `security` group is the one that matters to x2rock itself.** Everything it does rests on the
-Control API answering without authentication and on UPnP being open on :1400 - and those are
-settings, now visible, with names that read like switches Sonos could default off. A check that
-names them when control is refused would turn a mysterious failure into a sentence.
-
-Left alone: `authorization`, `catalog`, `management`, `smartplay`, `soundSwap`, `svc`, `pinewood`,
-`platformInternal`, `power`, `time`, `global`, `topology`, `households`, `systemReporting`,
-`roomDetection`, `networkTest` answer neither `subscribe` nor any plausible read name, household or
-player scoped; without a way to list their commands, guessing further is low-yield. None of this
-probe sent anything but reads and subscribes.
-
-### The UPnP switch, followed live (office, 2026-09-28)
-
-With UPnP off, everything x2rock does over SOAP answers 403 - `queue`, `alarms`, `eq`, `sleep`
-and the TV input, each refused at once and naming the switch - while the Control API carries on:
-`status`, `vol`, `recent`, `favorites` and the daemon's whole publish, and cover art, which is
-served from :1400 but is not SOAP (200). The front ends offered the refused set anyway, and the
-widget swallowed most of the refusals: an empty-looking queue, a TV glyph that did nothing.
-
-**The switch is readable and evented on the Control API.** `effectiveSettings:1 getSettingsGroup
-{"groupName": "security"}`, **player-scoped with no other parameter** - no `userId`, no
-`locationId`; household-scoped it is refused for want of one - answers `allowInsecureUPnP` beside
-the other two switches, and a `timestamp` for the group. `subscribe`, player-scoped and also
-parameterless, sends a `settingsChanged` listing every settings group and its `timestamp`, no
-values, first on subscribing and then on each change: UPnP on moved `security` 4 -> 5, off again
-5 -> 6, each within a second, and the group's own read carries the same number. So the daemon reads
-the group, subscribes on the primary, and re-reads only when `security`'s number moves - no
-polling - and publishes **`x2rock:upnpOff`** on every room. False means on *or* unknown, so an
-unread switch and an older daemon both leave clients offering everything, as before. Verified by
-flipping it both ways under the running daemon: the log line and the key followed with no restart.
-
-What the front ends do with it: the widget holds the queue glyph blank and ignores `Q`, drops the
-add-to-queue button from search and browse, keeps the TV glyph only where the room is already on
-TV (lit, not pressable), leaves night/dialog showing their state but not pressable - the daemon
-reads them over the Control API, only the write is UPnP - and skips their `eq` re-read. The TUI's
-`t` says why rather than switching. The daemon also stops sending the queue-version browse, which
-could only be a 403. `play-item` keeps its fallbacks - a refused enqueue still streams, and
-`loadContent` is Control API - and, if every route fails, now ends on UPnP being off rather than on
-the last route's failure. Seen on the office One SL: the key, both directions, and the queue glyph.
-The TV and night/dialog gating need a soundbar, so they are exercised only in the widget's code.
-
-### Cover art, fetched by x2rock rather than by Qt (2026-09-28)
-
-Raised in the widget's marketplace review (omacom/omarchy-plugin-marketplace#7284): every art URL
-went straight into a QML `Image`, which fetches anything from anywhere with no byte limit -
-`sourceSize` bounds the decode, not the download. On this household the URLs split two ways: the
-speaker's own `http://<ip>:1400/getaa` for now-playing and the queue, and service CDNs over https
-for favorites, recently played and search (`dzcdn.net`, `saavncdn.com`, `qobuz.com`,
-`mzstatic.com`). QML has no way to cap bytes, so the fetch left QML.
-
-`x2rock art <url>...` (`src/art.rs`) fetches only `https://`, or `http://` from a private IPv4
-address on port 1400; redirects are followed at most three times and each hop is held to the same
-rule. `http::get_bytes` stops reading once the raw response passes **2 MB** (a real 9 MB image was
-refused in 0.4 s) within **8 s**, a `Content-Encoding` is refused rather than inflated past the
-cap, and the body must start like a JPEG, PNG, GIF or WebP (AVIF and BMP since 2026-10-08).
-Kept in `$XDG_CACHE_HOME/x2rock/art`, mode 700, one file per URL named for its MD5, written by rename. A hit bumps the file's mtime - atime
-is unreliable under `relatime` - and each run prunes at most hourly (a `.pruned` marker): past
-**30 days** goes, then the least recently used until under **50 MB**. A cache hit answers in
-~2 ms. The widget shows only a `file://` path matching that cache's naming; `CoverArt.qml` refuses
-anything else. It asks in batches of up to 40 URLs, up to four processes at once, with `--each`,
-which prints a row per image as it lands: the first version printed one array at the end, from a
-single process, and every cover in a list waited on the slowest CDN in it - visibly slower than
-Qt's own fetch, on the office household. With `--each` it was not. In the CLI, not the daemon: a CDN is a
-service, and the daemon does not talk to services.
-
-### Preferred Service lives in the cloud or the app
-
-The Sonos app's Manage > Your Preferred Service (lists that service first, floats its search
-results) was flipped Deezer -> TIDAL -> Deezer with a snapshot between each step: every UPnP
-service's initial event from Kitchen (`SystemProperties` `UpdateID`, `ContentDirectory` counters,
-`DeviceProperties`, the topology), the Control API's groups, favorites and playlists, `settings:1`,
-and the household's decrypted account store. The only thing that moved was
-`ThirdPartyMediaServersX`, the encrypted account blob, and decrypted it was identical in both
-states - same records, flags and token lengths - so that was re-encryption, not content. TIDAL's
-`Flags0` reads `0` against the others' `4`, and it stayed `0` with Deezer preferred, so it is not
-the preference either. **Preferred Service is not stored on the household**; it belongs to the
-Sonos account or the app, and x2rock cannot read it. Merged search keeps its own order.
-
-## Scenes (2026-09-28)
-
-Prompted by comparing with SonosCLI, whose `scene save/apply` keeps grouping and per-room
-volume/mute. x2rock's (`src/commands/scene.rs`) keeps the groups, each room's volume and each
-group's mute, and adds an optional **soundtrack** per group - a Sonos favorite or a kept bookmark,
-resolved at save time, started last on apply. Stored in `$XDG_STATE_HOME/x2rock/scenes.json` per
-household id, rooms by player id with the name beside it, so a renamed room still matches.
-
-**Applying never removes a coordinator from its own group** - that hands its queue to whoever stays
-(see "Grouping over the local API"). `next_step` plans one `modifyGroupMembers` at a time against a
-fresh `getGroups`: if the wanted coordinator is a member of someone else's group it is detached
-(a member leaving is harmless), and then its group gains and loses members to match. Only what
-differs is changed, since a regroup stalls playback in every room it touches. Unit-tested against a
-model of the player's own semantics, including the case that forces a detach.
-
-Mute stays group-wide, as `vol mute` has it, and is set after the levels because a level being set
-unmutes. A bookmark soundtrack uses the queue path only: `bookmark`'s stream fallback prints its own
-lines, which cannot sit under a `--json` report, so a refusal becomes a note suggesting a favorite.
-
-Verified on the office One SL: save, list, apply with nothing to change (`regrouped: 0`), the
-soundtrack lookup and both refusals, and a favorite soundtrack starting on apply - Media Room went
-from Apple Music to the Deezer favorite in 0.8 s, reported under `playing`. A bookmark soundtrack
-too: a YouTube Music bookmark started in 1.6 s (`"kind": "bookmark"`), and a Sonos Radio one was
-refused by the queue (UPnP 800) and came back as the stderr note, with stdout's JSON clean,
-`playing` empty and exit 0 - the rest of the scene applied and the room kept playing. **Multi-room regrouping has not met real speakers yet** - the
-office has one room - and needs the home household.
-
-## Away from every household (2026-09-29, a network with no Sonos)
-
-Exercised on a network x2rock had never seen, with the office and home households both remembered:
-
-- Every command that needs a speaker (`status`, `now`, `vol`, `queue`, `favorites`, `scene`,
-  `play`) fails at once with `unregistered_network`, `fix` null, exit 1 - no scan, no wait.
-- Bookmarks, the radio directory, `accounts`, `service status`, `desktop status` and `art` work.
-- The daemon logged four lines on resuming here and then went quiet; no MPRIS players are
-  published, so the widget hides itself.
-- **`households` scans** - by design, it always does - and ran a 3 s sweep of the foreign /24 when
-  called here. The skill's "never reflexive" rule named only `discover`; it now names both.
-- **Searching a linked service said to link it.** With two households remembered and none in reach,
-  `current_household` resolved to nothing and `search -s Deezer` answered "Deezer needs a linked
-  account" - wrong, and following it would have started a browser login for an account already
-  held. `--household <room>`, the documented spelling, did not help either: offline, only an id
-  fragment matched. Now a room name resolves against the rooms remembered per household
-  (`State::household_rooms`), and a service linked somewhere but with no household known answers
-  `multiple_households` naming each household's rooms, **with no fix** - the usual one is
-  `x2rock households`, which would scan this network.
-
-## Findings from x2rocktv (2026-10-01/02)
-
-The Kotlin TV app, working through this document's lessons, measured four things on the home
-household and the office One SL that this document does not yet say, or says otherwise. Each was
-read off the speakers, mostly with this CLI's `raw` commands; x2rocktv's own fixtures hold the
-captures (`core/src/testFixtures/resources/fixtures/`).
-
-**`queueVersion` is sent, and it moves on every queue edit.** In `playbackStatus`, on both
-households: `"8"` at home, `"QV:00019"` on the office One SL (build 97180312, display 18.8).
-Watching Kitchen's `playback:1` events while `x2rock queue move 1 2` and back ran took it
-26 → 27 → 28, each arriving as its own `playbackStatus` event, with the room idle throughout.
-So on this firmware a pushed version answers "did the queue change?" without a browse, and
-`RoomPlayer::queue_version_fetch`'s `UpdateID` browse per playback event may be unneeded — worth
-checking which firmware sends the field before relying on it, since this document measured its
-absence on an earlier one. The silent-append caveat may not hold either: the move was an edit to
-an idle room, and it was pushed.
-
-**iHeartRadio is `DeviceLink` in this household, not anonymous.** `ListAvailableServices` lists
-service 6 with `<Policy Auth="DeviceLink">`. A rating call made with no token therefore stops
-before it starts, which is what x2rocktv's ratings ran into on Kitchen's iHeart podcast track;
-`x2rock rate` works because it presents a linked token. (TuneIn, 254, is the anonymous one;
-TuneIn (New), Radio Paradise, Apple Music and Plex are `AppLink`.)
-
-**`hdmi:1` says whether anything is plugged in, and whether the TV is on.** Player-scoped
-`subscribe` on a Beam answers an `hdmiStatus` event at once:
-
-| Room | `connection` | `tvPowerStatus` | `tvCECStatus` | `stateARC` |
-|---|---|---|---|---|
-| Bedroom (TV attached) | `CONNECTED` | `ON` | `ENABLED` | `ERROR` (`ABORT_INCORRECT_MODE`) |
-| Guest TV (nothing plugged in) | `NO_CONNECTION` | `UNKNOWN` | `UNKNOWN` | `RESET` |
-
-`NO_CONNECTION` is what "TV Audio [Unavailable]" means (see "Player-scoped finds"). x2rocktv now
-treats such a soundbar as having no TV input — no badge, no Source row, no candidate for "the
-television's room" — while keeping its Night Sound and Speech Enhancement, which need no TV.
-`tvPowerStatus: ON` is captured but unused; it could settle which soundbar the TV in front of you
-is on.
-
-**A ringing alarm names itself in `playbackMetadata:1`.** With the built-in chime, the container
-is `{name: "x-rincon-buzzer:0", type: "other", id: {serviceId: "buzzer", objectId: "0"}}` with no
-current item, while `playback:1` goes `IDLE` → `BUFFERING` → `PLAYING`, and back to `IDLE` on
-`pause`. That is a pushed signal that a room is ringing, where `GetRunningAlarmProperties` has to
-be asked. The snooze reply was not captured.
-
-Two smaller ones, for completeness:
-
-- **`zones:1 activeZonesChange` at household scope** reports a bonded speaker that has dropped off
-  as `state.disconnected: true` on that member — captured with Bedroom's left surround unplugged.
-  Whether a later disconnect is pushed while subscribed is still unknown; x2rock only ever
-  subscribed, read and left.
-- **A favourite's playability** follows `x2rock favorites --json`'s rule (a service name or a
-  content type) in x2rocktv too; the home household has no shells to check it against.
-
-## `x2rock say`: speech from a service, served to the speaker from here (built 2026-10-02)
-
-Announcements in a real voice were the one thing ronor's `speak` had that x2rock did not, and the
-question of building them came up with an ElevenLabs account to hand. The mechanics were measured
-before anything was written, and they settled the design.
-
-**What ElevenLabs is.** One POST, `/v1/text-to-speech/{voice_id}`, key in an `xi-api-key` header,
-JSON body of text and `model_id`, answered with the audio bytes - MP3 at 44.1kHz/128kbps by
-default, WAV and PCM on request. A sentence to `eleven_flash_v2_5` came back in 0.6s as 49KB of
-mono MP3, billed at **8 characters** by the `character-cost` response header, with `request-id` and
-`history-item-id` beside it. Keys are scoped: the one here is text-to-speech only, and lacks
-`user_read`, `voices_read` and `speech_history_read`, each named in a 401 whose `detail.status` is
-`missing_permissions`. That is the right way to issue one, and it is why `--voices` and a voice
-given by name are the only parts of `say` that can fail on permissions. Models run from 5,000 to
-40,000 characters a request; an announcement is a sentence.
-
-**Why the audio must pass through this machine.** `loadAudioClip` has an `httpAuthorization`
-field the player sends as an `Authorization` header on an HTTPS fetch, and ElevenLabs keeps every
-generation as a history item with a GET URL - so for an hour it looked as if the speaker could fetch
-straight from ElevenLabs with nothing served here. It cannot. ElevenLabs does read an
-`Authorization` header, but answers the API key in it with `invalid_authorization_header` /
-"authorization header must contain a valid bearer token": the bearer path is a different credential
-(a session token), and nothing in their documentation index mints one a speaker could carry. There
-is no signed or public download URL either. So the bytes come back here, and the question becomes
-the firewall.
-
-**The firewall, measured twice.** The clip was served from this laptop with a one-line Python HTTP
-server and a `notify` sent to the office One SL. With Omarchy's default-deny `ufw` as shipped: the
-player accepted the request in 0.37s and never connected - the server log held only the local sanity
-check. With one rule (`ufw allow from 192.168.77.94 to any port 8765 proto tcp`): the player fetched
-the file with a single plain `GET`, no `HEAD` and no `Range`, within a second, over plain HTTP - no
-certificate involved. Same command, same file, same speaker; the rule was the only variable. This
-is "The firewall problem" again, and the same answer the account-event capture reached: a fixed
-port, opened once.
-
-**Built.** Three pieces, kept apart on purpose:
-
-- `src/speech.rs` is the provider: config and key in `$XDG_STATE_HOME/x2rock/speech.json` at 0600
-  (its own file, not `credentials.json`, because a text-to-speech key belongs to the machine, not to
-  a household), the vendor's own `ELEVENLABS_API_KEY` overriding the file, the key read from stdin
-  by `--set-key` so it never enters a shell history. It knows nothing about speakers. It is CLI-only
-  under the standing rule: the daemon never loads it.
-- `src/clipserve.rs` serves one file, once, to one address: bound to **TCP 3401, the port the
-  `ThirdPartyMediaServersX` capture already uses**, so a household's firewall rule is written once
-  and covers both of x2rock's inbound uses. It answers the clip's path to the player's IP alone,
-  closes the connection on anyone else, waits 8s for the fetch and 1.5s more after it, and reports
-  `clip_not_fetched` with the `ufw` line in `data.firewall_rule` when the player never comes. No
-  `fix`: a `sudo` rule is the person's to run.
-- `src/commands/say.rs` is the only place that knows both: cache under `$XDG_CACHE_HOME/x2rock/say/`
-  keyed by MD5 of (provider, voice, model, text) so a repeated sentence is free, the speaker resolved
-  before anything is spent, then `loadAudioClip` through the same player-scoped path as `notify`.
-  Measured end to end against the One SL: **2.5s** for a fresh sentence (generation plus the
-  player's fetch), and the cached repeat served without a call to the provider.
-
-**Interoperability, by design rather than by second implementation.** Every text-to-speech API in
-use has the same shape - a JSON POST naming a voice and a model, answered with bytes - and the LLM
-vendors are converging on OpenAI's `/v1/audio/speech` under a bearer key. `speech.json` is keyed by
-provider name with a `base_url` slot for an OpenAI-shaped endpoint hosted elsewhere, `Kind` is an
-enum whose one variant carries the request builder, and `Synth` exposes only `synthesize`,
-`voices` and `resolve_voice`. The second vendor is a variant and a builder, not a second file
-format or a second command. It is deliberately *not* built until there is an account to verify it
-against: this document records what was measured, and an unverified backend would be the first
-thing in it that was not.
-
-**The voice list is remembered (same day).** The first run of `--voice Junior` needed the voices
-permission, and getting it meant switching the key's restrictions off altogether - a bad trade for
-one lookup, since generation never needs it and ids do not change. So a successful listing, whether
-from `--voices` or from a name that had to be looked up, is kept in `speech.json` under the provider
-(`voices`, with `voices_at`), names resolve there first, and `--voices` under a key that cannot
-list falls back to the remembered list and says so. The workflow is: list once with a broad key,
-restrict the key back to text-to-speech, and every name still works.
-
-**Two choices worth defending.** The default voice is a hardcoded ElevenLabs premade id (George),
-because a text-to-speech-only key cannot list voices and the first `say` should need nothing chosen.
-The default model is Flash v2.5 rather than Multilingual v2, because it is billed at half the rate
-and an announcement is not where the difference is heard; `--model` and `--set-default` change it.
-
-**Left out.** A local engine (Piper) as the account-free fallback, which the seam would take; a
-served-directory alternative to the listener for people with a web root, which the firewall
-measurement made less pressing than it looked; and ronor's `--scrape` idea, which is an agent's job
-now rather than a CLI's.
-
-## Audible: a book resumes from `positionInformation`, chapter-relative (measured 2026-10-06)
-
-Audible was added to the home household for this and imported with `link --from-household`; the
-book was Dune (`reftitle:B002V1OF70_com`), played in the Bedroom at volume 2. The shape was first
-captured by x2rocktv (its `parsePositionInformation`, 2026-10-06); what it could not settle - it
-had not played a book - is settled here.
-
-**What a book is.** `search` answers it as `itemType` `audiobook`. Its id is not itself playable;
-`getMetadata` on it lists the chapters as ordinary `track`s (53 for Dune) and carries the
-listener's place beside them:
-
-```xml
-<positionInformation><id>refchapter:B002V1OF70_119953071_com_119000_1795000</id>
-  <index>0</index><offsetMillis>689440</offsetMillis></positionInformation>
-```
-
-A chapter id ends in its own span in book time - `_119000_1795000` is 1:59-29:55, and its
-`duration` (1676s) is exactly that difference. Each chapter carries `canResume`, `canSeek` and
-`canSkip`.
-
-**The offset is chapter-relative.** The chapter played through `play-item` reported a
-`duration_ms` of 1,676,000 - the chapter, not the book - and started at 0. A Control API
-`playback:1 seek` to 689,440 landed at 691,062. After about a minute the player read 756,034 and
-paused; `getMetadata` then answered `offsetMillis` **756,107**, 73ms from the player. Book-relative
-it would have read about 875,000. So resuming is: play the chapter `positionInformation` names,
-seek to `offsetMillis` as given. No arithmetic on the id.
-
-**The speaker reports the position back to Audible itself.** While playing, the resume point
-trailed the player by about 16s (739,096 against 755,052), so it is reported periodically; on
-pause it was exact within a second. A book left off through x2rock is therefore where the Audible
-app, the Sonos app and the next `getMetadata` will pick it up - nothing in x2rock has to write it.
-
-**What x2rock did with a book, and why it was wrong.** `bookmarks::container_holds_tracks`
-counts `audiobook` as a container of tracks, like an album, so `play-item` or `browse --play` on a
-book enqueued every chapter and started at chapter one: the place was lost without a word, and
-playing it then *moved* the service's resume point to the start. The chapter played here went in
-as queue row 13, `x-sonosapi-hls-static:refchapter%3a…?sid=239&…&sn=29`, through the ordinary
-track path, which is the one resume uses.
-
-**Built the same day.** `play_item` sends an `audiobook` to `play_resumed`: one `getMetadata`
-with a count of 1 (`smapi::resume_point`) for the place and the first chapter, the chapter played
-as a `track` through the ordinary path, a wait for `PLAYING`, then `playback:1 seek` to the
-offset. No place kept means the first chapter from its start; `play-item --from-start` takes the
-old route on purpose. Verified in the Dining Room: Dune resumed at 756,107 - the saved place to the
-millisecond - in 3.5s, and Audible held 756,530 after the pause. `search`/`browse --play` resume
-too; `queue-item` on a book still adds every chapter, which is what queueing a book means.
-
-## iHeartRadio searched the way the Sonos app shows it, and its stations played as radio (2026-10-07)
-
-Prompted by x2rocktv (`ServiceContent.asSonosShowsThem`, commit 27e2318, office household) and
-re-measured here on the home household's iHeartRadio, sid 6.
-
-**Its search categories do not mean what they say.** The presentation map publishes stations,
-artists, tracks, albums, playlists and podcasts. For "coldplay": `artists` answers *artist
-stations* - `artist_radio.1648` "Coldplay" and its kin, all `program`; `tracks` answers artist
-stations too, its first hit "A COLD PLAY" being `artist_radio.32433934`, which plays The Kid
-LAROI's station rather than a song (the free tier plays no song on demand); `stations` answers
-only live radio ("z100": Z100, Z100 Portland, Z100 Eau Claire, all `stream`) and nothing for an
-artist; `playlists` answers iHeart's own custom radio. The Sonos app offers **Stations** and
-**Podcasts** only, and its Stations for "coldplay" are exactly the `artists` list, in order - so
-it merges the two. (iHeart's totals are not stable between requests: `artists` reported 80 for
-"coldplay" at a count of 4, and the merged list 36 at a count of 6.)
-
-**Built.** `iheart.rs` fixes iHeart's categories at `stations` and `podcasts`, alongside Apple
-Music's, behind one hook - `smapi::fixed_categories` - that the catalogue's cached reads consult
-too, so a list cached from the map is passed over. `smapi::search` runs iHeart's `stations` as
-`search_as_one` over `stations` then `artists`: one list, paged through as a whole, each category
-asked from where the page falls in it, a repeated id dropped. `search -s iHeartRadio -c tracks`
-now says iHeart has no such category, and the merged search draws on Stations and Podcasts only,
-so no station is ever listed as an artist or a song. (**Superseded 2026-10-12**: the app shows
-three sections, not two, and the merged list is gone. See "iHeartRadio's three sections, as the
-app shows them".)
-
-**A `program` plays as the room's source first.** `artist_radio` was recorded as playing only
-through `loadContent`, the last resort (2026-09-26, the table under "`loadContent`, and what it
-settles"). `play_radio` - `x-sonosapi-radio:` with the `audioBroadcast` DIDL - arrived on
-2026-09-30 for Radio Paradise and reaches it earlier, but only as a fallback: `play_one` still
-tried `AddURIToQueue` first, which refuses every `program` with 800, and printed the refusal as if
-something had gone wrong. Measured 2026-10-07 in the Kitchen: `artist_radio.1648` went queue (800)
-then radio, 1.6s, playing Coldplay's "Magic". Now a `program` goes to the room's source first and
-the queue is not tried; the same station started in 1.4s with nothing on stderr. (2026-10-11: this
-held for `play-item` only until the same day's fix: `search --play` and `browse --play` refused a
-`program` that came as a `mediaCollection` before `play_one` was reached. See "Every household token, imported".)
-
-## The 2026-10-08 review: what was measured and built
-
-A review of x2rock against x2rocktv's findings and the Sonos app (v89.01), worked through on the
-office household (Media Room, One SL, build 97180312). Each entry is what was measured, then what
-changed. Media Room's `volumeScalingFactor` sits at 0.02 on purpose while it is the test room.
-
-**Deezer rates with a heart and a ban, not thumbs.** Its `NowPlayingRatings` (presentation map
-version 301) keys on `ISFAVORITE`: at `0` it offers `SKIP_TRACK` (id 3) and `SAVE_TRACK` (id 1), at
-`1` `SKIP_TRACK` and `DELETE_TRACK` (id 0). Its strings name them: `SAVE_TRACK` adds to the
-favourite tracks, `DELETE_TRACK` removes from them, and `SKIP_TRACK` is "Add to Dislike tracks",
-declared `AutoSkip="ALWAYS"`. `rate` looked for `UP`/`DOWN` in the string id, found neither, and
-said Deezer "did not report a rating state" - a state it had reported. `smapi::RatingKind` now reads
-a heart as up, a ban as down and a delete as `unfavorite`, and `rate` tells "no state" from "this
-state does not offer that". Measured on "Fame is a Gun": `rate up` added it to the favourites; a
-second `rate up` was refused naming `rate down` and `rate unfavorite`; `rate unfavorite` sent
-`DELETE_TRACK` and took it back out. `rate down` was not sent, since nothing here undoes a dislike.
-
-**A replay could report the paused content as the new one.** `load_and_start` pauses, loads, and
-presses play until the room reads PLAYING. Measured on Media Room: `replay "Happy Radio"` (Saavn)
-over Sonos Radio's Hit List printed success, and polling after it read Hit List's "Saturn" playing
-for a moment, then `IDLE · on Saavn` for good - the first press had resumed the paused station
-before the load took over. PLAYING now counts only when what plays differs from before (track id,
-container name) or the container is the item named, which is how replaying what is already on
-still passes; history's id (`sonos:2997`) and the container's (`2997`) do not line up to compare.
-The same `replay "Happy Radio"` now keeps pressing until Saavn plays (4.8s); `replay "Hit List"`
-over itself takes as long as before (4.3-5.0s both ways). A `loadContent` the player never
-answers is no longer an error either: judged by the same check, after x2rocktv's e4b2848.
-
-**The pushed `queueVersion` cannot stand in for the `UpdateID`, as value or as trigger.** "Findings
-from x2rocktv" above wondered whether `queue_version_fetch`'s browse per playback event was
-unneeded where the player pushes a version. Measured on Media Room while it played a Sonos Radio
-station: an add and a remove left `playbackStatus.queueVersion` at `28`, while the `UpdateID` went
-168 to 170. An edit to a queue that is not the room's source does not move the pushed version, so
-the fetch stays on every playback event. What was wrong was `apply_playback` writing the pushed
-value into the same field the fetch fills: on firmware that sends it, `x2rock:queueVersion`
-alternated between the two counts on every event, and each change re-read the widget's queue. It
-now carries the `UpdateID` only (172 to 184 across seven edits, with no other value between).
-
-**Queue edits quote the version their positions came from.** Every `remove`/`move` read a fresh
-`UpdateID` immediately before sending it - one extra browse, and a version that always matches, so
-the player's 1028 for a stale queue could never fire. `queue --json` now reports `version`, the
-`UpdateID` of its first page, and `remove`/`move --at VERSION` quote it; without `--at` the fresh
-read stands, there being no list to be stale against. Measured: `move 6 5 --at 164` after two adds
-(now 166) was refused with nothing moved; `--at 166` moved it. The widget quotes the version of the
-list it shows, and its refusal re-reads the list, as `docs/dbus-interface.md` planned for
-`Group1`. `clear` takes no version: `RemoveAllTracksFromQueue` has no `UpdateID` argument.
-
-**Sonos Radio's front page is not SMAPI's.** `getMetadata root` answers 200 with nothing in it,
-which `browse` reported as "root is empty". The service's manifest
-(`https://cf.ws.sonos.com/p/m/53495571-…`) names a second endpoint, `{"type": "browse", "uri":
-"https://sali.sonos.superhi.fi/browse/v1"}`, and an unauthenticated GET there answers the app's
-page: 28 `views` (Trending Now, Discover Sonos Radio, Sonos Presents, Recently Updated, Spooky
-Season, ..., Browse Radio), 216 items inline. The shelf ids it hands out - `/stations/en-US/US/
-c2Q6VVM6dHJlbmRpbmctbm93` - are ordinary SMAPI container ids: `getMetadata` on one lists its
-stations as `program`s (`sonos:2997`, Hit List), and on Browse Radio's `/genres/en-US/US` and
-`/stations/en-US/US/EgdVUzpHOjIy` (News & Talk) the genres and the stations under them. Only the
-top level was missing, so `sonosradio.rs` (now `frontpage.rs`, 2026-10-11) builds `root` from `browse/v1`'s views, reading the
-endpoint from the manifest, and `smapi::metadata` walks the rest as for any service. Played from a
-shelf, Smooth Jazz started in Media Room as `program` radio, the route `play_radio` already takes.
-
-**The volume limit is a Control API write.** `settings:1 getPlayerSettings` carries
-`volumeScalingFactor`, the Sonos app's Volume Limit, as 0.0-1.0. `setPlayerSettings
-{"volumeScalingFactor": 0.01}` on Media Room answered `success` and read back as 0.01 - the one
-field of that command this connection may write; night mode and dialog are still
-`ERROR_NO_PERMISSION`. A limit scales rather than clamps: under 0.01, `vol 50` was accepted and read
-back 50. `vol --limit [PCT|off]` reads and sets it per speaker; Media Room was returned to 0.02.
-
-**A favorite's object id carries the player's container prefix, which the service does not
-know.** `favorites:1` gives each favorite a `resource.id` - Saavn's album Irumudi is
-`1004206cALBUM:79488223`, its playlist Top Kuthu `1006706cplaylist:109815423`. `getMetadata` on
-the first is refused, "Item not found"; on `ALBUM:79488223` it lists the four tracks. The eight hex
-digits are the prefix `container_uri` itself writes. They cannot be stripped from every id on
-sight, since an all-digit id (Apple Music's) has the same shape. So they come off a favorite's own
-id, which the player wrote, and otherwise only on a retry after the service refuses the whole id.
-`browse --favorite <name>` opens an album or playlist favorite that way, the app's album page; a
-song or station is refused. `favorites` lists in the app's sections (Playlists, Songs, Albums,
-Stations), and `--json` adds `category`.
-
-**`tv` with UPnP off, for a soundbar on its own.** `tv` hands a group to the TV over UPnP, which
-is a 403 with the household's UPnP switch off. `homeTheater:1 loadHomeTheaterPlayback` (verified
-2026-09-05, see "Soundbars: the TV input") does the switch over the Control API, but addressed to
-the bar it takes the TV for the bar alone, which for a grouped bar is a different act from the
-handover. So it is the fallback only when the 403 is the switch being off and the bar's group is
-the bar. Not exercised against hardware on 2026-10-08: the office household, the only one reachable,
-has no soundbar.
-
-**All three Connection Security switches are shown, by `x2rock security`.** The daemon reads only
-UPnP, because only UPnP changes what it does; the review asked for the other two. They are
-displayed rather than acted on: Authentication on refuses x2rock before the read could happen, so
-it can only ever read Off here, and Guest Access touches nothing x2rock does. The command is the
-answer to "is UPnP on?" without the Sonos app. Media Room: Authentication Off, UPnP On, Guest
-Access On.
-
-**The TUI rates, sets the sleep timer, and toggles night sound and speech.** `l`/`L`/`b` run the
-CLI's `rate` (now `services::rate`, an outcome rather than printed lines), gated on the
-`x2rock:hasTrackId` the daemon already publishes; down asks first, since Deezer's dislike skips and
-nothing here undoes it. `z` steps the sleep timer through the Sonos app's 15/30/45/60/90 minutes to
-off, always to the first step more than a minute past what is left. The sleep timer is not on
-MPRIS, and polling it would break the daemon's no-polling rule, so the TUI reads it over UPnP at
-start and when the cursor lands on a room, and counts down locally. `N`/`D` toggle a soundbar's
-night sound and speech enhancement over `SetEQ`, offered only where the daemon publishes
-`x2rock:nightMode`/`enhanceDialog`. On Media Room: `z` set a timer that `x2rock sleep` read as 14:58,
-a restarted TUI read it back, and `l` on Sonos Radio said the service publishes no ratings. `t` with
-UPnP off is now refused only for a group, after the lone-soundbar fallback above.
-
-## Every household token, imported, and Browse checked against each service's own front page (home, 2026-10-11)
-
-The home household had trials added in the Sonos app for most of the paid services, family plans
-where offered (Amazon Music among them). `link --from-household --dry-run` read 18 account
-records, every one `NumAccounts=1`, serials 10 and 23-40; `link --from-household` kept all of
-them. New to x2rock: **Spotify, Bandcamp, SoundCloud, Pandora, SiriusXM**, plus the home
-household's own Saavn, Amazon Music and Qobuz. iHeartRadio still holds two accounts. Classical
-Archives is "won't test" and Pandora CloudCover is out of scope. Plex is not in this household
-and is deferred to a later pass.
-
-Every service was then browsed from `root`, searched for "miles davis", and played in the Kitchen
-at volume 1. The table at the top has the per-service rows. What follows is what the sweep found
-that is not a single row.
-
-### Two services that could not be linked can be imported, and they work
-
-SiriusXM refuses `getAppLink` (`Service Error`, 2026-09-22) and SoundCloud refuses it
-(`Client.NOT_AUTHORIZED`, 2026-09-10). The tokens the Sonos app minted for them, read out of
-`ThirdPartyMediaServersX`, **search, browse and play**. So the 2026-09-22 conclusion that
-SiriusXM "cannot be linked at all, so a subscription buys no test" was wrong in what it
-concluded. The probe answered whether *x2rock's* flow could mint a token. The household import
-needs no flow. `getAppLink` is no longer a reason to skip a paid service. The real question is
-whether the household's token answers, and that costs one trial.
-
-Both SoundCloud and YouTube Music carry a sealed `apiKey.cr` envelope in their manifests (see
-"The YouTube Music `apiKey` is sealed"). SoundCloud's token works without it. Whatever the sealed
-key gates, it is not SMAPI `getMetadata`/`search` for SoundCloud, so it is not evidence about
-YouTube Music either way.
-
-Bandcamp goes the other way. The household's token (32 bytes, an 8-byte key) imports, and every
-call answers `Client.LoginInvalid`. The token x2rock minted itself on 2026-08-31 worked.
-
-**Re-linked the same evening** (`x2rock link Bandcamp`, the owner at the browser). The fresh token
-browses and searches. It sends no `userIdHashCode`, so the household was not matched, and the queue
-still refused the track with 800: the registration it would play through was dead. The owner
-confirmed it: Bandcamp "wasn't working properly" in the Sonos app either, until it was removed and
-re-added there (2026-10-12).
-
-**Two things were wrong, not one (2026-10-12).** After the re-add the household holds Bandcamp as
-`sn_43`, and the queue plays the track: `x-sonos-http:t%3a807797106.mp3?sid=157&flags=8232&sn=43`,
-30:38 long. So the registration had been stale. **But the new household token is refused from
-x2rock as well** (`Client.LoginInvalid` on search and browse), minted minutes earlier and working
-for the speakers. So Bandcamp accepts the household's token only from a speaker, and x2rock's
-own link token only from x2rock. What it keys on was not found:
-
-- `deviceId` in the credentials header was tried (the field "`deviceId`: a header field x2rock has
-  never sent" anticipated) and changed nothing. Its value, `R_TrialZPSerial`, is
-  **household-wide**: all seven players read outside the Living Room answer the same
-  `78-28-CA-9C-45-B8:G`, not a per-player id as that section implied.
-- The `householdId` is already sent.
-
-**The working arrangement is both accounts, with x2rock's preferred** (`accounts --prefer Bandcamp
-"x2rock on x2lap"`). Its token searches and browses. Its serial, 31, belongs to the deleted
-registration, so the player resolves it to the household's live account: the enqueue went out with
-`sn=31`, and the queued row reads `sn=43`. This is the fallback "A stored bookmark serial cannot go
-stale in a way that matters" describes. Played from `browse --play` in the Kitchen, from the queue,
-with its full duration, so it pauses and resumes. With the household's account preferred instead,
-the track plays but can never be found, because search and browse are refused.
-
-**The fallback found a bug of its own: an extensionless file URL.** Bandcamp's `getMediaURI` is an
-https MP3 at `t4.bcbits.com/stream/<hash>/mp3-v0/<id>?p=0&ts=…&t=…`, with no extension. The probe
-judged it a file correctly (206, `Last-Modified`, 48,184,203 bytes, `audio/mpeg`), and
-`play_url_as_track` sent it as the transport URI with a DIDL carrying no `<res>`. The player
-answered **UPnP 714, illegal MIME type**: it was guessing the type from the URL. Deezer's `.flac`
-and TIDAL's `/0.flac?…` had always been guessed right. Now the probe keeps the file's `audio/*`
-`Content-Type`, and the DIDL declares it as `<res protocolInfo="http-get:*:audio/mpeg:*">`.
-Verified in the Kitchen: the Kid Koala track played and its position advanced. Deezer's and
-TIDAL's files (forced down the same path with `--kind stream`) still played, positions advancing.
-
-### The front page the app shows is often not SMAPI's `root`
-
-The 2026-10-08 review found this for Sonos Radio: the manifest names a `browse` endpoint, and the
-app draws its first page from that, not from `getMetadata root`. The same manifest field was
-read for all seventeen services:
-
-| service | manifest `browse` endpoint | bearer token (the SMAPI `auth_token`) | vs. `getMetadata root` |
-|---|---|---|---|
-| Sonos Radio | `sali.sonos.superhi.fi/browse/v1` | needs none | already built (`sonosradio.rs`, now `frontpage.rs`); refuses a bearer, so it is read bare |
-| **Spotify** | `spotify-v5.ws.sonos.com/v1/browse` | **200**, 22 views | root has 5 shelves; the app's 21 personalised ones ("Recommended for today", "Your top mixes", "More like <artist>", ...) are missing |
-| **Deezer** | `platform.deezer.com/api/sonos/browse` | **200**, 9 views | root has 6; Recently played, the Flow moods, Made for you, Recommended playlists and Charts are missing as shelves |
-| SiriusXM | `ce-sonos.siriusxm.com/sonos/v1/browse` | **200**, 9 views | the same 9 ids SMAPI root lists - nothing missing |
-| Amazon Music | `sonos.smapi.amazonmusic.com/api/home` | 401 `{}` | root is Library and User Playlists only, so Amazon's Home is missing |
-| **TuneIn (New)** | `sonos.tunein.com/browse/v1` | 403 Cloudflare 1010 from a Python client, which Cloudflare blocks by signature; **200 from x2rock's own client**, 27 views | root had 9; Recents, Most Popular Stations, Featured Collections, Browse Genres and the rest are new |
-| Apple Music | `sonos-music.apple.com/browse/v1` | 500, empty | - |
-
-The rest (Audible, Bandcamp, iHeartRadio, Qobuz, Saavn, SoundCloud, TIDAL, YouTube Music, Radio
-Paradise, Pandora) publish no `browse` endpoint, so SMAPI root *is* their front page.
-
-**A view's id is an ordinary SMAPI container id**, as it was for Sonos Radio. `browse -s Spotify
-spotify:view:section0JQ5DAnM3wGh0gz1MXnu3F` lists "Recommended for today"'s albums, `…nu89` the
-Daily-Mix-style "Your top mixes". Deezer's `flow-multiflow`, `user-smarttracklists-<user>` and
-`charts-worldwide` open the same way. One exception: Deezer's `user-recentlyplayed` is refused by
-`getMetadata` (a bare `getMetadata` fault string). Only the top level is missing, which is exactly the
-shape `sonosradio.rs` already solved.
-
-**Built the same day: `sonosradio.rs` became `frontpage.rs`**, for any service whose manifest
-names an https `browse` endpoint.
-
-- **`root` is the page's shelves, in its order, then whatever SMAPI's root lists that the page
-  does not.** Spotify's page has no Charts, New Releases, Genres or Popular Playlists. Replacing
-  root would have traded one gap for another.
-- **SMAPI's root is read first, because that call refreshes the token.** Spotify's had lapsed
-  within hours of the morning's probe, and the endpoint answers a stale one with a bare 401, not
-  SMAPI's refresh fault. After a `browse` refreshed it, the same GET answered 200. A page that
-  cannot be read leaves SMAPI's root standing, unremarked.
-- **A bearer refused with 401 or 403 is retried bare.** Sonos Radio's page, which needs no
-  credential, refused the household's Sonos Radio token. The first build, which always sent it,
-  showed Sonos Radio's root as empty again. That was caught by testing every service's root, and
-  fixed before commit.
-- **A shelf `getMetadata` refuses is answered from the page's inline items.** Deezer's
-  endpoint takes no parameter that would serve one view; `/browse/<id>` is a 404 and
-  `?objectId=` is ignored. So a refused id that names a shelf is answered from the items the page
-  carries for it, with its types mapped onto SMAPI's (`station` to `stream`, `*program` to
-  `program`, `track` content to a leaf).
-
-Measured against the home household after the change:
-
-| service | `root` rows before | after |
-|---|---|---|
-| Spotify | 5 | 26: 21 personal shelves, then Your Library, Popular Playlists, Charts, New Releases, Genres and Moods |
-| Deezer | 6 | 13: the page's 9, then Flow, Popular, Picked for you, Favorite Tracks |
-| TuneIn (New) | 9 | 27 |
-| SiriusXM | 9 | 10 (one shelf root had and the page did not) |
-| Sonos Radio | 28 | 28 |
-| Amazon Music, Apple Music | unchanged; the page refuses (401, 500) | |
-
-**Spotify's shelves, played in the Kitchen the same day.** All 26 root rows opened. From them,
-`--play` played the following:
-
-- an album ("Recommended for today")
-- a Daily-Mix playlist ("Your top mixes")
-- a station-style playlist ("Recommended Stations": Nirvana Radio)
-- an album out of a mixed shelf ("Metal of the 90s")
-- the first row of Charts and of New Releases
-
-An artist ("Your favorite artists") was refused as a container of containers. Opened, it lists
-`spotify:artistRadio:<id>` as a `program`, which played as radio; then Top Tracks (`trackList`),
-which played; then the albums. `--queue` of an album from "Album picks" added its 16 tracks without
-interrupting playback. An artist radio's track list is reshuffled on every read, so `--play N`
-inside one plays whatever is N-th on that read. Then: Deezer's
-`user-recentlyplayed` lists its ten items from the page, and `--play 2` on it played *Kind Of
-Blue*; TuneIn's Most Popular Stations listed 24 streams, and the first played. Spotify's page
-**changes between requests** ("Your top mixes" one time, "Based on your recent listening" the
-next), as its app does. Root browsing costs one manifest GET and one page GET more, about a
-second, on the services that have one.
-
-Amazon's and Apple's endpoints were only tried with a bearer token. Which header each wants is
-unexplored.
-
-### A `program` that is a station was refused by `search --play` and `browse --play` (fixed)
-
-**The largest gap this pass found.** The 2026-10-07 change makes `play_one` start a `program` as
-the room's source (`x-sonosapi-radio:`). But `search --play` and `browse --play` refuse any
-container that `container_holds_tracks` does not name, before `play_one` is reached. A program
-returned as a `mediaCollection` is such a container: "is a program, which holds other containers
-rather than tracks". The widget treats the same row as a place to open. Measured refused from
-`search --play`, and each played at once through `play-item --kind program`:
-
-| service | id | as radio |
-|---|---|---|
-| Pandora | `ST:121804999784157021` (My Stations), `SF:16722:17347` (search) | ✓ |
-| iHeartRadio | `artist_radio.37582527` (search) | refused by the gate; the 2026-10-07 measurement went through `play-item` |
-| SiriusXM | `artist-station:3be89098-…` (search), `channel-xtra:62b1ccac-…` | ✓ |
-| Amazon Music | `catalog:station:key:A2JQOZI8G660XB` | ✓ |
-| Deezer | `flow-multiflow-happy` (Flow: Happy) | ✓ |
-
-Opening one instead fails for Pandora: `getMetadata` on any station answers **"Unsupported action
-for account type"**. Read on 2026-09-10 as the free tier being unable to browse a station, it is
-the same answer on the trial tier. The SOAP explains it: every Pandora hit is
-`<canPlay>true</canPlay><canEnumerate>false</canEnumerate>`. A Pandora station is a thing to play
-and, by the service's own declaration, not a place to open. `smapi::Item` keeps neither flag,
-so `container` can only mean "came as a `mediaCollection`". iHeartRadio's artist station *does*
-enumerate, as `artist_radio_track` rows that are per-listener and stream-only, so a person
-drilling in gets a list of songs that do not behave like songs.
-
-**Built the same day.** `Item::opens()` is `container` and not a `program`. It decides both
-`--play` gates, the trailing slash in `browse`, and the JSON `container` field, so the widget
-plays a station row instead of opening it, with no QML change. `queueable` is false for a
-`program`, and `queue-item`/`--queue` refuses one by name ("a station, which plays as the room's
-source and has no queue form") rather than passing on the player's 800/804. Carrying
-`canEnumerate` into `Item` would be the more literal rule. It was not used, because the `program`
-kind alone covers every case measured, and Plex shows that a service's flags are not always
-trustworthy (see "Plex wraps playable tracks"). Verified in the Kitchen: `search --play` played
-a Pandora `SF:` hit, an iHeartRadio artist station and a SiriusXM artist station. `browse --play`
-played a Pandora My Stations entry and Deezer's Flow from root. An artist is still refused, a
-Spotify album still queues, and TuneIn still streams.
-
-**`browse --play` caught up with `search --play` on containers, the same day.** It still refused
-*every* container, citing "A service container cannot be played over the LAN at all"
-(2026-09-11), which "An album is queued by a different scheme from a track" overtook a week
-later. `search --play` had been changed then, but `browse --play` had not. It now refuses only
-what `opens()` and that holds no tracks. Verified in the Kitchen: an Amazon library album, a
-Spotify featured playlist and a Pandora station all played from `browse --play`, and Spotify's
-`playlists` collection was still refused. One side effect, measured: playing a Pandora `SF:` hit **creates a station**
-("Miles Davis Radio" appeared in My Stations), as the Sonos app does when you tap one.
-
-SiriusXM's live channels are the counter-case. A `channel-linear:` is `stream`, plays as a direct
-stream through the session, and refuses the radio route (`playback:1 play` →
-`ERROR_PLAYBACK_NO_CONTENT`). The search path already sends it the right way. A `program` is not
-always radio, so the radio route's stream fallback is still needed.
-
-### Single-service search without `-c` asked the first category, not what `--help` says (fixed)
-
-`search -s SoundCloud "miles davis"` returned one artist. With `-c tracks,artists,albums` it
-returned nine rows across all three. The single-service path picks `all`, else **the service's
-first category** (`commands/services.rs`, the `None =>` arm after `pick_categories`). The merged
-path uses `pick_categories`, which falls to `DEFAULT_CATEGORIES`. `--category`'s own help
-describes the merged rule ("else `tracks`, `artists` and `albums` where it has them"), so the CLI
-contradicts itself. Every service here with no `all` lists `artists` first: SoundCloud, TIDAL,
-Deezer, Qobuz, Bandcamp. A bare single-service search on any of them answers artists only.
-
-The divergence was deliberate on 2026-09-01 ("The default category, and the widget's new
-`searchCategory`"): changing it "would silently move iHeartRadio from stations to tracks". That
-reason has lapsed. Since 2026-10-07 iHeart's categories are fixed at `stations` and `podcasts`,
-none of the three defaults, so `pick_categories` already lands on `stations` for it. **Built the same day**: the single-service
-path now uses `pick_categories` too. When that picks several categories, they go through the
-path `-c tracks,artists,albums` already took. Each category is asked for its share of `--count`,
-from its share of `--index`, and the interleave is capped at `--count`, so a page is still
-`--count` rows and the next page continues each category where the last stopped. Verified:
-TIDAL at `--count 6` gives two tracks, two artists and two albums, and `--index 6` continues
-with tracks 3-4. iHeartRadio still defaults to stations, and Spotify, which has `all`, is
-unchanged. Bare `search -s SoundCloud` now prints "Default is tracks, artists, albums".
-**SoundCloud ignores SMAPI `index`**: `-c tracks --index 2` returns the same rows as
-`--index 0`, so its second page repeats the first. That is the service, not this.
-
-### Smaller things the sweep turned up
-
-- **Amazon Music's library returns a sentinel row.** `library:albums` ends with an item of id
-  `unauthorized`, no type, titled "Content Unavailable", and `browse` listed it as if it were an
-  album. **Fixed 2026-10-12**: it is `<canPlay>false</canPlay><canEnumerate>false</canEnumerate>`,
-  and `parse_items` now drops a row that says both, taking it out of the reported total too. Only
-  both, and only when said: a Pandora station is `canPlay` true and `canEnumerate` false. This is
-  the rule x2rocktv took the same day (its T-18). Verified on the office household: four albums,
-  total 4.
-- **SiriusXM's `talent:` hits carry a whole biography as their description.** The CLI printed
-  it in full on one line. **Fixed 2026-10-12**: plain `search` and `browse` listings collapse a
-  second line to one line of at most 80 characters (`one_line`), as the merged list already capped
-  its own. `--json` keeps the whole text (706 characters for Miles Davis).
-- **Audible's root is seven marketplaces** (`.com`, `.co.uk`, `.de`, ...). Only the account's own
-  holds the library. The app likely opens straight into it. Not compared.
-- **Sonos Radio searches with the household token** - the first token x2rock has held for it.
-- **iHeartRadio's merged Stations list put live stations before artist stations.** For "miles
-  davis" it led with KOST 103.5. Looked at in the app the next day: neither order is right. See
-  "iHeartRadio's three sections, as the app shows them" below (2026-10-12).
-- **Spotify, SoundCloud, TIDAL, Deezer, Saavn, Qobuz, Amazon Music and TuneIn (New)** all played a
-  search hit through the ordinary paths on the home household. Qobuz and Saavn had only been
-  played in the office before.
-
-## Every service's front page, against the Sonos app on a phone (home, 2026-10-12)
-
-The Sonos app (Android, app 90) was driven over adb on a phone and each service's page read from
-the UI tree, scrolled to its end, then compared with `x2rock browse -s <service>` (root). Eighteen
-services:
-
-| service | app's page | x2rock |
-|---|---|---|
-| TIDAL, Qobuz, SoundCloud, Saavn, iHeartRadio, Plex, Radio Paradise, Bandcamp, Audible | the SMAPI root's own entries | **identical**, entry for entry. Audible's app page is the same seven marketplaces |
-| Spotify, Deezer, TuneIn (New), Sonos Radio, SiriusXM | the manifest `browse` page's shelves | **every shelf**, in the app's order, then SMAPI root's extras (Spotify's Charts, Genres and Moods; Deezer's Flow, Popular, …). Spotify's page has two shelves both titled "More like Tyler, The Creator", in the app too |
-| Pandora | My Stations | My Stations - after re-importing the token (below) |
-| **Amazon Music** | Collections (Library, *Explore Podcasts*, User Playlists), then *Followed Playlists, Songs for You, Your Frequent Plays, Hot Playlists, Podcasts You May Like, Albums for You, New Releases for You, Pop, Trending Songs, Playlists for You* | Library and User Playlists only. The rest is Amazon's Home endpoint (`sonos.smapi.amazonmusic.com/api/home`), which refuses a bearer token (401) |
-| **Apple Music** | 22 shelves: Library, Top Picks for You, Playlists Made for You, Stations for You, Daily Top 100, Radio Shows, Stations by Genre, … | nothing: the household's Apple token is refused for browse (`InvalidTokenException`) |
-| **YouTube Music** | Home, Library, My Supermix | nothing: Google's project gate (HTTP 403) |
-
-**Why the last three differ (2026-10-13).** The Sonos app gets every service's page from Sonos's
-own cloud content service rather than from the service. A service's own SMAPI endpoint, which
-x2rock speaks to directly, serves a third party only what that service chooses. Spotify, Deezer,
-TuneIn, SiriusXM and Sonos Radio publish a `browse` endpoint that matches the app, which is why
-they agree here. Amazon, Apple and YouTube Music do not, so their pages exist only through
-Sonos's cloud.
-
-**Technically reachable, not within the terms.** The content service serves these pages, and
-YouTube Music search, to an ordinary Sonos developer sign-in; nothing about it is unusual
-(verified 2026-10-13, office household). It is not part of what the developer program licenses,
-so using it does not abide by the Sonos terms. Sonos's OAuth is a confidential-client flow: the
-client secret is needed on the code exchange and every refresh. See
-[the terms boundaries note](sonos-terms-boundaries.md).
-
-## Cloud browse and search, opt-in (2026-10-13)
-
-> **Outside the Sonos terms (2026-10-14).** This uses the content service the developer program
-> does not license; see [the terms boundaries note](sonos-terms-boundaries.md). It stays recorded
-> here because the code still ships it.
-
-Built in the x2rock **CLI** (x2rocktv deliberately untouched) on a bring-your-own-registration
-shape, and available
-**only to registered Sonos developers**: it reuses the existing account-OAuth layer
-(`sonos::login`, which already reads the person's own `sonos-integration.json`), so it is live only
-for someone who has registered with Sonos's developer program, saved their own integration, and run
-`x2rock login`; otherwise `cloud::available()` is false and nothing here runs. Not a toggle a
-typical user can flip. `src/sonos/cloud.rs`:
-
-- **`serviceId = service_type` (`smapiId*256+schemaRev`), `accountId = sn_N` serial** — both already
-  held, so no id is harvested. When the preferred account is a browser link with no serial, any
-  `--from-household` account of the same service supplies one.
-- **`browse -s <svc>` root** falls back to the cloud home when the direct root is thin
-  (`< FRONT_PAGE_FLOOR` rows, i.e. a bare SMAPI root or an error/empty) and the cloud returns more —
-  so Spotify/Deezer, which already match the app via their public `browse` endpoint, are untouched,
-  while Amazon/Apple/YouTube Music gain their full pages. A shelf is a container whose id is its own
-  browse URL, tagged `cloud:`; descending it follows that URL (`TEMPLATE_LIST_PAGE` → `section.items`,
-  home → `sections.items`). A leaf keeps its real object id, so the player plays it through the
-  household registration — which is why **YouTube Music plays even though its own SMAPI is 403**.
-- **`search -s <svc>`** falls back to the cloud household search when the direct search is refused or
-  empty, filtered to this service's block. This is what gives **YouTube Music search** at all.
-
-Verified on hardware 2026-10-13 (office household): Amazon's 11-shelf Home and Apple's shelves
-listed, a shelf descended to its tracks, and both an Amazon track and a YouTube Music album played in
-the Media Room.
-
-**Fixed the same day: TuneIn listed Music, News & Talk and Sports twice**, once from the page and
-once from SMAPI's root, under different ids. The merge now drops a root entry whose title matches a
-shelf as well as one whose id does. TuneIn's root is 24 rows, down from 27.
-
-**Found the same day: a household token can go stale under x2rock.** Pandora's, imported on
-2026-10-11, was refused a day later with **"Failed to reauth device id"**: it had expired, and the
-refresh SMAPI offers failed for x2rock. The Sonos app was working, so the household had a fresh one;
-`link --from-household Pandora` read it and browse worked again. Built the next day; see below.
-
-## A refused imported token is re-read from the household (2026-10-13)
-
-When a service refuses a token that came from the household and offers no refreshed one, x2rock
-reads the household's store once and, if it now holds a **different** token for the same account
-(same service, same `sn_N`), saves it and retries the call (`rereads`, called from `smapi::call`).
-Every command gets it, since every SMAPI call goes through there.
-
-- **Imported accounts only**: a record carrying the `serial` that only an import reads. A browser
-  link's token is never swapped for the household's, which for Bandcamp would not work off a speaker.
-- **Any refusal, not worded ones.** The plan was to filter for refusals that sound like a credential
-  problem. A garbled Pandora token is refused with ``TypeError: Cannot read properties of null
-  (reading 'getListenerId')``, which no filter would recognise. The real signal is a different token
-  on the household, and only a read can tell that.
-- **Bounded cost**: one read per household per 10 minutes per process, failures included, so a
-  firewall that drops the callback costs one 5-second wait, not one per call. Reads are serialized,
-  so a search across many services refused at once reads once. The player is any one this process
-  reached; one from another household fails the integrity check and the next is tried.
-
-Measured at home with the stored Pandora token garbled before each command: `browse` recovered in
-1.3 s, `search` in 1.6 s, and `search --play` started the station in the Kitchen. Each time the
-store held the household's token afterwards.
-
-## Plex on the home household: a VPN on the server's PC, then a reauthorization (2026-10-12)
-
-Linked with `x2rock link plex` before Plex was in the household, as a "before" picture. Then the
-owner added it in the Sonos app, which failed too. The steps, each measured:
-
-1. **x2rock's PIN token alone, and then the household's own token** (imported minutes after the
-   app added Plex), both got `sonos.plex.tv`'s **"No available servers. Add a server to your Plex
-   account to continue."** for root, and nothing from search. The Sonos app said "An error occurred
-   with Plex. Try again later." The account was not the problem: `plex.tv/api/v2/resources`
-   with the PIN token listed "Prime Plex Media Server" owned, present, and the same machine the
-   LAN answers for (`/identity` at `192.168.86.36:32400`, machine `c69ee188…`).
-2. **The tell was `publicAddressMatches: false`.** The server advertised its public address as
-   `104.243.245.172:13502`; this laptop and the speakers reach the internet as `70.122.115.65`.
-   The PC running Plex had a VPN on, so Plex's cloud saw the server at the VPN's exit and did not
-   place it on the speakers' network. The owner turned the VPN off. Within a minute the
-   resources call read `publicAddressMatches: true`, public address `70.122.115.65`.
-3. **Then `sonos.plex.tv` timed out** (x2rock's 6s), and an untimed call got HTTP 500 "Unexpected
-   error." The household's registration still pointed at the old state. The owner **reauthorized
-   Plex in the Sonos app**, and the app worked.
-4. **After that, the household token works fully, and the PIN token is back to the 2026-09-01
-   split**: search yes, root no ("Unexpected error." now, `ServiceUnknownError` then). The
-   household's account (`rahga`, `sn_45`) is preferred.
-
-So a VPN on the PC that hosts Plex silently breaks Plex on Sonos, for the app and x2rock alike,
-while every Plex-side page reads healthy. The check is `publicAddressMatches` in the resources call.
-
-**How the app queues Plex**, read off the Kitchen while it played a Plex playlist: 100 rows, each
-`x-sonos-http:<server>%3a63%3a<track id>%3atrack.mp3?sid=212&flags=24616&sn=45` - the library
-section (63) inside the id, `.mp3`, `flags=24616`. x2rock's search hits carry no section
-(`<server>::69294:track`), and x2rock enqueues under `x-sonosapi-hls-static`.
-
-**Played by x2rock the same evening**, in the Kitchen + Dining Room group the owner was using. A
-searched track ("Yellow") queued and played; **the player rewrote x2rock's URI to the app's form**,
-`x-sonos-http:<server>%3a%3a66244%3atrack.mp3?…&sn=45`, with the empty section kept and harmless.
-An album from the Recently Added hub expanded to 30 rows, each `…%3atrack.flac` (a FLAC library
-file played as FLAC). An album from search (`<server>::66140:album`, no section) expanded to 100
-rows and played. "Shuffle All", a `program` at root, played as radio, not from the queue. Nothing
-x2rock sends had to change.
-
-## iHeartRadio's three sections, as the app shows them (office, 2026-10-12)
-
-Read off the Sonos app (Android, app 90) on a phone driven over adb, searching iHeartRadio from its
-own page. The app shows **three** sections, three rows each, in this order:
-
-| term | Stations (`artists`) | Live stations (`stations`) | Podcasts |
-|---|---|---|---|
-| miles davis | Miles Davis; Miles Davis Quintet; Cannonball Adderley, Miles Davis | KOST 103.5; La Mezcla Fuego; ShaqFu Radio | The Miles Davis Podcast |
-| z100 | Z100wave; Z1K0; ZC100 | Z100; Z100 Portland; Z100 Eau Claire | Z100 New York Secret Sound |
-
-So the 2026-10-07 reading, "Stations and Podcasts only, Stations merging live and artist", was
-wrong for app 90. Live radio is its own section. And **no single list can copy this in either
-order**. iHeart matches loosely: "z100" answers dozens of artist stations (Z100wave, Z1K0, ...)
-before Z100 itself, and "miles davis" puts KOST 103.5 among live radio. Live-first buried the
-artist under KOST; artist-first, tried here and measured, buried Z100 under 47 artist stations.
-The app keeps both visible by showing three of each.
-
-**Built.** iHeart's categories are now `stations` (sent as `artists`), `live` (sent as `stations`)
-and `podcasts`, each marked `default` - a new `Category` field that `pick_categories` honours
-before `all`, set only by a service whose categories x2rock fixes. A bare search asks all three
-through the several-categories path, which takes one row from each in turn and labels it. `-c
-live` asks live radio alone. `search_as_one` and its pager are gone, with nothing left to use them.
-Measured on the office household: "miles davis" gives Miles Davis, KOST 103.5, The Miles Davis
-Podcast, Miles Davis Quintet, La Mezcla Fuego, and on; "z100" gives Z100wave, then **Z100 second**.
-From that search, Z100 played as a stream and Z100wave as radio, in Media Room at volume 1.
-
-## Replay queues, because `loadContent` restarts a speaker on Mixcloud (home, 2026-10-11)
-
-Found by x2rocktv (its P-21). It started Mixcloud with `loadContent`, and the Dining Room
-coordinator hung and restarted. That happened on both of the household's Mixcloud accounts, and
-the speaker dropped off the network for a while: it answered ping but nothing on 1400 or 1443,
-which this session saw from x2rock as "Dining Room unreachable" right after a daemon restart.
-The Sonos app, playing the same content in the same room, **queued** it: the Bass category went
-in as 100 mixes, each `x-sonosapi-hls-static:cloudcast%3a<id>?sid=181&flags=8232&sn=41`, played
-from the queue. Queueing one mix from x2rocktv played, and the speaker stayed up.
-
-**x2rock's exposure was `replay`.** `play-item`, `search --play` and `browse --play` already queue
-Mixcloud (verified 2026-09-08). `loadContent` is their last resort, after the queue and the stream
-both refuse, and Mixcloud's queue add does not refuse. But `replay`, and the widget's Recently
-played door that runs it, sent *every* history row through `loadContent`, which was the design
-of "Recently played, and `loadContent`" (2026-09-26). The Bass row was unplayable here only
-because this machine held no Mixcloud token for the home household. One `link --from-household
-Mixcloud` made it playable, and replaying it would have restarted whichever room it was sent to.
-
-**Built.** `replay` resolves the row's service and plays it through `play_item`: the queue, a
-`program` as the room's source, a `stream` through the session, an `audiobook` resumed. It keeps
-the history item's own account (by `sn_N`, via `token_by_serial`) after `replayable` has swapped
-a dead one, so an iHeartRadio custom station still plays as the listener who made it. A Sonos
-playlist (`65435`) has no service to ask and still loads. `play_unqueued` never reaches
-`loadContent` for Mixcloud, whatever fails first. That matches by service name, since a service
-id is not a constant (see "A service id is not a constant").
-
-**Verified in the Kitchen**, every playable row of the home household's history replayed through
-the new path:
-
-| row | route taken |
-|---|---|
-| Mixcloud `categories:music:bass` (`playlist`) | queue: the player expanded it into 100 mixes, the first row the app's own URI above, on `sn=41`; position advanced and the speaker stayed up |
-| iHeartRadio live station | stream |
-| Sonos Radio, SiriusXM artist station, Radio Paradise, Pandora (`SF:` and `ST:`), Amazon station | radio (`program`) |
-| YouTube Music, Spotify, Apple Music, TIDAL, Deezer and Amazon albums; a Spotify playlist | queue |
-
-**The UPnP switch now matters to `replay`.** It used to be unaffected, as `loadContent` is a
-Control API command. Now a queued replay with UPnP off is refused and falls through to
-`play_item`'s stream and load fallbacks, so it still plays where those can. Mixcloud is the
-exception: no load is allowed, so with UPnP off a Mixcloud replay is refused. Not measured: the
-home household's UPnP is on.
-
-## Review pass (2026-09-18/19): decisions challenged and upheld
-
-A whole-codebase review, then an audit by a second agent, then a review of that audit. The detail
-is in the commits (`0c0c4e5..c606a67`). What belongs here is the set of decisions that were
-questioned and stand, so the next pass does not re-derive them, and the facts that did change.
-
-**Upheld — do not "fix" these:**
-
-- **`panic = "abort"` means a lock can never be poisoned**, so `lock().unwrap()` is right and
-  `unwrap_or_else(|e| e.into_inner())` is dead code that also contradicts the intent: a panic
-  holding the MPRIS state lock should abort and let systemd restart clean, not continue on state a
-  panic left half-mutated. The rationale sits beside the setting in `Cargo.toml`.
-- **The restart channel has capacity one on purpose.** It is a "reconnect now" signal;
-  `daemon::restarted` treats `Lagged` as uninteresting and loops to the newest message, and one
-  reconnect answers a burst. A deeper buffer only hands it stale ones first.
-- **`Service::entry` looks the table up by name**, so it survives `SERVICES` being reordered or
-  extended. Positions into it would fail by quietly addressing the wrong service — a worse failure
-  than the deliberate, test-guarded panic. The test asserts each variant's name.
-- **A clamp-then-cast is not an `unwrap_or(0)`.** A value clamped to `0..=100` cannot fail
-  `u8::try_from`, and a fallback that sets a speaker to silence is the wrong shape for a failure
-  that cannot happen. Reverted twice (`volume.rs`, `tui/mod.rs`).
-- **`http.rs` reads to EOF.** An early break on `Content-Length` or on `0\r\n\r\n` can truncate a
-  chunked body whose bytes happen to end that way at a read boundary; the parse downstream is what
-  catches a short body. Kept simple.
-- **The picker's merged search is opt-in.** `searchService` defaults to `"TuneIn"`, the one broad
-  anonymous service, so a fresh install's Search row works with nothing linked; `"linked"` or
-  `"all"` turns on the merged search. "It only shows radio stations" is that default, not a
-  regression.
-
-**Changed, and why:**
-
-- **The queue version is fetched off the event loop.** A UPnP browse has an 8s timeout; awaited in
-  `follow`'s loop, one wedged coordinator stalled every room's events. `RoomPlayer::queue_version_fetch`
-  is a spawned future holding only the coordinator's address, answering through a channel;
-  `apply_queue_version` folds it in on the loop. One fetch per group in flight.
-- **`dechunk` cannot panic on a wire-supplied size** (`checked_add`), and the chunked check is
-  case-insensitive on the value. Two paths that could abort the daemon on a bad reply are closed.
-- **`itemsFrom` returns `null` for an empty body**, so every picker handler's failure branch covers
-  "exit 0, nothing on stdout" and no surface sits on "Searching…"/"Opening…" for ever. The premise
-  that the exit code had already reported an empty body was false.
-- **`search --json`/`browse --json` keep the `no_player` code** on the no-cache path (it degraded to
-  `unknown`), and a merged search's envelope carries `asked`, `searches`, `answered`, `slow` and
-  `refused`, with the slow/refused services also on stderr.
-- **`status` and `update` ask every coordinator/player at once** (`join_all`), the shape `system`
-  already had; sequentially, N unreachable ones cost N timeouts.
-- **The subnet sweep is a rolling window** (`buffer_unordered`), not chunks each waiting for their
-  slowest probe.
-- **The TUI's per-snapshot proxies set `CacheProperties::No`**, so a snapshot no longer runs
-  AddMatch, GetAll and RemoveMatch per player every heartbeat.
-- **`session::connect`'s progress lines can be silenced**; the daemon does so once, and `StatusLog`
-  owns the journal. They were printing uncoalesced on every retry while a household was off.
-- **`parse_sleep` and `parse_range` refuse huge inputs** (checked arithmetic; start checked before
-  the subtraction) rather than wrapping under the bound check in release.
-- **`require_http_url` requires a non-empty host**, so `http:///path` and `http://:8080/...` are
-  refused before the player sees them.
-- **The gateway lookup skips on-link and dummy default routes** — see the fingerprint bullet in
-  "Network identity".
-
-**Process, recorded because it bit twice:** CI runs `cargo fmt --check`, `cargo clippy --all-targets
---locked -- -D warnings` and `cargo test --locked` on every push, and two agents each pushed a red
-commit by skipping the first. Run all three before the push; hand-patched or agent-patched Rust does
-not pass through rustfmt on its own.
-
-See also [openphonos-ratings-findings.md](openphonos-ratings-findings.md), the 2026-09-12 research
-record the `rate` work was built from.
-
-## Resolved since the original draft
-
-- ~~Should a bookmark store the account serial?~~ - **closed 2026-08-31: dissolved.** The enqueue path
-  sends none and the player resolves the household's current registration, so a stored serial can
-  neither pin nor break anything. See "Re-added the same day: `sn_20`, and the bookmark resurrected".
-- ~~A Spotify track added to the queue cannot be played, even under the household's own
-  registration~~ - **closed 2026-09-10.** The enqueue URI scheme was hardcoded to one service's;
-  it is looked up per service now. See "The real fix: the enqueue URI itself was wrong".
-- ~~Should x2rock present Sonos's API key to unlock YouTube Music search?~~ - **closed 2026-09-01:
-  dissolved.** There is no key to present, only encrypted envelopes whose keys live in the apps.
-  See "The YouTube Music `apiKey` is sealed".
-- ~~Should the picker discover services itself, or keep the configured-by-hand bargain?~~ - **decided
-  2026-08-31: discover what was linked, hand-configure what was not.** See "The picker discovers
-  linked services".
-- ~~Music search is out of scope~~ - **decided 2026-08-29, reversed 2026-08-31.** The rationale read
-  *service* authentication as a *Sonos account*; one unexamined word closed a feature for two days,
-  which is why the entry stays. See "Music service search, reopened".
-- ~~Is a bespoke Quickshell widget worth building in v1?~~ - **built 2026-08-28/29**, and went further
-  than the question imagined. See the widget README.
-
-- ~~Can YouTube Music be searched from this machine - is there any identity `sendRequest` accepts
-  from us?~~ - **closed 2026-09-23: no, and the reason is Google's, with a name.** A self-service API
-  key gets `SERVICE_DISABLED` for "YouTube Music API (Partner)", method
-  `google.music.sonos.v1.Sonos.SendRequest`; the API is not in the Library and cannot be enabled by a
-  self-service project; an OAuth token is judged against the same project (measured, not inferred - a
-device-grant token with `auth/youtube` scope hit the same `SERVICE_DISABLED`). A project allowlist, not
-  a client pin. Playback through the household's registration is untouched. See "TASK: the OAuth
-  identity probe".
-- ~~Does a service with two accounts break the one-account assumption?~~ - **the store half closed
-  2026-09-22**: it holds several per service with one preferred (schema 3). The cdudn half closed
-  2026-09-25: `sn=` picks the account and the cdudn has to agree, and the enqueue now sends both for
-  the preferred account - see "Which account an enqueue plays from".
-- ~~Cloud Control API is the only integration path~~ — false; the LAN WebSocket API is better.
-- ~~Build WebSocket from day one, or ship polling v1 first?~~ — settled: push from day one, and it
-  costs *less* than polling, not more.
-- ~~Carry over `docs/sonos-control-api.md` from the old repo~~ — those files are saved HTML dumps of
-  Sonos's readme.io pages, not clean references. The namespace/command reference is better taken
-  live from `docs.sonos.com`, which applies to the local transport too.
-- ~~Is content browsing needed, or is favorites + transport enough?~~ — settled 2026-08-28: queue
-  navigation is a core requirement, so UPnP is mandatory. This reverses the earlier "optional
-  second transport" framing.
-- ~~Is off-LAN control wanted?~~ — no, not for now. Cloud OAuth cut from v1, seam retained.
-- ~~Is multi-household a day-one requirement?~~ — not on day one; household IDs were kept plumbed
-  through (they come free from `getGroups`). Several households on one network turned up in
-  practice, so `x2rock households` and `--household` now exist; a room name picks its own
-  household, and `--household` is needed only when no room names one.
-- ~~Always-on machine or laptop that sleeps?~~ — laptop, and users are expected to be road
-  warriors. Network mobility is now a design driver rather than an edge case; see "Connection
-  lifecycle and network mobility".
-- ~~Queue navigation needs building over UPnP~~ — done 2026-08-28. `x2rock queue` / `play N` over
-  AVTransport + ContentDirectory on 1400. Verified: `Browse Q:0` lists it, `Seek TRACK_NR` jumps
-  (error 711 out of range, 701 when the queue is not the current source), `GetMediaInfo` reports
-  `x-rincon-queue:` when the queue is the active source. The CLI switches the source with
-  `SetAVTransportURI` before seeking, since after a radio stream the queue is not current.
-
-## The TUI: what it shows, and what it doesn't yet (2026-10-13)
-
-`x2rock tui` is shipped - `mod tui` in `main.rs`, `Command::Tui` → `tui::run`, on ratatui 0.30 /
-crossterm 0.29, documented in the README. It draws the whole household on one screen off the daemon
-and writes back through the in-process session path (see "Doing and printing, separated", above): a
-write opens a session on first use and the panes update from the daemon's push feed rather than by
-re-running the binary.
-
-What it covers: per-room transport, volume, mute, and the EQ values the daemon pushes (bass, treble,
-loudness, balance, crossfade). What it does **not** cover yet, and why:
-
-- **Night Sound and Speech Enhancement** are absent. They are the two values in the daemon's
-  contract that are **not push-correct** - a subscription reports nothing when they change - so they
-  need a re-read after a write rather than riding the push feed the other EQ controls use. Deferred
-  as "not a dealbreaker"; wiring them means teaching the TUI a re-read for just these two.
-- **`DialogLevel` above 1 is untested**, deliberately: settling it is a real write to the Beam, and
-  the only home-theater device here is the living-room Beam, which is off limits. The office
-  household has no appendable queue source but radio either, so some queue paths cannot be exercised
-  there.
-- **Queue, media sources and search** were named as eventual TUI surfaces; none is built.
-
-**Corroboration worth recording:** besides the GENA evidence already in this doc, another session
-measured `settings:1` accepting a subscription and pushing **nothing** for a `SetEQ` write (8-second
-window, zero events; a re-read saw the change at once) - a second namespace agreeing that these
-writes are not push-back. The precise numbers live in that project's commit `4f337c7`; this is the
-additive note the earlier handoff left unwritten because it came through a lossy paste.
-
-These are the genuinely open TUI items; the TUI itself is shipped, not in flight.
+| Deezer | device-link | link | ✓ | enqueue ✓; file fallback ✓ | 2026-10-11, home and office |
+| TIDAL | device-link (OAuth) | link | ✓ | enqueue ✓; file fallback ✓ | 2026-09-19, home |
+| iHeartRadio | device-link | link | ✓ (three sections) | stations stream; podcasts enqueue | 2026-10-12, office |
+| Spotify | app-link | link, or import | ✓; root is the app's page | enqueue ✓ (`x-sonos-spotify`) | 2026-10-11, home |
+| Amazon Music | app-link | link, or import | ✓ (paid tier); root is Library and Playlists only | enqueue ✓; HLS fallback ✓ | 2026-10-11, home |
+| YouTube Music | app-link | import only; still 403 | ✗ (Google's partner gate) | ✓ for known ids | 2026-10-11, home |
+| Apple Music | app-link | import (unusable for search) | catalogue search via iTunes | ✓ any catalogue id | 2026-10-11, home |
+| Qobuz | app-link | import only | ✓ | ✓ | 2026-10-11, home |
+| SiriusXM | app-link | import only | ✓ | live channels stream; stations as radio | 2026-10-12, office |
+| SoundCloud | app-link | import only | ✓ | enqueue ✓ | 2026-10-11, home |
+| Pandora | app-link | link, or import | ✓ (stations) | as radio | 2026-10-12, home |
+| TuneIn (New) | app-link | link | ✓; root is the app's page | streams | 2026-10-11, home |
+| Radio Paradise | app-link | link (anonymous login) | browse only | as radio, with a registration | 2026-09-30, office |
+| Sonos Radio | device-link | import only (link handlers crash) | ✓; root from its `browse/v1` | as radio | 2026-10-11, home |
+| Saavn | device-link | link (Pro required) | ✓ | enqueue ✓ | 2026-10-11, home |
+| Plex | own PIN flow | PIN, or import | ✓ (root needs the household token) | enqueue ✓; Shuffle All as radio | 2026-10-12, home |
+| Bandcamp | device-link | link (household token refused) | ✓ (own collection) | enqueue ✓ | 2026-10-12, home |
+| Mixcloud | device-link | link | ✓ | enqueue ✓ (never `loadContent`) | 2026-10-11, home |
+| Audible | app-link | import | ✓ | resumes | 2026-10-06, home |
+| Classical Archives | device-link | ✗ (link stubbed) | - | - | won't test |
+| Pandora CloudCover | app-link | - | - | - | out of scope |
+
+All 24 services searchable on the office household on 2026-09-18 were played, each verified by the
+playing position advancing.
+
+### Ratings
+
+A service declares ratings in its presentation map (`NowPlayingRatings`), keyed on a state such as
+`ISFAVORITE`, and `rate` sends SMAPI `rateItem`. `smapi::RatingKind` reads a thumb or a heart as up,
+a ban as down, and Deezer's `DELETE_TRACK` as `unfavorite`. `rate` distinguishes "no state reported"
+from "this state does not offer that". A dislike may auto-skip (`AutoSkip="ALWAYS"`), and nothing
+undoes it, so the TUI asks before sending one. `x2rock:hasTrackId` gates rating in front ends.
+Research record: [openphonos-ratings-findings.md](openphonos-ratings-findings.md).
+
+## Authentication on, and signing in
+
+With Authentication on:
+
+- Every Control API command answers `ERROR_NO_PERMISSION`, while UPnP keeps answering.
+- Sockets opened before the switch keep working.
+- Discovery stays open: REST `GET /api/v1/players/local/info` reports `credentialTypeAllowed:
+  GUEST_TOKEN` instead of `API_KEY`.
+- `attach` maps the refusal to `authentication_required` at once, with no rescan.
+
+The credential is a Sonos OAuth 2 bearer token from the person's **own** developer integration;
+x2rock ships no key or secret. That is a confidential-client flow: the secret is needed on the code
+exchange and on every refresh, through `api.sonos.com/login/v3/oauth` and `/oauth/access`, with scope
+`playback-control-all`, a 24-hour access token and a refresh token. On the WebSocket the token goes
+in **each command's header** as `"authorization": "Bearer <token>"`, not in the handshake. On REST
+it is the usual `Authorization` header.
+
+`x2rock login`: Sonos redirects only to a registered public HTTPS page, so the page
+(`rahga.github.io/x2rock/callback.html`, CSP `default-src 'none'`) forwards the browser to a
+`127.0.0.1` port that x2rock carries at the front of the OAuth `state`. It also shows the address to
+paste when the browser is on another machine (`x2rock login '<address>'`).
+
+The token file is mode 600 (`src/sonos/login.rs`):
+
+- Every command reads it from disk, so a running daemon sees login, logout and replacement.
+- It is refreshed ten minutes before expiry; one refresh runs per process at a time, with a
+  60-second cooldown after a failure.
+- A refresh is saved only if the token it refreshed is still current, so a late reply cannot
+  restore a logged-out sign-in.
+
+## The Connection Security switches
+
+The app's Account > Privacy and Security > Connection Security switches are readable on the Control
+API through `effectiveSettings:1 getSettingsGroup {"groupName": "security"}`, player-scoped with no
+other parameter:
+
+- `allowUnauthenticatedControl`: Authentication off;
+- `allowInsecureUPnP`: UPnP on;
+- `allowGuestAccess`: Guest Access.
+
+`x2rock security` shows all three. A player-scoped `subscribe` sends `settingsChanged` with a
+timestamp per settings group whenever one changes.
+
+**UPnP off:** every SOAP call answers 403 (queue, alarms, EQ writes, sleep timer, TV handoff), while
+the Control API and cover art on :1400 carry on. The daemon reads the switch, re-reads it when the
+`security` timestamp moves, and publishes `x2rock:upnpOff`. False means on or unknown, so an older
+daemon leaves clients offering everything. The widget and TUI then withdraw what would be refused,
+and the daemon stops its queue-version browse. `play-item` keeps the routes that do not need UPnP,
+and `tv` falls back to `loadHomeTheaterPlayback` for a lone soundbar.
+
+## The daemon and MPRIS
+
+`x2rock daemon` publishes one MPRIS2 player per **group**, `org.mpris.MediaPlayer2.x2rock-<room>`,
+named for its coordinator. Party mode collapses a household to one player. It holds one WebSocket per
+coordinator plus best-effort member sockets for per-room volume. Losing a member socket freezes one
+slider (`Loss::Tolerated`); losing a coordinator reconnects.
+
+MPRIS has no word for a group, a member's volume, a TV input or a live stream, so the daemon adds
+`x2rock:` keys to `Metadata`:
+
+- `members`, `memberVolumes`, `muted`, `volumeLevel`, `fixedVolume`;
+- `canRepeat`, `canShuffle`, `canCrossfade`;
+- `noSource`;
+- `hasTvInput`, `onTvInput`, `inputFormat`;
+- `isLiveStream`, `stationName`, `streamInfo`;
+- `hasTrackId`, `queueVersion`, `upnpOff`, `nightMode`, `enhanceDialog`.
+
+The README lists them all.
+
+- **Live stream** means `container.type == "station"`, the player's own vocabulary. It is not a
+  missing duration, `objectId "-1"` or a missing `currentItem`; those are TuneIn's shape.
+- **Live and pausable are different properties.** TuneIn has `canPause: false` and resumes at the
+  live edge. Sonos Radio pauses, then resumes the same track from its start. Transport controls gate
+  on `canPause`.
+- **`stationName`** is set only when the stream is live and the station name is not already the
+  title.
+- **Title and art** come from `track` before `container`, so Sonos Radio's per-track art updates on
+  its own.
+- **A podcast episode** has no artist or album; `album` falls back to the show (`track.podcast.name`).
+- **The service id** is read from the art URL's `sid` first. The metadata object's `serviceId` is
+  wrong for HLS content.
+
+**The daemon on `Pool`.** `serve` owns a `Session`. Sockets beyond the primary come from
+`Pool::reach`, which evicts a socket its keepalive gave up on. `session.groups` follows every
+`groups` event. A republish closes the pool.
+
+**Daemon writes never touch a room.** Recording history swallows its own errors. The queue-version
+fetch runs off the event loop, one per group, so one wedged coordinator cannot stall every room.
+`panic = "abort"`: a panic restarts the unit clean rather than continuing on half-mutated state, so
+`lock().unwrap()` is correct.
+
+## The agent contract
+
+The CLI is an API, and an agent is as likely a caller as a person.
+
+- **`status --json`** is the one-call snapshot: every group through its own coordinator, all at
+  once. An unreachable coordinator tags its own room with `error`; the rest still answer. `--full`
+  wraps it in `{household, network, total, reachable, warnings, rooms}`.
+- **Errors are data.** A `Hint` (`src/hint.rs`) carries a stable `code`, an optional runnable `fix`
+  and optional `data`. With `--json`, a failure prints `{error, code, fix, …data}` on stderr and
+  exits non-zero. A plain error is `code: "unknown"`. `unknown_room` carries `rooms` and
+  `did_you_mean`. `no_player` keeps a sharper connection-layer code from underneath.
+- **A `fix` must be safe and local, and must run.** It never scans a network, so neither network
+  error carries `discover`. `hint::shell_arg` quotes names with spaces or quotes, which is tested by
+  running the emitted fix, not by matching strings.
+- **Outcomes, not printing.** A command returns a typed outcome implementing `commands::Report`
+  (`Serialize` plus `text()` and `notes()`). `emit()` prints text or one JSON line on stdout, and
+  notes on stderr. JSON goes through `serde_json::to_value`, so keys print sorted.
+- **Fan-out.** `-r` repeats and `--all` applies to per-room commands (volume, transport, repeat,
+  shuffle, crossfade). One connection; rooms report as they finish; it stops at the first failure.
+  Several `-r` on a command that does not fan out is `too_many_rooms`.
+- **Fields that save a parse:** `on_tv`, `audible`, `service_id`, `queue_position`,
+  `favorites --json`'s `playable` and `category`. Two favorites sharing a name are listed by id
+  rather than picked.
+- **The skill ships in the binary** (`include_str!`). `x2rock skill` installs it, and its error table
+  is tested against the code in both directions.
+
+## Implementation
+
+### Layout
+
+One crate:
+
+- `main.rs` and `cli.rs`: the clap tree.
+- `commands/`: one file per command family; nothing there parses arguments.
+- `session.rs`: connect, the `Pool`, progress lines.
+- `discover.rs`, `netid.rs`, `state.rs`, `store.rs`.
+- `daemon.rs`, `mpris.rs`, `restart.rs`: the daemon, its MPRIS server, logind and NetworkManager.
+- `hint.rs`.
+- Service-side modules: `catalogue.rs`, `credentials.rs`, `bookmarks.rs`, `streams.rs`,
+  `stations.rs`, `itunes.rs`, `iheart.rs`, `frontpage.rs`, `rereads.rs`, `art.rs`, `speech.rs`,
+  `clipserve.rs`.
+- `tui/`.
+- `sonos/`: `local.rs` (the WebSocket transport), `api.rs`, `proto.rs`, `upnp.rs`, `http.rs`,
+  `smapi.rs`, `plex.rs`, `stored.rs`, `login.rs`, `cloud.rs`.
+
+The one boundary designed up front is the transport (`local.rs` against `api.rs`). Everything else
+was split when a file became unwieldy. `main.rs` became `cli.rs` and `commands/` as a pure move,
+verified byte-identical against captured output. `scripts/output-baseline.sh` captures 33 commands
+for that kind of diff; it changes rooms and restores most of their state.
+
+### Dependencies
+
+- **The Sonos client is written from scratch.** Every Sonos crate surveyed speaks UPnP only.
+- **`mpris-server`** (on `zbus`), because the daemon exposes an interface rather than consuming one.
+- **One HTTP client**, `sonos/http.rs`: plain HTTP to a player, TLS to a service. Timeouts belong to
+  the caller (8 s to a player, 6 s to a service). It reads to EOF, and `dechunk` uses checked
+  arithmetic.
+- **`aes`, `cbc` and `md-5`** for the household envelope only; `ring` offers neither cipher. base64
+  is a dozen hand-rolled lines.
+
+### `ring` over `aws-lc-rs`, deliberately
+
+rustls defaults to `aws-lc-rs`. Swapping to `ring` took the stripped binary from 9.3 MB to 7.2 MB
+and removed the cmake step, with the same cipher suites. The swap spans three places that have to
+move together: `default-features = false` on `rustls` and `tokio-rustls`, and
+`sonos::crypto_provider()`, the one site that names a backend. `builder_with_provider` is used
+everywhere, so a second provider linked in later cannot panic at the first handshake.
+
+Two things were given up. One is post-quantum key exchange: nothing x2rock sends is worth
+harvesting, and this should be revisited if it ever carries a durable secret. The other is P-521:
+a P-521 certificate would fail the handshake with an opaque alert, before `AcceptAnyCert` is
+consulted.
+
+### State files and concurrency
+
+All of these live under `$XDG_STATE_HOME/x2rock/`; the secret ones are mode 600:
+
+- `networks.json`: players per network;
+- `services.json`: the catalogue cache;
+- `credentials.json`;
+- `bookmarks.json`;
+- `scenes.json`;
+- `speech.json`;
+- `streams.json`;
+- the Sonos sign-in.
+
+The art and speech caches live under `$XDG_CACHE_HOME/x2rock/`.
+
+- **Every write is atomic, and owns its scratch file.** It writes a PID-and-counter name with
+  `create_new` at the final mode, renames it into place, and removes the scratch on any failure.
+  Atomic replacement does not merge competing updates.
+- **Read-modify-write takes `store::Lock`**, an `flock` on a sibling `<file>.lock`, since the rename
+  replaces the data file's inode. Bookmarks, credentials, scenes and the sign-in use it. The player
+  list does not: its writers write what a player just said.
+- **User data migrates; caches are discarded.** The bookmark `pinned` flag defaults to true; a
+  catalogue with the wrong `SCHEMA` is refetched.
+
+### The CLI, the TUI and the pool
+
+Most of a CLI call's ~420 ms is opening sockets, not process start (3 ms).
+
+- **`Session` holds a `Pool`** of connections beyond its primary, keyed by address. The lock is
+  never held across an open; the loser of a race closes its socket. Dead sockets are evicted.
+  `Session::close` closes everything, since `Connection` has no `Drop`. A split socket closes only
+  when both halves drop, so the read loop drops the sink on its way out.
+- **The TUI runs commands in-process** (`tui::action::Speakers`). It keeps a session from its first
+  write and re-reads the topology before every write. The connect is a spawned single-flight task.
+  The held session carries a generation, so a failure releases only its own. Only an unreachable or
+  dead socket drops the session. A failed write re-asks the daemon for the household, so a bar that
+  moved on the keypress snaps back. The cursor follows the room a key chose, through republishes.
+  Writes take about 180 ms once the session is open.
+- **Doing and printing, separated.** Because commands return outcomes, the TUI and a future D-Bus
+  interface ([dbus-interface.md](dbus-interface.md), a proposal) can call them without parsing
+  output.
+
+### Cover art
+
+`x2rock art <url>…` (`src/art.rs`) fetches covers for the widget, so QML never fetches an arbitrary
+URL:
+
+- only `https://`, or `http://` to a private IPv4 address on port 1400;
+- at most three redirects, each held to the same rule;
+- at most 2 MB in 8 s, and any `Content-Encoding` refused;
+- the body must start like an image;
+- cached in `$XDG_CACHE_HOME/x2rock/art` (mode 700), named by MD5, pruned hourly at most: past
+  30 days, then least recently used down to 50 MB.
+
+`--each` streams a row per image as it lands. `CoverArt.qml` shows only a `file://` path in that
+cache.
+
+### Speech: `x2rock say`
+
+The provider is `src/speech.rs`:
+
+- ElevenLabs text-to-speech, with the key in `speech.json` (mode 600) or `ELEVENLABS_API_KEY`;
+  `--set-key` reads it from stdin.
+- The voice list is remembered, so a key restricted to text-to-speech still resolves names.
+- The provider is an enum, ready for an OpenAI-shaped endpoint, which is not built until it can be
+  verified.
+
+The speaker cannot fetch from ElevenLabs (its bearer path is not the API key), so `clipserve.rs`
+serves the clip once, on port 3401, to the target player's address only. If the player never
+connects, the error is `clip_not_fetched`, with the `ufw` line in `data.firewall_rule` and no `fix`.
+Clips are cached by provider, voice, model and text. Playback is `loadAudioClip`, player-scoped, like
+`notify`.
+
+### Decisions upheld on review
+
+These were challenged and stand; do not "fix" them:
+
+- `lock().unwrap()` under `panic = "abort"`.
+- The restart channel's capacity of one, since a reconnect signal needs only the latest message.
+- `Service::entry` looks up by name, not position.
+- Clamp-then-cast for volume, rather than a silent fallback to 0.
+- `http.rs` reads to EOF.
+- The picker's merged search is opt-in (`searchService` defaults to TuneIn).
+
+**Process:** run `cargo fmt --check`, Clippy with `-D warnings` and the tests before pushing; CI
+checks all three.
+
+## Tested hardware and its limits
+
+Home has five rooms:
+
+- a 5.1 Beam with a Sub and two Play:1 surrounds;
+- a 5.0 Beam with two One SL surrounds;
+- a standalone Beam;
+- a One SL;
+- a SYMFONISK Bookshelf stereo pair.
+
+The office has one One SL. All of them are on SonosNet, through one wired Beam.
+
+`system` reads the topology's `ConnectionType`: 1 is wired, 2 is SonosNet (a pair half included),
+6 is a home-theatre satellite. `WirelessMode` reads 0 everywhere on S2 and means nothing. A speaker
+joined to WiFi rather than SonosNet has never been observed, so it reports `unknown`.
+
+Known blind spots:
+
+- **No Atmos.** The Beam (S14) is first generation, so a `5.1.2` reading needs an Arc or a Beam
+  gen 2.
+- **No line-in.** There is no Port or Amp here, and no line-in command.
+- **A speaker on the home WiFi.**
+- **`DialogLevel` above 1.**
+- **TruePlay's `Available` meaning.**
+- **Multi-room scene apply and party mode** have not been tested against the current code.
+
+One port scan of a One SL (firmware 96.1) found 1400, 1410 (an HTTP server answering 404 to
+everything), 1443 and 7000 (AirPlay) open. Sonos's published firewall list covers the whole product
+line and history.
+
+## Open questions
+
+- **The widget and `omarchy.media`.** Omarchy's media widget shows MPRIS title and artist, never the
+  room. It prefers players with a local PipeWire stream, so a Sonos room never wins that round, and
+  then the oldest playing player. The widget could pin a room with
+  `bar.shell.firstPartyServiceFor("omarchy.media").selectPlayer(dbusName)`, or better, read
+  `activePlayer` to mark which room the bar is showing. Neither is built, and behaviour with several
+  rooms on the bus is untested.
+- **The household's default account** for an enqueue with no `sn=`: the lowest live serial or the
+  first registered. One household cannot separate the two.
+- **`homeTheater:1 setOptions`**, a possible Control API write path for night and dialog. It has not
+  been tried with real parameters.
+- **Creating favorites** through `ContentDirectory CreateObject` is advertised and untested.
+- **The TUI** has no queue, sources or search panes yet.

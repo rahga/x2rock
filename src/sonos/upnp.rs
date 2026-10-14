@@ -2393,8 +2393,8 @@ fn insert_before(from: u32, to: u32) -> u32 {
 /// one.** A serial stays visible after its account is deleted, because deleting
 /// an account does not rewrite a queue that names it; and an account that has
 /// only ever played a station is absent, because a station never enters a
-/// queue. Both were observed on one household within an hour. See "The harvest
-/// showed a deleted account and hid a live one" in docs/architecture.md.
+/// queue. Both were observed on one household within an hour. See "Household
+/// registration is what playback needs" in docs/architecture.md.
 pub fn serials_in(items: &[BrowseItem]) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for item in items {
