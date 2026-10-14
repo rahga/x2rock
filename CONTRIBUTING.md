@@ -36,6 +36,31 @@ You do not need a patch or an automated test to report a bug. Give the version, 
 and observed behavior, and available sanitized diagnostics. A clear report of a real failure is
 more useful than a speculative fix. Never include credentials or account tokens.
 
+## Triage and review
+
+Every issue and pull request gets one of five dispositions:
+
+- **Actionable**: a clear, bounded report of a real problem, or a change with demonstrated value,
+  reproducible evidence and appropriate checks.
+- **Needs specific evidence**: something needed to assess or reproduce it is missing. The reply
+  names the one missing item, such as `x2rock --version`, the exact command, the error JSON or
+  `x2rock system --json --redact`. It does not start open-ended debugging or rewrite coaching.
+- **Duplicate**: closed with a link to the issue or pull request already tracking it.
+- **Out of scope**: a documented non-goal (S1, control from outside the LAN, jobs only the Sonos
+  app does), or a feature with no clear maintenance case.
+- **Maintenance cost exceeds benefit**: speculative abstractions, cosmetic or style-only churn,
+  dependency updates with no stated reason, or additions whose upkeep outweighs the user benefit.
+
+A genuine bug is not turned away because its reporter cannot find the cause or write a test.
+What happened, what was expected, and output from existing read-only commands are enough.
+
+**Check diagnostics before pasting them.** `x2rock status` (text) and `x2rock system --json
+--redact` are made for sharing. `status --json` and `now --json` are not redacted: their
+`art_url` holds LAN addresses and, while Plex is playing, the household's Plex token. Remove
+`art_url` before pasting either. Default daemon logs (`journalctl --user -u x2rock`) are fine;
+logs captured with `X2ROCK_LOG_EVENTS` or `X2ROCK_DUMP_SMAPI` contain raw event and service
+bodies, so do not paste them unedited. Never include credentials, tokens or passwords.
+
 ## Build and check
 
 Use Rust 1.89 or newer and a C compiler for `ring`. No CMake or Sonos SDK is required.
