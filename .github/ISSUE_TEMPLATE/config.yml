@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contribution guidelines
+    url: https://github.com/rahga/x2rock/blob/main/CONTRIBUTING.md
+    about: What a useful report or change includes, the checks CI runs, and how issues are triaged.
