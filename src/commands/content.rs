@@ -314,7 +314,7 @@ fn is_resumable(kind: &str) -> bool {
 /// then a seek to the offset into it. Without this a book was an album to the
 /// queue - every chapter, from the first - and the place was lost without a
 /// word, and then overwritten, since the speaker reports position back to the
-/// service as it plays. See "Audible: a book resumes" in docs/architecture.md.
+/// service as it plays. See "Playback routes" in docs/architecture.md.
 ///
 /// With no place kept (a book never started), the first chapter from its start.
 async fn play_resumed(

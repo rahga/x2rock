@@ -1086,7 +1086,7 @@ those two apart when telling a user what linking will do.
   `--household` narrows it; `unlink <service> --account "<nickname>"` forgets just one and leaves
   its siblings. The plain form says how many it dropped, so a service that held two says so.
 - **The per-service scoreboard below is a summary.** What has been tested, with dates and the
-  household each result came from, is the table at the top of `docs/architecture.md`; when the two
+  household each result came from, is the services table in `docs/architecture.md`; when the two
   disagree, that one is right. The *live* answer for a household is `x2rock search` (bare) and
   `x2rock link` (bare).
 - **How playback works once linked.** A **stream** (`type: "stream"`, a station) is streamed with

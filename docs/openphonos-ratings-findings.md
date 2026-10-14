@@ -2,7 +2,7 @@
 
 > **Status (2026-09-19).** The research record from 2026-09-12 that `x2rock rate` was built from,
 > kept as history. The current behaviour, its hardware verification and later corrections live in
-> [architecture.md](architecture.md) (search for `rate`, `RatingsMatch` and the 2026-09-12 audit)
+> [architecture.md](architecture.md) (its *Ratings* section)
 > and in the commit log; where this file and those disagree, they win.
 
 Source: `~/openphonos` (amp64/openphonos, C#, cloned + built 2026-09-12; kept around

@@ -2,9 +2,9 @@
 
 x2rock is a Linux Rust binary containing a CLI, an MPRIS daemon and a terminal UI.
 You can build it and run the default test suite without Sonos hardware or an account.
-The [README](README.md) documents current behavior; [architecture notes](docs/architecture.md)
-record dated findings and decisions. Check their superseded-claims index before relying on an
-older entry. The [custom D-Bus interface](docs/dbus-interface.md) is a proposal, not an implemented API.
+The [README](README.md) documents current behavior; the [architecture notes](docs/architecture.md)
+are the current reference for the protocol and the decisions behind it, with the investigation
+history in git. The [custom D-Bus interface](docs/dbus-interface.md) is a proposal, not an implemented API.
 
 Agents should also read [AGENTS.md](AGENTS.md). The maintainer's laptop has an ignored
 `.local-work/` queue for assignments, reviews and handoffs; contributing from another clone does

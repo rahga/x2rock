@@ -48,8 +48,8 @@
 //!   does not implement `getMediaURI` at all (Radio Paradise).
 //!
 //! The enqueue URI itself must be in the scheme the player writes for that
-//! service - see [`crate::bookmarks::service_uri`] and "The real fix: the
-//! enqueue URI itself was wrong" in docs/architecture.md.
+//! service - see [`crate::bookmarks::service_uri`] and "Enqueue URIs follow
+//! the player's own scheme" in docs/architecture.md.
 
 use std::time::Duration;
 
@@ -366,8 +366,7 @@ impl Item {
     /// refuses outright ("Unsupported action for account type" - it declares
     /// `canEnumerate` false) and iHeart's lists per-listener tracks that will
     /// only stream. Played, each starts as the room's source. Measured
-    /// 2026-10-11, home; see "Every household token, imported" in
-    /// docs/architecture.md.
+    /// 2026-10-11, home; see "Playback routes" in docs/architecture.md.
     pub fn opens(&self) -> bool {
         self.container && !is_program(&self.item_type)
     }
@@ -799,7 +798,7 @@ fn fresh_token<'a>(
 /// `offset_millis` counts from that chapter's start. Measured, not assumed
 /// (2026-10-06, Dune): a chapter sought to 689,440 and played a minute was
 /// reported back as 756,107 against the player's 756,034 - book-relative it
-/// would have read about 875,000. See "Audible: a book resumes" in
+/// would have read about 875,000. See "Playback routes" in
 /// docs/architecture.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumePoint {

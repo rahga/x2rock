@@ -243,8 +243,8 @@ const SPOTIFY_SERVICE_ID: &str = "12";
 /// app enqueued, carry `x-sonos-spotify` instead. Enqueuing a Spotify id under
 /// the generic scheme is accepted - `AddURIToQueue` succeeds, the row shows
 /// correct metadata - but is never actually playable: `Seek` answers UPnP 711
-/// against a queue that visibly holds the item. See "A Spotify track added to
-/// the queue cannot be seeked to or played" in docs/architecture.md.
+/// against a queue that visibly holds the item. See "Enqueue URIs follow the
+/// player's own scheme" in docs/architecture.md.
 fn native_scheme(service_id: &str) -> &'static str {
     match service_id {
         SPOTIFY_SERVICE_ID => "x-sonos-spotify",
@@ -819,9 +819,8 @@ mod tests {
         // (2026-09-10): `x-sonos-spotify:spotify:track:<id>?sid=12&flags=8232
         // &sn=22`, not `x-sonosapi-hls-static`. Enqueuing under the generic
         // scheme was accepted by AddURIToQueue but never actually playable -
-        // UPnP 711 on Seek against a queue that visibly held the item. See "A
-        // Spotify track added to the queue cannot be seeked to or played" in
-        // docs/architecture.md.
+        // UPnP 711 on Seek against a queue that visibly held the item. See
+        // "Enqueue URIs follow the player's own scheme" in docs/architecture.md.
         let b = Bookmark::from_id(
             "So What",
             &id(

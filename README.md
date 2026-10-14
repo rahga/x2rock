@@ -910,11 +910,9 @@ x2rock a server.
 ## Design
 
 The reasoning behind every choice — the local WebSocket over the cloud API, discovery behind a
-default-deny firewall, the protocol facts verified against real hardware and the ones that turned
-out to be wrong — is in [docs/architecture.md](docs/architecture.md). It is a dated engineering
-log rather than a reference; its
-[*Superseded claims*](docs/architecture.md#superseded-claims--check-here-before-trusting-an-early-section)
-index says which early findings later ones overturned.
+default-deny firewall, and the protocol facts verified against real hardware — is in
+[docs/architecture.md](docs/architecture.md), a current reference. The dated investigation that
+produced it is in its git history.
 
 For the source map, local checks and hardware-test boundaries, see
 [Contributing](CONTRIBUTING.md).
