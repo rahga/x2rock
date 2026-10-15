@@ -647,9 +647,9 @@ in to Sonos, refreshing that sign-in is its one cloud exception.
 
 ### Optional Sonos cloud search and browse
 
-> **Inactive under current license requirements.** This path uses Sonos's cloud content service,
-> which the Sonos developer program does not license, so it is switched off in the code and makes
-> no request, whatever is set up. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
+> **Inactive under current license requirements.** This path uses Sonos's cloud content service.
+> The terms of the Sonos developer program restrict it to invite-only licensees, so it is switched
+> off in the code and makes no request, whatever is set up. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
 
 When active, it gave `search` and `browse` a fallback through Sonos's cloud content API for what a
 service's own interface refuses: YouTube Music search and library browsing, Amazon's Home and
