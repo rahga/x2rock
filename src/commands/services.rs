@@ -1497,9 +1497,9 @@ pub async fn run_browse(
         answer = Ok(found);
     }
     // The cloud fallbacks, which need the service's cloud id and an account
-    // serial, and run only for someone who has set up their own Sonos
-    // integration and signed in: every `cloud` call fails before the network
-    // otherwise, and a failure here leaves the direct answer standing.
+    // serial. Inactive under current license requirements (`cloud::ACTIVE`):
+    // every `cloud` call fails before the network, and a failure here leaves
+    // the direct answer standing.
     if !sonos::cloud::is_cloud(at)
         && let Some(service_type) = chosen.service_type
         && let Some(serial) = cloud_serial
@@ -1944,7 +1944,7 @@ pub async fn run_search(
     .await;
     // A service whose own search is refused or comes back empty, but reachable
     // through the cloud (YouTube Music's SMAPI search is 403 at Google's gate),
-    // falls back to the cloud search - opt-in, same as `browse`. A miss there
+    // falls back to the cloud search - inactive, like `browse`'s. A miss there
     // leaves the direct answer, refusal included, standing.
     if result.as_ref().map_or(true, |(items, _)| items.is_empty())
         && let Some(service_type) = chosen.service_type
@@ -2050,7 +2050,7 @@ fn print_rows(items: &[sonos::smapi::Item], id_width: usize) {
 const SUMMARY_MAX: usize = 80;
 
 /// Below this many rows, a service's own `root` is a bare SMAPI root rather
-/// than a front page, so the cloud home (opt-in) is worth a look. A real front
+/// than a front page, so the cloud home (inactive; see `cloud::ACTIVE`) is worth a look. A real front
 /// page - Spotify's, Deezer's - clears it and is kept as is.
 const FRONT_PAGE_FLOOR: usize = 8;
 

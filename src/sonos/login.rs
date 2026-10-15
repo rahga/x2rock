@@ -10,7 +10,7 @@
 //! proves who is asking.
 //!
 //! Nothing here reaches Sonos unless the person has signed in. Authentication
-//! off needs no sign-in, though a person can opt in for cloud content browsing.
+//! off needs no sign-in.
 //! Long-running clients re-read the saved token so a later login or logout
 //! takes effect without restarting the daemon.
 //!

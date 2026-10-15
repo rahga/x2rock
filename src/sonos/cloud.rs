@@ -1,6 +1,12 @@
 //! Browse and search through **Sonos's cloud content API**, for the pages the
 //! direct SMAPI path cannot serve.
 //!
+//! **Inactive under current license requirements** ([`ACTIVE`] is false). The
+//! Sonos developer program does not license this service (see
+//! docs/sonos-terms-boundaries.md), so every call here fails before touching
+//! the network and the callers keep their direct answer. The code is kept, not
+//! deleted, so the path can be re-enabled if the licensing changes.
+//!
 //! The modern Sonos app reaches every service's front page not from the
 //! service's own SMAPI endpoint but from `api.ws.sonos.com/content/api`, which
 //! brokers the request server-side. That is how it shows Amazon's Home, Apple's
@@ -41,6 +47,10 @@ use serde_json::Value;
 use crate::sonos::smapi::{self, Item};
 use crate::sonos::{http, login};
 
+/// Whether the cloud content path may run at all. False while the Sonos terms
+/// do not license the content service; flipping it is the whole switch.
+pub const ACTIVE: bool = false;
+
 const BASE: &str = "https://api.ws.sonos.com/content/api/v3";
 const TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -53,6 +63,9 @@ pub fn is_cloud(id: &str) -> bool {
 }
 
 async fn get_json(url: &str) -> Result<Value> {
+    if !ACTIVE {
+        bail!("the Sonos cloud content path is inactive under current license requirements")
+    }
     let Some(token) = login::bearer().await else {
         bail!(
             "not signed in to a Sonos account - cloud browse needs `x2rock login` \
@@ -329,6 +342,20 @@ fn is_container_kind(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_inactive_path_refuses_before_reaching_the_network() {
+        // Pins the switch: while `ACTIVE` is false, no cloud call is made,
+        // whatever the caller holds. Flipping it means changing this test too.
+        let err = search("Sonos_household", 72711, "anything", 0, 5)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("inactive"), "{err:#}");
+        let err = browse("cloud:https://api.ws.sonos.com/x", 0, 5)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("inactive"), "{err:#}");
+    }
 
     #[test]
     fn an_srn_splits_into_kind_and_decoded_object_id() {
