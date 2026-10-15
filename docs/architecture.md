@@ -654,7 +654,9 @@ front pages do not come from SMAPI's `root`. A service's manifest can name a `br
 Spotify, Deezer, TuneIn (New), SiriusXM and Sonos Radio match the Sonos app shelf for shelf, and
 services with no endpoint match because SMAPI root is the page. Amazon's home endpoint refuses a
 bearer (401) and Apple's answers 500. The Sonos app shows full pages for Amazon Music, Apple Music
-and YouTube Music only through Sonos's cloud; see the terms note.
+and YouTube Music only through Sonos's cloud; see the terms note. x2rock's path to that service
+(`src/sonos/cloud.rs`) is inactive under current license requirements: `cloud::ACTIVE` is false, so
+it makes no request.
 
 **A curated shelf is not the addressable set.** Saavn's Top Shows lists 92 shows, yet any show id
 from the service's own website browses. "Not in the browse tree" does not mean unreachable.

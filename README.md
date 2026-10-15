@@ -69,7 +69,7 @@ expected to work but untested, which is not the same as known to fail.
 | Search and browse of free services | Internet access; no account | Per service, dated: [the tested-services table](docs/architecture.md#music-services-what-has-actually-been-tested) |
 | Search and browse of your own subscriptions | `x2rock link` per service. Playback also needs the service added to the household in the Sonos app | Same table; results vary by service |
 | Apple Music catalogue search | `link --from-household` | Same table |
-| Amazon Home, Apple's shelves, YouTube Music search and browse | Your **own** Sonos developer integration, `x2rock login` and `link --from-household`; see [the cloud fallback](#optional-sonos-cloud-search-and-browse) | Office household, 2026-10-13. **Outside the Sonos terms**; see the note in that section |
+| Amazon Home, Apple's shelves, YouTube Music search and browse | **Inactive under current license requirements**; see [the cloud path](#optional-sonos-cloud-search-and-browse) | Office household, 2026-10-13, before it was switched off |
 | A household with Authentication switched on | The same integration and `x2rock login` | Verified 2026-09-27 |
 | `say` · `link --from-household` | An inbound TCP 3401 rule from the speakers' network | Office One SL · home and office |
 
@@ -95,8 +95,7 @@ official Sonos mobile app has used since 2024. x2rock is built on it directly:
   talks to a radio directory, because neither wants a Sonos login. Local control requires signing
   in only when the household has switched Authentication on and the speakers answer only to a
   signed-in client; see [Households with Authentication on](#households-with-authentication-on).
-  Signing in also enables an optional [cloud search and browse fallback](#optional-sonos-cloud-search-and-browse)
-  for content a service's direct interface cannot return. Playback control still stays on the LAN.
+  Control stays on the LAN either way.
 - **Push events, not polling.** The LAN API supports real subscriptions; the daemon never polls.
 - **Ordinary control needs only outbound connections**, which matters on a Linux box with a
   default-deny firewall and on a locked-down office network. That is also why discovery does not
@@ -614,15 +613,13 @@ keeps them: Qobuz, and everything else the household already holds, in one comma
 to take only that one; `--dry-run` shows every record without keeping any. Two things to know: the
 player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
 change it), so a host firewall needs that one inbound rule; and it does not by itself get past
-YouTube Music's direct search refusal. Its token imports cleanly but SMAPI still answers 403;
-the optional [Sonos cloud fallback](#optional-sonos-cloud-search-and-browse) provides another route.
+YouTube Music's search refusal. Its token imports cleanly but SMAPI still answers 403.
 
 **Apple Music is searched through Apple's public catalogue.** Its imported token cannot search, but
 the iTunes Search API needs no account and names the same ids the player plays, so `x2rock search
 -s "Apple Music"` finds tracks and albums there and the household's own Apple Music account plays
 them. It needs the import all the same, which is how x2rock knows the household has Apple Music and
-which account plays. Your library and Apple's playlists are out of that public catalogue's reach;
-the optional cloud browse path below can expose additional shelves.
+which account plays. Your library and Apple's playlists are out of that public catalogue's reach.
 
 Tokens are kept **per household**, so a laptop that moves between two Sonos systems holds a
 separate account for each and uses the right one wherever it is. A household can also hold two
@@ -650,26 +647,15 @@ in to Sonos, refreshing that sign-in is its one cloud exception.
 
 ### Optional Sonos cloud search and browse
 
-> **Outside the Sonos terms.** This fallback uses Sonos's cloud content service, which the Sonos
-> developer program does not license. Anyone who sets it up does so under their own developer
-> agreement. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
+> **Inactive under current license requirements.** This path uses Sonos's cloud content service,
+> which the Sonos developer program does not license, so it is switched off in the code and makes
+> no request, whatever is set up. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
 
-`x2rock login` also enables a fallback through Sonos's cloud content API, even in a household
-with Authentication off. It uses your own developer integration and Sonos sign-in; follow the
-setup under [Households with Authentication on](#households-with-authentication-on). x2rock ships
-no integration key or secret. Import the household's service accounts with
-`x2rock link --from-household` as well: cloud browse needs the account serial that import retains.
-
-Search tries the cloud when direct SMAPI search fails or returns no items. Browse can use it for
-a richer front page when the direct root has few entries, or to open a container the direct
-interface refuses. This provides a route to YouTube Music search and library browsing, and to
-Amazon and Apple shelves. Availability still depends on the household's accounts and what Sonos
-returns; a failed fallback leaves the direct result or error in place.
-
-The same `search` and `browse` commands use it automatically after sign-in, and playback still
-goes to the speakers over the LAN. Without a saved Sonos sign-in, these fallbacks make no cloud
-request. `x2rock logout` removes that sign-in locally, which also disables authenticated LAN
-control for a household with Authentication on.
+When active, it gave `search` and `browse` a fallback through Sonos's cloud content API for what a
+service's own interface refuses: YouTube Music search and library browsing, Amazon's Home and
+Apple's shelves. It needed the person's own Sonos developer integration and `x2rock login`. It is
+kept in the code, inactive, so that it can return if the licensing changes. Signing in still
+serves its other purpose: control of a household with Authentication on.
 
 ### Keeping things you cannot search for
 
@@ -903,7 +889,7 @@ x2rock a server.
 
 - **Android.** [`x2rocktv`](https://github.com/rahga/x2rocktv) is the Kotlin Android TV app.
 - **Control from outside the LAN.** Speaker control stays local. Optional Sonos OAuth supports
-  authenticated households and the cloud content fallback described above.
+  authenticated households only.
 - **Sonos S1.** Every supported device runs S2, and no S1 accommodation is carried anywhere.
 - **A GUI of its own.** The daemon is the product; front ends are consumers of it.
 

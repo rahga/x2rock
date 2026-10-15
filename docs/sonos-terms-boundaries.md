@@ -10,9 +10,9 @@ It is a maintainer's reading of those terms (as read 2026-10-14), not legal advi
 ## Who the terms bind
 
 The terms bind whoever registers a Sonos developer account. The maintainer has one; so does
-anyone who follows [Households with Authentication on](../README.md#households-with-authentication-on)
-or sets up the cloud fallback. Ordinary LAN control needs no account. The terms neither license
-nor forbid it for someone who never registered.
+anyone who follows [Households with Authentication on](../README.md#households-with-authentication-on).
+Ordinary LAN control needs no account. The terms neither license nor forbid it for someone who
+never registered.
 
 The clauses that matter here:
 
@@ -37,15 +37,10 @@ The clauses that matter here:
 
 | Gate | Technically | Against the terms | Status |
 |---|---|---|---|
-| **Search and browse for Amazon Music, Apple Music and YouTube Music** as the Sonos app shows them | Sonos's cloud content service serves them to a Sonos developer sign-in: Amazon's Home, Apple's shelves, YouTube Music browse and search (verified 2026-10-13, office household). Nothing about the implementation is unusual | **Not usable within the terms.** The content service is not part of what the developer program licenses | The opt-in [cloud fallback](../README.md#optional-sonos-cloud-search-and-browse) (`src/sonos/cloud.rs`) is still in the code; see the owner decision below |
+| **Search and browse for Amazon Music, Apple Music and YouTube Music** as the Sonos app shows them | Sonos's cloud content service serves them to a Sonos developer sign-in: Amazon's Home, Apple's shelves, YouTube Music browse and search (verified 2026-10-13, office household). Nothing about the implementation is unusual | **Not usable within the terms.** The content service is not part of what the developer program licenses **Inactive under current license requirements** (2026-10-14): [the cloud path](../README.md#optional-sonos-cloud-search-and-browse) stays in the code with `cloud::ACTIVE` false, so it makes no request |
 | **The household's music-service tokens** are stored on the speakers, encrypted to the household | Any LAN controller can read them using a method published by a third party ([SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010)); verified 2026-09-22 | Not derived from Sonos materials by x2rock. Whether §3(g) reaches use of a published interoperability method is untested | Shipped as `link --from-household` (`src/sonos/stored.rs`) |
 | **The LAN Control API** (WebSocket, port 1443) | Answers any controller on the LAN; x2rock sends the community's placeholder API key, not a portal-issued one | §2(b) requires a separate licence to publish a LAN-based app, for those bound by the terms | The core of x2rock; shipped |
 | **Households with Authentication on** | x2rock presents a token from the person's own developer integration (verified 2026-09-27) | Uses the documented OAuth flow with the person's own key (§1(b)–(c)); it ties LAN use to an account, so §2(b) applies to that person | Shipped, opt-in |
-
-## Open owner decision
-
-The opt-in cloud fallback, shipped 2026-10-13, uses the content service the terms do not license.
-Until it is withdrawn, the README still describes it.
 
 ## Facts worth keeping, from documented or observable behaviour
 
