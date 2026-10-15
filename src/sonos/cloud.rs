@@ -2,10 +2,11 @@
 //! direct SMAPI path cannot serve.
 //!
 //! **Inactive under current license requirements** ([`ACTIVE`] is false). The
-//! Sonos developer program does not license this service (see
-//! docs/sonos-terms-boundaries.md), so every call here fails before touching
-//! the network and the callers keep their direct answer. The code is kept, not
-//! deleted, so the path can be re-enabled if the licensing changes.
+//! terms of the Sonos developer program restrict this service to invite-only
+//! licensees (see docs/sonos-terms-boundaries.md), so every call here fails
+//! before touching the network and the callers keep their direct answer. The
+//! code is kept, not deleted, so the path can be re-enabled if the licensing
+//! changes.
 //!
 //! The modern Sonos app reaches every service's front page not from the
 //! service's own SMAPI endpoint but from `api.ws.sonos.com/content/api`, which
@@ -47,8 +48,9 @@ use serde_json::Value;
 use crate::sonos::smapi::{self, Item};
 use crate::sonos::{http, login};
 
-/// Whether the cloud content path may run at all. False while the Sonos terms
-/// do not license the content service; flipping it is the whole switch.
+/// Whether the cloud content path may run at all. False while the terms of
+/// the Sonos developer program restrict the content service to invite-only
+/// licensees; flipping it is the whole switch.
 pub const ACTIVE: bool = false;
 
 const BASE: &str = "https://api.ws.sonos.com/content/api/v3";

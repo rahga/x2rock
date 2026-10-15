@@ -1034,8 +1034,8 @@ those two apart when telling a user what linking will do.
   At most one read per household every 10 minutes. Re-running `link --from-household` is only
   needed when that read cannot happen: a firewall, or no player reachable.
 - **The cloud browse/search path is inactive under current license requirements.** It used
-  Sonos's cloud content service, which the Sonos developer program does not license, so it is
-  switched off in the code and makes no request. Amazon Music's Home, Apple Music's shelves and
+  Sonos's cloud content service, which the terms of the Sonos developer program restrict to
+  invite-only licensees, so it is switched off in the code and makes no request. Amazon Music's Home, Apple Music's shelves and
   YouTube Music search are therefore not reachable from here. Do not suggest setting anything up
   to get them; offer favorites, bookmarks or `recent` for what the household has already played.
 - **Apple Music searches Apple's public catalogue, not the household's account.** Its imported
