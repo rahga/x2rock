@@ -461,8 +461,18 @@ applying the curve measured for the room it left.
   reliable. **`loadFavorite`** is group-scoped, takes `favoriteId` in the body, replaces the queue,
   and resolves everything itself, account included. That makes a favorite the reliable way to play
   someone's personal content in a household with several accounts.
-- **`FV:2` over UPnP** also lists service shortcuts (`<r:type>shortcut</r:type>`, empty `<res>`),
-  which `getFavorites` rightly omits. Filter on the marker, not on the missing resource.
+- **`FV:2` over UPnP** also lists shortcuts (`<r:type>shortcut</r:type>`, empty `<res>`), which
+  `getFavorites` omits. Some are Sonos Radio navigation entries with nothing to play. But today's
+  Sonos app also saves an album, artist or song favorite as a shortcut (x2rocktv, 2026-10-16):
+  the item is only in `r:resMD`, an 8-hex prefix before the service's own id with `/` written
+  `__UNENCODED_SLASH__`, and the service is the cdudn type over 256 (TIDAL's 44551 is 174). The
+  account is not named. `loadFavorite` refuses these with `ERROR_INVALID_OBJECT_ID`; they play
+  through the service path like any album. x2rock still drops every shortcut, so it hides these
+  real favorites too. Tell them apart by the `upnp:class` inside `r:resMD`, and tell a shortcut
+  from a favorite by the marker, not by the missing resource.
+- **Favorites cannot be created over UPnP.** `ContentDirectory CreateObject` on `FV:2` answers
+  UPnP error 803 on every speaker tried, even for an exact copy of an existing favorite
+  (x2rocktv, 2026-10-16). The Sonos app saves them some other way, presumably through its cloud.
 - **A favorite's `resource.id` carries the player's container prefix** (`1004206cALBUM:79488223`),
   which the service does not know. `browse --favorite` strips it from the favorite's own id, or
   retries without it after a refusal. All-digit ids look the same, so it is never stripped on sight.
@@ -1235,5 +1245,4 @@ line and history.
   first registered. One household cannot separate the two.
 - **`homeTheater:1 setOptions`**, a possible Control API write path for night and dialog. It has not
   been tried with real parameters.
-- **Creating favorites** through `ContentDirectory CreateObject` is advertised and untested.
 - **The TUI** has no queue, sources or search panes yet.
