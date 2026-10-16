@@ -68,9 +68,10 @@ re-shape a household. These are decisions, not gaps:
 - **Measuring TruePlay.** That needs the app and a phone microphone. x2rock reads whether TruePlay
   is on and can turn it off.
 - **Adding a music service to the household**, which only the app (or the desktop controller) does.
-- **Editing favorites.** `favorites:1` offers only `getFavorites` and `loadFavorite`. Deleting one
-  (`DestroyObject` on `FV:2/<id>`) and adding one (`CreateObject` on `FV:2`) both work over UPnP,
-  as recorded under Favorites below, and stay `raw` escape hatches. The rule: if the Control API does not sanction an edit, x2rock does not add it as a command.
+- **Renaming and reordering favorites.** `favorites:1` offers only `getFavorites` and
+  `loadFavorite`. Saving and removing one are commands anyway, at the owner's call (2026-10-16),
+  so an agent can answer "favorite this song": `favorite add` and `favorite remove`, over UPnP, as
+  recorded under Favorites below.
 - **Cloud queues.** `loadCloudQueue` is a permanent no. Sonos scopes the Cloud Queue API to content
   integrations, and it would make x2rock an inbound server the player polls.
 
@@ -473,8 +474,8 @@ applying the curve measured for the room it left.
 - **Favorites can be created and removed over UPnP** (x2rocktv T-31 and T-32, 2026-10-16).
   `ContentDirectory CreateObject`, container `FV:2`, takes an `object.item.sonos-favorite` wrapper
   with `r:type instantPlay`, a playable resource and the item's DIDL escaped inside `r:resMD`.
-  Proven on TIDAL at home and Saavn on the office One SL; a save leaves playback alone. These are
-  protocol findings, not new Rust commands: the scope rule above still stands. Captures,
+  Proven on TIDAL at home and Saavn on the office One SL; a save leaves playback alone. x2rock's
+  `favorite add` and `favorite remove` use it. Captures,
   implementation and tests are in x2rocktv (`TrackFavorites.kt`, `docs/lan-transport.md`).
   - *A service item* is saved as a queue is given it: the enqueue URI as the resource (protocol
     `<its scheme>:*:*:*`) and the enqueue DIDL in `r:resMD`. `getFavorites` then types and names

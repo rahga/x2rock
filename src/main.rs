@@ -31,7 +31,7 @@ mod tui;
 use anyhow::{Result, ensure};
 use clap::{CommandFactory, FromArgMatches};
 
-use cli::{Cli, Command, RawTransport, SceneAction};
+use cli::{Cli, Command, FavoriteAction, RawTransport, SceneAction};
 use commands::speaker::{
     ToneRequest, apply_buttons, apply_eq, apply_led, apply_remote, apply_rename, apply_sleep,
     apply_snooze,
@@ -482,6 +482,21 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             return content::favorites(session, query.as_deref(), *json).await;
         }
 
+        // Removing one by name is household business too; with no name it
+        // means what is playing, which needs the room below.
+        Command::Favorite {
+            action:
+                Some(FavoriteAction::Remove {
+                    name: Some(name),
+                    json,
+                    ..
+                }),
+            ..
+        } => {
+            let upnp = sonos::upnp::Upnp::new(session.connection.ip());
+            return content::favorite_remove(&upnp, Some(name), None, *json).await;
+        }
+
         Command::Recent { query, json } => {
             return content::recent(session, query.as_deref(), *json).await;
         }
@@ -671,9 +686,24 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         Command::Bookmark { query, next } => {
             content::bookmark(session, &player, &target, &query, next).await?;
         }
-        Command::Favorite { query } => {
-            content::favorite(session, &player, &target, &query).await?;
-        }
+        Command::Favorite { action, query } => match action {
+            None => {
+                let query = query.unwrap_or_default();
+                content::favorite(session, &player, &target, &query).await?;
+            }
+            Some(FavoriteAction::Add { container, json }) => {
+                content::favorite_add(session, &player, &target, container, json).await?;
+            }
+            Some(FavoriteAction::Remove {
+                name,
+                container,
+                json,
+            }) => {
+                let upnp = sonos::upnp::Upnp::new(commands::upnp_ip(&target, player.ip()));
+                let playing = Some((&player, target.group_id.as_str(), container));
+                content::favorite_remove(&upnp, name.as_deref(), playing, json).await?;
+            }
+        },
         Command::Replay { query } => {
             content::replay(session, &player, &target, room, &query).await?;
         }

@@ -624,6 +624,55 @@ impl Alarm {
     }
 }
 
+/// What [`Upnp::create_favorite`] saves: what a queue would be given for the
+/// item - the URI and DIDL a bookmark enqueues with - under a favorite's
+/// wrapper. Saved that way, `getFavorites` types and names it like the Sonos
+/// app's own (x2rocktv T-32: a Saavn track as `TRACK`, an album as `ALBUM`).
+pub struct NewFavorite<'a> {
+    pub title: &'a str,
+    pub uri: &'a str,
+    /// The item's own DIDL, carried as the favorite's `r:resMD`.
+    pub metadata: &'a str,
+    pub art_url: Option<&'a str>,
+    /// The service's name, which the Sonos app shows under the favorite.
+    pub service_name: Option<&'a str>,
+}
+
+/// A favorite's DIDL for `CreateObject`: an `object.item.sonos-favorite` with
+/// `r:type instantPlay`, the URI as its resource under the URI's own scheme
+/// (`x-sonosapi-hls-static:*:*:*`), and the item's DIDL escaped inside
+/// `r:resMD`. The shape the player answered a save with.
+fn favorite_didl(favorite: &NewFavorite<'_>) -> String {
+    let scheme = favorite.uri.split(':').next().unwrap_or_default();
+    let art = favorite
+        .art_url
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("<upnp:albumArtURI>{}</upnp:albumArtURI>", xml_escape(a)))
+        .unwrap_or_default();
+    let description = favorite
+        .service_name
+        .map(|d| format!("<r:description>{}</r:description>", xml_escape(d)))
+        .unwrap_or_default();
+    format!(
+        concat!(
+            r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" "#,
+            r#"xmlns:dc="http://purl.org/dc/elements/1.1/" "#,
+            r#"xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" "#,
+            r#"xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            r#"<item id="-1" parentID="FV:2" restricted="true">"#,
+            "<dc:title>{title}</dc:title><upnp:class>object.item.sonos-favorite</upnp:class>",
+            r#"<res protocolInfo="{scheme}:*:*:*">{uri}</res>{art}"#,
+            "<r:type>instantPlay</r:type>{description}<r:resMD>{metadata}</r:resMD></item></DIDL-Lite>"
+        ),
+        title = xml_escape(favorite.title),
+        scheme = xml_escape(scheme),
+        uri = xml_escape(favorite.uri),
+        art = art,
+        description = description,
+        metadata = xml_escape(favorite.metadata),
+    )
+}
+
 pub struct Upnp {
     ip: IpAddr,
 }
@@ -701,6 +750,39 @@ impl BrowseItem {
                 )
             }),
         }
+    }
+
+    /// The service and that service's own id for what a favorite points at,
+    /// read from the item inside its `r:resMD`. The same whether the favorite
+    /// is an `instantPlay` with a URI or a shortcut with none, which is what
+    /// lets `favorite remove` find the playing track among either.
+    ///
+    /// The inner id is the player's 8-hex prefix (`00032020` a track,
+    /// `1004206c` a container) before the id percent-encoded, or, in a shortcut
+    /// the Sonos app wrote, with `/` spelled `__UNENCODED_SLASH__`. The service
+    /// is the cdudn's type over 256: TIDAL's 44551 is service 174.
+    pub fn service_object(&self) -> Option<(String, String)> {
+        let inner = Document::parse(&self.metadata).ok()?;
+        let item = inner
+            .descendants()
+            .find(|n| n.has_tag_name("item") || n.has_tag_name("container"))?;
+        let id = item.attribute("id")?;
+        let cdudn = item
+            .children()
+            .find(|n| n.has_tag_name("desc") && n.attribute("id") == Some("cdudn"))?
+            .text()?;
+        let service_type: u32 = cdudn
+            .strip_prefix("SA_RINCON")?
+            .split('_')
+            .next()?
+            .parse()
+            .ok()?;
+        let bare = match id.get(..8) {
+            Some(prefix) if prefix.bytes().all(|b| b.is_ascii_hexdigit()) => &id[8..],
+            _ => id,
+        };
+        let object = http::urldecode(&bare.replace("__UNENCODED_SLASH__", "/"));
+        (!object.is_empty()).then(|| ((service_type / 256).to_string(), object))
     }
 }
 
@@ -1894,6 +1976,55 @@ impl Upnp {
             .to_owned())
     }
 
+    /// Save a Sonos favorite, answering its `FV:2/<n>` id, or `None` when the
+    /// item already is one.
+    ///
+    /// **803 is "already a favorite"**, not a refusal (x2rocktv, office One SL,
+    /// 2026-10-16): it answers for anything already in `FV:2`, under any title
+    /// and any spelling of its URI, and the same request succeeds once that
+    /// copy is gone. Every 803 that once read as "favorites cannot be created"
+    /// was a copy of one already there.
+    pub async fn create_favorite(&self, favorite: &NewFavorite<'_>) -> Result<Option<String>> {
+        let elements = favorite_didl(favorite);
+        let text = match self
+            .soap(
+                Service::ContentDirectory,
+                "CreateObject",
+                &[("ContainerID", "FV:2"), ("Elements", &elements)],
+            )
+            .await
+        {
+            Ok(text) => text,
+            Err(e) if Fault::of(&e).and_then(Fault::upnp_code) == Some("803") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let doc = Document::parse(&text).context("parsing CreateObject response")?;
+        match text_of(&doc, "ObjectID") {
+            Some(id) if id.starts_with("FV:2/") => Ok(Some(id.to_owned())),
+            _ => bail!(
+                "the speaker did not confirm the save; check `x2rock favorites` before trying again"
+            ),
+        }
+    }
+
+    /// Delete a Sonos favorite by its `FV:2/<n>` id. `false` when it was
+    /// already gone: `DestroyObject` answers 701 for one that no longer exists,
+    /// and a favorite that is not there is as removed as one taken out.
+    pub async fn destroy_favorite(&self, id: &str) -> Result<bool> {
+        match self
+            .soap(
+                Service::ContentDirectory,
+                "DestroyObject",
+                &[("ObjectID", id)],
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) if Fault::of(&e).and_then(Fault::upnp_code) == Some("701") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// How long the current track runs, when the player knows and the Control
     /// API does not.
     ///
@@ -2966,6 +3097,75 @@ mod tests {
         // shortcut from a favorite the service resolves, which is exactly why
         // the r:type marker is what decides.
         assert!(items[0].uri.is_none());
+    }
+
+    #[test]
+    fn a_favorite_names_its_service_object_with_or_without_a_uri() {
+        // The two shapes x2rocktv recorded on 2026-10-16: an instantPlay
+        // favorite saved over UPnP (from its captured CreateObject reply), and
+        // a shortcut the Sonos app wrote for a TIDAL album (rebuilt from the
+        // ids in its notes; synthetic otherwise).
+        let didl = r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
+              xmlns:dc="http://purl.org/dc/elements/1.1/"
+              xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">
+            <item id="FV:2/18"><dc:title>Sammakka</dc:title>
+              <res protocolInfo="x-sonosapi-hls-static:*:*:*">x-sonosapi-hls-static:TRACK_NEW%3A-sJuFNFc?sid=164&amp;flags=65544&amp;sn=13</res>
+              <r:type>instantPlay</r:type>
+              <r:resMD>&lt;DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"&gt;&lt;item id="00032020TRACK_NEW%3A-sJuFNFc" parentID="-1" restricted="true"&gt;&lt;dc:title&gt;Sammakka&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.audioItem.musicTrack&lt;/upnp:class&gt;&lt;desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/"&gt;SA_RINCON41991_X_#Svc41991-acdaed4d-Token&lt;/desc&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</r:resMD></item>
+            <item id="FV:2/19"><dc:title>Kind Of Blue (Legacy Edition)</dc:title><res></res>
+              <r:type>shortcut</r:type>
+              <r:resMD>&lt;DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"&gt;&lt;container id="10082064album__UNENCODED_SLASH__2178485" parentID="-1" restricted="true"&gt;&lt;dc:title&gt;Kind Of Blue&lt;/dc:title&gt;&lt;upnp:class&gt;object.container.album.musicAlbum&lt;/upnp:class&gt;&lt;desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/"&gt;SA_RINCON44551_X_#Svc44551-0-Token&lt;/desc&gt;&lt;/container&gt;&lt;/DIDL-Lite&gt;</r:resMD></item>
+            <item id="FV:2/0"><dc:title>Trending Now</dc:title><res></res>
+              <r:type>shortcut</r:type></item>
+          </DIDL-Lite>"#;
+        let items = Upnp::new("127.0.0.1".parse().unwrap())
+            .items_from_didl(didl)
+            .unwrap();
+        // Saavn's type 41991 is service 164, as the URI's own sid says.
+        assert_eq!(
+            items[0].service_object(),
+            Some(("164".into(), "TRACK_NEW:-sJuFNFc".into()))
+        );
+        assert_eq!(
+            items[1].service_object(),
+            Some(("174".into(), "album/2178485".into()))
+        );
+        assert_eq!(
+            items[2].service_object(),
+            None,
+            "a menu entry names nothing"
+        );
+    }
+
+    #[test]
+    fn a_favorite_is_saved_as_its_queue_item_under_a_favorite_wrapper() {
+        let inner = r#"<DIDL-Lite><item id="00032020a%3Ab"><dc:title>A &amp; B</dc:title></item></DIDL-Lite>"#;
+        let didl = favorite_didl(&NewFavorite {
+            title: "A & B",
+            uri: "x-sonosapi-hls-static:00032020a%3Ab?sid=164&flags=65544&sn=13",
+            metadata: inner,
+            art_url: Some("https://art.example/a.jpg"),
+            service_name: Some("Saavn"),
+        });
+        let doc = Document::parse(&didl).expect("well-formed");
+        let item = doc.descendants().find(|n| n.has_tag_name("item")).unwrap();
+        assert_eq!(item.attribute("parentID"), Some("FV:2"));
+        assert_eq!(text_of(&doc, "title"), Some("A & B"));
+        assert_eq!(text_of(&doc, "class"), Some("object.item.sonos-favorite"));
+        assert_eq!(text_of(&doc, "type"), Some("instantPlay"));
+        assert_eq!(text_of(&doc, "description"), Some("Saavn"));
+        let res = doc.descendants().find(|n| n.has_tag_name("res")).unwrap();
+        assert_eq!(
+            res.attribute("protocolInfo"),
+            Some("x-sonosapi-hls-static:*:*:*")
+        );
+        assert_eq!(
+            res.text(),
+            Some("x-sonosapi-hls-static:00032020a%3Ab?sid=164&flags=65544&sn=13")
+        );
+        // Escaped once here and once more by the SOAP envelope, so the item's
+        // own DIDL arrives as text and comes back out whole.
+        assert_eq!(text_of(&doc, "resMD"), Some(inner));
     }
 
     fn item(uri: Option<&str>, art: Option<&str>) -> BrowseItem {

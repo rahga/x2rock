@@ -445,9 +445,19 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Play a favorite, by name or id. One way to start a room that has
-    /// nothing queued, which `play` cannot do.
-    Favorite { query: String },
+    /// Play a Sonos favorite, by name or id, or save or remove one. Playing
+    /// one starts a room that has nothing queued, which `play` cannot do.
+    ///
+    /// `favorite add` saves what is playing; `favorite remove` takes one out.
+    /// These are the household's Sonos favorites, the ones the Sonos app lists;
+    /// `rate up` instead likes a track in the music service's own library.
+    #[command(subcommand_negates_reqs = true)]
+    Favorite {
+        #[command(subcommand)]
+        action: Option<FavoriteAction>,
+        #[arg(required = true)]
+        query: Option<String>,
+    },
     /// What the household played lately, newest first - the Sonos app's
     /// "Recently played", from whichever controller played it.
     ///
@@ -1331,6 +1341,35 @@ pub enum DesktopAction {
 
 /// What `bookmarks` can do: remove, pin from history, rename, or prune.
 ///
+/// What `favorite` does other than play one.
+#[derive(Subcommand)]
+pub enum FavoriteAction {
+    /// Save what is playing as a Sonos favorite: the song, or with
+    /// --container the album or playlist it comes from.
+    Add {
+        /// The album or playlist rather than the single song.
+        #[arg(long)]
+        container: bool,
+        /// `{name, service, kind, id, saved}`; `saved` is false when it already
+        /// was a favorite.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a Sonos favorite by name or id, or with no name, whatever is
+    /// playing.
+    Remove {
+        // `name`, not `query`: zsh completion hooks a `query` under any
+        // `(remove)` label as a bookmark name.
+        name: Option<String>,
+        /// With no name: the album or playlist playing rather than the song.
+        #[arg(long)]
+        container: bool,
+        /// `{name, removed}`, `removed` the titles taken out.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Subcommands rather than top-level commands, to sit beside `queue remove`:
 /// they act on the bookmarks file printed by the base command.
 #[derive(Subcommand)]
@@ -1789,6 +1828,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn favorite_plays_by_name_and_adds_or_removes_by_subcommand() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("x2rock").chain(args.iter().copied()))
+        };
+        assert!(matches!(
+            parse(&["favorite", "Kind of Blue"]).unwrap().command,
+            Command::Favorite { action: None, query: Some(ref q) } if q == "Kind of Blue"
+        ));
+        assert!(matches!(
+            parse(&["favorite", "add", "--json"]).unwrap().command,
+            Command::Favorite {
+                action: Some(FavoriteAction::Add {
+                    container: false,
+                    json: true
+                }),
+                query: None,
+            }
+        ));
+        assert!(matches!(
+            parse(&["-r", "Kitchen", "favorite", "add", "--container"])
+                .unwrap()
+                .command,
+            Command::Favorite {
+                action: Some(FavoriteAction::Add {
+                    container: true,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["favorite", "remove"]).unwrap().command,
+            Command::Favorite {
+                action: Some(FavoriteAction::Remove { name: None, .. }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["favorite", "remove", "Sammakka"]).unwrap().command,
+            Command::Favorite {
+                action: Some(FavoriteAction::Remove { name: Some(ref q), .. }),
+                ..
+            } if q == "Sammakka"
+        ));
+        // Playing one still needs a name.
+        assert!(parse(&["favorite"]).is_err());
     }
 
     #[test]
