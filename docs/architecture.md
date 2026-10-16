@@ -69,8 +69,8 @@ re-shape a household. These are decisions, not gaps:
   is on and can turn it off.
 - **Adding a music service to the household**, which only the app (or the desktop controller) does.
 - **Editing favorites.** `favorites:1` offers only `getFavorites` and `loadFavorite`. Deleting one
-  is possible through `ContentDirectory DestroyObject` on `FV:2/<id>` and stays a `raw` escape
-  hatch. The rule: if the Control API does not sanction an edit, x2rock does not add it as a command.
+  (`DestroyObject` on `FV:2/<id>`) and adding one (`CreateObject` on `FV:2`) both work over UPnP,
+  as recorded under Favorites below, and stay `raw` escape hatches. The rule: if the Control API does not sanction an edit, x2rock does not add it as a command.
 - **Cloud queues.** `loadCloudQueue` is a permanent no. Sonos scopes the Cloud Queue API to content
   integrations, and it would make x2rock an inbound server the player polls.
 
@@ -470,19 +470,28 @@ applying the curve measured for the room it left.
   through the service path like any album. x2rock still drops every shortcut, so it hides these
   real favorites too. Tell them apart by the `upnp:class` inside `r:resMD`, and tell a shortcut
   from a favorite by the marker, not by the missing resource.
-- **Current-track favorites can be created over UPnP** (x2rocktv, 2026-10-16). The earlier
-  blanket prohibition was wrong: those 803 probes copied empty-resource shortcuts.
-  `ContentDirectory CreateObject`, container `FV:2`, accepts an `object.item.sonos-favorite`
-  wrapper with `r:type instantPlay`, the real `GetPositionInfo.TrackURI` as its resource and
-  `TrackMetaData` escaped inside `r:resMD`. If the inner item lacks its catalogue id or cdudn,
-  fill them from the current Control API track id (`00032020` + percent-encoded objectId) and
-  advertised service type (`SA_RINCON<type>_X_#Svc<type>-0-Token`); preserve existing fields.
-  Without that identity a save can succeed but remain untyped and hidden in the phone app.
-  Proven with TIDAL at home (visible on the phone) and Saavn on the office One SL via the TV
-  emulator; `x2rock favorites --json` lists the new Saavn entry as `TRACK`, playable. Playback
-  was unchanged. This is a protocol finding, not a new Rust command; the CLI scope above
-  still stands. Captures, implementation and regression tests are in sibling x2rocktv's
-  `TrackFavorites.kt` and `docs/lan-transport.md` (T-31).
+- **Favorites can be created and removed over UPnP** (x2rocktv T-31 and T-32, 2026-10-16).
+  `ContentDirectory CreateObject`, container `FV:2`, takes an `object.item.sonos-favorite` wrapper
+  with `r:type instantPlay`, a playable resource and the item's DIDL escaped inside `r:resMD`.
+  Proven on TIDAL at home and Saavn on the office One SL; a save leaves playback alone. These are
+  protocol findings, not new Rust commands: the scope rule above still stands. Captures,
+  implementation and tests are in x2rocktv (`TrackFavorites.kt`, `docs/lan-transport.md`).
+  - *A service item* is saved as a queue is given it: the enqueue URI as the resource (protocol
+    `<its scheme>:*:*:*`) and the enqueue DIDL in `r:resMD`. `getFavorites` then types and names
+    it like the Sonos app's own: a Saavn album as
+    `x-rincon-cpcontainer:1004206cALBUM%3a48037104?sid=164&flags=8300&sn=13` is `ALBUM`, a track as
+    `x-sonosapi-hls-static:…` is `TRACK`. An `x-sonos-http:` URI with no file extension saves
+    untyped, with no service.
+  - *The playing track* is saved from `GetPositionInfo`'s `TrackURI` and `TrackMetaData`. If the
+    inner item lacks its catalogue id or cdudn, fill them from the Control API track id
+    (`00032020` + percent-encoded objectId) and the service type
+    (`SA_RINCON<type>_X_#Svc<type>-0-Token`), keeping the fields already there. Without that
+    identity a save succeeds but stays untyped and hidden in the phone app.
+  - **803 means "already a favorite"**, not a refusal. It answers for an item already in `FV:2`
+    under any title and any spelling of its URI (`%3A` or `%3a`, with or without an extension).
+    Every earlier 803 was a copy of a favorite that was already there.
+  - **`DestroyObject` on `FV:2/<n>`** removes one with an empty reply. One already gone answers
+    701, which counts as removed.
 - **A favorite's `resource.id` carries the player's container prefix** (`1004206cALBUM:79488223`),
   which the service does not know. `browse --favorite` strips it from the favorite's own id, or
   retries without it after a refusal. All-digit ids look the same, so it is never stripped on sight.
