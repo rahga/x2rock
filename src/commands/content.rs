@@ -1680,9 +1680,11 @@ pub async fn playlist(
 
 /// Everything that can go in a queue by name: the saved playlists (`SQ:`) and
 /// the favorites (`FV:2`), searched as one list because both enqueue the same
-/// way. Shortcuts are dropped - they have no resource, so they can neither be
-/// enqueued nor played, and offering one only produces "has nothing to play"
-/// a step later. The two browses are independent, so they run together.
+/// way. Shortcuts are dropped - they have no resource, so they cannot be
+/// enqueued from here, and offering one only produces "has nothing to play" a
+/// step later. That also drops album, artist and song favorites the Sonos app
+/// saved as shortcuts, which would need the service path. The two browses are
+/// independent, so they run together.
 pub async fn queue_sources(upnp: &Upnp) -> Result<Vec<upnp::BrowseItem>> {
     let (mut sources, favorites) =
         tokio::try_join!(upnp.browse_content("SQ:"), upnp.browse_content("FV:2"))?;

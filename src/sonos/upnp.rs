@@ -664,11 +664,11 @@ pub struct BrowseItem {
     /// this is passed on exactly as it arrived rather than parsed and remade.
     pub metadata: String,
     pub art_url: Option<String>,
-    /// A service's navigation entry rather than something to play: `FV:2`
-    /// carries these alongside real favorites, marked `<r:type>shortcut</r:type>`
-    /// and with an empty `<res>`. "Trending Now" and "Discover Sonos Radio" are
-    /// two of them. They belong in the Sonos app's browse tree, not in a list of
-    /// things a room can be told to play.
+    /// Marked `<r:type>shortcut</r:type>` in `FV:2`, with an empty `<res>`.
+    /// Sonos Radio's navigation entries ("Trending Now", "Discover Sonos
+    /// Radio") are shortcuts with nothing to play. But today's Sonos app also
+    /// saves an album, artist or song favorite this way, with the item only in
+    /// `r:resMD`, so a shortcut is not always something to throw away.
     pub shortcut: bool,
 }
 
