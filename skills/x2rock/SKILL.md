@@ -400,6 +400,7 @@ rooms; see "Ask before you act".
 | Play a saved Sonos playlist | `x2rock playlist "<name-or-id>"` (replaces the queue) / `x2rock queue add` appends |
 | The queue | `x2rock queue --json` / `queue remove N` / `queue clear --yes` (irreversible — see "Ask before you act") |
 | Favorites | `x2rock favorites --json` (household-wide) / `x2rock -r <Room> favorite "<name-or-id>"` / `x2rock browse --favorite "<name>"` (an album's or playlist's tracks) |
+| "Favorite this song" / "add this album to favorites" / "unfavorite this" | `x2rock -r <Room> favorite add [--container] --json` / `x2rock -r <Room> favorite remove [--container] --json` (the playing song; `--container` its album or playlist) / `x2rock favorite remove "<name-or-id>" --json` — Sonos favorites, the ones the Sonos app lists; see "Rating a track" for the service's own like |
 | Search every service at once | `x2rock search "<term>" --json` — no `--service`; `--only-linked` for the good tier, `-c artists,tracks` to choose categories, `--per-service N` to cap each |
 | Search one service | `x2rock search -s <svc> <term> --json` / `x2rock search --json` (lists services) |
 | Browse a service | `x2rock browse -s <svc> [container] --json` |
@@ -494,7 +495,11 @@ Two shapes worth noting because they are inconsistent: **`favorite` is name/id-a
 (`favorite "Jazz"` or `favorite 37`), while a **search/browse hit is index-addressed** (`--play N`).
 And **`group`/`ungroup` are asymmetric**: `group` takes `-r <coordinator>` plus room arguments;
 `ungroup` takes the room *positionally* with no `-r`. **`favorites` (listing) is household-wide** —
-`-r` is only meaningful on `favorite` (playing), to say which room.
+`-r` is only meaningful on `favorite` (playing), to say which room, and on `favorite add` and
+`favorite remove` with no name, to say whose playing song. `favorite add --json` is `{name,
+service, kind, id, saved}`, `saved` false when it already was a favorite (not an error);
+`favorite remove --json` is `{name, removed}`. Removing is undone by `favorite add` while it still
+plays, and only then, so confirm a remove by name.
 
 ## Free radio: find a station and play it
 
@@ -686,6 +691,9 @@ is the room correctly reporting a Live station, not a bug to work around.
   `should_skip` comes back an explicit `false`, not absent. A different service may set it and mean
   it - check the live `should_skip` field in the response, which `x2rock rate` already acts on
   (skipping the track immediately when `true`), not the declared policy.
+- **Not a Sonos favorite.** "Favorite this song" means `favorite add`, which the Sonos app lists
+  under its favorites; `rate up` likes it in the service's own library (Deezer's hearts), and
+  only on services that offer it. Use `rate` when the listener names the service's like or heart.
 - No account, no favorite and no fixed id list is involved: this reaches the *music service's* own
   server (SMAPI), the same way `search`/`browse` do, and needs whatever token the service already
   requires (`needs_link` if the service is not linked at all).
