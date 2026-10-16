@@ -38,9 +38,34 @@ The clauses that matter here:
 | Gate | Technically | Against the terms | Status |
 |---|---|---|---|
 | **Search and browse for Amazon Music, Apple Music and YouTube Music** as the Sonos app shows them | Sonos's cloud content service serves them to a Sonos developer sign-in: Amazon's Home, Apple's shelves, YouTube Music browse and search (verified 2026-10-13, office household). Nothing about the implementation is unusual | **Not usable under the current terms.** The terms of the Sonos developer program restrict the content service to invite-only licensees | **Inactive under current license requirements** (2026-10-14): [the cloud path](../README.md#optional-sonos-cloud-search-and-browse) stays in the code with `cloud::ACTIVE` false, so it makes no request |
-| **The household's music-service tokens** are stored on the speakers, encrypted to the household | Any LAN controller can read them using a method published by a third party ([SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010)); verified 2026-09-22 | Not derived from Sonos materials by x2rock. Whether §3(g) reaches use of a published interoperability method is untested | Shipped as `link --from-household` (`src/sonos/stored.rs`) |
+| **The household's music-service tokens** are stored on the speakers, encrypted to the household | Any LAN controller can read them: the player publishes the encrypted set in its `ZoneGroupTopology` event, and the key is derived from the household id and a fixed salt that originates in Sonos's own software (see below). Method published by a third party ([SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010)); verified 2026-09-22 | x2rock derived nothing from Sonos materials, but the salt it uses did originate there. Whether §3(g) reaches *using* a salt someone else extracted, versus extracting it, is untested — and a separate, non-ToS question of circumvention law (e.g. US DMCA §1201) was raised by SoCo's own maintainer (see below) | Shipped as `link --from-household` (`src/sonos/stored.rs`); the token is the same credential a device link mints, good only for public SMAPI search and browse |
 | **The LAN Control API** (WebSocket, port 1443) | Answers any controller on the LAN; x2rock sends the community's placeholder API key, not a portal-issued one | §2(b) requires a separate licence to publish a LAN-based app, for those bound by the terms | The core of x2rock; shipped |
 | **Households with Authentication on** | x2rock presents a token from the person's own developer integration (verified 2026-09-27) | Uses the documented OAuth flow with the person's own key (§1(b)–(c)); it ties LAN use to an account, so §2(b) applies to that person | Shipped, opt-in |
+
+## The household-token salt: where it came from, and SoCo's objection
+
+The key protecting the stored tokens is `md5(iv + md5(householdId + SALT))`, with a fixed 16-byte
+`SALT` (`1a01a731c96e9ebde8475182b274b70e`). x2rock copied that constant from SoCo PR #1010; it did
+not extract it. But the value itself originates in Sonos software:
+
+- **svrooij/sonos-net** (commit 76bbb86, 2026-04-09) carries it with the comment "This key was
+  extracted from the Sonos app" — the earliest public copy found.
+- **BookCatKid/sonos-research** (the #1010 author's notes) locates it in the macOS desktop
+  controller 17.2.3 and says it was read from the installed executable. It necessarily also lives
+  in every speaker's firmware, since the speaker decrypts the same blob to play.
+
+"Not derived from Sonos materials by x2rock" is true of x2rock's own work and misleading on its
+own: the salt is a vendor constant lifted from Sonos's app, wherever any given copy got it.
+
+**SoCo declined to ship it.** On 2026-10-13 SoCo maintainer *pwt* blocked the salt in #1010 for a
+library, on grounds beyond the Sonos ToS: circumvention law (DMCA §1201 and equivalents), and
+unwillingness to ship a turnkey credential reader. pwt's proposed remedy was to split the PR —
+keep the read-only browser with **caller-supplied** credentials, and move any decryption to a
+separate package outside the SoCo org. x2rock's reply (same thread) is that the imported token is
+the same credential a device link mints, that most services it links directly, and that the use is
+only ever public SMAPI search and browse. **x2rock's position (2026-10-16):** the code already
+isolates decryption to `src/sonos/stored.rs` and supplies tokens to the SMAPI client as input, but
+the salt stays in the main crate; no cargo split until there is a demonstrated problem.
 
 ## Facts worth keeping, from documented or observable behaviour
 
