@@ -470,9 +470,19 @@ applying the curve measured for the room it left.
   through the service path like any album. x2rock still drops every shortcut, so it hides these
   real favorites too. Tell them apart by the `upnp:class` inside `r:resMD`, and tell a shortcut
   from a favorite by the marker, not by the missing resource.
-- **Favorites cannot be created over UPnP.** `ContentDirectory CreateObject` on `FV:2` answers
-  UPnP error 803 on every speaker tried, even for an exact copy of an existing favorite
-  (x2rocktv, 2026-10-16). The Sonos app saves them some other way, presumably through its cloud.
+- **Current-track favorites can be created over UPnP** (x2rocktv, 2026-10-16). The earlier
+  blanket prohibition was wrong: those 803 probes copied empty-resource shortcuts.
+  `ContentDirectory CreateObject`, container `FV:2`, accepts an `object.item.sonos-favorite`
+  wrapper with `r:type instantPlay`, the real `GetPositionInfo.TrackURI` as its resource and
+  `TrackMetaData` escaped inside `r:resMD`. If the inner item lacks its catalogue id or cdudn,
+  fill them from the current Control API track id (`00032020` + percent-encoded objectId) and
+  advertised service type (`SA_RINCON<type>_X_#Svc<type>-0-Token`); preserve existing fields.
+  Without that identity a save can succeed but remain untyped and hidden in the phone app.
+  Proven with TIDAL at home (visible on the phone) and Saavn on the office One SL via the TV
+  emulator; `x2rock favorites --json` lists the new Saavn entry as `TRACK`, playable. Playback
+  was unchanged. This is a protocol finding, not a new Rust command; the CLI scope above
+  still stands. Captures, implementation and regression tests are in sibling x2rocktv's
+  `TrackFavorites.kt` and `docs/lan-transport.md` (T-31).
 - **A favorite's `resource.id` carries the player's container prefix** (`1004206cALBUM:79488223`),
   which the service does not know. `browse --favorite` strips it from the favorite's own id, or
   retries without it after a refusal. All-digit ids look the same, so it is never stripped on sight.
