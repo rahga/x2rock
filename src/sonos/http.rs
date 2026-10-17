@@ -32,6 +32,17 @@ use tokio_rustls::TlsConnector;
 /// `a` gets the real reply. A caller that sends its own `User-Agent` keeps it.
 const AGENT: &str = concat!("x2rock/", env!("CARGO_PKG_VERSION"));
 
+/// The ceiling on a text response, as read off the wire and again after it is
+/// decompressed. No SMAPI page, UPnP reply or radio directory document comes
+/// anywhere near it - a browse page is a hundred items, a queue a thousand - so
+/// it is not a size the services hit, but a stop against the two things a caller
+/// cannot otherwise bound: a server that never closes the connection, and a
+/// compressed body that inflates far past what it sent. Both would otherwise
+/// grow in memory until the request's timeout, and a service's reply ultimately
+/// reaches the long-lived bar widget. The binary paths (cover art, speech) carry
+/// their own, smaller caps; this is the one for documents.
+const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
 /// Where a request is going, and how to reach it: the host and port out of a
 /// URL, and whether its scheme wants TLS. A player on the LAN arrives here as
 /// an `http://<ip>:1400` URL like everything else.
@@ -136,7 +147,15 @@ pub async fn post(
         timeout,
         "talking to",
         &authority,
-        exchange(&endpoint, "POST", &path, headers, Some(body), false, None),
+        exchange(
+            &endpoint,
+            "POST",
+            &path,
+            headers,
+            Some(body),
+            false,
+            Some(MAX_TEXT_BYTES),
+        ),
     )
     .await?;
     Ok((status, text(&head, body, &authority)?))
@@ -176,7 +195,15 @@ pub async fn get_with(
         timeout,
         "fetching",
         url,
-        exchange(&endpoint, "GET", &path, headers, None, false, None),
+        exchange(
+            &endpoint,
+            "GET",
+            &path,
+            headers,
+            None,
+            false,
+            Some(MAX_TEXT_BYTES),
+        ),
     )
     .await?;
     Ok((status, text(&head, body, &endpoint.authority())?))
@@ -560,7 +587,7 @@ fn text(head: &str, body: Vec<u8>, authority: &str) -> Result<String> {
     let encoded =
         header(head, "Content-Encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
     let body = if encoded {
-        gunzip(&body).with_context(|| format!("gzip body from {authority}"))?
+        gunzip(&body, MAX_TEXT_BYTES).with_context(|| format!("gzip body from {authority}"))?
     } else {
         body
     };
@@ -579,7 +606,7 @@ fn text(head: &str, body: Vec<u8>, authority: &str) -> Result<String> {
 /// trailer needs no handling - inflate stops at the final block and ignores
 /// what follows - so this is header arithmetic and nothing more. Pulling in a
 /// second crate to do that much would be the larger change.
-fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
+fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     // Magic, then the compression method: deflate is the only one ever defined.
     let [0x1f, 0x8b, 0x08, flags, ..] = data else {
         bail!("not a gzip member");
@@ -611,8 +638,13 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
     let deflate = data
         .get(at..)
         .ok_or_else(|| anyhow!("gzip header runs past the end of the body"))?;
-    miniz_oxide::inflate::decompress_to_vec(deflate)
-        .map_err(|e| anyhow!("would not decompress: {e:?}"))
+    // A capped inflate: the raw body was already read under a cap, but a gzip
+    // member can inflate to many times its compressed size, so the cap is
+    // applied again here rather than trusting the ratio. A body over the limit
+    // reports `HasMoreOutput`, and a corrupt one its own status; either way the
+    // reply is unusable, so both become the same error.
+    miniz_oxide::inflate::decompress_to_vec_with_limit(deflate, limit)
+        .map_err(|e| anyhow!("would not decompress: {:?}", e.status))
 }
 
 fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
@@ -901,13 +933,35 @@ mod tests {
         // the bare ten bytes: the optional fields are the part worth pinning.
         const GZ: &[u8] = include_bytes!("testdata/hello.gz");
         assert_eq!(GZ[3] & 0b0000_1000, 0b0000_1000, "FNAME is set");
-        assert_eq!(gunzip(GZ).unwrap(), b"<hello>SMAPI</hello>\n");
+        assert_eq!(
+            gunzip(GZ, MAX_TEXT_BYTES).unwrap(),
+            b"<hello>SMAPI</hello>\n"
+        );
     }
 
     #[test]
     fn gunzip_refuses_what_is_not_a_member() {
-        assert!(gunzip(b"<?xml version=\"1.0\"?>").is_err(), "plain XML");
-        assert!(gunzip(&[0x1f, 0x8b]).is_err(), "truncated magic");
+        assert!(
+            gunzip(b"<?xml version=\"1.0\"?>", MAX_TEXT_BYTES).is_err(),
+            "plain XML"
+        );
+        assert!(
+            gunzip(&[0x1f, 0x8b], MAX_TEXT_BYTES).is_err(),
+            "truncated magic"
+        );
+    }
+
+    #[test]
+    fn gunzip_refuses_a_member_that_inflates_past_the_cap() {
+        // A member that decompresses to more than the limit allows is an error,
+        // not a body truncated to the cap: a reply that big is unusable and a
+        // compressed one must not be the way around the read-time ceiling.
+        const GZ: &[u8] = include_bytes!("testdata/hello.gz");
+        assert!(gunzip(GZ, 4).is_err(), "21 bytes decompressed, cap 4");
+        assert_eq!(
+            gunzip(GZ, MAX_TEXT_BYTES).unwrap().len(),
+            b"<hello>SMAPI</hello>\n".len(),
+        );
     }
 
     #[test]
