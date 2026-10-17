@@ -120,6 +120,17 @@ inventory. UPnP SOAP on :1400 has all of them.
 firewall drops silently. Read a service's own description (`/xml/<Service>1.xml`) before calling a
 new action: it states argument names and ranges, and costs nothing.
 
+Besides SOAP, the player serves its own **support pages** on :1400 — plain GETs any LAN controller
+can make, no account, nothing that reaches the cloud. Two are read: `/status/batterystatus` (the
+`battery` command, the one place a portable's charge appears) and `/support/review` (the `network`
+command), the household-wide diagnostics XML behind the Sonos app's network view — one GET returns
+every player's link mode, speed, WiFi/SonosNet state and firmware. `network` parses only the
+`EnetPorts`, `WirelessInfo` and `ZPInfo` sections and **drops `HouseholdControlID` (the household id)
+and `LocationId` before anything is printed**, so a dump meant to be pasted or fed to an agent cannot
+carry the one secret the stored-token import turns on; `--redact` masks the remaining hardware
+identifiers. These pages are undocumented and vary by firmware, so the parse is tolerant: a missing
+section is empty, an unknown field passes through, and the LED and raw-command dumps are left unread.
+
 ### Namespaces, scopes and how to probe them
 
 The target key (`groupId`, `playerId`, `householdId`, `sessionId`) travels in the **header**, never

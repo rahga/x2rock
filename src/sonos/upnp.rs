@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use roxmltree::Document;
+use serde::Serialize;
 
 use super::child_text;
 use super::element_text as text_of;
@@ -540,6 +541,76 @@ fn parse_battery(body: &str) -> Option<Battery> {
     Some(battery)
 }
 
+/// `ZPInfo` fields that never leave this parser. `HouseholdControlID` is the
+/// household id - the secret the stored-token decryption turns on - and
+/// `LocationId` is a stable per-player identifier; a diagnostics dump exists to
+/// be pasted, so neither is worth keeping. `Copyright` is dropped as noise.
+const DROP_INFO: &[&str] = &["HouseholdControlID", "LocationId", "Copyright"];
+
+/// A player's network view from each `ZPSupportInfo` block of `/support/review`.
+///
+/// Tolerant by design: a block with no `ZPInfo` is skipped (the page opens with
+/// an empty one on some firmware), a missing section is an empty map, and every
+/// field is passed through as its text so a firmware that renames or adds one
+/// does not silently drop it. Only the three network sections are read; the LED
+/// log and the raw command dumps are left on the page.
+fn parse_review(body: &str) -> Result<Vec<PlayerNetwork>> {
+    let doc = Document::parse(body).context("parsing the network review")?;
+    // Direct children of an element, by tag, as a map of trimmed text. Empty
+    // values are kept out so an absent field reads as absent rather than "".
+    let children_map = |node: roxmltree::Node| {
+        let mut map = std::collections::BTreeMap::new();
+        for child in node.children().filter(roxmltree::Node::is_element) {
+            if let Some(text) = child.text().map(str::trim).filter(|t| !t.is_empty()) {
+                map.insert(child.tag_name().name().to_string(), text.to_string());
+            }
+        }
+        map
+    };
+
+    let mut players = Vec::new();
+    for block in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("ZPSupportInfo"))
+    {
+        let Some(zpinfo) = block.descendants().find(|n| n.has_tag_name("ZPInfo")) else {
+            continue;
+        };
+        let mut info = children_map(zpinfo);
+        for key in DROP_INFO {
+            info.remove(*key);
+        }
+        let zone = info.get("ZoneName").cloned().unwrap_or_default();
+
+        let wireless = block
+            .descendants()
+            .find(|n| n.has_tag_name("WirelessInfo"))
+            .map(children_map)
+            .unwrap_or_default();
+
+        let ports = block
+            .descendants()
+            .filter(|n| n.has_tag_name("Port"))
+            .map(|port| EnetPort {
+                port: port.attribute("port").unwrap_or_default().to_string(),
+                up: child_text(port, "Link").map(str::trim) == Some("1"),
+                speed: child_text(port, "Speed")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            })
+            .collect();
+
+        players.push(PlayerNetwork {
+            zone,
+            ports,
+            wireless,
+            info,
+        });
+    }
+    Ok(players)
+}
+
 /// A player's own description of itself, read from `device_description.xml`.
 ///
 /// This one document carries every field the Sonos apps' "About My System"
@@ -676,6 +747,44 @@ fn favorite_didl(favorite: &NewFavorite<'_>) -> String {
 
 pub struct Upnp {
     ip: IpAddr,
+}
+
+/// One wired port of a player, from `/support/review`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnetPort {
+    /// The port number the player gives it (`0` on most, a second on devices
+    /// with two jacks).
+    pub port: String,
+    /// `Link` is `1`: a cable is in and the link is up.
+    pub up: bool,
+    /// `Speed`, verbatim - `100FD` is 100 Mbps full duplex, `1000FD` gigabit;
+    /// `None` when the port is down and reports none.
+    pub speed: Option<String>,
+}
+
+/// One player's network view, parsed from the household-wide `/support/review`
+/// diagnostics page. A deliberately plain shape - recognised fields pulled out,
+/// the rest of `ZPInfo` and `WirelessInfo` passed through as string maps - so an
+/// agent can reason over it and a firmware that adds a field does not drop it.
+///
+/// **It never carries the household id.** `ZPInfo` includes
+/// `HouseholdControlID` (the household id itself, the secret the stored-token
+/// decryption turns on) and `LocationId`; both are dropped at parse so a dump
+/// pasted into a chat cannot leak them. The remaining identifiers - address,
+/// MAC, serial, uuid - are real but masked by `network --redact`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlayerNetwork {
+    /// `ZoneName`, e.g. `Living Room (LF,RF)` - the channel suffix is the
+    /// player's, kept as the page gives it.
+    pub zone: String,
+    /// Every wired port the player reports.
+    pub ports: Vec<EnetPort>,
+    /// `WirelessInfo`: `WifiModeString` (`SONOSNET_MODE`/`STATION_MODE`),
+    /// `ConnectionTypeString`, `SonosNetDisabled`, `BusyClients` and the rest.
+    pub wireless: std::collections::BTreeMap<String, String>,
+    /// `ZPInfo` less the dropped secrets: firmware, hardware, series, address,
+    /// MAC, serial, uuid.
+    pub info: std::collections::BTreeMap<String, String>,
 }
 
 /// What `ListAvailableServices` answers with, unparsed.
@@ -911,6 +1020,24 @@ impl Upnp {
             bail!("the player answered {status} for its battery status");
         }
         Ok(parse_battery(&body))
+    }
+
+    /// Every player's network view, from `/support/review`.
+    ///
+    /// **Not SOAP**, like [`battery`](Self::battery): one of the player's own
+    /// support pages, the XML behind the Sonos app's and web UI's network
+    /// diagnostics. One GET to any player answers for the whole household - each
+    /// `ZPSupportInfo` block is one player - so this reads from a single speaker
+    /// rather than fanning out. The page also carries LED logs and raw command
+    /// dumps; those are left unread, and only `EnetPorts`, `WirelessInfo` and
+    /// `ZPInfo` are parsed.
+    pub async fn network(&self) -> Result<Vec<PlayerNetwork>> {
+        let url = format!("http://{}:{PORT}/support/review", self.ip);
+        let (status, body) = http::get(&url, TIMEOUT).await?;
+        if status != 200 {
+            bail!("the player answered {status} for its network review");
+        }
+        parse_review(&body)
     }
 
     /// Every player in the household, satellites and hidden pair halves too.
@@ -2590,6 +2717,57 @@ fn parse_hms(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_review_reads_each_players_link_and_never_the_household_id() {
+        // Synthetic `/support/review`: two players and a leading empty block.
+        let players = parse_review(include_str!("testdata/review.xml")).unwrap();
+        assert_eq!(players.len(), 2, "the ZPInfo-less opening block is skipped");
+
+        let kitchen = &players[0];
+        assert_eq!(kitchen.zone, "Test Kitchen");
+        assert_eq!(kitchen.ports.len(), 1);
+        assert!(kitchen.ports[0].up);
+        assert_eq!(kitchen.ports[0].speed.as_deref(), Some("1000FD"));
+        assert_eq!(
+            kitchen
+                .wireless
+                .get("ConnectionTypeString")
+                .map(String::as_str),
+            Some("SonosNet (Ethernet)")
+        );
+        // Ordinary fields pass through; firmware and hardware are kept.
+        assert_eq!(
+            kitchen.info.get("SoftwareVersion").map(String::as_str),
+            Some("97.1-80312")
+        );
+        assert_eq!(
+            kitchen.info.get("IPAddress").map(String::as_str),
+            Some("192.0.2.11")
+        );
+
+        // The second player is on WiFi with its wired port down.
+        let den = &players[1];
+        assert_eq!(den.zone, "Test Den");
+        assert!(!den.ports[0].up);
+        assert_eq!(
+            den.wireless.get("WifiModeString").map(String::as_str),
+            Some("STATION_MODE")
+        );
+
+        // The secrets and the noise never reach the parsed view.
+        for player in &players {
+            assert!(!player.info.contains_key("HouseholdControlID"));
+            assert!(!player.info.contains_key("LocationId"));
+            assert!(!player.info.contains_key("Copyright"));
+        }
+        // And nothing anywhere in the output carries the household id string.
+        let dump = serde_json::to_string(&players).unwrap();
+        assert!(
+            !dump.contains("SYNTHETICsecret"),
+            "household id leaked: {dump}"
+        );
+    }
 
     #[test]
     fn an_album_is_sought_from_its_first_track_not_the_queues_end() {

@@ -257,6 +257,30 @@ pub enum Command {
         #[arg(long)]
         redact: bool,
     },
+    /// Each player's network link, read from the players' own diagnostics.
+    ///
+    /// Wired, SonosNet or WiFi, at what link speed, on what firmware - the
+    /// fields behind the Sonos app's and web UI's network diagnostics page
+    /// (`/support/review`). One read answers for the whole household.
+    ///
+    /// Built to be ingested: `--json` is the whole parsed view per player, for
+    /// an agent to reason over, so x2rock reports rather than diagnoses.
+    ///
+    /// **Read-only**, and local: a plain GET any LAN controller can make, no
+    /// account and nothing sent anywhere. **The household id is never
+    /// included** - it is dropped before anything is printed, `--redact` or not.
+    Network {
+        /// One object per player: `zone`, `ports`, `wireless` and `info` (the
+        /// firmware, hardware and identifier fields), passed through so a new
+        /// field is not dropped.
+        #[arg(long)]
+        json: bool,
+        /// Mask addresses, MACs, serials and uuids - everything that
+        /// identifies hardware - for pasting somewhere public. The household id
+        /// is never printed either way.
+        #[arg(long)]
+        redact: bool,
+    },
     /// List the household's alarms.
     ///
     /// Alarms are household-wide - one list, each entry naming its room - so

@@ -127,7 +127,7 @@ impl Report for PartyOutcome {
 /// segments of it. One segment is not enough: a serial ends in a single check
 /// character, so `…C` would collapse most of a household onto the same label
 /// and lose the only thing the tail was kept for.
-fn masked(value: &str) -> String {
+pub(crate) fn masked(value: &str) -> String {
     // An IPv6 address is full of ':' but its tail can embed the MAC (EUI-64),
     // so the two-segment rule would keep three octets of it; one group is
     // plenty to compare. Unreachable today - players publish IPv4 Locations -
@@ -157,7 +157,7 @@ fn masked(value: &str) -> String {
 /// under `--redact`. It has no separators for [`masked`] to cut on; the kept
 /// tail is the last MAC octet plus the fixed suffix, the same exposure the
 /// masked serial gives.
-fn masked_uuid(uuid: &str) -> String {
+pub(crate) fn masked_uuid(uuid: &str) -> String {
     match uuid.char_indices().rev().nth(6) {
         Some((i, _)) => format!("…{}", &uuid[i..]),
         None => "…".to_owned(),

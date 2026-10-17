@@ -37,8 +37,8 @@ use commands::speaker::{
     apply_snooze,
 };
 use commands::{
-    admin, apply_per_room, content, emit, fan_out, fans_out, household, per_room, playback, raw,
-    scene, services, speaker, status, stream, too_many_rooms, volume,
+    admin, apply_per_room, content, emit, fan_out, fans_out, household, network, per_room,
+    playback, raw, scene, services, speaker, status, stream, too_many_rooms, volume,
 };
 use state::State;
 
@@ -516,6 +516,12 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
             return household::system(session, *json, *redact).await;
         }
 
+        // Household-wide and read from one player's diagnostics page, so no
+        // target is resolved - like `system`, it speaks for every speaker.
+        Command::Network { json, redact } => {
+            return network::run(session, *json, *redact).await;
+        }
+
         // Per-player too, and for the same reason: a battery belongs to a speaker,
         // not to whichever group it happens to be in.
         Command::Battery { room: one, json } => {
@@ -775,6 +781,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Alarm { .. }
         | Command::Update { .. }
         | Command::System { .. }
+        | Command::Network { .. }
         | Command::Security { .. }
         | Command::Battery { .. }
         | Command::Group { .. }

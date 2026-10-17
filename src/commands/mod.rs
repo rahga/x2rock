@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod content;
 pub mod household;
+pub mod network;
 pub mod playback;
 pub mod raw;
 pub mod say;
