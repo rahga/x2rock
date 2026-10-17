@@ -50,6 +50,39 @@ pub(crate) fn child_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option
         .and_then(|c| c.text())
 }
 
+/// The longest a service-supplied *display* string is kept: a title, a second
+/// line, a description. A row needs none of it beyond this, and an unbounded
+/// one does not stop at the row - it travels through `--json` into the bar
+/// widget, a long-lived process that parses and holds whatever arrives. So the
+/// field is bounded where it is read, once, rather than trusted to the widget.
+/// Identifiers (ids, URIs, `r:resMD`) are never clipped: they must arrive whole
+/// for the track to play.
+pub(crate) const MAX_FIELD_CHARS: usize = 512;
+
+/// The longest a service-supplied URL is kept. Over this it is dropped rather
+/// than clipped - a truncated URL is a broken fetch, so no cover art is the
+/// better answer than a request that cannot succeed.
+pub(crate) const MAX_URL_BYTES: usize = 8 * 1024;
+
+/// Clip a display string to [`MAX_FIELD_CHARS`], on a char boundary so the
+/// result stays valid UTF-8. A string already within the bound is untouched.
+pub(crate) fn clip(mut s: String) -> String {
+    if let Some((at, _)) = s.char_indices().nth(MAX_FIELD_CHARS) {
+        s.truncate(at);
+    }
+    s
+}
+
+/// [`clip`] over an optional second line.
+pub(crate) fn clip_opt(s: Option<String>) -> Option<String> {
+    s.map(clip)
+}
+
+/// Drop a URL past [`MAX_URL_BYTES`]; keep a sane one as it is.
+pub(crate) fn clip_url(url: Option<String>) -> Option<String> {
+    url.filter(|u| u.len() <= MAX_URL_BYTES)
+}
+
 /// Text made safe to sit inside an XML element or attribute value.
 ///
 /// One function serves SOAP arguments and DIDL-Lite alike. Four copies of
@@ -90,7 +123,7 @@ pub(crate) fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 
 #[cfg(test)]
 mod tests {
-    use super::xml_escape;
+    use super::{MAX_FIELD_CHARS, MAX_URL_BYTES, clip, clip_url, xml_escape};
 
     #[test]
     fn xml_escape_covers_the_five_reserved_characters() {
@@ -98,5 +131,25 @@ mod tests {
             xml_escape(r#"a&b<c>"d"'e'"#),
             "a&amp;b&lt;c&gt;&quot;d&quot;&apos;e&apos;"
         );
+    }
+
+    #[test]
+    fn clip_bounds_a_display_string_on_a_char_boundary() {
+        let short = "a short title".to_string();
+        assert_eq!(clip(short.clone()), short, "within the cap is untouched");
+
+        // A multi-byte char sitting on the boundary must not be split.
+        let long: String = "é".repeat(MAX_FIELD_CHARS + 50);
+        let clipped = clip(long);
+        assert_eq!(clipped.chars().count(), MAX_FIELD_CHARS);
+        assert!(clipped.is_char_boundary(clipped.len()));
+    }
+
+    #[test]
+    fn clip_url_drops_an_absurd_url_and_keeps_a_sane_one() {
+        let sane = Some("https://cdn.example/art.jpg".to_string());
+        assert_eq!(clip_url(sane.clone()), sane);
+        assert_eq!(clip_url(Some("x".repeat(MAX_URL_BYTES + 1))), None);
+        assert_eq!(clip_url(None), None);
     }
 }

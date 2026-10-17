@@ -19,6 +19,7 @@ use super::child_text;
 use super::element_text as text_of;
 use super::http;
 use super::xml_escape;
+use super::{clip, clip_opt, clip_url};
 
 pub const PORT: u16 = 1400;
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -1706,11 +1707,11 @@ impl Upnp {
                     .and_then(parse_hms);
                 QueueItem {
                     index,
-                    title: child("title").unwrap_or_default(),
-                    artist: child("creator"),
-                    album: child("album"),
+                    title: clip(child("title").unwrap_or_default()),
+                    artist: clip_opt(child("creator")),
+                    album: clip_opt(child("album")),
                     duration,
-                    art_url: child("albumArtURI").map(|uri| self.absolute(&uri)),
+                    art_url: clip_url(child("albumArtURI").map(|uri| self.absolute(&uri))),
                 }
             })
             .collect())
@@ -1804,10 +1805,10 @@ impl Upnp {
                 let child = |name: &str| child_text(node, name);
                 BrowseItem {
                     id: node.attribute("id").unwrap_or_default().to_owned(),
-                    title: child("title").unwrap_or_default().to_owned(),
+                    title: clip(child("title").unwrap_or_default().to_owned()),
                     uri: child("res").map(str::to_owned),
                     metadata: child("resMD").unwrap_or_default().to_owned(),
-                    art_url: child("albumArtURI").map(|uri| self.absolute(uri)),
+                    art_url: clip_url(child("albumArtURI").map(|uri| self.absolute(uri))),
                     // The marker, not the missing `res`: a real favorite whose
                     // content the service resolves can also arrive without one,
                     // and dropping those would lose things that do play.
