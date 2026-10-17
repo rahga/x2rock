@@ -1,5 +1,8 @@
 # x2rock
 
+> **Looking for the Android TV app?** It lives at
+> [rahga/x2rocktv](https://github.com/rahga/x2rocktv). This repository is the Linux daemon and CLI.
+
 Local-first Sonos control for Linux: a daemon that publishes every room as a standard MPRIS2
 media player, and a CLI that reaches everything the speakers will answer to on the LAN — playback,
 volume, grouping, the queue, favorites, music services, alarms, tone, and the physical speaker.
