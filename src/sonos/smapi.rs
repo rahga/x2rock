@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 
 use super::http;
 use super::xml_escape;
-use super::{child_text, element_text};
+use super::{child_text, clip, clip_opt, clip_url, element_text};
 
 /// Short, and deliberately shorter than the LAN's. Search is invoked from a bar
 /// widget as a subprocess; a call that never returns is worse than one that fails.
@@ -920,7 +920,7 @@ fn items_in(doc: &Document) -> (Vec<Item>, u32) {
                 && !matches!(item_type.as_str(), "track" | "stream");
             Some(Item {
                 id: child("id")?,
-                title: child("title").unwrap_or_default(),
+                title: clip(child("title").unwrap_or_default()),
                 item_type,
                 // Whatever the service offers as a second line; services differ
                 // on which of these they populate, and most populate one.
@@ -931,14 +931,18 @@ fn items_in(doc: &Document) -> (Vec<Item>, u32) {
                 // children found nothing: every Deezer track searched came back
                 // with no second line and no cover at all, which read as a
                 // service that publishes neither.
-                summary: child("summary")
-                    .or_else(|| child("artist"))
-                    .or_else(|| nested("trackMetadata", "artist"))
-                    .or_else(|| child("genre"))
-                    .or_else(|| child("country")),
-                art_url: child("albumArtURI")
-                    .or_else(|| nested("trackMetadata", "albumArtURI"))
-                    .or_else(|| nested("streamMetadata", "logo")),
+                summary: clip_opt(
+                    child("summary")
+                        .or_else(|| child("artist"))
+                        .or_else(|| nested("trackMetadata", "artist"))
+                        .or_else(|| child("genre"))
+                        .or_else(|| child("country")),
+                ),
+                art_url: clip_url(
+                    child("albumArtURI")
+                        .or_else(|| nested("trackMetadata", "albumArtURI"))
+                        .or_else(|| nested("streamMetadata", "logo")),
+                ),
                 container,
             })
         })
