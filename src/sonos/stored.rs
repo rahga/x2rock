@@ -47,6 +47,21 @@ use crate::sonos::upnp::PORT;
 /// A reverse-engineered constant, public in SoCo #1010; a firmware update could
 /// in principle change it, at which point the integrity check below would start
 /// failing and say so, rather than returning garbage.
+///
+/// What this salt recovers is not a new capability. For a service whose AppLink
+/// flow `link` can complete itself, the token minted that way is an exact match
+/// for the one this decrypts: the same `{token, key}` SMAPI `loginToken`, for the
+/// same account - `getAppLink` nests a `deviceLink` and returns the same
+/// `authToken`/`privateKey` shape a device link does (see `smapi.rs`). The salt
+/// is a shortcut to a credential the device could mint for itself; for the
+/// cloud-completing services the Sonos app finishes on your behalf it is the only
+/// route to that token, but it is still the same token, not a larger one.
+///
+/// And it is spent the same way a minted token is: SMAPI search and browse, and
+/// play where the service allows, spoken straight to the service's own SMAPI
+/// endpoint. It never touches the Sonos cloud - no Sonos sign-in, no Sonos
+/// content service, no portal - and it unlocks nothing at the account beyond what
+/// the Sonos app's own linked token already does.
 const SALT: [u8; 16] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];

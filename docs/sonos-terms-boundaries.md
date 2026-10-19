@@ -67,6 +67,12 @@ only ever public SMAPI search and browse. **x2rock's position (2026-10-16):** th
 isolates decryption to `src/sonos/stored.rs` and supplies tokens to the SMAPI client as input, but
 the salt stays in the main crate; no cargo split until there is a demonstrated problem.
 
+The same point is made at the salt itself (`src/sonos/stored.rs`), where a reader is likelier to
+look than in a doc: for a service whose AppLink flow `link` can complete, the token it mints is an
+exact match for the one the salt recovers — the same `{token, key}` SMAPI `loginToken`, for the same
+account. The salt is a shortcut to a credential the device could mint for itself, spent only on SMAPI
+search and browse (and play where the service allows), and it never touches the Sonos cloud.
+
 ## Facts worth keeping, from documented or observable behaviour
 
 - Sonos's OAuth is a confidential-client flow: the client secret is needed on the code exchange
