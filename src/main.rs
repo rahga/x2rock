@@ -518,8 +518,10 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
 
         // Household-wide and read from one player's diagnostics page, so no
         // target is resolved - like `system`, it speaks for every speaker.
-        Command::Network { json, redact } => {
-            return network::run(session, *json, *redact).await;
+        // Masked by default: `--unredacted` is the opt-in, so the redaction the
+        // command applies is on unless it is passed.
+        Command::Network { json, unredacted } => {
+            return network::run(session, *json, !*unredacted).await;
         }
 
         // Per-player too, and for the same reason: a battery belongs to a speaker,

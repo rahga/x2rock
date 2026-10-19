@@ -5,6 +5,11 @@
 //! an agent to ingest - `--json` is the whole parsed view - so x2rock reports
 //! rather than diagnoses: it pulls the stable fields out of the diagnostics page
 //! and leaves the judgement to whoever reads them.
+//!
+//! **Masked by default.** Because this output is made to be handed off, the
+//! hardware identifiers are masked unless `--unredacted` is passed (the caller
+//! hands [`run`] `redact = !unredacted`). The household id is dropped earlier,
+//! at parse, and is never shown either way.
 
 use anyhow::Result;
 

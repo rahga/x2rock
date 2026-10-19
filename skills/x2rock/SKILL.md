@@ -249,10 +249,11 @@ an `info` block of firmware, hardware and identifiers. One read answers for the 
 It is built to be **ingested** - `--json` is the whole parsed view, so x2rock reports the fields and
 leaves the diagnosis to you - and it is read-only and local (a plain GET any LAN controller can
 make). **The household id is never included**: `HouseholdControlID` and `LocationId` are dropped
-before anything is printed. `--redact` masks the remaining identifiers (address, MAC, serial, uuid)
-for pasting, the same policy `system` uses. Reach for it to see link speeds, which rooms are on
-SonosNet versus home WiFi, or firmware across satellites; reach for `system` first for bonding and
-"what speakers do I have".
+before anything is printed. **It is masked by default** - the reverse of `system` - because this
+output is made to be handed off (a forum, a bug report, a cloud assistant): the hardware identifiers
+(address, MAC, serial, uuid) come masked unless you pass `--unredacted`, which the diagnosis never
+needs. Reach for it to see link speeds, which rooms are on SonosNet versus home WiFi, or firmware
+across satellites; reach for `system` first for bonding and "what speakers do I have".
 
 **Alarms are household-wide and addressed by id, not by room.** `alarms` lists every one with the
 room it belongs to, so it takes no `-r`; `alarm <id> on|off` arms and disarms; `alarm <id> remove
@@ -401,7 +402,7 @@ rooms; see "Ask before you act".
 | Firmware check (read-only) | `x2rock update --json` |
 | Battery on the portables | `x2rock battery --json` (sweeps) / `-r <Room>` (one) — mains speakers are skipped, not listed as empty |
 | What the household is made of | `x2rock system --json` (add `--redact` to paste it anywhere) |
-| Each speaker's network link, link speed, SonosNet-vs-WiFi, firmware | `x2rock network --json` (add `--redact` to paste it anywhere) — reads `/support/review`; household id never included |
+| Each speaker's network link, link speed, SonosNet-vs-WiFi, firmware | `x2rock network --json` — reads `/support/review`; masked by default (identifiers safe to paste/feed an assistant), `--unredacted` to show address/MAC/serial; household id never included |
 | Why the queue/alarms/TV don't work, "is UPnP on?" | `x2rock security --json` — `{authentication, upnp, guest_access}`, `true` meaning the app's "On"; `upnp: false` is the `upnp_disabled` cause. Read-only: only the person can change them, in the Sonos app |
 | Which Sonos household(s) are reachable | `x2rock households --json` — only matters with more than one; see "Addressing a household" |
 | Alarms | `x2rock alarms --json` (list) / `x2rock alarm <id> on\|off` / `x2rock alarm <id> remove --yes` |

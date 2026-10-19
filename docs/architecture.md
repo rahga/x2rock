@@ -127,9 +127,14 @@ command), the household-wide diagnostics XML behind the Sonos app's network view
 every player's link mode, speed, WiFi/SonosNet state and firmware. `network` parses only the
 `EnetPorts`, `WirelessInfo` and `ZPInfo` sections and **drops `HouseholdControlID` (the household id)
 and `LocationId` before anything is printed**, so a dump meant to be pasted or fed to an agent cannot
-carry the one secret the stored-token import turns on; `--redact` masks the remaining hardware
-identifiers. These pages are undocumented and vary by firmware, so the parse is tolerant: a missing
-section is empty, an unknown field passes through, and the LED and raw-command dumps are left unread.
+carry the one secret the stored-token import turns on. It is also **masked by default** — the reverse
+of `system`'s raw-default/`--redact` — because its output is made to be handed off; the hardware
+identifiers come masked unless `--unredacted` is passed, which the diagnosis never needs. (This is
+hygiene for accidental sharing, not a defence against a hostile agent: anything that can run the
+command can read the same page, and the household id, directly; the drop keeps a cooperative run from
+splashing that field into a transcript it does not control.) These pages are undocumented and vary by
+firmware, so the parse is tolerant: a missing section is empty, an unknown field passes through, and
+the LED and raw-command dumps are left unread.
 
 ### Namespaces, scopes and how to probe them
 

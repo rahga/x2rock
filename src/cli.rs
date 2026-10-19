@@ -268,18 +268,24 @@ pub enum Command {
     ///
     /// **Read-only**, and local: a plain GET any LAN controller can make, no
     /// account and nothing sent anywhere. **The household id is never
-    /// included** - it is dropped before anything is printed, `--redact` or not.
+    /// included** - it is dropped before anything is printed, always.
+    ///
+    /// **Masked by default**, unlike `system`: this output exists to be handed
+    /// off - to a forum, a bug report, a cloud assistant whose transcript you do
+    /// not keep - so hardware identifiers (address, MAC, serial, uuid) are
+    /// masked unless you ask for them with `--unredacted`. The diagnosis needs
+    /// none of them; `system` leaves them raw because it is a local inventory.
     Network {
         /// One object per player: `zone`, `ports`, `wireless` and `info` (the
         /// firmware, hardware and identifier fields), passed through so a new
         /// field is not dropped.
         #[arg(long)]
         json: bool,
-        /// Mask addresses, MACs, serials and uuids - everything that
-        /// identifies hardware - for pasting somewhere public. The household id
-        /// is never printed either way.
+        /// Show the hardware identifiers raw - address, MAC, serial, uuid -
+        /// rather than masked. Off by default because this output is made to be
+        /// shared; the household id is never shown either way.
         #[arg(long)]
-        redact: bool,
+        unredacted: bool,
     },
     /// List the household's alarms.
     ///
