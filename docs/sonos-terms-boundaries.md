@@ -42,7 +42,7 @@ The clauses that matter here:
 | **The LAN Control API** (WebSocket, port 1443) | Answers any controller on the LAN; x2rock sends the community's placeholder API key, not a portal-issued one | §2(b) requires a separate licence to publish a LAN-based app, for those bound by the terms | The core of x2rock; shipped |
 | **Households with Authentication on** | x2rock presents a token from the person's own developer integration (verified 2026-09-27) | Uses the documented OAuth flow with the person's own key (§1(b)–(c)); it ties LAN use to an account, so §2(b) applies to that person | Shipped, opt-in |
 
-## The household-token salt: where it came from, and SoCo's objection
+## The household-token salt
 
 The key protecting the stored tokens is `md5(iv + md5(householdId + SALT))`, with a fixed 16-byte
 `SALT`. The value itself originates in Sonos software:
