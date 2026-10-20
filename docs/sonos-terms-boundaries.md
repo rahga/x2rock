@@ -45,33 +45,15 @@ The clauses that matter here:
 ## The household-token salt: where it came from, and SoCo's objection
 
 The key protecting the stored tokens is `md5(iv + md5(householdId + SALT))`, with a fixed 16-byte
-`SALT` (`<redacted>`). x2rock copied that constant from SoCo PR #1010; it did
-not extract it. But the value itself originates in Sonos software:
+`SALT`. The value itself originates in Sonos software:
 
 - **svrooij/sonos-net** (commit 76bbb86, 2026-04-09) carries it with the comment "This key was
-  extracted from the Sonos app" — the earliest public copy found.
-- **BookCatKid/sonos-research** (the #1010 author's notes) locates it in the macOS desktop
-  controller 17.2.3 and says it was read from the installed executable. It necessarily also lives
-  in every speaker's firmware, since the speaker decrypts the same blob to play.
+  extracted from the Sonos app" — the earliest public copy found. There may be others.
 
-"Not derived from Sonos materials by x2rock" is true of x2rock's own work and misleading on its
-own: the salt is a vendor constant lifted from Sonos's app, wherever any given copy got it.
-
-**SoCo declined to ship it.** On 2026-10-13 SoCo maintainer *pwt* blocked the salt in #1010 for a
-library, on grounds beyond the Sonos ToS: circumvention law (DMCA §1201 and equivalents), and
-unwillingness to ship a turnkey credential reader. pwt's proposed remedy was to split the PR —
-keep the read-only browser with **caller-supplied** credentials, and move any decryption to a
-separate package outside the SoCo org. x2rock's reply (same thread) is that the imported token is
-the same credential a device link mints, that most services it links directly, and that the use is
-only ever public SMAPI search and browse. **x2rock's position (2026-10-16):** the code already
-isolates decryption to `src/sonos/stored.rs` and supplies tokens to the SMAPI client as input, but
-the salt stays in the main crate; no cargo split until there is a demonstrated problem.
-
-The same point is made at the salt itself (`src/sonos/stored.rs`), where a reader is likelier to
-look than in a doc: for a service whose AppLink flow `link` can complete, the token it mints is an
-exact match for the one the salt recovers — the same `{token, key}` SMAPI `loginToken`, for the same
-account. The salt is a shortcut to a credential the device could mint for itself, spent only on SMAPI
-search and browse (and play where the service allows), and it never touches the Sonos cloud.
+For a service whose AppLink flow `link` can complete, the token it mints is an
+**exact match** for the one the salt recovers — the same `{token, key}` SMAPI `loginToken`, for the same
+account. The salt is a shortcut to a credential the device **could mint for itself**, spent only on SMAPI
+search and browse (and play where the service allows), and it **never touches the Sonos cloud**.
 
 ## Facts worth keeping, from documented or observable behaviour
 
