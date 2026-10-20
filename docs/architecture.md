@@ -1202,9 +1202,21 @@ URL:
 - only `https://`, or `http://` to a private IPv4 address on port 1400;
 - at most three redirects, each held to the same rule;
 - at most 2 MB in 8 s, and any `Content-Encoding` refused;
-- the body must start like an image;
+- the body must be a JPEG or a PNG, and is **sanitised to its pixels** before it is cached;
 - cached in `$XDG_CACHE_HOME/x2rock/art` (mode 700), named by MD5, pruned hourly at most: past
   30 days, then least recently used down to 50 MB.
+
+**The sanitiser disarms the cover before the widget's loader sees it.** A cover is internet bytes,
+and a music service could hide a decompression bomb in image metadata that the widget's `sourceSize`
+scaling never bounds. So each kept image is rebuilt to the parts that draw it: a PNG keeps only
+`IHDR`/`PLTE`/`IDAT`/`IEND`/`tRNS` (dropping every `tEXt`/`zTXt`/`iTXt`/`iCCP`), a JPEG drops every
+`APPn` and comment segment (so no EXIF, ICC or thumbnail), and both are refused above `MAX_DIM`
+(4096px) a side so a tiny file cannot declare a raster large enough to exhaust the shell. GIF, WebP,
+AVIF and BMP carry no cheap way to do the same without a decoder, so they are **not kept** and the
+room shows the placeholder. The sanitiser's version is folded into the cache key, so changing what it
+keeps retires every older file. The bound lives here, not in QML: a `TextField`-free widget and a
+clipboard-free filter still load images, and this is the one place those images can be made safe
+without a codec in the shell.
 
 `--each` streams a row per image as it lands. `CoverArt.qml` shows only a `file://` path in that
 cache.
