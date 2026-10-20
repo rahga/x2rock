@@ -1211,7 +1211,8 @@ and a music service could hide a decompression bomb in image metadata that the w
 scaling never bounds. So each kept image is rebuilt to the parts that draw it: a PNG keeps only
 `IHDR`/`PLTE`/`IDAT`/`IEND`/`tRNS` (dropping every `tEXt`/`zTXt`/`iTXt`/`iCCP`), a JPEG drops every
 `APPn` and comment segment (so no EXIF, ICC or thumbnail), and both are refused above `MAX_DIM`
-(4096px) a side so a tiny file cannot declare a raster large enough to exhaust the shell. GIF, WebP,
+(2170px, just over a 4K display's height, so no cover is ever limited) a side, which bounds the decode
+a hostile file can force to about 18 MB rather than letting a small file declare a huge raster. GIF, WebP,
 AVIF and BMP carry no cheap way to do the same without a decoder, so they are **not kept** and the
 room shows the placeholder. The sanitiser's version is folded into the cache key, so changing what it
 keeps retires every older file. The bound lives here, not in QML: a `TextField`-free widget and a

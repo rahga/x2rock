@@ -73,11 +73,16 @@ const MARKER: &str = ".pruned";
 /// The extensions this module writes, which is what `cached` probes for. Only
 /// the two that are sanitised; a GIF, WebP, AVIF or BMP is refused, not cached.
 const KINDS: [&str; 2] = ["jpg", "png"];
-/// The longest side a cover may claim, in pixels. A real cover is 544px, up to
-/// about 1500 from a service; this is well above any of them and exists to
-/// refuse the tiny file that declares a 100000px raster - a decompression bomb
-/// that `sourceSize` would only scale down *after* the full raster was built.
-const MAX_DIM: u32 = 4096;
+/// The longest side a cover may claim, in pixels. Real covers measured here run
+/// 50-1500 across the services and the speakers; this sits just above a 4K
+/// display's 2160px, so it never limits what could be shown (a cover is only
+/// ever scaled *down* to a tile), while refusing the tiny file that declares a
+/// giant raster. That caps the decode a hostile file can force to about 18 MB
+/// (2170 x 2170 x 4), which `sourceSize` then scales to the tile - rather than
+/// the raster only being bounded *after* it was already built. A genuine
+/// higher-resolution original is refused and shown as the placeholder; without a
+/// decoder here it can be checked but not downscaled.
+const MAX_DIM: u32 = 2170;
 /// Bumped when the sanitiser changes what it keeps. Folded into the cache key so
 /// a file written by an older rule is never served: its key no longer matches,
 /// it is simply not found, and `prune` drops it in time. The cache is disposable
