@@ -30,7 +30,7 @@ The clauses that matter here:
 - Prefer, in order: the documented Control API; behaviour any LAN controller can observe from
   the speakers; publicly published third-party interoperability work, cited.
 - Never cache content obtained through a developer token (§3(a)).
-- Ship no Sonos key or secret, ever. A person who wants an account-based feature registers their
+- Ship no Sonos API key or secret. A person who wants an account-based feature registers their
   own integration and accepts the terms themselves.
 
 ## The gates
