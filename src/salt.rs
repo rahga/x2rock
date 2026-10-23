@@ -110,8 +110,8 @@ pub fn require() -> Result<Salt> {
     }
 }
 
-/// No `fix`: supplying a salt is a person's step - they paste a value they
-/// have - not a command an agent should run blind.
+/// No `fix`: the command that supplies a salt needs the value, which x2rock
+/// does not have to put in it.
 fn missing(path: &Path) -> anyhow::Error {
     Hint::new(
         format!(
