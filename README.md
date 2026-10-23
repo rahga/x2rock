@@ -55,6 +55,7 @@ cargo build --release --locked && install -Dm755 target/release/x2rock ~/.local/
 Then: [name a room](#rooms-and-the-household), [read an error](#errors-are-data),
 [link a music service](#linking-an-account), and check [what works](#what-works-and-what-it-needs)
 before you invest time in something.
+For a pinned build, an upgrade or a rollback, use the [installation guide](docs/installation.md).
 
 ## What works, and what it needs
 
@@ -418,6 +419,10 @@ between reconnect attempts, so a later `discover` is picked up within a minute.
 
 `service install` also installs the desktop entry and icon that let MPRIS clients label each room
 player by name; `x2rock desktop install|status|uninstall` manages those on their own.
+
+Replacing the executable does not replace a running daemon. The [upgrade and rollback
+procedure](docs/installation.md#upgrade-an-existing-user-service) separates the binary backup,
+unit refresh and restart, then checks the running build.
 
 ### What the daemon publishes beyond MPRIS
 
