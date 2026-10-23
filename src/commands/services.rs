@@ -690,8 +690,9 @@ pub async fn run_link(
     if from_household && dry_run {
         // Not a mode of the import: it keeps nothing, so it shares the capture
         // and none of the rest.
+        let salt = crate::salt::require()?;
         let (short, encoded) = capture_stored(&session, &household, callback_port).await?;
-        return report_stored_accounts(&encoded, &short, &catalogue);
+        return report_stored_accounts(&encoded, &short, &salt, &catalogue);
     }
     if from_household {
         return link_from_household(
@@ -953,9 +954,10 @@ async fn capture_stored(
 fn report_stored_accounts(
     encoded: &str,
     short_household: &str,
+    salt: &sonos::stored::Salt,
     catalogue: &catalogue::Catalogue,
 ) -> Result<()> {
-    let records = sonos::stored::decrypt_elements(encoded, short_household)?;
+    let records = sonos::stored::decrypt_elements(encoded, short_household, salt)?;
     println!(
         "{} account record{} in the household's store. Nothing was kept.\n",
         records.len(),
@@ -1049,8 +1051,11 @@ async fn link_from_household(
     nickname: Option<&String>,
     callback_port: u16,
 ) -> Result<()> {
+    // Before the capture: without a salt there is nothing to decrypt with, and
+    // the capture is a twelve-second wait on a firewall.
+    let salt = crate::salt::require()?;
     let (short_household, encoded) = capture_stored(session, long_household, callback_port).await?;
-    let accounts = sonos::stored::decrypt_accounts(&encoded, &short_household)?;
+    let accounts = sonos::stored::decrypt_accounts(&encoded, &short_household, &salt)?;
 
     // Only accounts that actually carry a token can be injected; the rest are
     // placeholders. Keyed by service id, which is how the catalogue and the

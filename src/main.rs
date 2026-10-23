@@ -16,6 +16,7 @@ mod mpris;
 mod netid;
 mod rereads;
 mod restart;
+mod salt;
 mod service;
 mod session;
 mod sonos;
@@ -199,6 +200,12 @@ async fn run(cli: Cli) -> Result<()> {
             no_open,
         } => return services::login(address.as_deref(), no_open).await,
         Command::Logout => return services::logout(),
+        Command::Salt {
+            check,
+            clear,
+            force,
+            json,
+        } => return salt::run(check || json, clear, force, json),
         Command::Skill {
             agent,
             ref dir,
@@ -806,6 +813,7 @@ async fn run_session(cli: Cli, state: &mut State, session: &session::Session) ->
         | Command::Skill { .. }
         | Command::Login { .. }
         | Command::Logout
+        | Command::Salt { .. }
         | Command::Desktop { .. }
         | Command::Service { .. }
         | Command::Completions { .. }

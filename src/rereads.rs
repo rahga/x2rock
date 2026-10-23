@@ -108,6 +108,11 @@ async fn store_of(household: &str) -> Option<Vec<StoredAccount>> {
     if players.is_empty() {
         return None;
     }
+    // No salt saved, no read - and nothing remembered, so one saved later is
+    // used at the next refresh rather than after `KEEP_FOR`.
+    let Ok(salt) = crate::salt::require() else {
+        return None;
+    };
     let short = stored::short_household(household);
     let mut read = None;
     for player in players {
@@ -119,7 +124,7 @@ async fn store_of(household: &str) -> Option<Vec<StoredAccount>> {
         else {
             break;
         };
-        if let Ok(accounts) = stored::decrypt_accounts(&encoded, short) {
+        if let Ok(accounts) = stored::decrypt_accounts(&encoded, short, &salt) {
             read = Some(accounts);
             break;
         }

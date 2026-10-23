@@ -69,6 +69,7 @@ codes! {
     UpnpDisabled => "upnp_disabled",
     SpeechNotConfigured => "speech_not_configured",
     ClipNotFetched => "clip_not_fetched",
+    SaltMissing => "salt_missing",
     Unknown => "unknown",
 }
 

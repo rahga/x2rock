@@ -1029,6 +1029,27 @@ pub enum Command {
     },
     /// Forget the Sonos sign-in on this machine. Revoke it in the Sonos account.
     Logout,
+    /// Supply the household salt that `link --from-household` decrypts with.
+    ///
+    /// x2rock does not ship it: the value originates in Sonos's own software.
+    /// Paste it when asked, or `x2rock salt < file`. Takes 32 hex digits or a
+    /// `0x..` byte list copied from source, and keeps it in
+    /// `$XDG_CONFIG_HOME/x2rock/household-salt` at mode 0600.
+    Salt {
+        /// Say whether one is saved, and whether it is the known value.
+        #[arg(long, conflicts_with_all = ["clear", "force"])]
+        check: bool,
+        /// Forget the saved salt.
+        #[arg(long, conflicts_with = "force")]
+        clear: bool,
+        /// Save a value that is not the one households are known to use - for
+        /// a firmware that has changed it.
+        #[arg(long)]
+        force: bool,
+        /// `--check` as JSON: `{saved, known, path}`.
+        #[arg(long, conflicts_with_all = ["clear", "force"])]
+        json: bool,
+    },
     /// Install the x2rock agent skill so an AI assistant on this machine knows
     /// how to drive the CLI. Auto-detects installed assistant directories
     /// (Claude, Antigravity / Gemini) by default; the skill is embedded in the

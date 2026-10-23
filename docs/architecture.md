@@ -812,7 +812,11 @@ needs the player to connect back (TCP 3401, `--callback-port`, `0` for ephemeral
 (`2:` prefix) is keyed to the household id. The method is SoCo's, published in
 [SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010), and holds across firmware generations.
 x2rock's implementation is `src/sonos/stored.rs`: `decrypt_accounts` is pure and tested with
-synthetic vectors, and `capture_envelope` does the network part.
+synthetic vectors and a synthetic salt, and `capture_envelope` does the network part. The real
+salt is not in the tree: `x2rock salt` (`src/salt.rs`) takes it from the person and keeps it in
+`$XDG_CONFIG_HOME/x2rock/household-salt`; the binary holds only a fingerprint, to catch a bad
+paste. Without it the import fails `salt_missing` before any capture, and the token re-read in
+`src/rereads.rs` is skipped.
 
 The plaintext has one record per account:
 

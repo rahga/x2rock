@@ -43,14 +43,14 @@ use crate::netid::local_ip_toward;
 use crate::sonos::http;
 use crate::sonos::upnp::PORT;
 
-/// The fixed salt Sonos mixes with the household id to derive the blob key.
-/// A reverse-engineered constant, public in SoCo #1010; a firmware update could
-/// in principle change it, at which point the integrity check below would start
-/// failing and say so, rather than returning garbage.
+/// The household salt: the fixed 16 bytes Sonos mixes with the household id to
+/// derive the blob key. x2rock does not carry it - it originates in Sonos's own
+/// software (see `docs/sonos-terms-boundaries.md`) - so the person supplies it,
+/// and [`crate::salt`] keeps it. Every decrypt here takes it as an argument.
 ///
-/// What this salt recovers is not a new capability. For a service whose AppLink
-/// flow `link` can complete itself, the token minted that way is an exact match
-/// for the one this decrypts: the same `{token, key}` SMAPI `loginToken`, for the
+/// What it recovers is not a new capability. For a service whose AppLink flow
+/// `link` can complete itself, the token minted that way is an exact match for
+/// the one this decrypts: the same `{token, key}` SMAPI `loginToken`, for the
 /// same account - `getAppLink` nests a `deviceLink` and returns the same
 /// `authToken`/`privateKey` shape a device link does (see `smapi.rs`). The salt
 /// is a shortcut to a credential the device could mint for itself; for the
@@ -59,12 +59,10 @@ use crate::sonos::upnp::PORT;
 ///
 /// And it is spent the same way a minted token is: SMAPI search and browse, and
 /// play where the service allows, spoken straight to the service's own SMAPI
-/// endpoint. It never touches the Sonos cloud - no Sonos sign-in, no Sonos
-/// content service, no portal - and it unlocks nothing at the account beyond what
-/// the Sonos app's own linked token already does.
-const SALT: [u8; 16] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
+/// endpoint. It never touches the Sonos cloud. A firmware update could in
+/// principle change it, at which point the integrity check below fails and says
+/// so, rather than returning garbage.
+pub type Salt = [u8; 16];
 
 /// One music-service account as the household stores it.
 ///
@@ -131,14 +129,18 @@ pub fn short_household(long: &str) -> &str {
 /// `DeviceProperties GetHouseholdID` returns it - the long form the SMAPI header
 /// wants is *not* the key here. A wrong household id fails the integrity check
 /// rather than returning nonsense.
-pub fn decrypt_accounts(encoded: &str, household_id: &str) -> Result<Vec<StoredAccount>> {
-    let payload = decrypt_payload(encoded, household_id)?;
+pub fn decrypt_accounts(
+    encoded: &str,
+    household_id: &str,
+    salt: &Salt,
+) -> Result<Vec<StoredAccount>> {
+    let payload = decrypt_payload(encoded, household_id, salt)?;
     parse_accounts(&payload)
 }
 
 /// The `2:`-prefixed, base64'd `AES-128-CBC(iv + ciphertext)` envelope, decoded
 /// and verified, returning the account XML.
-fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
+fn decrypt_payload(encoded: &str, household_id: &str, salt: &Salt) -> Result<Vec<u8>> {
     let encoded = encoded.trim();
     let body = encoded
         .strip_prefix("2:")
@@ -151,7 +153,7 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
     let iv: &[u8; 16] = iv.try_into().expect("split_at(16) yields 16 bytes");
 
     // key = md5(iv + md5(household + salt))
-    let global = md5(&[household_id.as_bytes(), &SALT[..]]);
+    let global = md5(&[household_id.as_bytes(), &salt[..]]);
     let blob_key = md5(&[&iv[..], &global[..]]);
     let mut plain = aes_128_cbc_decrypt(ciphertext, &blob_key, iv);
 
@@ -160,7 +162,7 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
         .last()
         .ok_or_else(|| anyhow!("empty decrypted payload"))? as usize;
     if pad == 0 || pad > 16 || pad > plain.len() {
-        bail!("wrong household id, or a corrupt account payload (bad PKCS#7 padding)");
+        bail!("wrong household id or salt, or a corrupt account payload (bad PKCS#7 padding)");
     }
     plain.truncate(plain.len() - pad);
 
@@ -171,7 +173,9 @@ fn decrypt_payload(encoded: &str, household_id: &str) -> Result<Vec<u8>> {
     }
     let (payload, checksum) = plain.split_at(plain.len() - 4);
     if md5(&[payload])[..4] != *checksum {
-        bail!("account payload integrity check failed - wrong household id, or not this format");
+        bail!(
+            "account payload integrity check failed - wrong household id or salt, or not this format"
+        );
     }
     Ok(payload.to_vec())
 }
@@ -190,8 +194,12 @@ pub type StoredRecord = (String, Vec<(String, String)>);
 ///
 /// Secrets are returned intact: this is a library function, and the caller that
 /// prints them is the one that has to decide what a terminal may see.
-pub fn decrypt_elements(encoded: &str, household_id: &str) -> Result<Vec<StoredRecord>> {
-    let payload = decrypt_payload(encoded, household_id)?;
+pub fn decrypt_elements(
+    encoded: &str,
+    household_id: &str,
+    salt: &Salt,
+) -> Result<Vec<StoredRecord>> {
+    let payload = decrypt_payload(encoded, household_id, salt)?;
     let text = String::from_utf8_lossy(&payload);
     let doc = roxmltree::Document::parse(&text).context("decrypted account XML did not parse")?;
     Ok(doc
@@ -480,6 +488,10 @@ mod tests {
     use super::*;
     use aes::cipher::BlockEncryptMut;
 
+    /// A synthetic salt, not Sonos's: the round trip below proves the
+    /// arithmetic with any 16 bytes, so the real value never enters the tree.
+    const SALT: Salt = *b"x2rock-test-salt";
+
     /// Build a real `2:` envelope from account XML, so the decrypt path can be
     /// tested against its own inverse with no live household and no real token.
     fn seal(account_xml: &str, household_id: &str, iv: [u8; 16]) -> String {
@@ -515,7 +527,7 @@ mod tests {
     #[test]
     fn a_sealed_envelope_round_trips_to_its_accounts() {
         let envelope = seal(XML, HH, [7u8; 16]);
-        let accounts = decrypt_accounts(&envelope, HH).unwrap();
+        let accounts = decrypt_accounts(&envelope, HH, &SALT).unwrap();
         assert_eq!(accounts.len(), 3);
 
         let qobuz = &accounts[0];
@@ -543,7 +555,7 @@ mod tests {
               SerialNum1="25" Token1="ihr-b" Key1="" Nickname1="iHeartRadio 885ebbcc"
               Username1="X_#Svc1543-885ebbcc-Token" Flags1="4" Tier1="0"/>
         </ThirdPartyMediaServers>"#;
-        let accounts = decrypt_accounts(&seal(TWO, HH, [3u8; 16]), HH).unwrap();
+        let accounts = decrypt_accounts(&seal(TWO, HH, [3u8; 16]), HH, &SALT).unwrap();
         assert_eq!(accounts.len(), 2, "both indices are read");
         assert_eq!(accounts[0].serial, 24);
         assert_eq!(accounts[0].token, "ihr-a");
@@ -562,7 +574,7 @@ mod tests {
             <MediaServer UDN="SA_RINCON7943_X" NumAccounts="3"
               SerialNum0="14" Token0="qb-token" Key0="qb-key" Nickname0="Qb1"/>
         </ThirdPartyMediaServers>"#;
-        let accounts = decrypt_accounts(&seal(OVER, HH, [5u8; 16]), HH).unwrap();
+        let accounts = decrypt_accounts(&seal(OVER, HH, [5u8; 16]), HH, &SALT).unwrap();
         assert_eq!(accounts.len(), 1, "no empty records padded onto the end");
         assert_eq!(accounts[0].token, "qb-token");
     }
@@ -583,7 +595,7 @@ mod tests {
               Md0="" Flags0="4" Whatever0="new-in-some-firmware"/>
             <NotAnAccount Name="no UDN, not a record"/>
         </ThirdPartyMediaServers>"#;
-        let raw = decrypt_elements(&seal(ODD, HH, [9u8; 16]), HH).unwrap();
+        let raw = decrypt_elements(&seal(ODD, HH, [9u8; 16]), HH, &SALT).unwrap();
         assert_eq!(raw.len(), 1, "only elements carrying a UDN are records");
         let (tag, attrs) = &raw[0];
         assert_eq!(tag, "MediaServer");
@@ -597,7 +609,7 @@ mod tests {
 
     #[test]
     fn the_service_id_is_decoded_from_the_udn() {
-        let accounts = decrypt_accounts(&seal(XML, HH, [1u8; 16]), HH).unwrap();
+        let accounts = decrypt_accounts(&seal(XML, HH, [1u8; 16]), HH, &SALT).unwrap();
         // 228864 / 256 = 894? no: 284 * 256 = 72704. Assert against the real map.
         assert_eq!(accounts[1].service_id, 894, "228864 / 256");
         assert_eq!(accounts[1].token, "ytm-token");
@@ -605,7 +617,7 @@ mod tests {
 
     #[test]
     fn an_empty_token_account_is_kept_but_flagged() {
-        let accounts = decrypt_accounts(&seal(XML, HH, [2u8; 16]), HH).unwrap();
+        let accounts = decrypt_accounts(&seal(XML, HH, [2u8; 16]), HH, &SALT).unwrap();
         let anon = &accounts[2];
         assert_eq!(anon.serial, 9);
         assert!(!anon.has_token(), "empty Token0 is not a usable credential");
@@ -614,7 +626,8 @@ mod tests {
     #[test]
     fn the_wrong_household_id_fails_the_integrity_check_not_silently() {
         let envelope = seal(XML, HH, [3u8; 16]);
-        let err = decrypt_accounts(&envelope, "Sonos_ADifferentHousehold000000").unwrap_err();
+        let err =
+            decrypt_accounts(&envelope, "Sonos_ADifferentHousehold000000", &SALT).unwrap_err();
         let msg = format!("{err:#}").to_lowercase();
         assert!(
             msg.contains("integrity") || msg.contains("padding"),
@@ -623,8 +636,19 @@ mod tests {
     }
 
     #[test]
+    fn the_wrong_salt_fails_the_integrity_check_not_silently() {
+        let envelope = seal(XML, HH, [3u8; 16]);
+        let err = decrypt_accounts(&envelope, HH, b"not-the-salt-xyz").unwrap_err();
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("salt"),
+            "a wrong salt should be named as a suspect, got: {msg}"
+        );
+    }
+
+    #[test]
     fn a_non_envelope_is_refused_by_its_prefix() {
-        let err = decrypt_accounts("not-a-2-colon-thing", HH).unwrap_err();
+        let err = decrypt_accounts("not-a-2-colon-thing", HH, &SALT).unwrap_err();
         assert!(format!("{err:#}").contains("envelope version"));
     }
 

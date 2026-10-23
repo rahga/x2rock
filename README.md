@@ -583,6 +583,7 @@ ten with `stream_did_not_play`. `--no-wait` returns at once for scripts that che
 ```sh
 x2rock link                              # services that can be linked
 x2rock link bandcamp                     # link one: a browser login you finish
+x2rock salt < household-salt.txt         # once, before --from-household: the salt x2rock does not ship
 x2rock link --from-household             # no browser: take every token the household already holds
 x2rock link --from-household --dry-run   # see what that would take, keeping nothing
 x2rock link plex                         # Plex's own PIN flow
@@ -619,7 +620,12 @@ SoundCloud refuse, and Qobuz refuses at the last step, after the login has succe
 whose own flow refuses. Every speaker stores the token the Sonos app minted for each service the
 household has — encrypted, with the household id as the key — and this reads them off a player and
 keeps them: Qobuz, and everything else the household already holds, in one command. Name a service
-to take only that one; `--dry-run` shows every record without keeping any. Two things to know: the
+to take only that one; `--dry-run` shows every record without keeping any. Three things to know.
+The key is derived from the household id and a fixed salt that originates in Sonos's own software,
+so **x2rock does not ship the salt**: you supply it once, with `x2rock salt` (paste it when asked)
+or `x2rock salt < file`, and it is kept in `~/.config/x2rock/household-salt` at mode 0600.
+[What the terms allow](docs/sonos-terms-boundaries.md#the-household-token-salt) says where it is
+published and what using it may mean. The
 player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
 change it), so a host firewall needs that one inbound rule; and it does not by itself get past
 YouTube Music's search refusal. Its token imports cleanly but SMAPI still answers 403.
