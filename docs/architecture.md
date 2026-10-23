@@ -11,9 +11,7 @@ One SL, and 86.x for the older generation. The office has a single One SL, build
 about third parties (a vendor's menu, a live catalogue) go stale; claims about what the speakers
 answer have held.
 
-Where something is technically possible but outside the Sonos Platform Terms of Service, see
-[the terms boundaries note](sonos-terms-boundaries.md). This document records conclusions, not how
-they were reached.
+This document records conclusions, not how they were reached.
 
 **Reading it from another platform.** Most of this is protocol and transfers anywhere: the
 integration path, the namespaces, volume, grouping, soundbars, the queue, favorites and SMAPI. Two

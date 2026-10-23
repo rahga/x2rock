@@ -4,7 +4,7 @@
 //! with a key derived from the household id and a fixed 16-byte salt (see
 //! `sonos/stored.rs`). That salt originates in Sonos's own software, so x2rock
 //! does not carry it: the person who wants the feature finds it in public
-//! interoperability work (`docs/sonos-terms-boundaries.md` says where) and hands
+//! interoperability work (SoCo PR #1010 publishes it with the method) and hands
 //! it over once with `x2rock salt`. It is kept in
 //! `$XDG_CONFIG_HOME/x2rock/household-salt` at mode 0600, beside
 //! `sonos-integration.json` - configuration the person writes, not state x2rock
@@ -119,8 +119,7 @@ fn missing(path: &Path) -> anyhow::Error {
         format!(
             "reading the household's stored accounts needs the household salt, which x2rock \
              does not ship. Paste it once with: x2rock salt (or x2rock salt < file). \
-             It is kept in {} at mode 0600; docs/sonos-terms-boundaries.md says where the \
-             value is published.",
+             It is kept in {} at mode 0600; SoCo PR #1010 publishes the value.",
             path.display()
         ),
         Code::SaltMissing,

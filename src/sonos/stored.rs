@@ -45,8 +45,8 @@ use crate::sonos::upnp::PORT;
 
 /// The household salt: the fixed 16 bytes Sonos mixes with the household id to
 /// derive the blob key. x2rock does not carry it - it originates in Sonos's own
-/// software (see `docs/sonos-terms-boundaries.md`) - so the person supplies it,
-/// and [`crate::salt`] keeps it. Every decrypt here takes it as an argument.
+/// software - so the person supplies it, and [`crate::salt`] keeps it. Every
+/// decrypt here takes it as an argument.
 ///
 /// What it recovers is not a new capability. For a service whose AppLink flow
 /// `link` can complete itself, the token minted that way is an exact match for

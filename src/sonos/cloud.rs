@@ -3,7 +3,7 @@
 //!
 //! **Inactive under current license requirements** ([`ACTIVE`] is false). The
 //! terms of the Sonos developer program restrict this service to invite-only
-//! licensees (see docs/sonos-terms-boundaries.md), so every call here fails
+//! licensees, so every call here fails
 //! before touching the network and the callers keep their direct answer. The
 //! code is kept, not deleted, so the path can be re-enabled if the licensing
 //! changes.
@@ -20,8 +20,7 @@
 //! Sonos developer integration, read from `sonos-integration.json`, under their
 //! own developer agreement. Every call here fails before touching the network
 //! unless they have set that up and signed in, and the callers treat a failure
-//! as "no fallback". x2rock ships no Sonos key or secret, and never will (see
-//! docs/sonos-terms-boundaries.md).
+//! as "no fallback". x2rock ships no Sonos key or secret, and never will.
 //!
 //! **The id arithmetic that makes it fit.** The content API names a service by
 //! `serviceId = smapiId * 256 + schemaRev` - which is exactly the

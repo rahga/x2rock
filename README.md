@@ -623,9 +623,8 @@ keeps them: Qobuz, and everything else the household already holds, in one comma
 to take only that one; `--dry-run` shows every record without keeping any. Three things to know.
 The key is derived from the household id and a fixed salt that originates in Sonos's own software,
 so **x2rock does not ship the salt**: you supply it once, with `x2rock salt` (paste it when asked)
-or `x2rock salt < file`, and it is kept in `~/.config/x2rock/household-salt` at mode 0600.
-[What the terms allow](docs/sonos-terms-boundaries.md#the-household-token-salt) says where it is
-published and what using it may mean. The
+or `x2rock salt < file`, and it is kept in `~/.config/x2rock/household-salt` at mode 0600. It is
+published alongside the method, in [SoCo PR #1010](https://github.com/SoCo/SoCo/pull/1010). The
 player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
 change it), so a host firewall needs that one inbound rule; and it does not by itself get past
 YouTube Music's search refusal. Its token imports cleanly but SMAPI still answers 403.
@@ -664,7 +663,7 @@ in to Sonos, refreshing that sign-in is its one cloud exception.
 
 > **Inactive under current license requirements.** This path uses Sonos's cloud content service.
 > The terms of the Sonos developer program restrict it to invite-only licensees, so it is switched
-> off in the code and makes no request, whatever is set up. See [the terms boundaries note](docs/sonos-terms-boundaries.md).
+> off in the code and makes no request, whatever is set up.
 
 When active, it gave `search` and `browse` a fallback through Sonos's cloud content API for what a
 service's own interface refuses: YouTube Music search and library browsing, Amazon's Home and
