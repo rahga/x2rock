@@ -116,7 +116,7 @@ fn missing(path: &Path) -> anyhow::Error {
     Hint::new(
         format!(
             "reading the household's stored accounts needs a speaker salt, which x2rock \
-             does not ship. If you have one, supply it once with: x2rock salt (or \
+             neither ships nor documents. If you have one, supply it once with: x2rock salt (or \
              x2rock salt < file). It is kept in {} at mode 0600.",
             path.display()
         ),

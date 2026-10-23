@@ -620,13 +620,16 @@ SoundCloud refuse, and Qobuz refuses at the last step, after the login has succe
 whose own flow refuses. Every speaker stores the token the Sonos app minted for each service the
 household has — encrypted, with the household id as the key — and this reads them off a player and
 keeps them: Qobuz, and everything else the household already holds, in one command. Name a service
-to take only that one; `--dry-run` shows every record without keeping any. Three things to know.
-It needs a speaker salt, which x2rock does not ship: if you have one, supply it once with
-`x2rock salt` (paste it when asked) or `x2rock salt < file`, and it is kept in
-`~/.config/x2rock/household-salt` at mode 0600. The
-player has to open a connection *back* to this machine (TCP 3401 by default, `--callback-port` to
-change it), so a host firewall needs that one inbound rule; and it does not by itself get past
-YouTube Music's search refusal. Its token imports cleanly but SMAPI still answers 403.
+to take only that one; `--dry-run` shows every record without keeping any. Four things to know.
+It needs a speaker salt, which x2rock neither ships nor documents: no documentation of any kind is
+available here about the speaker salt, and `x2rock salt` exists only for completeness. If you have
+one, supply it once with `x2rock salt` (paste it when asked) or `x2rock salt < file`; it is kept
+in `~/.config/x2rock/household-salt` at mode 0600. A household's owner can stop this import from
+the Sonos app by switching **UPnP** off (Account > Privacy and Security > Connection Security),
+since the speaker hands over its stored accounts only in a UPnP event; that also stops the queue,
+alarms and the rest of what x2rock does over UPnP. The player has to open a connection *back* to
+this machine (TCP 3401 by default, `--callback-port` to change it), so a host firewall needs that
+one inbound rule. And it does not by itself get past YouTube Music's search refusal. Its token imports cleanly but SMAPI still answers 403.
 
 **Apple Music is searched through Apple's public catalogue.** Its imported token cannot search, but
 the iTunes Search API needs no account and names the same ids the player plays, so `x2rock search

@@ -1031,7 +1031,8 @@ pub enum Command {
     Logout,
     /// Supply a speaker salt, which `link --from-household` decrypts with.
     ///
-    /// x2rock does not ship one. If you have it, paste it when asked, or
+    /// x2rock neither ships nor documents a speaker salt; this command exists
+    /// only for completeness. If you have one, paste it when asked, or
     /// `x2rock salt < file`. Takes 32 hex digits or a
     /// `0x..` byte list copied from source, and keeps it in
     /// `$XDG_CONFIG_HOME/x2rock/household-salt` at mode 0600.
