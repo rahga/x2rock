@@ -33,7 +33,7 @@ Continue in the same shell to keep `build_dir`. If any command fails, stop befor
 Keep the resolved commit ID, toolchain versions and executable's SHA-256 with your build
 record. A hash identifies the resulting bytes; this procedure does not promise identical
 bytes across toolchains or machines. `--version` normally includes a Git description;
-a build without Git metadata can report only `0.1.0`, and the dirty marker is best effort.
+a build without Git metadata can report only the crate version, such as `0.2.0`, and the dirty marker is best effort.
 A clean checkout, full commit ID and executable hash give a more complete record.
 
 ## First installation

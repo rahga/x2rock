@@ -1,9 +1,8 @@
 //! Stamp the build with the commit it came from.
 //!
-//! `version` in Cargo.toml has read 0.1.0 since the rewrite and will go on
-//! reading it: nothing here is released, so the crate version cannot answer
-//! the question people actually ask of a binary in `~/.local/bin` - which
-//! build is this? The commit can, and three places want to say it: `--version`,
+//! `version` in Cargo.toml moves only with a crates.io release, so between
+//! releases it cannot answer the question people actually ask of a binary in
+//! `~/.local/bin` - which build is this? The commit can, and three places want to say it: `--version`,
 //! the daemon's first log line, and the header of the unit `service install`
 //! writes. So it is resolved once here and handed to the compiler as
 //! `X2ROCK_VERSION`.
