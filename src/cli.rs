@@ -1029,10 +1029,10 @@ pub enum Command {
     },
     /// Forget the Sonos sign-in on this machine. Revoke it in the Sonos account.
     Logout,
-    /// Supply the household salt that `link --from-household` decrypts with.
+    /// Supply a speaker salt, which `link --from-household` decrypts with.
     ///
-    /// x2rock does not ship it: the value originates in Sonos's own software.
-    /// Paste it when asked, or `x2rock salt < file`. Takes 32 hex digits or a
+    /// x2rock does not ship one. If you have it, paste it when asked, or
+    /// `x2rock salt < file`. Takes 32 hex digits or a
     /// `0x..` byte list copied from source, and keeps it in
     /// `$XDG_CONFIG_HOME/x2rock/household-salt` at mode 0600.
     Salt {

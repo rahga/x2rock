@@ -1,11 +1,9 @@
-//! The household salt, supplied by the person rather than shipped.
+//! The speaker salt, supplied by the person rather than shipped.
 //!
 //! `link --from-household` decrypts the music-service tokens a household stores
 //! with a key derived from the household id and a fixed 16-byte salt (see
-//! `sonos/stored.rs`). That salt originates in Sonos's own software, so x2rock
-//! does not carry it: the person who wants the feature finds it in public
-//! interoperability work (SoCo PR #1010 publishes it with the method) and hands
-//! it over once with `x2rock salt`. It is kept in
+//! `sonos/stored.rs`). x2rock does not carry it: a person who has it hands it
+//! over once with `x2rock salt`. It is kept in
 //! `$XDG_CONFIG_HOME/x2rock/household-salt` at mode 0600, beside
 //! `sonos-integration.json` - configuration the person writes, not state x2rock
 //! learns.
@@ -68,7 +66,7 @@ pub fn parse(text: &str) -> Result<Salt> {
             .collect()
     };
     if digits.len() != 32 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-        bail!("a household salt is 16 bytes: 32 hex digits, or a list of sixteen 0x.. bytes");
+        bail!("a speaker salt is 16 bytes: 32 hex digits, or a list of sixteen 0x.. bytes");
     }
     let mut salt = [0u8; 16];
     for (i, byte) in salt.iter_mut().enumerate() {
@@ -112,14 +110,14 @@ pub fn require() -> Result<Salt> {
     }
 }
 
-/// No `fix`: supplying a salt is a person's step - they find the value and
-/// paste it - not a command an agent should run blind.
+/// No `fix`: supplying a salt is a person's step - they paste a value they
+/// have - not a command an agent should run blind.
 fn missing(path: &Path) -> anyhow::Error {
     Hint::new(
         format!(
-            "reading the household's stored accounts needs the household salt, which x2rock \
-             does not ship. Paste it once with: x2rock salt (or x2rock salt < file). \
-             It is kept in {} at mode 0600; SoCo PR #1010 publishes the value.",
+            "reading the household's stored accounts needs a speaker salt, which x2rock \
+             does not ship. If you have one, supply it once with: x2rock salt (or \
+             x2rock salt < file). It is kept in {} at mode 0600.",
             path.display()
         ),
         Code::SaltMissing,
@@ -138,9 +136,9 @@ pub fn run(check: bool, clear: bool, force: bool, json: bool) -> Result<()> {
     let path = path()?;
     if clear {
         match std::fs::remove_file(&path) {
-            Ok(()) => println!("Forgot the household salt ({}).", path.display()),
+            Ok(()) => println!("Forgot the speaker salt ({}).", path.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("No household salt was saved.")
+                println!("No speaker salt was saved.")
             }
             Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
         }
@@ -159,12 +157,12 @@ pub fn run(check: bool, clear: bool, force: bool, json: bool) -> Result<()> {
             );
         } else {
             match saved {
-                None => println!("No household salt is saved. Paste one with: x2rock salt"),
+                None => println!("No speaker salt is saved. Supply one with: x2rock salt"),
                 Some(salt) if is_known(&salt) => {
-                    println!("A household salt is saved in {}.", path.display())
+                    println!("A speaker salt is saved in {}.", path.display())
                 }
                 Some(_) => println!(
-                    "A household salt is saved in {}, but it is not the one households are \
+                    "A speaker salt is saved in {}, but it is not the one households are \
                      known to use; `link --from-household` will fail to decrypt unless a \
                      firmware has changed it.",
                     path.display()
@@ -176,7 +174,7 @@ pub fn run(check: bool, clear: bool, force: bool, json: bool) -> Result<()> {
 
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        eprintln!("Paste the household salt (32 hex digits, or a 0x.. byte list), then Enter:");
+        eprintln!("Paste the speaker salt (32 hex digits, or a 0x.. byte list), then Enter:");
     }
     let mut text = String::new();
     if stdin.is_terminal() {
@@ -197,7 +195,7 @@ pub fn run(check: bool, clear: bool, force: bool, json: bool) -> Result<()> {
     }
     save_to(&path, &salt)?;
     println!(
-        "Saved the household salt to {}. `x2rock link --from-household` can read the \
+        "Saved the speaker salt to {}. `x2rock link --from-household` can read the \
          household's accounts now.",
         path.display()
     );

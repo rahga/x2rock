@@ -438,7 +438,7 @@ rooms; see "Ask before you act".
 | Link a music service (a person finishes a browser login) | `x2rock link '<Service>' [--no-open]` / `x2rock accounts --json` / `x2rock unlink '<Service>'` — see "Linking a music service" |
 | Link with no browser at all, from what the household already holds | `x2rock link --from-household ['<Service>']` — the only route to Qobuz, Apple Music and Amazon; needs inbound TCP 3401 from the player |
 | See what the household holds, without keeping it | `x2rock link --from-household --dry-run` — every account record and attribute, tokens shown only as byte lengths |
-| Supply the household salt `--from-household` decrypts with (once, a person's step) | `x2rock salt` (paste when asked) · `x2rock salt < file` · `x2rock salt --check` |
+| Supply the speaker salt `--from-household` decrypts with (once, a person's step) | `x2rock salt` (paste when asked) · `x2rock salt < file` · `x2rock salt --check` |
 | Forget tokens | `x2rock unlink '<Service>'` (every household, every account) / `--household <id>` (one) / `--account "<nickname>"` (one account) / `x2rock unlink --all` (wipe) |
 | Choose which account a service uses | `x2rock accounts --prefer '<Service>' "<nickname>"` — only where a household holds two accounts for it; `x2rock accounts` marks the current one `*` |
 | Shell completions | `x2rock completions [shell] [--install\|--uninstall]` — auto-detects shell when omitted |
@@ -840,7 +840,7 @@ A failed `--json` command prints to **stderr** and exits non-zero:
 | `upnp_disabled` | the household has **UPnP** switched off, so the speakers refuse everything x2rock does over UPnP: the queue (`queue`, adding to it, `play <n>`), `alarms`, `snooze`, `sleep`, `eq` and tone, `tv` for a soundbar in a group (one on its own still switches, over the Control API), and `play-item` once its stream and load fallbacks have failed too. Playback, volume, grouping, favorites and `recent` are unaffected, and `replay` falls back to loading what it would have queued (not for Mixcloud) | **null** — the user turns UPnP back on (Sonos app > Account > Privacy and Security > Connection Security > UPnP); it also switches off the Sonos macOS and Windows apps. Nothing x2rock can run fixes it, so do not retry; do the same errand another way if one exists (a favorite instead of the queue) |
 | `speech_not_configured` | `say` has no text-to-speech key: nothing saved and the provider's variable (`ELEVENLABS_API_KEY`) unset | **null** — a person saves one: `x2rock say --set-key < keyfile` reads it from stdin (never an argument), so ask them to run it; `data.provider` and `data.env` say which provider and variable |
 | `clip_not_fetched` | `say` made the clip and the player accepted it, but never connected back to fetch it within 8s — a firewall on this machine, almost always | **null** — the fix is a `sudo` firewall rule, which is the user's to run: it is spelled out in the message and in `data.firewall_rule` (one rule, port 3401, covers `say` and `link --from-household`). Do not retry until it is in place |
-| `salt_missing` | `link --from-household` (or its `--dry-run`) has no household salt to decrypt the household's stored accounts with: x2rock does not ship it, and none is saved. Nothing was read or stored | **null** — a person supplies it once: `x2rock salt` asks for it to be pasted, or `x2rock salt < file`; ask them to run it rather than hunting for the value yourself. `data.path` is where it is kept. Browser `link` is unaffected |
+| `salt_missing` | `link --from-household` (or its `--dry-run`) has no speaker salt to decrypt the household's stored accounts with: x2rock does not ship one, and none is saved. Nothing was read or stored | **null** — a person who has one supplies it once: `x2rock salt` asks for it to be pasted, or `x2rock salt < file`; ask them to run it, and never go looking for the value yourself. `data.path` is where it is kept. Browser `link` is unaffected |
 | `unknown` | no known remedy — e.g. `pause` on an already-idle room, `--all` on a command that does not take it | null (read `error`) |
 
 **When `fix` is non-null, run it and retry** — except `needs_link`, whose fix opens a login page for
@@ -1047,7 +1047,7 @@ those two apart when telling a user what linking will do.
   that one, or omit it to import every service the household holds a usable token for. It is the
   only route to a service whose own link flow refuses x2rock — **Qobuz, Apple Music, Amazon** — and
   it needs no `match` step, because playback already rides the registration the Sonos app made.
-  It **needs the household salt saved first**: x2rock does not ship it, so without one the command
+  It **needs a speaker salt saved first**: x2rock does not ship one, so without one the command
   fails `salt_missing` at once; the user runs `x2rock salt` and pastes it (`x2rock salt --check`
   says whether one is saved). The stale-token re-read below is skipped without it too.
   Three things to tell a user before running it: it is **read-only on the household** (nothing is
