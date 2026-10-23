@@ -115,10 +115,10 @@ impl Kind {
 pub struct Config {
     #[serde(default)]
     pub schema: u32,
-    /// Set by every write-side accessor, so a command saves once at the end
-    /// and only when something moved. Never on disk.
+    /// Changes made by this command, applied to the latest file when saving.
+    /// A voice lookup can wait on the network while another command saves a key.
     #[serde(skip)]
-    changed: bool,
+    pending: Vec<Change>,
     /// The provider `say` uses when `--provider` is not given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -151,6 +151,44 @@ pub struct ProviderConfig {
     pub voices_at: Option<u64>,
 }
 
+#[derive(Debug)]
+enum Change {
+    Key(Kind, String),
+    Voice(Kind, String),
+    Model(Kind, String),
+    Provider(Kind),
+    Voices(Kind, Vec<Voice>, u64),
+}
+
+impl Change {
+    fn apply(&self, config: &mut Config) {
+        match self {
+            Self::Provider(kind) => config.provider = Some(kind.id().to_string()),
+            Self::Key(kind, key) => {
+                config
+                    .providers
+                    .entry(kind.id().into())
+                    .or_default()
+                    .api_key = Some(key.clone());
+                if config.provider.is_none() {
+                    config.provider = Some(kind.id().to_string());
+                }
+            }
+            Self::Voice(kind, voice) => {
+                config.providers.entry(kind.id().into()).or_default().voice = Some(voice.clone());
+            }
+            Self::Model(kind, model) => {
+                config.providers.entry(kind.id().into()).or_default().model = Some(model.clone());
+            }
+            Self::Voices(kind, voices, at) => {
+                let entry = config.providers.entry(kind.id().into()).or_default();
+                entry.voices = voices.clone();
+                entry.voices_at = Some(*at);
+            }
+        }
+    }
+}
+
 fn path() -> Result<PathBuf> {
     store::path(FILE)
 }
@@ -175,12 +213,8 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&path()?)
-    }
-
     /// Written at 0600 whatever is in it: the file exists to hold a key.
-    pub fn save_to(&self, path: &Path) -> Result<()> {
+    fn save_to(&self, path: &Path) -> Result<()> {
         /// The file as written: the config borrowed, stamped with [`SCHEMA`].
         #[derive(Serialize)]
         struct OnDisk<'a> {
@@ -197,26 +231,55 @@ impl Config {
         store::write_atomically(path, &serde_json::to_string_pretty(&file)?, store::SECRET)
     }
 
-    /// The provider's entry, for writing; marks the config as changed.
-    pub fn provider_mut(&mut self, kind: Kind) -> &mut ProviderConfig {
-        self.changed = true;
-        self.providers.entry(kind.id().to_string()).or_default()
+    fn record(&mut self, change: Change) {
+        change.apply(self);
+        self.pending.push(change);
+    }
+
+    pub fn set_key(&mut self, kind: Kind, key: String) {
+        self.record(Change::Key(kind, key));
+    }
+
+    pub fn set_voice(&mut self, kind: Kind, voice: String) {
+        self.record(Change::Voice(kind, voice));
+    }
+
+    pub fn set_model(&mut self, kind: Kind, model: String) {
+        self.record(Change::Model(kind, model));
+    }
+
+    pub fn set_provider(&mut self, kind: Kind) {
+        self.record(Change::Provider(kind));
     }
 
     /// Keep a freshly listed voice list for `kind`, replacing the last.
     fn remember_voices(&mut self, kind: Kind, voices: Vec<Voice>) {
-        let entry = self.provider_mut(kind);
-        entry.voices = voices;
-        entry.voices_at = Some(crate::credentials::now());
+        self.record(Change::Voices(kind, voices, crate::credentials::now()));
     }
 
     /// Write the file if anything was written to the config since it was
     /// loaded or last saved.
     pub fn save_if_changed(&mut self) -> Result<()> {
-        if self.changed {
-            self.save()?;
-            self.changed = false;
+        if self.pending.is_empty() {
+            return Ok(());
         }
+        self.save_changes_to(&path()?)
+    }
+
+    /// Hold the lock only for the reload and write, never across provider I/O.
+    /// Replaying the command's changes preserves unrelated settings saved while
+    /// it waited. A failure leaves those changes pending so a retry can save them.
+    fn save_changes_to(&mut self, path: &Path) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let _lock = store::Lock::exclusive(path)?;
+        let mut current = Self::load_from(path)?;
+        for change in &self.pending {
+            change.apply(&mut current);
+        }
+        current.save_to(path)?;
+        *self = current;
         Ok(())
     }
 
@@ -582,14 +645,16 @@ mod tests {
         assert_eq!(empty.kind(None).unwrap(), Kind::ElevenLabs);
 
         let mut config = Config::default();
-        config.provider_mut(Kind::ElevenLabs).api_key = Some("sk-test".into());
-        config.provider_mut(Kind::ElevenLabs).voice = Some("abc".into());
-        config.save_to(&path).unwrap();
+        config.set_key(Kind::ElevenLabs, "sk-test".into());
+        config.set_voice(Kind::ElevenLabs, "abc".into());
+        config.set_provider(Kind::ElevenLabs);
+        config.save_changes_to(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
 
         let back = Config::load_from(&path).unwrap();
         assert_eq!(back.schema, SCHEMA);
+        assert_eq!(back.provider.as_deref(), Some(Kind::ElevenLabs.id()));
         let saved = &back.providers["elevenlabs"];
         assert_eq!(saved.api_key.as_deref(), Some("sk-test"));
         assert_eq!(saved.voice.as_deref(), Some("abc"));
@@ -597,17 +662,157 @@ mod tests {
 
         // A remembered list survives the round trip and is dated.
         config.remember_voices(Kind::ElevenLabs, vec![junior()]);
-        config.save_to(&path).unwrap();
+        config.save_changes_to(&path).unwrap();
         let back = Config::load_from(&path).unwrap();
         let saved = &back.providers["elevenlabs"];
         assert_eq!(saved.voices, vec![junior()]);
         assert!(saved.voices_at.is_some());
     }
 
+    /// Synthetic provider response, delayed until another command saves settings.
+    #[tokio::test]
+    async fn a_delayed_voice_listing_preserves_concurrent_key_and_default_changes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::oneshot;
+
+        let dir = TempDir::new("speech-overlapping-settings");
+        let path = dir.path().join(FILE);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut initial = Config::default();
+        initial.set_key(Kind::ElevenLabs, "synthetic-old-key".into());
+        initial.set_model(Kind::ElevenLabs, "old-model".into());
+        initial.provider_mut(Kind::ElevenLabs).base_url =
+            Some(format!("http://{}", listener.local_addr().unwrap()));
+        initial.save_to(&path).unwrap();
+
+        let (entered, waiting) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            assert!(request.starts_with(b"GET /v2/voices?page_size=100 "));
+            entered.send(()).unwrap();
+            released.await.unwrap();
+            let body = br#"{"voices":[{"voice_id":"synthetic-id","name":"Synthetic Voice"}]}"#;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+        let delayed_path = path.clone();
+        let delayed = tokio::spawn(async move {
+            let mut config = Config::load_from(&delayed_path).unwrap();
+            let mut synth = Synth::from_config(&config, None, None, None).unwrap();
+            // Never send an environment-provided key to the synthetic endpoint.
+            synth.key = "synthetic-old-key".into();
+            assert!(matches!(
+                synth.list_voices(&mut config).await.unwrap(),
+                Listing::Fresh(_)
+            ));
+            config.save_changes_to(&delayed_path).unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut editor = Config::load_from(&path).unwrap();
+        editor.set_key(Kind::ElevenLabs, "synthetic-new-key".into());
+        editor.set_model(Kind::ElevenLabs, "new-model".into());
+        editor.save_changes_to(&path).unwrap();
+        release.send(()).unwrap();
+        delayed.await.unwrap();
+        server.await.unwrap();
+
+        let saved = Config::load_from(&path).unwrap();
+        let provider = &saved.providers[Kind::ElevenLabs.id()];
+        assert_eq!(provider.api_key.as_deref(), Some("synthetic-new-key"));
+        assert_eq!(provider.model.as_deref(), Some("new-model"));
+        assert_eq!(provider.voices[0].name, "Synthetic Voice");
+    }
+
+    #[test]
+    fn a_late_voice_cache_save_does_not_restore_a_removed_key() {
+        let dir = TempDir::new("speech-removed-key");
+        let path = dir.path().join(FILE);
+        let mut config = Config::default();
+        config.set_key(Kind::ElevenLabs, "synthetic-key".into());
+        config.set_model(Kind::ElevenLabs, "saved-model".into());
+        config.save_changes_to(&path).unwrap();
+
+        config.remember_voices(Kind::ElevenLabs, vec![junior()]);
+        std::fs::remove_file(&path).unwrap();
+        config.save_changes_to(&path).unwrap();
+        let saved = Config::load_from(&path).unwrap();
+        let provider = &saved.providers[Kind::ElevenLabs.id()];
+        assert!(provider.api_key.is_none());
+        assert!(provider.model.is_none());
+        assert!(saved.provider.is_none());
+        assert_eq!(provider.voices, vec![junior()]);
+    }
+
+    #[test]
+    fn an_explicit_setting_wins_even_if_unchanged_and_is_not_replayed_after_save() {
+        let dir = TempDir::new("speech-explicit-setting");
+        let path = dir.path().join(FILE);
+        let mut first = Config::default();
+        first.set_model(Kind::ElevenLabs, "original".into());
+        first.save_changes_to(&path).unwrap();
+        let mut second = Config::load_from(&path).unwrap();
+        // Explicitly reselecting the original value is still a command to save it.
+        first.set_model(Kind::ElevenLabs, "original".into());
+        second.set_model(Kind::ElevenLabs, "other".into());
+        second.save_changes_to(&path).unwrap();
+        first.save_changes_to(&path).unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().providers[Kind::ElevenLabs.id()]
+                .model
+                .as_deref(),
+            Some("original")
+        );
+        second.set_model(Kind::ElevenLabs, "newer".into());
+        second.save_changes_to(&path).unwrap();
+        first.save_changes_to(&path).unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().providers[Kind::ElevenLabs.id()]
+                .model
+                .as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn a_failed_save_preserves_the_replaced_file_and_can_retry_pending_changes() {
+        let dir = TempDir::new("speech-save-failure");
+        let path = dir.path().join(FILE);
+        let mut config = Config::default();
+        config.set_model(Kind::ElevenLabs, "pending-model".into());
+        for unreadable in ["not json", r#"{"schema":999}"#] {
+            std::fs::write(&path, unreadable).unwrap();
+            assert!(config.save_changes_to(&path).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), unreadable);
+        }
+        let mut replacement = Config::default();
+        replacement.set_key(Kind::ElevenLabs, "synthetic-replacement-key".into());
+        replacement.save_to(&path).unwrap();
+        config.save_changes_to(&path).unwrap();
+        let saved = &config.providers[Kind::ElevenLabs.id()];
+        assert_eq!(saved.api_key.as_deref(), Some("synthetic-replacement-key"));
+        assert_eq!(saved.model.as_deref(), Some("pending-model"));
+        assert!(config.pending.is_empty());
+    }
+
     impl Config {
-        /// Tests build configs by writing to them, which marks them changed.
+        /// Test fixtures may set an endpoint directly, without scheduling a save.
+        fn provider_mut(&mut self, kind: Kind) -> &mut ProviderConfig {
+            self.providers.entry(kind.id().to_string()).or_default()
+        }
+
+        /// Discard saves scheduled while building a test fixture.
         fn save_if_changed_marker_reset(&mut self) {
-            self.changed = false;
+            self.pending.clear();
         }
     }
 
@@ -668,7 +873,7 @@ mod tests {
             .unwrap();
         assert_eq!(id, "JBFqnCBsd6RMkjVDRZzb");
         // Neither touched the config.
-        assert!(!config.changed);
+        assert!(config.pending.is_empty());
         // A name not remembered does go and ask, and the failure says what the
         // list did not hold.
         let err = synth

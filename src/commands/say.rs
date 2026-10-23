@@ -85,10 +85,7 @@ pub async fn run(
 
     if args.set_key {
         let key = speech::key_from_stdin()?;
-        config.provider_mut(kind).api_key = Some(key);
-        if config.provider.is_none() {
-            config.provider = Some(kind.id().to_string());
-        }
+        config.set_key(kind, key);
         let path = store::path(speech::FILE)?;
         if args.json {
             println!(
@@ -108,14 +105,13 @@ pub async fn run(
             // Saved as an id, so the default never needs a lookup again.
             let synth = Synth::from_config(&config, provider, None, None)?;
             let id = synth.resolve_voice(&mut config, voice).await?;
-            config.provider_mut(kind).voice = Some(id);
+            config.set_voice(kind, id);
         }
         if let Some(model) = &args.model {
-            config.provider_mut(kind).model = Some(model.clone());
+            config.set_model(kind, model.clone());
         }
         if provider.is_some() {
-            config.provider_mut(kind);
-            config.provider = Some(kind.id().to_string());
+            config.set_provider(kind);
         }
         let saved = config.providers.get(kind.id());
         let voice = saved.and_then(|p| p.voice.as_deref());
