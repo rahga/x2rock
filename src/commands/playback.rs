@@ -7,13 +7,15 @@
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 
-use super::stream::{STREAM_START, StreamStart, stream_item};
+use super::stream::{StreamStart, stream_item};
 use super::{Report, on_off, on_word, refreshed_catalogue, transition, upnp_ip};
 use crate::session::{self, Target};
 use crate::sonos::local::Connection;
 use crate::sonos::proto::{MetadataStatus, Repeat};
 use crate::sonos::upnp::Upnp;
-use crate::{credentials, hint, sonos, streams};
+use crate::{credentials, hint, streams};
+#[allow(unused_imports)]
+pub use x2rock::play::*;
 
 /// A play mode read or set: repeat, shuffle or crossfade on a group.
 ///
@@ -148,152 +150,6 @@ pub async fn apply_transport(
         .await
 }
 
-/// Ask a room to play, then confirm it actually did.
-///
-/// `play` on a room whose source has gone stale - an expired stream URL, a
-/// track a service will no longer serve - returns success while the player
-/// drops straight back to idle and raises a `playbackError` a beat later. So
-/// this does not trust the command's own reply: it watches `playback:1` until
-/// the room reaches PLAYING, an error the player raises, or a short deadline
-/// with the room still idle. The reasoning is `stream_url`'s - a loaded stream
-/// that never plays says nothing on its own - reached here through resume
-/// rather than a fresh load.
-pub(crate) async fn play_confirmed(
-    player: &Connection,
-    upnp: &Upnp,
-    group: &str,
-    room: &str,
-) -> Result<()> {
-    // Subscribed, and the receiver attached, before the play is sent: the error
-    // can overtake the command's own reply, and a receiver opened afterwards
-    // would miss exactly the event this went to see - the rule `raw api --watch`
-    // and the stream loader both follow.
-    player.subscribe_group("playback:1", group).await?;
-    let mut events = player.events();
-    // A dead source fails in one of two shapes: the player takes the play and
-    // raises a `playbackError` a beat later (an expired Amazon URL did), or it
-    // refuses the play outright with the same code (a URL that never loaded
-    // does). Both are "the room cannot play what it holds", and both must read
-    // as `playback_failed`, since that is what the resume waits for.
-    if let Err(e) = player.playback(group, "play").await {
-        return Err(match refused_play(&e) {
-            Some(error) => playback_failed(room, &error, upnp).await,
-            None => e,
-        });
-    }
-
-    // A play on an already-playing room raises no transition event to wait for,
-    // and an instant resume has often already landed by now: one status read
-    // settles both without spending the failure budget on a room that is fine.
-    if player.playback_status(group).await?.state() == Some("PLAYING") {
-        return Ok(());
-    }
-
-    let deadline = tokio::time::Instant::now() + STREAM_START;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        // A lost socket or a closed channel is not a verdict on the play; fall
-        // through to the one status read below rather than decide from here.
-        let Ok(Ok(event)) = tokio::time::timeout(remaining, events.recv()).await else {
-            break;
-        };
-        if event.namespace != "playback:1" {
-            continue;
-        }
-        // An error deserializes cleanly into a status ("nothing changed"), so it
-        // is tested for first, before the body is read as one.
-        if let Some(error) = sonos::proto::playback_error(&event.body) {
-            return Err(playback_failed(room, &error, upnp).await);
-        }
-        if let Ok(status) =
-            serde_json::from_value::<sonos::proto::PlaybackStatus>(event.body.clone())
-            && status.state() == Some("PLAYING")
-        {
-            return Ok(());
-        }
-    }
-
-    // No error and no PLAYING within the window. A room still buffering is on
-    // its way and must not be called broken; only one left idle is the silent
-    // failure this exists to catch.
-    match player.playback_status(group).await?.state() {
-        Some("IDLE") | Some("STOPPED") | None => Err(stayed_idle(room)),
-        _ => Ok(()),
-    }
-}
-
-/// A `play` the player refused because it cannot play what it holds, read off
-/// the typed refusal; `None` for any other failure (a lost socket, a stale
-/// group id), which is not about the source and must not be treated as one.
-fn refused_play(e: &anyhow::Error) -> Option<sonos::proto::PlaybackError> {
-    let api = e.downcast_ref::<sonos::local::ApiError>()?;
-    (api.code.as_deref() == Some("ERROR_PLAYBACK_FAILED")).then(|| sonos::proto::PlaybackError {
-        error_code: api.code.clone(),
-        reason: api.reason.clone(),
-        track_name: None,
-        service_name: None,
-    })
-}
-
-/// The player raised a `playbackError` on a play: an expired stream URL, or a
-/// track a service pulled. One code with [`stayed_idle`], since the remedy is
-/// the same - the source is gone, so load a fresh one - and the sentence names
-/// which of the two it was.
-///
-/// Which source failed is asked of the coordinator only now, on the failure
-/// path; a read that fails gives the stream wording rather than hiding the
-/// play's own error.
-async fn playback_failed(
-    room: &str,
-    error: &sonos::proto::PlaybackError,
-    upnp: &Upnp,
-) -> anyhow::Error {
-    let from_queue = upnp.playing_from_queue().await.unwrap_or(false);
-    playback_failed_message(room, error, from_queue)
-}
-
-fn playback_failed_message(
-    room: &str,
-    error: &sonos::proto::PlaybackError,
-    from_queue: bool,
-) -> anyhow::Error {
-    let message = if from_queue {
-        format!(
-            "{room}: {error}. Nothing is playing now. That track is in the room's queue \
-             and its service would not serve it - a queued track can expire or be pulled. \
-             `x2rock queue` lists what else is there: `play N` plays another track, and \
-             `queue remove N` drops this one."
-        )
-    } else {
-        format!(
-            "{room}: {error}. Nothing is playing now. If the room was on a direct stream \
-             (some services have no queue here, so x2rock streams them - Amazon Music on \
-             a Prime account among them), its URL has most likely expired; start it again \
-             with `favorite`, `bookmark`, or a fresh search to fetch a new one."
-        )
-    };
-    hint::Hint::new(message, hint::Code::PlaybackFailed, None).into()
-}
-
-/// A play the player accepted without ever leaving idle, and without raising an
-/// error to say why - most often a room with nothing loaded.
-fn stayed_idle(room: &str) -> anyhow::Error {
-    hint::Hint::new(
-        format!(
-            "{room}: asked to play, but still idle {}s later, with no error from the \
-             player. The room most likely has nothing loaded - `x2rock now` shows what it \
-             holds, and `favorite`, `bookmark` or a search starts something.",
-            STREAM_START.as_secs()
-        ),
-        hint::Code::PlaybackFailed,
-        None,
-    )
-    .into()
-}
-
 /// Ask a room to play; if that fails on a dead source x2rock started as a direct
 /// stream, resume it from the remembered item. The one play path for a single
 /// room, `--all` and several `-r` alike, so what SKILL.md says of `play` holds
@@ -420,6 +276,7 @@ pub async fn play_track(player: &Connection, target: &Target, n: u32) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use crate::sonos;
     use super::*;
     use serde_json::json;
 

@@ -23,12 +23,14 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::Command;
 use crate::hint;
-use crate::session::{self, Session, Target};
-use crate::sonos::upnp::{self, Upnp};
+use crate::session::{self, Session};
+use crate::sonos::upnp::Upnp;
 use crate::state::State;
 use crate::{catalogue, credentials, sonos};
 use playback::{apply_crossfade, apply_repeat, apply_shuffle, apply_transport, play_or_resume};
 use volume::apply_vol;
+#[allow(unused_imports)]
+pub use x2rock::play::*;
 
 /// A rough age for a unix time, for a list where the exact second has never
 /// mattered: `accounts` dates its links with it and `say --voices` its
@@ -40,19 +42,6 @@ pub fn ago(then: u64) -> String {
         s if s < 3600 => format!("{}m ago", s / 60),
         s if s < 86_400 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
-    }
-}
-
-/// "a" or "an" for a word about to follow it.
-///
-/// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
-/// which are plain ASCII words where the spelling rule holds. It would be wrong
-/// about "an hour" and "a European", and there is no reason for either to reach
-/// it.
-pub fn article(word: &str) -> &'static str {
-    match word.chars().next().map(|c| c.to_ascii_lowercase()) {
-        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
-        _ => "a",
     }
 }
 
@@ -163,29 +152,6 @@ pub fn transition(before: &str, after: &str) -> String {
     }
 }
 
-pub fn mmss(duration: Option<std::time::Duration>) -> String {
-    match duration {
-        Some(d) => format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60),
-        None => String::new(),
-    }
-}
-
-/// Whether an error is the *player* declining, as opposed to not being reached.
-///
-/// The distinction the `Fault` type exists to draw, asked in three places: the
-/// two enqueue fallbacks below and `raw upnp`. A refusal means "this is not
-/// queue material", which is a reason to try the stream session instead; a
-/// timeout or a dead socket means nothing of the kind, and falling back on one
-/// spends a second round trip to fail the same way while printing a sentence
-/// that blames the content.
-///
-/// A UPnP fault is one way the player says it; `not_queue_material` is the
-/// other, raised by `enqueue_and_play` when the row was accepted and then would
-/// not play. Both mean the same thing to a caller holding a stream fallback.
-pub fn is_refusal(e: &anyhow::Error) -> bool {
-    upnp::Fault::of(e).is_some() || hint::of(e).0 == hint::Code::NotQueueMaterial
-}
-
 /// `on`/`off`, for every flag and argument that takes those two words.
 ///
 /// Hoisted out of `apply_eq`'s closure once `remote`, `led`, `shuffle` and
@@ -208,14 +174,6 @@ pub fn on_word(on: bool) -> &'static str {
 /// nobody rather than the first.
 pub fn nth<T>(items: &[T], n: usize) -> Option<&T> {
     items.get(n.checked_sub(1)?)
-}
-
-/// Where a group's UPnP calls go: its coordinator, which owns the queue and
-/// the transport, or `fallback` - the connection already open - when the
-/// topology gave no address for it. One rule, because a call that went to a
-/// member instead would edit the wrong queue while looking like it worked.
-pub fn upnp_ip(target: &Target, fallback: IpAddr) -> IpAddr {
-    target.coordinator_ip.unwrap_or(fallback)
 }
 
 /// The service catalogue, brought up to date against the player the session
@@ -424,6 +382,7 @@ pub fn all_is_the_commands_own(command: &Command) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::sonos::upnp;
     #[test]
     fn all_belongs_to_the_two_commands_that_redefine_it() {
         use clap::Parser;

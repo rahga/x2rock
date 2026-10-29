@@ -12,6 +12,7 @@ pub mod hint;
 pub mod iheart;
 pub mod itunes;
 pub mod netid;
+pub mod play;
 pub mod rereads;
 pub mod salt;
 pub mod session;
