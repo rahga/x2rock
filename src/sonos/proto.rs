@@ -70,7 +70,7 @@ impl Event {
 }
 
 /// Body of a failed command.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorBody {
     pub error_code: Option<String>,
@@ -271,7 +271,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// `playback:1 getPlaybackStatus`, and the body of `playbackStatus` events.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackStatus {
     /// **Absent from some event bodies**, though present in every
@@ -460,7 +460,7 @@ impl PlaybackStatus {
 ///
 /// Every field is optional because the players do not send them all - a second
 /// error moments after the first arrived here with no `itemId` at all.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackError {
     pub error_code: Option<String>,
@@ -501,7 +501,7 @@ pub fn playback_error(body: &serde_json::Value) -> Option<PlaybackError> {
 }
 
 /// `playlists:1 getPlaylists`: the household's saved queues.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistsList {
     #[serde(default)]
@@ -515,7 +515,7 @@ pub struct PlaylistsList {
 /// `loadPlaylist` refuses `SQ:0` with `ERROR_INVALID_OBJECT_ID`, so a caller
 /// holding the UPnP form has to resolve it through this list rather than
 /// trimming the prefix and hoping.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Playlist {
     pub id: String,
@@ -525,7 +525,7 @@ pub struct Playlist {
 }
 
 /// `playbackMetadata:1 getMetadataStatus`, and the body of `metadataStatus` events.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataStatus {
     /// The album, playlist or station being played from.
@@ -623,7 +623,7 @@ impl MusicObjectId {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
     pub id: Option<MusicObjectId>,
@@ -639,7 +639,7 @@ pub struct Container {
 /// What a soundbar is actually receiving over HDMI, which is not the same as
 /// what the source claims to send: a TV or streaming box that has quietly
 /// dropped to stereo reports `Dolby Digital` with two channels and no LFE.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeTheaterFormat {
     #[serde(default)]
@@ -687,12 +687,12 @@ impl HomeTheaterFormat {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct QueueItem {
     pub track: Option<Track>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     pub id: Option<MusicObjectId>,
@@ -733,7 +733,7 @@ impl Track {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Named {
     pub name: Option<String>,
 }
@@ -741,20 +741,20 @@ pub struct Named {
 /// A `zones:1` event: the household's bonded setups - stereo pairs and home
 /// theatre - each with its members. It arrives in two kinds, one carrying each
 /// member's `state` and one its `settings`; a member's other half is absent.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Zones {
     #[serde(default)]
     pub zones: Vec<Zone>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Zone {
     pub name: String,
     #[serde(default)]
     pub members: Vec<ZoneMember>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ZoneMember {
     /// The player's `RINCON_…` id, the topology's uuid.
@@ -765,12 +765,12 @@ pub struct ZoneMember {
     pub settings: Option<ZoneMemberSettings>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ZoneMemberState {
     pub disconnected: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ZoneMemberSettings {
     #[serde(rename = "gainTrimDB")]
     pub gain_trim_db: Option<f64>,
@@ -808,7 +808,7 @@ impl Bond {
 
 /// `history:1 getHistory`: what the household has played lately, newest first -
 /// the Sonos app's "Recently played". Household-scoped, and forty items here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct History {
     #[serde(default)]
     pub resources: Vec<HistoryItem>,
@@ -817,7 +817,7 @@ pub struct History {
 /// One thing played: an album, a playlist, a station or a program, rarely a
 /// track. Named by the triple `playback:1 loadContent` takes back, so an item
 /// can be played again without knowing anything about its service.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HistoryItem {
     pub name: String,
     /// `album`, `playlist`, `stream`, `program`, `container`, `track`.
@@ -857,19 +857,19 @@ impl ContentId {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
 }
 
 /// `groups:1 modifyGroupMembers`, which answers with the group as it ended up.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GroupInfo {
     pub group: Group,
 }
 
 /// `favorites:1 getFavorites`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FavoritesList {
     pub items: Vec<Favorite>,
 }
@@ -877,7 +877,7 @@ pub struct FavoritesList {
 /// One saved favorite. Only `id` and `name` are dependable: of the 70 on the
 /// household this was built against, 26 carry no service at all, and the
 /// resource - and so the kind - is missing from some too.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Favorite {
     pub id: String,
@@ -920,7 +920,7 @@ impl Favorite {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Resource {
     #[serde(rename = "type")]
     pub kind: Option<String>,
@@ -928,7 +928,7 @@ pub struct Resource {
 }
 
 /// `groupVolume:1` / `playerVolume:1` `getVolume`, and their events.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Volume {
     pub volume: u8,
     pub muted: bool,
@@ -966,7 +966,7 @@ pub struct HomeTheaterOptions {
 /// through those defaults reads as "night off, dialog off" and overwrote a
 /// freshly-seeded Beam with the opposite of its real settings. The same trap
 /// [`PlaybackActions`] documents, in the same shape, one namespace over.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeTheaterUpdate {
     pub night_mode: Option<bool>,
@@ -988,7 +988,7 @@ impl From<&HomeTheaterOptions> for HomeTheaterUpdate {
 /// block and the volume limit are deserialized; the object carries more (room name, volume mode,
 /// spatial audio) that x2rock does not report - see docs/architecture.md on why
 /// spatial audio and volume mode are deliberately left out.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerSettings {
     pub home_theater: Option<HomeTheaterOptions>,
@@ -1004,7 +1004,7 @@ pub struct PlayerSettings {
 /// Security in the Sonos app; see docs/architecture.md for which switch is
 /// which. The daemon acts on UPnP alone; all three are shown by `x2rock
 /// security`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecuritySettings {
     pub attributes: SecurityAttributes,
@@ -1014,7 +1014,7 @@ pub struct SecuritySettings {
     pub timestamp: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SecurityAttributes {
     /// The UPnP switch. Off, every SOAP action on :1400 answers 403 - the
     /// queue, alarms, tone, the sleep timer and the TV input with it.
@@ -1033,14 +1033,14 @@ pub struct SecurityAttributes {
 /// An `effectiveSettings:1` `settingsChanged` event: which settings groups
 /// exist, each with the version it is at. No values - a group whose version
 /// moved has to be read again. The first one arrives on subscribing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsChanged {
     #[serde(default)]
     pub settings_group_metadata: Vec<SettingsGroupVersion>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SettingsGroupVersion {
     pub name: String,
     #[serde(default)]
