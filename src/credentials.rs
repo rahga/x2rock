@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,6 +57,7 @@ const OLDEST_READABLE: u32 = 2;
 
 /// Everything past owner read/write. A secret with any of these set is a bug
 /// somewhere, most likely a hand-edit or a careless copy.
+#[cfg(unix)]
 const LOOSE: u32 = 0o177;
 
 #[derive(Debug, Default)]
@@ -360,10 +362,11 @@ impl Credentials {
         // Tighten rather than warn and carry on. A secret readable by the rest
         // of the machine is worth fixing at the first opportunity, and the fix
         // is one syscall that cannot lose anything.
+        #[cfg(unix)]
         if let Ok(meta) = fs::metadata(path) {
             let mode = meta.permissions().mode();
             if mode & LOOSE != 0 {
-                match fs::set_permissions(path, fs::Permissions::from_mode(store::SECRET)) {
+                match store::restrict(path, store::SECRET) {
                     Ok(()) => eprintln!(
                         "x2rock: {} was mode {:04o}; tightened to {:04o}",
                         path.display(),
@@ -1175,6 +1178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_saved_token_is_readable_only_by_its_owner() {
         let dir = TempDir::new("cred-mode");
         let path = dir.path().join("credentials.json");
@@ -1194,6 +1198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_loose_file_is_tightened_when_it_is_read() {
         let dir = TempDir::new("cred-loose");
         let path = dir.path().join("credentials.json");

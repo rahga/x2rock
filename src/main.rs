@@ -1,32 +1,15 @@
-mod art;
-mod bookmarks;
-mod catalogue;
+#[allow(unused_imports)]
+use x2rock::{art,bookmarks,catalogue,credentials,discover,frontpage,hint,iheart,itunes,netid,rereads,salt,session,sonos,state,stations,store,streams,testdir};
+
 mod cli;
 mod clipserve;
 mod commands;
 mod completions;
-mod credentials;
 mod daemon;
-mod discover;
-mod frontpage;
-mod hint;
-mod iheart;
-mod itunes;
 mod mpris;
-mod netid;
-mod rereads;
 mod restart;
-mod salt;
 mod service;
-mod session;
-mod sonos;
 mod speech;
-mod state;
-mod stations;
-mod store;
-mod streams;
-#[cfg(test)]
-mod testdir;
 mod tui;
 
 use anyhow::{Result, ensure};
@@ -47,7 +30,7 @@ use state::State;
 /// header of the unit `service install` writes. The crate version plus the
 /// commit it was built from, stamped in by `build.rs` - see there for why the
 /// crate version alone cannot answer it.
-pub const VERSION: &str = env!("X2ROCK_VERSION");
+pub use x2rock::VERSION;
 
 /// Exit quietly when the thing reading our output has gone away.
 ///

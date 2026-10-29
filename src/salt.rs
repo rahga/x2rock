@@ -247,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_saved_salt_round_trips_at_0600_and_a_missing_one_is_none() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new("salt");

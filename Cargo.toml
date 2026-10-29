@@ -10,6 +10,23 @@ readme = "README.md"
 keywords = ["sonos", "mpris", "cli", "audio", "upnp"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
+[lib]
+name = "x2rock"
+path = "src/lib.rs"
+
+# The CLI, daemon and TUI. A front end that wants only the Sonos layer depends
+# on this package with `default-features = false` and gets the library alone,
+# without clap, the terminal UI or D-Bus - which is also what lets the library
+# build on Windows, where there is no session bus to publish MPRIS on.
+[[bin]]
+name = "x2rock"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:clap_complete", "dep:crossterm", "dep:mpris-server", "dep:ratatui", "dep:zbus"]
+
 [dependencies]
 # AES-128-CBC and MD5, for reading the music-service tokens a household already
 # stores (see `src/sonos/stored.rs`). This tree's other crypto is `ring`, via
@@ -21,16 +38,16 @@ categories = ["command-line-utilities", "multimedia::audio"]
 aes = "0.8.4"
 anyhow = "1.0.104"
 cbc = "0.1.2"
-clap = { version = "4.6.6", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"], optional = true }
 # Maintained by clap's authors; shares clap_lex with clap itself, so adding it
 # pulls no new transitives into the tree.
-clap_complete = "4.6.9"
+clap_complete = { version = "4.6.9", optional = true }
 # Already in the tree under ratatui; named here only for `event-stream`, which
 # ratatui does not pass through. That feature is what lets the TUI wait on the
 # keyboard and on the daemon's D-Bus signals in one `select!` - the alternative
 # is a thread parked in a blocking `read()`. It adds no crate: futures-core is
 # already here under futures-util.
-crossterm = { version = "0.29.0", features = ["event-stream"] }
+crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
 directories = "6.0.0"
 futures-util = "0.3.34"
 if-addrs = "0.15.0"
@@ -44,8 +61,8 @@ if-addrs = "0.15.0"
 # See the note on `aes` above; this is the second half of the same pair.
 md-5 = "0.10.6"
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
-mpris-server = { version = "0.10.0", features = ["tokio"] }
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+mpris-server = { version = "0.10.0", features = ["tokio"], optional = true }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"], optional = true }
 roxmltree = "0.21.1"
 # ring, not the aws-lc-rs default: 2MB smaller, and no cmake step - a C
 # compiler is still needed, since ring's build script compiles C and asm. See
@@ -68,7 +85,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 # intermediates) is fixed there. Its companion, RUSTSEC-2026-0382 in rustls-webpki,
 # is fixed in 0.103.16, which the lockfile carries; it is not a direct dependency.
 webpki-roots = "1.0.10"
-zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"], optional = true }
 
 [dev-dependencies]
 # `#[tokio::test(start_paused = true)]` for the restart debouncer, whose settle

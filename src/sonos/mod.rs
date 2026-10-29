@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 /// host splits at the colon *inside* the brackets. Sonos publishes IPv4 today,
 /// so the v6 arm is untrodden - handled anyway, because the failure would be a
 /// reachable player silently reported as having no address.
-pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
+pub fn host_ip(url: &str) -> Option<IpAddr> {
     let rest = url.split_once("://")?.1;
     let host = match rest.strip_prefix('[') {
         Some(v6) => v6.split(']').next()?,
@@ -34,7 +34,7 @@ pub(crate) fn host_ip(url: &str) -> Option<IpAddr> {
 /// One element's text, by local name - the lookup every reply parser does,
 /// in SOAP replies from the players and from music services alike. Written out
 /// longhand six times in one file before it had a name, then twice more.
-pub(crate) fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Option<&'a str> {
+pub fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Option<&'a str> {
     doc.descendants()
         .find(|n| n.tag_name().name() == tag)
         .and_then(|n| n.text())
@@ -44,7 +44,7 @@ pub(crate) fn element_text<'a>(doc: &'a roxmltree::Document, tag: &str) -> Optio
 /// per-row counterpart to [`element_text`], for a parser walking a list of
 /// rows rather than reading one value out of a whole reply. Five closures
 /// across `upnp` and `smapi` spelled this out before it had a name.
-pub(crate) fn child_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option<&'a str> {
+pub fn child_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option<&'a str> {
     node.children()
         .find(|c| c.tag_name().name() == tag)
         .and_then(|c| c.text())
@@ -57,16 +57,16 @@ pub(crate) fn child_text<'a>(node: roxmltree::Node<'a, '_>, tag: &str) -> Option
 /// field is bounded where it is read, once, rather than trusted to the widget.
 /// Identifiers (ids, URIs, `r:resMD`) are never clipped: they must arrive whole
 /// for the track to play.
-pub(crate) const MAX_FIELD_CHARS: usize = 512;
+pub const MAX_FIELD_CHARS: usize = 512;
 
 /// The longest a service-supplied URL is kept. Over this it is dropped rather
 /// than clipped - a truncated URL is a broken fetch, so no cover art is the
 /// better answer than a request that cannot succeed.
-pub(crate) const MAX_URL_BYTES: usize = 8 * 1024;
+pub const MAX_URL_BYTES: usize = 8 * 1024;
 
 /// Clip a display string to [`MAX_FIELD_CHARS`], on a char boundary so the
 /// result stays valid UTF-8. A string already within the bound is untouched.
-pub(crate) fn clip(mut s: String) -> String {
+pub fn clip(mut s: String) -> String {
     if let Some((at, _)) = s.char_indices().nth(MAX_FIELD_CHARS) {
         s.truncate(at);
     }
@@ -74,12 +74,12 @@ pub(crate) fn clip(mut s: String) -> String {
 }
 
 /// [`clip`] over an optional second line.
-pub(crate) fn clip_opt(s: Option<String>) -> Option<String> {
+pub fn clip_opt(s: Option<String>) -> Option<String> {
     s.map(clip)
 }
 
 /// Drop a URL past [`MAX_URL_BYTES`]; keep a sane one as it is.
-pub(crate) fn clip_url(url: Option<String>) -> Option<String> {
+pub fn clip_url(url: Option<String>) -> Option<String> {
     url.filter(|u| u.len() <= MAX_URL_BYTES)
 }
 
@@ -114,7 +114,7 @@ pub fn xml_escape(text: &str) -> String {
 /// and `tokio-rustls`; swapping it means changing those two lines and this
 /// function together. Why `ring` and not the `aws-lc-rs` default is recorded
 /// in docs/architecture.md ("`ring` over `aws-lc-rs`, deliberately").
-pub(crate) fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     static PROVIDER: OnceLock<Arc<rustls::crypto::CryptoProvider>> = OnceLock::new();
     PROVIDER
         .get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))

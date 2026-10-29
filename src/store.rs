@@ -12,6 +12,7 @@
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,9 +33,9 @@ fn dirs() -> Result<directories::ProjectDirs> {
 /// `$XDG_STATE_HOME/x2rock/<file>`.
 pub fn path(file: &str) -> Result<PathBuf> {
     let dirs = dirs()?;
-    let dir = dirs
-        .state_dir()
-        .ok_or_else(|| anyhow!("no XDG state directory on this platform"))?;
+    // XDG has a state directory; Windows and macOS do not, and there the
+    // per-user local data directory is the nearest thing to it.
+    let dir = dirs.state_dir().unwrap_or_else(|| dirs.data_local_dir());
     Ok(dir.join(file))
 }
 
@@ -54,8 +55,30 @@ pub fn cache_dir(sub: &str) -> Result<PathBuf> {
 /// spoken clips - and is nobody else's to read.
 pub fn owner_only_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("restricting {}", dir.display()))
+    restrict(dir, 0o700).with_context(|| format!("restricting {}", dir.display()))
+}
+
+/// Set a Unix mode. Elsewhere there are no modes: the per-user profile
+/// directories these files live in are already the owner's alone.
+#[cfg(unix)]
+pub fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+/// See the Unix version.
+#[cfg(not(unix))]
+pub fn restrict(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Open options that create a file with `mode` where modes exist.
+fn create_with_mode(mode: u32) -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(unix)]
+    options.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    options
 }
 
 /// Mark a cached file as just used, by its modification time: access times
@@ -88,10 +111,9 @@ impl Scratch {
         loop {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let tmp = sibling(path, &format!("{}.{serial}.tmp", std::process::id()));
-            match fs::OpenOptions::new()
+            match create_with_mode(mode)
                 .write(true)
                 .create_new(true)
-                .mode(mode)
                 .open(&tmp)
             {
                 Ok(file) => return Ok(Self { path: tmp, file }),
@@ -185,12 +207,11 @@ impl Lock {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let lock = sibling(path, "lock");
-        let file = fs::OpenOptions::new()
+        let file = create_with_mode(SECRET)
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(SECRET)
             .open(&lock)
             .with_context(|| format!("opening {}", lock.display()))?;
         // `File::lock` is what moved the MSRV to 1.89: it is `flock(2)` from
@@ -205,6 +226,7 @@ impl Lock {
 mod tests {
     use super::*;
     use crate::testdir::TempDir;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -255,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_leftover_scratch_file_does_not_loosen_the_mode() {
         // `mode` on open applies only to a file being created. A leftover from a
         // crashed writer at the umask's default used to keep its 0644 through
@@ -289,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_lock_lives_beside_the_file_and_outlasts_a_rename() {
         let dir = TempDir::new("store-lock");
         let path = dir.path().join("bookmarks.json");
