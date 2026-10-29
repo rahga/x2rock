@@ -32,6 +32,7 @@ pub fn local_ip_toward(peer: IpAddr) -> Result<IpAddr> {
 /// Default IPv4 gateway, parsed from a routing table in `/proc/net/route` format.
 ///
 /// `/proc/net/route` is little-endian hex, one route per line.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn default_gateway_from(table: &str) -> Result<Ipv4Addr> {
     for line in table.lines().skip(1) {
         let mut fields = line.split_whitespace();
@@ -57,6 +58,7 @@ fn default_gateway_from(table: &str) -> Result<Ipv4Addr> {
     Err(anyhow!("no default route"))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn default_gateway() -> Result<Ipv4Addr> {
     let table = fs::read_to_string("/proc/net/route")?;
     default_gateway_from(&table)
@@ -66,6 +68,18 @@ fn default_gateway() -> Result<Ipv4Addr> {
 ///
 /// Returns `None` rather than failing: an unidentifiable network is a normal
 /// condition, and simply means nothing is cached for it.
+#[cfg(not(target_os = "linux"))]
+pub fn network_fingerprint() -> Option<String> {
+    let gateway = netdev::get_default_gateway().ok()?;
+    let mac = gateway.mac_addr.to_string().to_ascii_lowercase();
+    (mac != "00:00:00:00:00:00").then_some(mac)
+}
+
+/// MAC address of the default gateway, as a stable fingerprint for this network.
+///
+/// Returns `None` rather than failing: an unidentifiable network is a normal
+/// condition, and simply means nothing is cached for it.
+#[cfg(target_os = "linux")]
 pub fn network_fingerprint() -> Option<String> {
     let gateway = default_gateway().ok()?;
     let arp = fs::read_to_string("/proc/net/arp").ok()?;

@@ -87,6 +87,12 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 webpki-roots = "1.0.10"
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"], optional = true }
 
+# The default gateway's MAC off Linux, where /proc/net is not there to read:
+# the network fingerprint remembered players are kept under. Linux keeps its
+# own path, which needs no crate.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+netdev = "0.47"
+
 [dev-dependencies]
 # `#[tokio::test(start_paused = true)]` for the restart debouncer, whose settle
 # window is two seconds of wall clock the suite should not spend. Same tokio
