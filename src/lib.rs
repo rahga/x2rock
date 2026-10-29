@@ -10,6 +10,7 @@ pub mod discover;
 pub mod frontpage;
 pub mod hint;
 pub mod iheart;
+pub mod import;
 pub mod itunes;
 pub mod netid;
 pub mod play;
