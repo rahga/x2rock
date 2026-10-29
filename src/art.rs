@@ -409,6 +409,15 @@ async fn resolve(dir: &Path, url: &str) -> Result<PathBuf> {
     store(dir, url, &bytes, ext)
 }
 
+/// One cover's local file, fetched and sanitised under the rules above if it
+/// is not cached yet: what a front end in this process calls, where the bar
+/// widget runs `x2rock art` as a subprocess. Prunes first, as `run` does.
+pub async fn local_file(url: &str) -> Result<PathBuf> {
+    let dir = open_dir()?;
+    let _ = prune(&dir, SystemTime::now());
+    resolve(&dir, url).await
+}
+
 /// Bring the directory back inside [`MAX_AGE`] and [`MAX_TOTAL`] - unless it
 /// was done less than [`PRUNE_EVERY`] ago, which is most calls, and then this
 /// is one `stat`. Scratch files a crash left behind go once they are old.
