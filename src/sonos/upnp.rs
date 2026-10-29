@@ -796,7 +796,7 @@ pub struct Services {
     pub version: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueueItem {
     /// 1-based, as Sonos numbers them.
     pub index: u32,
@@ -808,7 +808,7 @@ pub struct QueueItem {
 }
 
 /// Something that can be put in the queue: a saved playlist, a favorite.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BrowseItem {
     /// The player's own id, e.g. `SQ:3` or `FV:2/19`.
     pub id: String,
@@ -896,7 +896,7 @@ impl BrowseItem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Queue {
     /// The queue's version, as `Browse` reports it. Mutating actions send it
     /// back so the player can reject a change aimed at a queue that has since
