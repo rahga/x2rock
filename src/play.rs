@@ -11,11 +11,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::json;
 
-use crate::session::{self, Target};
+use crate::session::{self, Session, Target};
 use crate::sonos::local::{ApiError, Connection, Unreachable};
 use crate::sonos::proto::ContentId;
 use crate::sonos::upnp::{self, Upnp};
-use crate::{bookmarks, credentials, hint, sonos, streams};
+use crate::{bookmarks, catalogue, credentials, hint, sonos, streams};
 
 
 /// "a" or "an" for a word about to follow it.
@@ -1416,4 +1416,181 @@ pub fn playback_failed_message(
         )
     };
     hint::Hint::new(message, hint::Code::PlaybackFailed, None).into()
+}
+
+
+/// The token and cdudn for `bookmark`'s own account on `service`.
+///
+/// The bookmark's URI already carries the serial it was kept from, so the
+/// cdudn names that same account - not the preferred one - and so does the
+/// token a stream fallback uses (see `Naming`). A serial the store does not
+/// hold names no selector, the `-0-` form, and streams with the preferred
+/// account. An unreadable store costs the naming, not the play: most
+/// bookmarks need no stored account at all.
+pub async fn account_naming(
+    session: &Session,
+    service: &sonos::smapi::Service,
+    bookmark: &bookmarks::Bookmark,
+) -> Result<(Option<sonos::smapi::Token>, String)> {
+    let household = session.connection.household_id().await?;
+    let linked = credentials::Credentials::load().unwrap_or_else(|e| {
+        eprintln!("x2rock: stored accounts unreadable ({e:#}); playing without them");
+        credentials::Credentials::default()
+    });
+    let own = bookmark
+        .account
+        .parse()
+        .ok()
+        .and_then(|sn| linked.token_by_serial(&household, &service.id, sn));
+    let selector = own.as_ref().and_then(|t| t.selector.as_deref());
+    let token = own
+        .clone()
+        .or_else(|| linked.token_for(&household, &service.id));
+    let cdudn = service.cdudn_for(selector).ok_or_else(|| {
+        anyhow!(
+            "{} has no service type in this player's list, so {:?} cannot name its account",
+            service.name,
+            bookmark.name
+        )
+    })?;
+    Ok((token, cdudn))
+}
+
+/// What is playing in `group`, as a bookmark would keep it: the track, or with
+/// `container` the album or playlist it comes from. What `favorite add` saves
+/// and what `favorite remove` looks for.
+pub async fn playing_item(
+    player: &Connection,
+    group: &str,
+    container: bool,
+) -> Result<bookmarks::Bookmark> {
+    let meta = player.metadata(group).await?;
+    let (id, name, artist, art, kind) = if container {
+        let c = meta
+            .container
+            .ok_or_else(|| anyhow!("nothing is playing to favorite"))?;
+        (c.id, c.name, None, c.image_url, c.kind)
+    } else {
+        let t = meta
+            .current_item
+            .and_then(|i| i.track)
+            .ok_or_else(|| anyhow!("nothing is playing to favorite"))?;
+        (
+            t.id,
+            t.name,
+            t.artist.and_then(|a| a.name),
+            t.image_url,
+            Some("track".to_string()),
+        )
+    };
+    let id = id.ok_or_else(|| anyhow!("the player reported no id for what is playing"))?;
+    let name = name.ok_or_else(|| anyhow!("what is playing has no name"))?;
+    let mut item = bookmarks::Bookmark::from_id(&name, &id)?;
+    item.artist = artist;
+    item.art_url = art;
+    item.kind = kind;
+    Ok(item)
+}
+
+/// The URI and DIDL a queue would be given for `item`, which is also what
+/// makes a favorite the household types and names like the Sonos app's own.
+pub fn favorite_source(item: &bookmarks::Bookmark, cdudn: &str) -> Result<(String, String)> {
+    match item.kind.as_deref() {
+        Some("track") => Ok((item.uri(), item.didl(cdudn))),
+        Some(kind) if bookmarks::container_holds_tracks(kind) => Ok((
+            bookmarks::container_uri(&item.object_id, &item.service_id, Some(&item.account)),
+            bookmarks::container_didl(&item.object_id, &item.name, kind, cdudn),
+        )),
+        other => bail!(
+            "{:?} is {}, which a favorite saved from here cannot hold; only a song, \
+             an album or a playlist",
+            item.name,
+            other.map_or("of no known kind".to_string(), |k| format!("a {k}")),
+        ),
+    }
+}
+
+/// The favorites that are `item`, by the URI a save would give them or by the
+/// service id inside them - the second is what finds a shortcut the Sonos app
+/// saved, which has no URI at all.
+pub fn favorites_of<'a>(
+    favorites: &'a [upnp::BrowseItem],
+    item: &bookmarks::Bookmark,
+    uri: Option<&str>,
+) -> Vec<&'a upnp::BrowseItem> {
+    favorites
+        .iter()
+        .filter(|f| {
+            (uri.is_some() && f.uri.as_deref() == uri)
+                || f.service_object().is_some_and(|(service, object)| {
+                    service == item.service_id && object == item.object_id
+                })
+        })
+        .collect()
+}
+
+
+/// The service catalogue, brought up to date against the player the session
+/// reached. Every by-id lookup wants this before it trusts an id: a cleared or
+/// schema-bumped cache would otherwise make a bookmark or a remembered stream
+/// look unknown until some `search` happened to rebuild it. Saved when the
+/// refresh changed it, so the next run need not parse the descriptors again.
+pub async fn refreshed_catalogue(session: &Session) -> Result<catalogue::Catalogue> {
+    let mut catalogue = catalogue::Catalogue::load();
+    catalogue
+        .refresh_and_save(&Upnp::new(session.connection.ip()), false)
+        .await?;
+    Ok(catalogue)
+}
+
+/// What saving the playing track (or its album or playlist) as a Sonos
+/// favourite did.
+#[derive(Debug, Clone)]
+pub struct SavedFavorite {
+    pub name: String,
+    pub service: String,
+    pub kind: Option<String>,
+    /// The favourite's id, without its `FV:2/`, where one is known.
+    pub id: Option<String>,
+    /// False when it was a favourite already: a duplicate is never made.
+    pub saved: bool,
+}
+
+/// Save what `target` is playing - the track, or with `container` its album or
+/// playlist - to the household's Sonos favourites, unless it is one already.
+/// Looked for first, rather than left to the player's 803: a shortcut the Sonos
+/// app saved has no URI for the player to recognise.
+pub async fn save_playing_favorite(
+    session: &session::Session,
+    player: &Connection,
+    target: &Target,
+    container: bool,
+) -> Result<SavedFavorite> {
+    let mut item = playing_item(player, &target.group_id, container).await?;
+    let catalogue = refreshed_catalogue(session).await?;
+    let service = catalogue
+        .by_id(&item.service_id)
+        .ok_or_else(|| anyhow!("service {} is not in this player's service list", item.service_id))?
+        .clone();
+    item.service_name = Some(service.name.clone());
+    let (_, cdudn) = account_naming(session, &service, &item).await?;
+    let (uri, didl) = favorite_source(&item, &cdudn)?;
+    let upnp = Upnp::new(upnp_ip(target, player.ip()));
+    let existing = upnp.browse_content("FV:2").await?;
+    let already = favorites_of(&existing, &item, Some(&uri));
+    let saved = match already.first() {
+        Some(_) => None,
+        None => {
+            upnp.create_favorite(&upnp::NewFavorite {
+                title: &item.name,
+                uri: &uri,
+                metadata: &didl,
+                art_url: item.art_url.as_deref(),
+                service_name: Some(&service.name),
+            })
+            .await?
+        }
+    };
+    let id = saved.as_deref().or(already.first().map(|f| f.id.as_str())).map(|i| i.trim_start_matches("FV:2/").to_owned());
+    Ok(SavedFavorite { name: item.name.clone(), service: service.name.clone(), kind: item.kind.clone(), id, saved: saved.is_some() })
 }

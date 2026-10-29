@@ -24,9 +24,8 @@ use anyhow::{Context, Result, bail};
 use crate::cli::Command;
 use crate::hint;
 use crate::session::{self, Session};
-use crate::sonos::upnp::Upnp;
 use crate::state::State;
-use crate::{catalogue, credentials, sonos};
+use crate::{credentials, sonos};
 use playback::{apply_crossfade, apply_repeat, apply_shuffle, apply_transport, play_or_resume};
 use volume::apply_vol;
 #[allow(unused_imports)]
@@ -174,19 +173,6 @@ pub fn on_word(on: bool) -> &'static str {
 /// nobody rather than the first.
 pub fn nth<T>(items: &[T], n: usize) -> Option<&T> {
     items.get(n.checked_sub(1)?)
-}
-
-/// The service catalogue, brought up to date against the player the session
-/// reached. Every by-id lookup wants this before it trusts an id: a cleared or
-/// schema-bumped cache would otherwise make a bookmark or a remembered stream
-/// look unknown until some `search` happened to rebuild it. Saved when the
-/// refresh changed it, so the next run need not parse the descriptors again.
-pub async fn refreshed_catalogue(session: &Session) -> Result<catalogue::Catalogue> {
-    let mut catalogue = catalogue::Catalogue::load();
-    catalogue
-        .refresh_and_save(&Upnp::new(session.connection.ip()), false)
-        .await?;
-    Ok(catalogue)
 }
 
 /// The opening `play-item` and `queue-item` share: connect, refresh the
