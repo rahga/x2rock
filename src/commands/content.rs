@@ -14,7 +14,9 @@ use super::{connect_for_service, find_named, is_refusal, mmss, refreshed_catalog
 use crate::cli::{BookmarksAction, QueueAction};
 use crate::session::{self, Session, Target};
 use crate::sonos::local::Connection;
-use crate::sonos::proto::{ContentId, Favorite, HistoryItem};
+use crate::sonos::proto::Favorite;
+#[cfg(test)]
+use crate::sonos::proto::HistoryItem;
 use crate::sonos::upnp::{self, Upnp};
 use crate::{bookmarks, catalogue, credentials, sonos};
 #[allow(unused_imports)]
@@ -581,113 +583,6 @@ pub async fn favorites(session: &Session, query: Option<&str>, json: bool) -> Re
     Ok(())
 }
 
-/// The service id `getHistory` gives a saved Sonos playlist, which is no music
-/// service and has no account: its `objectId` is the playlist's bare id.
-const SONOS_PLAYLISTS: &str = "65435";
-
-/// A recently played item as it can be played *now*.
-struct Replayable<'a> {
-    item: &'a HistoryItem,
-    /// The id to load: the item's own, with its account swapped for the one the
-    /// household uses for that service today.
-    id: ContentId,
-    service: Option<String>,
-    playable: bool,
-}
-
-/// Decide whether an item can be played again, and from which account.
-///
-/// **The account an item names is the one it was played from**, and a
-/// household re-registers services: forty items here named eleven YouTube
-/// Music serials, of which one is live. `loadContent` accepts a dead one and
-/// then silently plays nothing, and swapping in the live serial - the preferred
-/// account's, the one search and play-item use - made the same item play
-/// (verified 2026-09-26). **Only a dead one is swapped.** An account the
-/// household still holds is kept even when it is not the preferred one: an
-/// iHeartRadio custom station belongs to the listener who made it, and loaded
-/// under the household's other iHeartRadio account it played nothing. An item on a service this machine holds no account
-/// for is kept only when the service needs none; a Sonos playlist needs none
-/// either. Anything else is marked unplayable rather than offered.
-fn replayable<'a>(
-    item: &'a HistoryItem,
-    household: &str,
-    linked: &credentials::Credentials,
-    catalogue: &catalogue::Catalogue,
-) -> Replayable<'a> {
-    let mut id = item.id.clone();
-    let Some(service_id) = item.id.service_id.as_deref() else {
-        return Replayable {
-            item,
-            id,
-            service: None,
-            playable: false,
-        };
-    };
-    if service_id == SONOS_PLAYLISTS {
-        return Replayable {
-            item,
-            id,
-            service: Some("Sonos playlist".into()),
-            playable: true,
-        };
-    }
-    let service = catalogue.name_of(service_id).map(str::to_string);
-    let still_held = |serial: u32| {
-        linked
-            .accounts_for(household, service_id)
-            .is_some_and(|held| held.accounts.values().any(|a| a.serial == Some(serial)))
-    };
-    let playable = match linked.token_for(household, service_id) {
-        Some(token) => {
-            let kept = item.id.serial().is_some_and(still_held);
-            if !kept && let Some(serial) = token.serial {
-                id.account_id = Some(format!("sn_{serial}"));
-            }
-            true
-        }
-        None => catalogue
-            .by_id(service_id)
-            .is_some_and(|s| s.auth == sonos::smapi::Auth::Anonymous),
-    };
-    Replayable {
-        item,
-        id,
-        service,
-        playable,
-    }
-}
-
-/// The service catalogue for reading history: brought up to date against the
-/// player first, like every other by-id lookup, because a history row's
-/// service name and - for a service with no token here - whether it needs an
-/// account at all both come from it. Read from disk alone, a machine that had
-/// never searched or browsed named every row "unknown service" and refused to
-/// replay free ones such as TuneIn, telling the person to link an account
-/// that does not exist.
-///
-/// Best effort, unlike [`refreshed_catalogue`]: history is still worth listing
-/// from whatever is cached when the refresh fails, so a failure is said on
-/// stderr rather than returned. Saved when it changed, as `browse` does.
-async fn history_catalogue(session: &Session) -> catalogue::Catalogue {
-    let mut catalogue = catalogue::Catalogue::load();
-    match catalogue
-        .refresh(&Upnp::new(session.connection.ip()), false)
-        .await
-    {
-        Ok(true) => {
-            if let Err(e) = catalogue.save() {
-                eprintln!("x2rock: could not save the service list ({e:#})");
-            }
-        }
-        Ok(false) => {}
-        Err(e) => eprintln!(
-            "x2rock: could not read the service list ({e:#}); service names and what can be \
-             replayed may be incomplete"
-        ),
-    }
-    catalogue
-}
-
 /// `x2rock recent`: what the household played lately, newest first.
 pub async fn recent(session: &Session, query: Option<&str>, json: bool) -> Result<()> {
     let household = session.connection.household_id().await?;
@@ -769,46 +664,7 @@ pub async fn replay(
         "recently played item",
         "x2rock recent",
     )?;
-    let linked = credentials::Credentials::load()?;
-    let catalogue = history_catalogue(session).await;
-    let r = replayable(item, &household, &linked, &catalogue);
-    ensure!(
-        r.playable,
-        "{:?} was played from {}, which this machine holds no account for. \
-         Import the household's with: x2rock link --from-household",
-        item.name,
-        r.service
-            .as_deref()
-            .unwrap_or("a service x2rock does not know")
-    );
-    let service =
-        r.id.service_id
-            .as_deref()
-            .filter(|id| *id != SONOS_PLAYLISTS)
-            .and_then(|id| catalogue.by_id(id));
-    let Some(service) = service else {
-        load_and_start(player, target, &r.id, &item.kind, &item.name).await?;
-        println!("{:<24} {}", target.name, item.name);
-        return Ok(());
-    };
-    // The account the row was played from, which `replayable` has already
-    // swapped for the household's current one if it is gone: an iHeartRadio
-    // custom station belongs to the listener who made it.
-    let token =
-        r.id.serial()
-            .and_then(|n| linked.token_by_serial(&household, &service.id, n))
-            .or_else(|| linked.token_for(&household, &service.id));
-    play_item(
-        session,
-        room,
-        service,
-        token.as_ref(),
-        Some(&item.kind),
-        &r.id.object_id,
-        &item.name,
-        false,
-    )
-    .await
+    replay_item(session, player, target, room, item).await
 }
 
 /// `x2rock keep`: remember what `group` is playing - the track, or with
