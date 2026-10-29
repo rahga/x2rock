@@ -318,7 +318,7 @@ impl Speakers {
         self.write_target(room, |s, target| async move {
             let player = session::coordinator(&s, &target).await?;
             let rated =
-                services::rate(&player, &target.group_id, &target.name, direction, false).await?;
+                services::rate(&player, &target.group_id, &target.name, direction.kind(), false).await?;
             let mut said = vec![rated.text()];
             said.extend(rated.notes().iter().cloned());
             Ok(Said(said))

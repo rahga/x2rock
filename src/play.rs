@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::session::{self, Session, Target};
@@ -1593,4 +1594,249 @@ pub async fn save_playing_favorite(
     };
     let id = saved.as_deref().or(already.first().map(|f| f.id.as_str())).map(|i| i.trim_start_matches("FV:2/").to_owned());
     Ok(SavedFavorite { name: item.name.clone(), service: service.name.clone(), kind: item.kind.clone(), id, saved: saved.is_some() })
+}
+
+
+/// What `rate` did: `{service, rating, action, should_skip, skipped,
+/// message}` as JSON, and one line of text.
+#[derive(Debug, Serialize)]
+pub struct RateOutcome {
+    pub service: String,
+    pub rating: &'static str,
+    pub action: String,
+    pub should_skip: Option<bool>,
+    pub skipped: bool,
+    pub message: Option<String>,
+    /// What the rating did in the service's terms - "Added to favorites".
+    #[serde(skip)]
+    pub done: &'static str,
+    #[serde(skip)]
+    pub notes: Vec<String>,
+}
+
+/// [`run_rate`]'s work, returned rather than printed, for the TUI's rating keys.
+pub async fn rate(
+    player: &Connection,
+    group: &str,
+    room_name: &str,
+    want: sonos::smapi::RatingKind,
+    refresh: bool,
+) -> Result<RateOutcome> {
+    // Independent of each other - one is the Control API over the socket that
+    // is already open, the other a UPnP `ListAvailableServices` to the same
+    // player - so they overlap rather than queue. `refresh` is a no-op when
+    // the player's service-list version has not moved.
+    let mut catalogue = catalogue::Catalogue::load();
+    let upnp = Upnp::new(player.ip());
+    let (meta, dirty) =
+        tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, refresh))?;
+    let track_id = meta
+        .track()
+        .and_then(|t| t.id.as_ref())
+        .filter(|id| id.is_real())
+        .ok_or_else(|| {
+            anyhow!(
+                "nothing rateable is playing in {room_name} (a Live broadcast's track carries \
+                 no id to rate)"
+            )
+        })?;
+    let service_id = track_id
+        .service_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("the current track names no service, so it cannot be rated"))?;
+
+    let service = catalogue
+        .by_id(service_id)
+        .ok_or_else(|| anyhow!("service {service_id} is not in this player's service list"))?
+        .clone();
+
+    // Asked before the call for the same reason `search` asks before
+    // `categories_for`: a freshly learned *empty* list is exactly what is
+    // worth writing, and `is_empty()` afterwards cannot tell that from a hit.
+    let learned = !catalogue.ratings_cached(&service.id);
+    let ratings = catalogue.ratings_for(&service).await?;
+    if dirty || learned {
+        catalogue.save()?;
+    }
+    ensure!(
+        !ratings.is_empty(),
+        "{} publishes no ratings, so nothing here can be rated.{}",
+        service.name,
+        // Only worth suggesting when the answer came from cache: a reply just
+        // fetched says what the service currently says, and re-fetching it is
+        // a round trip that cannot change the outcome.
+        if learned {
+            ""
+        } else {
+            " (Cached; `x2rock rate --refresh` re-reads it if the service has since added them.)"
+        }
+    );
+
+    let mut linked = credentials::Credentials::load()?;
+    let household = player.household_id().await?;
+    let token = linked.token_for(&household, &service.id);
+
+    let mut refreshed = None;
+    let properties = sonos::smapi::extended_metadata(
+        &service,
+        token.as_ref(),
+        &track_id.object_id,
+        &mut refreshed,
+    )
+    .await?;
+    let token = use_refreshed_token(&mut linked, &service.id, token, refreshed);
+
+    // Two different refusals, told apart: no rating state at all (a track the
+    // service does not rate), and a state that does not offer this one (a
+    // Deezer track already in the favourites has no second heart to give).
+    // One message for both sent a person after the wrong cause.
+    let offered: Vec<&sonos::smapi::Rating> = properties
+        .iter()
+        .filter_map(|(propname, value)| {
+            sonos::smapi::RatingsMatch::offered(&ratings, propname, value)
+        })
+        .flatten()
+        .collect();
+    ensure!(
+        !offered.is_empty(),
+        "{} did not report a rating state for the current track, so it cannot be rated \
+         right now.",
+        service.name
+    );
+    let chosen = offered
+        .iter()
+        .copied()
+        .find(|r| r.kind() == Some(want))
+        .ok_or_else(|| {
+            let mut can: Vec<&str> = offered
+                .iter()
+                .filter_map(|r| r.kind())
+                .map(rate_word)
+                .collect();
+            can.dedup();
+            anyhow!(
+                "{} does not offer `rate {}` for this track right now; it offers {}.",
+                service.name,
+                rate_word(want),
+                match can.is_empty() {
+                    true => "nothing x2rock can name".to_string(),
+                    false => can
+                        .iter()
+                        .map(|w| format!("`rate {w}`"))
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                }
+            )
+        })?;
+
+    let mut refreshed = None;
+    let result = sonos::smapi::rate_item(
+        &service,
+        token.as_ref(),
+        &track_id.object_id,
+        &chosen.id,
+        &mut refreshed,
+    )
+    .await?;
+    // Nothing follows that needs the token; the call is for its save.
+    let _ = use_refreshed_token(&mut linked, &service.id, token, refreshed);
+
+    // The rating already landed - a failure here must not read as the rating
+    // itself having failed, which `?` would do (and which could send a caller
+    // that retries on error back to rate the same track twice). Warn and move
+    // on; the room simply keeps playing what it was.
+    let mut notes = Vec::new();
+    let skipped = result.should_skip == Some(true)
+        && match player.playback(group, "skipToNextTrack").await {
+            Ok(()) => true,
+            Err(e) => {
+                notes.push(format!(
+                    "x2rock: rated successfully, but the requested skip failed: {e:#}"
+                ));
+                false
+            }
+        };
+
+    Ok(RateOutcome {
+        service: service.name.clone(),
+        rating: rate_word(want),
+        action: chosen.string_id.clone(),
+        should_skip: result.should_skip,
+        skipped,
+        message: result.message_string_id,
+        done: rate_done(chosen),
+        notes,
+    })
+}
+
+/// A [`RatingKind`](sonos::smapi::RatingKind) as `rate` spells it.
+pub fn rate_word(kind: sonos::smapi::RatingKind) -> &'static str {
+    use sonos::smapi::RatingKind;
+    match kind {
+        RatingKind::Up => "up",
+        RatingKind::Down => "down",
+        RatingKind::Unfavorite => "unfavorite",
+    }
+}
+
+/// What a landed rating did, in the service's terms: a heart service saves a
+/// favourite where a thumbs one rates up.
+pub fn rate_done(rating: &sonos::smapi::Rating) -> &'static str {
+    let id = rating.string_id.to_uppercase();
+    match rating.kind() {
+        _ if id.starts_with("SAVE") => "Added to favorites",
+        _ if id.starts_with("SKIP") => "Added to disliked tracks",
+        Some(sonos::smapi::RatingKind::Unfavorite) => "Removed from favorites",
+        Some(sonos::smapi::RatingKind::Down) => "Rated down",
+        _ => "Rated up",
+    }
+}
+
+/// Which ratings the track a group plays can be given now, by its service.
+#[derive(Debug, Clone)]
+pub struct RatingOffers {
+    pub service: String,
+    pub kinds: Vec<sonos::smapi::RatingKind>,
+    /// A heart service (Deezer's favourites) rather than thumbs.
+    pub heart: bool,
+}
+
+/// The ratings on offer for what `group` plays: `None` for a track with
+/// nothing to rate (no id, a service publishing no ratings, no rating state).
+pub async fn rating_offers(player: &Connection, group: &str) -> Result<Option<RatingOffers>> {
+    let mut catalogue = catalogue::Catalogue::load();
+    let upnp = Upnp::new(player.ip());
+    let (meta, dirty) = tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, false))?;
+    let Some(track_id) = meta.track().and_then(|t| t.id.as_ref()).filter(|id| id.is_real()) else {
+        return Ok(None);
+    };
+    let Some(service) = track_id.service_id.as_deref().and_then(|id| catalogue.by_id(id)).cloned() else {
+        return Ok(None);
+    };
+    let learned = !catalogue.ratings_cached(&service.id);
+    let ratings = catalogue.ratings_for(&service).await?;
+    if dirty || learned {
+        catalogue.save()?;
+    }
+    if ratings.is_empty() {
+        return Ok(None);
+    }
+    let mut linked = credentials::Credentials::load()?;
+    let household = player.household_id().await?;
+    let token = linked.token_for(&household, &service.id);
+    let mut refreshed = None;
+    let properties = sonos::smapi::extended_metadata(&service, token.as_ref(), &track_id.object_id, &mut refreshed).await?;
+    let _ = use_refreshed_token(&mut linked, &service.id, token, refreshed);
+    let offered: Vec<&sonos::smapi::Rating> = properties
+        .iter()
+        .filter_map(|(propname, value)| sonos::smapi::RatingsMatch::offered(&ratings, propname, value))
+        .flatten()
+        .collect();
+    if offered.is_empty() {
+        return Ok(None);
+    }
+    let heart = offered.iter().any(|r| r.string_id.to_uppercase().starts_with("SAVE") || r.kind() == Some(sonos::smapi::RatingKind::Unfavorite));
+    let mut kinds: Vec<sonos::smapi::RatingKind> = offered.iter().filter_map(|r| r.kind()).collect();
+    kinds.dedup();
+    Ok(Some(RatingOffers { service: service.name.clone(), kinds, heart }))
 }
