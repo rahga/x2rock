@@ -331,7 +331,7 @@ impl Service {
 }
 
 /// One search hit, flattened from `mediaMetadata`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub id: String,
     pub title: String,
