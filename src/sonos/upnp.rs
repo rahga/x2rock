@@ -1902,6 +1902,16 @@ impl Upnp {
         Ok((items, total, update_id))
     }
 
+    /// One slot of the queue, 1-based, without reading the rest: what plays
+    /// before the current track, say. `None` past either end.
+    pub async fn queue_item(&self, index: u32) -> Result<Option<QueueItem>> {
+        if index == 0 {
+            return Ok(None);
+        }
+        let (_, _, didl) = self.browse_page("Q:0", index - 1, 1).await?;
+        Ok(self.queue_items_from_didl(&didl)?.into_iter().next())
+    }
+
     /// The whole queue, up to [`MAX_QUEUE_ITEMS`].
     pub async fn queue(&self) -> Result<Queue> {
         let (items, total, update_id) = self
