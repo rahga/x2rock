@@ -93,14 +93,18 @@ and so does Steam's (Steam + X in Gaming Mode).
 
 ## Building
 
-You need Rust (1.89 or newer) and the x2rock CLI's repository beside this one, on its
-`gui-library` branch, which exposes its Sonos layer as a library:
+You need Rust (1.89 or newer). The deck is the `deck/` member of the x2rock repository and
+uses the x2rock package at its root as a library, with the CLI left out. Build it by name from
+the repository root: a plain `cargo build` there is the CLI alone.
 
 ```sh
-git clone https://github.com/rahga/x2rock ../x2rock    # then: git -C ../x2rock checkout gui-library
-cargo build --release
-./target/release/x2rock-deck --demo                     # no speakers needed
+git clone https://github.com/rahga/x2rock && cd x2rock
+cargo build --profile release-deck -p x2rock-deck
+./target/release-deck/x2rock-deck --demo                # no speakers needed
 ```
+
+`release-deck` is the workspace's release profile with full optimisation and unwinding: the
+deck recovers from a panicked task, which x2rock's own `release` (abort) would not allow.
 
 On Linux the build needs fontconfig, xkbcommon, wayland and udev headers
 (`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev` on Debian and Ubuntu).
@@ -110,7 +114,7 @@ A Windows build can be made from Linux with [cargo-xwin](https://github.com/rust
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-cargo xwin build --release --target x86_64-pc-windows-msvc
+cargo xwin build --profile release-deck -p x2rock-deck --target x86_64-pc-windows-msvc
 ```
 
 Music services with an account are the ones this machine's x2rock has linked

@@ -20,7 +20,8 @@ find it again. Begun 2026-10-29.
 
 ## Changes made to x2rock (the CLI) for this
 
-All on its `gui-library` branch, every test passing after each:
+All on its `gui-library` branch, every test passing after each, and on `main` since the deck
+moved into that repository (2026-10-30):
 
 1. A library target: the Sonos layer and its helpers, with the CLI, daemon, MPRIS and TUI
    left in the binary behind a default `cli` feature.
@@ -83,8 +84,8 @@ All on its `gui-library` branch, every test passing after each:
 
 - **Send a report's code is drawn at whole modules, quiet zone included** (`report::qr_pixels`),
   and the screen only scales it down. It decodes (`zbarimg`) from screenshots at 1280x800,
-  1920x1080 and 2560x1600. Its link goes to `rahga/x2rockdeck`'s issues, which do not exist
-  until that repository does.
+  1920x1080 and 2560x1600. Its link goes to `rahga/x2rock`'s issues, where
+  the deck now lives.
 - **A review of the first build found two paths that sent commands nobody asked for**, both
   fixed with tests that fail without the fix: a Left held from the pane went on to pick the
   room up and confirm Play everywhere with every speaker at its level, and Select on the Group

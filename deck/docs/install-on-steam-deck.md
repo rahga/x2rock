@@ -7,7 +7,7 @@ Mode it is a non-Steam game, full screen, driven with the Deck's own controls.
 
 1. Switch to **Desktop Mode** (Steam button, Power, Switch to Desktop).
 2. Download `x2rock-deck-<version>-linux-x86_64.tar.gz` from the
-   [releases page](https://github.com/rahga/x2rockdeck/releases) and unpack it (right-click
+   [releases page](https://github.com/rahga/x2rock/releases) and unpack it (right-click
    it in Dolphin, Extract, Extract archive here).
 3. Open the unpacked folder, right-click an empty space, **Open Terminal Here**, and run:
 
@@ -75,5 +75,5 @@ Run it from a terminal to see what it says:
 ```
 
 `X2ROCK_DECK_DEBUG=1` adds how the screen was fitted. Reports are welcome at
-[github.com/rahga/x2rockdeck/issues](https://github.com/rahga/x2rockdeck/issues); please
+[github.com/rahga/x2rock/issues](https://github.com/rahga/x2rock/issues); please
 don't post your email address there.

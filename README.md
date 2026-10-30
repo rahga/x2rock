@@ -929,3 +929,7 @@ documentation](https://sonos.svrooij.io/) for the UPnP side.
 [0BSD](LICENSE), Copyright (C) 2026 Richard Hoelscher. Use it for anything, no attribution
 required — and that extends to packaging: nobody needs to ask.
 
+The exception is [`deck/`](deck/), the Slint front end for the Steam Deck, Linux desktops and
+Windows: it is [GPL-3.0-only](deck/LICENSE), because it takes Slint under Slint's GPLv3 option.
+It uses this package as a library, which stays 0BSD.
+

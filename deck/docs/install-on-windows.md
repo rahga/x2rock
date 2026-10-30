@@ -4,7 +4,7 @@ x2rock runs on Windows 10 and 11, including tablets, with touch, a keyboard or a
 controller.
 
 1. Download `x2rock-deck-<version>-windows-x86_64.zip` from the
-   [releases page](https://github.com/rahga/x2rockdeck/releases) and unzip it anywhere.
+   [releases page](https://github.com/rahga/x2rock/releases) and unzip it anywhere.
 2. Run `x2rock-deck.exe`.
 
 **SmartScreen** may say "Windows protected your PC", since the build is not signed. Choose

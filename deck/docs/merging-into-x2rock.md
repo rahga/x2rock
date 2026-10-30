@@ -1,5 +1,23 @@
 # Moving x2rock-deck into the x2rock repository
 
+**Done on 2026-10-30.** The deck is `deck/` in `rahga/x2rock`, a member of its workspace, on
+`main`. This document was the plan, written before the move, and is kept as its record. Where
+the move differed from it:
+
+- **`rahga/x2rockdeck` was never on GitHub.** So there was no `X2ROCK_REF` to pin and no
+  repository to archive: steps 2 and 7 below did not apply. Its history is not in x2rock either.
+  The deck arrived as one commit, by the owner's choice, and the earlier history was kept outside
+  the repository as a git bundle.
+- **CI is a workflow of its own, `.github/workflows/deck.yml`,** rather than jobs added to
+  `ci.yml`. It has the same jobs, and its own `deck-v*` release trigger. `ci.yml`'s `cargo fmt
+  --check` covers `deck/`.
+- **Formatting:** both the library and the deck were run through stock rustfmt, each as its own
+  commit, before anything else changed.
+
+The rest of this page is the plan as it was written.
+
+---
+
 The minimal steps to make this package a Cargo workspace member of `rahga/x2rock`. **Nothing here
 has been merged.** Each step was checked on 2026-10-30, against deck `ae1ad6b` and x2rock
 `gui-library` `877ef86`, in a trial workspace built from `git archive` exports of both. That trial
