@@ -1,0 +1,113 @@
+# The deck (deck/): build and test on Linux and Windows; on a deck-v* tag,
+# publish both as a release. x2rock's own releases are v* tags and are not
+# this workflow's, so the two never answer one another's tags. Formatting is
+# ci.yml's `cargo fmt --check`, which covers the whole workspace.
+name: Deck
+
+on:
+  push:
+    branches: [main]
+    tags: ["deck-v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  linux:
+    # 22.04, not latest: the binary needs a glibc no newer than SteamOS's.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+      # A credential store of its own, so the token-refresh test runs here
+      # rather than skipping (it refuses to touch a store that is not temporary).
+      - name: Test
+        run: |
+          state=$(mktemp -d)
+          XDG_STATE_HOME=$state cargo test --locked -p x2rock-deck
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -p x2rock-deck -- -D warnings
+      - name: Build
+        run: cargo build --profile release-deck --locked -p x2rock-deck
+      - name: Screenshots of the demo
+        run: |
+          mkdir -p shots
+          bin=target/release-deck/x2rock-deck
+          $bin --screenshot shots/home-1080p.png --size 1920x1080
+          $bin --screenshot shots/home-deck.png --size 1280x800 --theme OCEAN
+          $bin --screenshot shots/settings.png --size 1280x800 --keys down,down,down,down,down,select
+          $bin --screenshot shots/group-panel.png --size 1920x1080 --keys down,right,down,right,right,right,select
+          $bin --screenshot shots/speakers.png --size 1920x1080 --keys down,right,down,down,down
+          $bin --screenshot shots/tv-pane.png --size 1280x800 --theme EMBER --keys down,down,down,down
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-screenshots
+          path: shots
+      - name: Package
+        run: |
+          version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
+          dir=x2rock-deck-$version-linux-x86_64
+          mkdir -p $dir
+          cp target/release-deck/x2rock-deck deck/dist/install.sh deck/dist/x2rock-deck.desktop deck/dist/x2rock-deck.png deck/LICENSE $dir/
+          cp deck/docs/install-on-steam-deck.md $dir/README.md
+          tar czf $dir.tar.gz $dir
+          echo "PACKAGE=$dir.tar.gz" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-linux
+          path: ${{ env.PACKAGE }}
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked -p x2rock-deck
+      - name: Build
+        run: cargo build --profile release-deck --locked -p x2rock-deck
+      - name: Package
+        shell: bash
+        run: |
+          version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
+          dir=x2rock-deck-$version-windows-x86_64
+          mkdir -p $dir
+          cp target/release-deck/x2rock-deck.exe deck/LICENSE $dir/
+          cp deck/docs/install-on-windows.md $dir/README.md
+          7z a $dir.zip $dir
+          echo "PACKAGE=$dir.zip" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-windows
+          path: ${{ env.PACKAGE }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/deck-v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+      - uses: softprops/action-gh-release@v2
+        with:
+          # Not "latest": that stays x2rock's CLI release.
+          make_latest: false
+          files: |
+            packages/deck-linux/*
+            packages/deck-windows/*
