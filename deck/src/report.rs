@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 /// Where reports go: a public repository, which the screen says beside the code.
-pub const ISSUES: &str = "https://github.com/rahga/x2rockdeck/issues/new";
+pub const ISSUES: &str = "https://github.com/rahga/x2rock/issues/new";
 
 /// Past this a QR code is too dense to scan off a screen across a room; byte
 /// mode at the lowest correction holds 2953, and a phone needs margin below that.
