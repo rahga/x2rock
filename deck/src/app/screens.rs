@@ -10,10 +10,10 @@ use x2rock::stations::Station;
 
 use super::{App, zone};
 use crate::household::{Command, Fetch, Fetched, QueueView};
-use crate::services::{Section, ServiceInfo};
-use x2rock::sonos::smapi::Item;
 use crate::model::{self, RoomInfo};
+use crate::services::{Section, ServiceInfo};
 use crate::{BarState, Glyph, HeaderButton, Icons, ListCell, ListRow, RowKind, Screen, SideItem};
+use x2rock::sonos::smapi::Item;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -24,7 +24,11 @@ pub enum Kind {
     Search,
     Services,
     /// A page of a service: its front page at `root`, else a container.
-    ServicePage { service: String, container: String, title: String },
+    ServicePage {
+        service: String,
+        container: String,
+        title: String,
+    },
     Alarms,
     About,
     PreferredServices,
@@ -51,7 +55,10 @@ pub enum RowAction {
     Station(Station),
     Retry,
     OpenService(ServiceInfo),
-    ServiceItem { service: String, item: Item },
+    ServiceItem {
+        service: String,
+        item: Item,
+    },
     Recent(String),
     LoadMore,
     Alarm(x2rock::sonos::upnp::Alarm),
@@ -105,18 +112,42 @@ pub struct ScreenPending {
 
 impl ScreenPending {
     pub fn record(&mut self, requests: &ScreenRequests) {
-        if requests.queue.is_some() { self.queue = true; }
-        if requests.favorites.is_some() { self.favorites = true; }
-        if requests.playlists.is_some() { self.playlists = true; }
-        if requests.history.is_some() { self.history = true; }
-        if requests.stations.is_some() { self.stations = true; }
-        if requests.services.is_some() { self.services = true; }
-        if requests.page.is_some() { self.page = true; }
-        if requests.search.is_some() { self.search = true; }
-        if requests.alarms.is_some() { self.alarms = true; }
-        if requests.alarm_sounds.is_some() { self.alarm_sounds = true; }
-        if requests.about.is_some() { self.about = true; }
-        if requests.sign_ins.is_some() { self.sign_ins = true; }
+        if requests.queue.is_some() {
+            self.queue = true;
+        }
+        if requests.favorites.is_some() {
+            self.favorites = true;
+        }
+        if requests.playlists.is_some() {
+            self.playlists = true;
+        }
+        if requests.history.is_some() {
+            self.history = true;
+        }
+        if requests.stations.is_some() {
+            self.stations = true;
+        }
+        if requests.services.is_some() {
+            self.services = true;
+        }
+        if requests.page.is_some() {
+            self.page = true;
+        }
+        if requests.search.is_some() {
+            self.search = true;
+        }
+        if requests.alarms.is_some() {
+            self.alarms = true;
+        }
+        if requests.alarm_sounds.is_some() {
+            self.alarm_sounds = true;
+        }
+        if requests.about.is_some() {
+            self.about = true;
+        }
+        if requests.sign_ins.is_some() {
+            self.sign_ins = true;
+        }
     }
 }
 
@@ -174,8 +205,23 @@ pub struct ScreenState {
 /// Radio's ways into the directory: Popular, then the genres.
 pub fn radio_categories() -> Vec<(String, Option<String>)> {
     let genres = [
-        "pop", "rock", "jazz", "classical", "news", "talk", "country", "electronic", "ambient", "chillout", "hip hop", "oldies",
-        "blues", "soul", "reggae", "latin", "metal",
+        "pop",
+        "rock",
+        "jazz",
+        "classical",
+        "news",
+        "talk",
+        "country",
+        "electronic",
+        "ambient",
+        "chillout",
+        "hip hop",
+        "oldies",
+        "blues",
+        "soul",
+        "reggae",
+        "latin",
+        "metal",
     ];
     let mut out = vec![("Popular".to_owned(), None)];
     for g in genres {
@@ -191,7 +237,14 @@ pub fn radio_categories() -> Vec<(String, Option<String>)> {
 /// The favourites in the groups the Sonos app lists them under, each in the
 /// household's own order (FavoriteGroups.kt).
 pub fn favorite_groups(items: &[Favorite]) -> Vec<(&'static str, Vec<&Favorite>)> {
-    const GROUPS: [&str; 6] = ["Favorite playlists", "Favorite albums", "Favorite artists", "Favorite songs", "Favorite stations", "Favorites"];
+    const GROUPS: [&str; 6] = [
+        "Favorite playlists",
+        "Favorite albums",
+        "Favorite artists",
+        "Favorite songs",
+        "Favorite stations",
+        "Favorites",
+    ];
     let group_of = |f: &Favorite| match f.kind().map(|k| k.to_uppercase()).as_deref() {
         Some("PLAYLIST") => "Favorite playlists",
         Some("ALBUM") => "Favorite albums",
@@ -202,7 +255,15 @@ pub fn favorite_groups(items: &[Favorite]) -> Vec<(&'static str, Vec<&Favorite>)
     };
     GROUPS
         .iter()
-        .map(|g| (*g, items.iter().filter(|f| group_of(f) == *g).collect::<Vec<_>>()))
+        .map(|g| {
+            (
+                *g,
+                items
+                    .iter()
+                    .filter(|f| group_of(f) == *g)
+                    .collect::<Vec<_>>(),
+            )
+        })
         .filter(|(_, v)| !v.is_empty())
         .collect()
 }
@@ -218,7 +279,11 @@ pub fn favorite_line(f: &Favorite) -> String {
         _ => None,
     });
     let whose = f.service().or(f.description.as_deref());
-    [kind, whose].into_iter().flatten().collect::<Vec<_>>().join(" \u{00B7} ")
+    [kind, whose]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{00B7} ")
 }
 
 #[derive(Default)]
@@ -231,38 +296,68 @@ pub(super) struct Rows {
 
 impl Rows {
     pub(super) fn heading(&mut self, text: &str) {
-        self.rows.push(ListRow { kind: RowKind::Heading, text: text.into(), ..Default::default() });
+        self.rows.push(ListRow {
+            kind: RowKind::Heading,
+            text: text.into(),
+            ..Default::default()
+        });
     }
     pub(super) fn message(&mut self, text: &str) {
-        self.rows.push(ListRow { kind: RowKind::Message, text: text.into(), ..Default::default() });
+        self.rows.push(ListRow {
+            kind: RowKind::Message,
+            text: text.into(),
+            ..Default::default()
+        });
     }
     pub(super) fn item(&mut self, mut cell: ListCell, action: RowAction) {
         cell.focus = self.actions.len() as i32;
         self.actions.push(action);
         self.cells.push((self.row, 0));
         self.row += 1;
-        self.rows.push(ListRow { kind: RowKind::Item, cells: ModelRc::new(VecModel::from(vec![cell])), ..Default::default() });
+        self.rows.push(ListRow {
+            kind: RowKind::Item,
+            cells: ModelRc::new(VecModel::from(vec![cell])),
+            ..Default::default()
+        });
     }
     /// A block of text that is a focus stop, so a long one scrolls on a remote.
     pub(super) fn block(&mut self, text: &str, action: RowAction) {
-        let cell = ListCell { focus: self.actions.len() as i32, ..Default::default() };
+        let cell = ListCell {
+            focus: self.actions.len() as i32,
+            ..Default::default()
+        };
         self.actions.push(action);
         self.cells.push((self.row, 0));
         self.row += 1;
-        self.rows.push(ListRow { kind: RowKind::Block, text: text.into(), cells: ModelRc::new(VecModel::from(vec![cell])), ..Default::default() });
+        self.rows.push(ListRow {
+            kind: RowKind::Block,
+            text: text.into(),
+            cells: ModelRc::new(VecModel::from(vec![cell])),
+            ..Default::default()
+        });
     }
     pub(super) fn button(&mut self, text: &str, action: RowAction) {
-        let cell = ListCell { focus: self.actions.len() as i32, ..Default::default() };
+        let cell = ListCell {
+            focus: self.actions.len() as i32,
+            ..Default::default()
+        };
         self.actions.push(action);
         self.cells.push((self.row, 0));
         self.row += 1;
-        self.rows.push(ListRow { kind: RowKind::Button, text: text.into(), cells: ModelRc::new(VecModel::from(vec![cell])), ..Default::default() });
+        self.rows.push(ListRow {
+            kind: RowKind::Button,
+            text: text.into(),
+            cells: ModelRc::new(VecModel::from(vec![cell])),
+            ..Default::default()
+        });
     }
 }
 
 impl App {
     pub(super) fn open_screen(&mut self, kind: Kind) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
         self.keyboard = None;
         let opener = self.focus;
         let mut screen = ScreenState {
@@ -307,7 +402,10 @@ impl App {
                 let id = self.next_request_id();
                 screen.requests.queue = Some(id);
                 self.stack.push(screen);
-                self.send(Command::Fetch(Fetch::Queue { id: Some(id), group: entry.group_id }));
+                self.send(Command::Fetch(Fetch::Queue {
+                    id: Some(id),
+                    group: entry.group_id,
+                }));
             }
             Kind::Browse => {
                 let fav_id = self.next_request_id();
@@ -325,7 +423,11 @@ impl App {
                 let id = self.next_request_id();
                 screen.requests.stations = Some(id);
                 self.stack.push(screen);
-                self.send(Command::Fetch(Fetch::Stations { id: Some(id), tag: None, country: None }));
+                self.send(Command::Fetch(Fetch::Stations {
+                    id: Some(id),
+                    tag: None,
+                    country: None,
+                }));
             }
             Kind::NowPlaying | Kind::Search => {
                 self.stack.push(screen);
@@ -337,12 +439,18 @@ impl App {
                 self.send(Command::Fetch(Fetch::Alarms { id: Some(id) }));
                 if self.handle.is_none() {
                     // The demo: no household to ask.
-                    self.fetched(Fetched::Alarms { id: Some(id), result: Ok((crate::demo::alarms(), "2026-10-29 06:30:00".into(), true)) });
+                    self.fetched(Fetched::Alarms {
+                        id: Some(id),
+                        result: Ok((crate::demo::alarms(), "2026-10-29 06:30:00".into(), true)),
+                    });
                     let sounds_id = self.next_request_id();
                     if let Some(s) = self.stack.last_mut() {
                         s.requests.alarm_sounds = Some(sounds_id);
                     }
-                    self.fetched(Fetched::AlarmSounds { id: Some(sounds_id), result: Ok(crate::demo::alarm_sounds()) });
+                    self.fetched(Fetched::AlarmSounds {
+                        id: Some(sounds_id),
+                        result: Ok(crate::demo::alarm_sounds()),
+                    });
                 }
             }
             Kind::About => {
@@ -361,8 +469,14 @@ impl App {
                 self.send(Command::Fetch(Fetch::SignIns { id: Some(sign_id) }));
                 if self.handle.is_none() {
                     // The demo: no household to ask.
-                    self.fetched(Fetched::About { id: Some(about_id), result: Ok(crate::demo::speakers()) });
-                    self.fetched(Fetched::SignIns { id: Some(sign_id), result: Some(Ok(3)) });
+                    self.fetched(Fetched::About {
+                        id: Some(about_id),
+                        result: Ok(crate::demo::speakers()),
+                    });
+                    self.fetched(Fetched::SignIns {
+                        id: Some(sign_id),
+                        result: Some(Ok(3)),
+                    });
                 }
             }
             Kind::Services | Kind::PreferredServices => {
@@ -371,12 +485,19 @@ impl App {
                 self.stack.push(screen);
                 self.send(Command::Fetch(Fetch::Services { id: Some(id) }));
             }
-            Kind::ServicePage { service, container, .. } => {
+            Kind::ServicePage {
+                service, container, ..
+            } => {
                 let id = self.next_request_id();
                 screen.requests.page = Some(id);
                 screen.page_loading = true;
                 self.stack.push(screen);
-                self.send(Command::Fetch(Fetch::ServicePage { id: Some(id), service, container, index: 0 }));
+                self.send(Command::Fetch(Fetch::ServicePage {
+                    id: Some(id),
+                    service,
+                    container,
+                    index: 0,
+                }));
             }
         }
         self.render_screen();
@@ -441,7 +562,11 @@ impl App {
             return;
         }
         if let Fetched::Resume { book, chapter } = fetched {
-            for screen in self.stack.iter_mut().filter(|s| s.book.as_ref().is_some_and(|b| b.id == book)) {
+            for screen in self
+                .stack
+                .iter_mut()
+                .filter(|s| s.book.as_ref().is_some_and(|b| b.id == book))
+            {
                 screen.resume_chapter.clone_from(&chapter);
             }
             return;
@@ -451,7 +576,10 @@ impl App {
             self.render_panel();
             return;
         }
-        if matches!(fetched, Fetched::RatingOffers { .. } | Fetched::Previous { .. }) {
+        if matches!(
+            fetched,
+            Fetched::RatingOffers { .. } | Fetched::Previous { .. }
+        ) {
             return;
         }
 
@@ -477,7 +605,9 @@ impl App {
             return;
         }
 
-        let Some(req_id) = fetched.request_id() else { return };
+        let Some(req_id) = fetched.request_id() else {
+            return;
+        };
         let at = self.stack.iter().rposition(|s| match &fetched {
             Fetched::Queue { group, .. } => s.requests.queue == Some(req_id) && s.group == *group,
             Fetched::Favorites { .. } => s.requests.favorites == Some(req_id),
@@ -505,13 +635,20 @@ impl App {
             Fetched::Queue { group, result, .. } if group == screen.group => {
                 // The first read opens on the track playing, as the TV app's Queue does.
                 let first = screen.queue.is_none();
-                let current = result.as_ref().ok().and_then(|q| q.current).map(|c| c as usize);
+                let current = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|q| q.current)
+                    .map(|c| c as usize);
                 screen.queue = Some(result);
                 screen.requests.queue = None;
-                if first && on_top && self.focus.0 == zone::LIST
-                    && let Some(at) = current {
-                        self.focus.1 = at.saturating_sub(1) as i32;
-                    }
+                if first
+                    && on_top
+                    && self.focus.0 == zone::LIST
+                    && let Some(at) = current
+                {
+                    self.focus.1 = at.saturating_sub(1) as i32;
+                }
             }
             Fetched::Favorites { result, .. } => {
                 if let Ok(list) = &result {
@@ -548,16 +685,32 @@ impl App {
                 screen.sign_ins = Some(result);
                 screen.requests.sign_ins = None;
             }
-            Fetched::SearchSection { term, section, .. } if screen.searched.as_ref() == Some(&term) => {
+            Fetched::SearchSection { term, section, .. }
+                if screen.searched.as_ref() == Some(&term) =>
+            {
                 // A service with nothing to show takes no room; one that failed is named.
-                if let Some(pos) = screen.sections.iter().position(|s| s.service.id == section.service.id) {
+                if let Some(pos) = screen
+                    .sections
+                    .iter()
+                    .position(|s| s.service.id == section.service.id)
+                {
                     screen.sections[pos] = section;
                 } else {
                     screen.sections.push(section);
                 }
                 // Preferred services lead, then signed-in ones, then the rest.
                 let preferred = &self.prefs.preferred_services;
-                let order = |s: &Section| (s.result.as_ref().map(|r| r.is_empty()).unwrap_or(true), preferred.iter().position(|p| *p == s.service.id).unwrap_or(usize::MAX), !s.service.linked, s.service.name.to_lowercase());
+                let order = |s: &Section| {
+                    (
+                        s.result.as_ref().map(|r| r.is_empty()).unwrap_or(true),
+                        preferred
+                            .iter()
+                            .position(|p| *p == s.service.id)
+                            .unwrap_or(usize::MAX),
+                        !s.service.linked,
+                        s.service.name.to_lowercase(),
+                    )
+                };
                 screen.sections.sort_by_key(order);
             }
             Fetched::SearchDone { term, .. } => {
@@ -566,37 +719,51 @@ impl App {
                 }
                 screen.requests.search = None;
             }
-            Fetched::ServicePage { service, container, index, result, .. } => {
-                if let Kind::ServicePage { service: s2, container: c2, .. } = &screen.kind
-                    && *s2 == service && *c2 == container {
-                        match result {
-                            Ok((items, total)) => {
-                                if index == 0 && screen.page.is_empty() {
-                                    screen.page = items;
-                                    screen.page_total = total;
-                                    screen.page_error = None;
-                                    screen.page_loading = false;
-                                    screen.requests.page = None;
-                                } else if index != 0 && index == screen.page.len() as u32 {
-                                    screen.page.extend(items);
-                                    screen.page_total = total;
-                                    screen.page_error = None;
-                                    screen.page_loading = false;
-                                    screen.requests.page = None;
-                                }
-                            }
-                            Err(e) => {
-                                screen.page_error = Some(e);
+            Fetched::ServicePage {
+                service,
+                container,
+                index,
+                result,
+                ..
+            } => {
+                if let Kind::ServicePage {
+                    service: s2,
+                    container: c2,
+                    ..
+                } = &screen.kind
+                    && *s2 == service
+                    && *c2 == container
+                {
+                    match result {
+                        Ok((items, total)) => {
+                            if index == 0 && screen.page.is_empty() {
+                                screen.page = items;
+                                screen.page_total = total;
+                                screen.page_error = None;
+                                screen.page_loading = false;
+                                screen.requests.page = None;
+                            } else if index != 0 && index == screen.page.len() as u32 {
+                                screen.page.extend(items);
+                                screen.page_total = total;
+                                screen.page_error = None;
                                 screen.page_loading = false;
                                 screen.requests.page = None;
                             }
                         }
+                        Err(e) => {
+                            screen.page_error = Some(e);
+                            screen.page_loading = false;
+                            screen.requests.page = None;
+                        }
                     }
+                }
             }
             Fetched::Stations { fetch, result, .. } => {
                 let categories = radio_categories();
                 let wanted = match &fetch {
-                    Fetch::Stations { tag, .. } => categories.get(screen.category).map(|c| &c.1) == Some(tag),
+                    Fetch::Stations { tag, .. } => {
+                        categories.get(screen.category).map(|c| &c.1) == Some(tag)
+                    }
                     _ => false,
                 };
                 if wanted {
@@ -614,11 +781,23 @@ impl App {
         let live = self.live(group);
         let info = RoomInfo::from_live(&live);
         // Not for a television input: a play key for it means nothing.
-        let title = info.track_name.clone().or(info.stream_info.clone()).or(info.source.clone());
-        let Some(title) = title.filter(|_| !info.on_tv_input) else { return BarState::default() };
-        let subtitle = if info.track_name.is_some() { info.artist.clone() } else { info.source.clone().filter(|s| *s != title) };
+        let title = info
+            .track_name
+            .clone()
+            .or(info.stream_info.clone())
+            .or(info.source.clone());
+        let Some(title) = title.filter(|_| !info.on_tv_input) else {
+            return BarState::default();
+        };
+        let subtitle = if info.track_name.is_some() {
+            info.artist.clone()
+        } else {
+            info.source.clone().filter(|s| *s != title)
+        };
         let art = self.art_image(info.art_url.as_deref());
-        let Some(ui) = self.ui.upgrade() else { return BarState::default() };
+        let Some(ui) = self.ui.upgrade() else {
+            return BarState::default();
+        };
         let icons = ui.global::<Icons>();
         BarState {
             shown: true,
@@ -627,7 +806,11 @@ impl App {
             has_art: art.is_some(),
             art: art.unwrap_or_default(),
             play_icon: if live.playing() {
-                if live.actions.can_pause { icons.get_pause() } else { icons.get_stop() }
+                if live.actions.can_pause {
+                    icons.get_pause()
+                } else {
+                    icons.get_stop()
+                }
             } else {
                 icons.get_play_arrow()
             },
@@ -648,14 +831,24 @@ impl App {
             ui.set_screen(Screen::Home);
             return;
         };
-        let group = self.stack.last().map(|s| s.group.clone()).unwrap_or_default();
+        let group = self
+            .stack
+            .last()
+            .map(|s| s.group.clone())
+            .unwrap_or_default();
         let room = self.rooms.iter().find(|r| r.group_id == group).cloned();
-        let household_screen = matches!(kind, Kind::Alarms | Kind::About | Kind::PreferredServices | Kind::Report);
+        let household_screen = matches!(
+            kind,
+            Kind::Alarms | Kind::About | Kind::PreferredServices | Kind::Report
+        );
         let room_name = match self.alarm_draft().and_then(|d| d.room.as_ref()) {
             // The alarm being made names its room, as every screen opened from one does.
             Some((_, name)) if kind == Kind::Alarms => name.clone(),
             _ if household_screen => String::new(),
-            _ => room.as_ref().map(|r| self.room_label(r)).unwrap_or_default(),
+            _ => room
+                .as_ref()
+                .map(|r| self.room_label(r))
+                .unwrap_or_default(),
         };
         if kind == Kind::NowPlaying {
             self.models.list_rows.set(vec![]);
@@ -663,8 +856,13 @@ impl App {
             ui.set_screen(Screen::NowPlaying);
             ui.set_clock(super::panels::clock_time(chrono::Local::now()).into());
             // A step of drift a minute, round a small square.
-            const DRIFT: [(f32, f32); 6] = [(0., 0.), (6., 0.), (6., 6.), (0., 6.), (-6., 6.), (-6., 0.)];
-            let minutes = self.stack.last().map(|s| s.opened_at.elapsed().as_secs() / 60).unwrap_or(0) as usize;
+            const DRIFT: [(f32, f32); 6] =
+                [(0., 0.), (6., 0.), (6., 6.), (0., 6.), (-6., 6.), (-6., 0.)];
+            let minutes = self
+                .stack
+                .last()
+                .map(|s| s.opened_at.elapsed().as_secs() / 60)
+                .unwrap_or(0) as usize;
             let (dx, dy) = DRIFT[minutes % DRIFT.len()];
             ui.set_drift_x(dx);
             ui.set_drift_y(dy);
@@ -683,14 +881,26 @@ impl App {
                     "Queue",
                     vec![
                         (HeaderAction::SaveQueue, None, "Save as playlist"),
-                        (HeaderAction::ClearQueue, None, if armed { "Press again to clear" } else { "Clear" }),
+                        (
+                            HeaderAction::ClearQueue,
+                            None,
+                            if armed {
+                                "Press again to clear"
+                            } else {
+                                "Clear"
+                            },
+                        ),
                     ],
                 )
             }
             Kind::Browse => (
                 "Browse",
                 vec![
-                    (HeaderAction::MusicServices, Some(icons.get_library_music()), "Music Services"),
+                    (
+                        HeaderAction::MusicServices,
+                        Some(icons.get_library_music()),
+                        "Music Services",
+                    ),
                     (HeaderAction::Radio, Some(icons.get_radio()), "Radio"),
                 ],
             ),
@@ -704,8 +914,18 @@ impl App {
             Kind::ServicePage { .. } => (page_title.as_str(), vec![]),
             Kind::NowPlaying => unreachable!(),
         };
-        let screen_snapshot = self.stack.last().map(|s| (s.queue.clone(), s.favorites.clone(), s.playlists.clone(), s.stations.clone(), s.category));
-        let Some((queue, favorites, playlists, stations, category)) = screen_snapshot else { return };
+        let screen_snapshot = self.stack.last().map(|s| {
+            (
+                s.queue.clone(),
+                s.favorites.clone(),
+                s.playlists.clone(),
+                s.stations.clone(),
+                s.category,
+            )
+        });
+        let Some((queue, favorites, playlists, stations, category)) = screen_snapshot else {
+            return;
+        };
         let mut loading = false;
         // Send a report's link, drawn as a code beside the list.
         let mut aside: Option<String> = None;
@@ -721,7 +941,11 @@ impl App {
                 Some(Ok(q)) => {
                     for item in &q.items {
                         let art = self.thumbnail(item.art_url.as_deref());
-                        let subtitle = [item.artist.as_deref(), item.album.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" \u{2022} ");
+                        let subtitle = [item.artist.as_deref(), item.album.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" \u{2022} ");
                         rows.item(
                             ListCell {
                                 title: item.title.as_str().into(),
@@ -736,7 +960,10 @@ impl App {
                         );
                     }
                     if q.total as usize > q.items.len() {
-                        rows.message(&format!("{} more not shown", q.total as usize - q.items.len()));
+                        rows.message(&format!(
+                            "{} more not shown",
+                            q.total as usize - q.items.len()
+                        ));
                     }
                 }
             },
@@ -750,8 +977,28 @@ impl App {
                 if !self.prefs.presets.is_empty() {
                     rows.heading("Presets");
                     for preset in self.prefs.presets.clone() {
-                        let detail = format!("{} speaker{}{}", preset.player_ids.len(), if preset.player_ids.len() == 1 { "" } else { "s" }, if preset.favorite_id.is_some() { " \u{00B7} a favourite" } else { "" });
-                        rows.item(ListCell { title: preset.name.as_str().into(), subtitle: detail.into(), ..Default::default() }, RowAction::Preset(preset));
+                        let detail = format!(
+                            "{} speaker{}{}",
+                            preset.player_ids.len(),
+                            if preset.player_ids.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            },
+                            if preset.favorite_id.is_some() {
+                                " \u{00B7} a favourite"
+                            } else {
+                                ""
+                            }
+                        );
+                        rows.item(
+                            ListCell {
+                                title: preset.name.as_str().into(),
+                                subtitle: detail.into(),
+                                ..Default::default()
+                            },
+                            RowAction::Preset(preset),
+                        );
                     }
                 }
                 match &favorites {
@@ -781,43 +1028,64 @@ impl App {
                     }
                 }
                 if let Some(Ok(lists)) = &playlists
-                    && !lists.is_empty() {
-                        rows.heading("Playlists");
-                        for p in lists {
-                            let tracks = p.track_count.map(|n| if n == 1 { "1 track".to_owned() } else { format!("{n} tracks") }).unwrap_or_default();
-                            rows.item(
-                                ListCell { title: p.name.as_str().into(), subtitle: tracks.into(), ..Default::default() },
-                                RowAction::Playlist(p.id.clone(), p.name.clone()),
-                            );
-                        }
+                    && !lists.is_empty()
+                {
+                    rows.heading("Playlists");
+                    for p in lists {
+                        let tracks = p
+                            .track_count
+                            .map(|n| {
+                                if n == 1 {
+                                    "1 track".to_owned()
+                                } else {
+                                    format!("{n} tracks")
+                                }
+                            })
+                            .unwrap_or_default();
+                        rows.item(
+                            ListCell {
+                                title: p.name.as_str().into(),
+                                subtitle: tracks.into(),
+                                ..Default::default()
+                            },
+                            RowAction::Playlist(p.id.clone(), p.name.clone()),
+                        );
                     }
+                }
                 let history = self.stack.last().and_then(|s| s.history.clone());
                 if let Some(Ok(items)) = history
-                    && !items.is_empty() {
-                        rows.heading("Recently played");
-                        for item in items.into_iter().take(20) {
-                            let art = self.thumbnail(item.art_url());
-                            let kind = match item.kind.to_lowercase().as_str() {
-                                "album" => "Album",
-                                "playlist" => "Playlist",
-                                "stream" | "program" => "Radio",
-                                "track" => "Track",
-                                _ => "",
-                            };
-                            rows.item(
-                                ListCell {
-                                    title: item.name.as_str().into(),
-                                    subtitle: kind.into(),
-                                    has_art: art.is_some(),
-                                    art: art.unwrap_or_default(),
-                                    glyph: if kind == "Radio" { Glyph::Radio } else { Glyph::None },
-                                    ..Default::default()
+                    && !items.is_empty()
+                {
+                    rows.heading("Recently played");
+                    for item in items.into_iter().take(20) {
+                        let art = self.thumbnail(item.art_url());
+                        let kind = match item.kind.to_lowercase().as_str() {
+                            "album" => "Album",
+                            "playlist" => "Playlist",
+                            "stream" | "program" => "Radio",
+                            "track" => "Track",
+                            _ => "",
+                        };
+                        rows.item(
+                            ListCell {
+                                title: item.name.as_str().into(),
+                                subtitle: kind.into(),
+                                has_art: art.is_some(),
+                                art: art.unwrap_or_default(),
+                                glyph: if kind == "Radio" {
+                                    Glyph::Radio
+                                } else {
+                                    Glyph::None
                                 },
-                                RowAction::Replay(item),
-                            );
-                        }
+                                ..Default::default()
+                            },
+                            RowAction::Replay(item),
+                        );
                     }
-                if matches!(&favorites, Some(Ok(f)) if f.is_empty()) && matches!(&playlists, Some(Ok(p)) if p.is_empty()) {
+                }
+                if matches!(&favorites, Some(Ok(f)) if f.is_empty())
+                    && matches!(&playlists, Some(Ok(p)) if p.is_empty())
+                {
                     rows.message("This system has no favourites or playlists yet.");
                 }
             }
@@ -831,14 +1099,30 @@ impl App {
                 Some(Ok(list)) if list.is_empty() => rows.message("No stations"),
                 Some(Ok(list)) => {
                     for station in list {
-                        let mut tags: Vec<&str> = station.tags.split(',').map(str::trim).filter(|t| !t.is_empty()).take(3).collect();
+                        let mut tags: Vec<&str> = station
+                            .tags
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .take(3)
+                            .collect();
                         let format = station.format();
                         if format != "\u{2014}" {
                             tags.insert(0, &format);
                         }
-                        let subtitle = [station.country.as_str()].into_iter().filter(|c| !c.is_empty()).chain(tags).collect::<Vec<_>>().join(" \u{00B7} ");
+                        let subtitle = [station.country.as_str()]
+                            .into_iter()
+                            .filter(|c| !c.is_empty())
+                            .chain(tags)
+                            .collect::<Vec<_>>()
+                            .join(" \u{00B7} ");
                         rows.item(
-                            ListCell { title: station.name.trim().into(), subtitle: subtitle.into(), glyph: Glyph::Radio, ..Default::default() },
+                            ListCell {
+                                title: station.name.trim().into(),
+                                subtitle: subtitle.into(),
+                                glyph: Glyph::Radio,
+                                ..Default::default()
+                            },
                             RowAction::Station(station.clone()),
                         );
                     }
@@ -847,7 +1131,9 @@ impl App {
             Kind::Search => self.search_rows(&mut rows),
             Kind::Alarms if self.alarm_draft().is_some() => {
                 let screen = self.stack.last();
-                let draft = screen.and_then(|s| s.alarm_draft.clone()).unwrap_or_default();
+                let draft = screen
+                    .and_then(|s| s.alarm_draft.clone())
+                    .unwrap_or_default();
                 let sounds = screen.and_then(|s| s.alarm_sounds.clone());
                 self.alarm_rows(&mut rows, &draft, sounds.as_ref());
             }
@@ -861,14 +1147,22 @@ impl App {
                     }
                     Some(Ok((alarms, clock, zoned))) => {
                         // Times are the household's clock, never converted.
-                        let now = clock.get(11..16).or(clock.get(0..5)).unwrap_or(&clock).to_owned();
+                        let now = clock
+                            .get(11..16)
+                            .or(clock.get(0..5))
+                            .unwrap_or(&clock)
+                            .to_owned();
                         rows.message(&if zoned {
                             format!("Times are this system's clock. It's {now} there now. Select turns one on or off; a hold or Menu changes or removes it.")
                         } else {
                             format!("Times are this system's clock, which has no timezone set and so runs UTC. It's {now} there now. Select turns one on or off; a hold or Menu changes or removes it.")
                         });
                         rows.item(
-                            ListCell { title: "New alarm".into(), subtitle: "A room, a time, how often, and what it plays".into(), ..Default::default() },
+                            ListCell {
+                                title: "New alarm".into(),
+                                subtitle: "A room, a time, how often, and what it plays".into(),
+                                ..Default::default()
+                            },
                             RowAction::AlarmEditor(super::alarms::AlarmRow::New),
                         );
                         if alarms.is_empty() {
@@ -879,10 +1173,28 @@ impl App {
                         for alarm in alarms {
                             let room = self.player_name(&alarm.room_uuid);
                             let time = alarm.start.get(0..5).unwrap_or(&alarm.start).to_owned();
-                            let subtitle = [recurrence_words(&alarm.recurrence), alarm_sound(&alarm), format!("Volume {}", alarm.volume), if alarm.enabled { "On".into() } else { "Off".into() }].join(" \u{00B7} ");
+                            let subtitle = [
+                                recurrence_words(&alarm.recurrence),
+                                alarm_sound(&alarm),
+                                format!("Volume {}", alarm.volume),
+                                if alarm.enabled {
+                                    "On".into()
+                                } else {
+                                    "Off".into()
+                                },
+                            ]
+                            .join(" \u{00B7} ");
                             rows.item(
                                 ListCell {
-                                    title: format!("{time} \u{00B7} {}", if room.is_empty() { "A room not here" } else { &room }).into(),
+                                    title: format!(
+                                        "{time} \u{00B7} {}",
+                                        if room.is_empty() {
+                                            "A room not here"
+                                        } else {
+                                            &room
+                                        }
+                                    )
+                                    .into(),
                                     subtitle: subtitle.into(),
                                     active: alarm.enabled,
                                     ..Default::default()
@@ -905,7 +1217,15 @@ impl App {
                         rows.message("Preferred services lead in Search and in Music Services, in the order chosen. Select one to add it or take it out.");
                         let preferred = self.prefs.preferred_services.clone();
                         let mut list = list;
-                        list.sort_by_key(|s| (preferred.iter().position(|p| *p == s.id).unwrap_or(usize::MAX), s.name.to_lowercase()));
+                        list.sort_by_key(|s| {
+                            (
+                                preferred
+                                    .iter()
+                                    .position(|p| *p == s.id)
+                                    .unwrap_or(usize::MAX),
+                                s.name.to_lowercase(),
+                            )
+                        });
                         for service in list {
                             let rank = preferred.iter().position(|p| *p == service.id);
                             let logo = crate::logos::logo_url(&service.name);
@@ -913,7 +1233,10 @@ impl App {
                             rows.item(
                                 ListCell {
                                     title: service.name.as_str().into(),
-                                    subtitle: rank.map(|r| format!("Preferred \u{00B7} {}", r + 1)).unwrap_or_default().into(),
+                                    subtitle: rank
+                                        .map(|r| format!("Preferred \u{00B7} {}", r + 1))
+                                        .unwrap_or_default()
+                                        .into(),
                                     has_art: art.is_some(),
                                     art: art.unwrap_or_default(),
                                     active: rank.is_some(),
@@ -941,24 +1264,49 @@ impl App {
                             n => format!("{n} speakers have an update waiting. Updates are applied in the Sonos app."),
                         });
                         for speaker in list {
-                            let line = [speaker.model.as_str(), &format!("Version {}", speaker.version), if speaker.update_waiting { "Update waiting" } else { "" }]
-                                .into_iter()
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                                .join(" \u{00B7} ");
-                            rows.item(ListCell { title: speaker.room.as_str().into(), subtitle: line.into(), active: speaker.update_waiting, ..Default::default() }, RowAction::Speaker);
+                            let line = [
+                                speaker.model.as_str(),
+                                &format!("Version {}", speaker.version),
+                                if speaker.update_waiting {
+                                    "Update waiting"
+                                } else {
+                                    ""
+                                },
+                            ]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" \u{00B7} ");
+                            rows.item(
+                                ListCell {
+                                    title: speaker.room.as_str().into(),
+                                    subtitle: line.into(),
+                                    active: speaker.update_waiting,
+                                    ..Default::default()
+                                },
+                                RowAction::Speaker,
+                            );
                         }
                     }
                 }
             }
             Kind::Report => {
-                let (about, sign_ins) = self.stack.last().map(|s| (s.about.clone(), s.sign_ins.clone())).unwrap_or_default();
+                let (about, sign_ins) = self
+                    .stack
+                    .last()
+                    .map(|s| (s.about.clone(), s.sign_ins.clone()))
+                    .unwrap_or_default();
                 match (about, sign_ins) {
                     (Some(about), Some(sign_ins)) => {
                         // A speaker that does not answer is still listed, as About lists it.
-                        let report = crate::report::report(&self.report_input(about.unwrap_or_default(), sign_ins));
+                        let report = crate::report::report(
+                            &self.report_input(about.unwrap_or_default(), sign_ins),
+                        );
                         for block in report.text.split("\n\n").filter(|b| !b.trim().is_empty()) {
-                            rows.block(block.trim().replace("**", "").as_str(), RowAction::ReportBlock);
+                            rows.block(
+                                block.trim().replace("**", "").as_str(),
+                                RowAction::ReportBlock,
+                            );
                         }
                         aside = Some(report.url);
                     }
@@ -976,14 +1324,24 @@ impl App {
                     Some(Ok(list)) => {
                         let preferred = self.prefs.preferred_services.clone();
                         let mut list = list;
-                        list.sort_by_key(|s| preferred.iter().position(|p| *p == s.id).unwrap_or(usize::MAX));
+                        list.sort_by_key(|s| {
+                            preferred
+                                .iter()
+                                .position(|p| *p == s.id)
+                                .unwrap_or(usize::MAX)
+                        });
                         for service in list {
                             let logo = crate::logos::logo_url(&service.name);
                             let art = self.thumbnail(logo.as_deref());
                             rows.item(
                                 ListCell {
                                     title: service.name.as_str().into(),
-                                    subtitle: if service.linked { "Signed in" } else { "No account needed" }.into(),
+                                    subtitle: if service.linked {
+                                        "Signed in"
+                                    } else {
+                                        "No account needed"
+                                    }
+                                    .into(),
                                     has_art: art.is_some(),
                                     art: art.unwrap_or_default(),
                                     ..Default::default()
@@ -999,7 +1357,14 @@ impl App {
                 let (items, total, error, page_loading) = self
                     .stack
                     .last()
-                    .map(|s| (s.page.clone(), s.page_total, s.page_error.clone(), s.page_loading))
+                    .map(|s| {
+                        (
+                            s.page.clone(),
+                            s.page_total,
+                            s.page_error.clone(),
+                            s.page_loading,
+                        )
+                    })
                     .unwrap_or_default();
                 loading = page_loading && items.is_empty();
                 if let Some(e) = error {
@@ -1008,15 +1373,25 @@ impl App {
                 } else if items.is_empty() && !page_loading {
                     rows.message("Nothing here");
                 }
-                let (book, resume) = self.stack.last().map(|s| (s.book.clone(), s.resume_chapter.clone())).unwrap_or_default();
+                let (book, resume) = self
+                    .stack
+                    .last()
+                    .map(|s| (s.book.clone(), s.resume_chapter.clone()))
+                    .unwrap_or_default();
                 for item in &items {
                     let art = self.thumbnail(item.art_url.as_deref());
                     // A book's chapter it resumes at carries on from the place, by
                     // playing the book; any other plays from its own start.
                     let resumes = resume.as_deref() == Some(item.id.as_str());
                     let action = match (&book, resumes) {
-                        (Some(book), true) => RowAction::ServiceItem { service: service.clone(), item: book.clone() },
-                        _ => RowAction::ServiceItem { service: service.clone(), item: item.clone() },
+                        (Some(book), true) => RowAction::ServiceItem {
+                            service: service.clone(),
+                            item: book.clone(),
+                        },
+                        _ => RowAction::ServiceItem {
+                            service: service.clone(),
+                            item: item.clone(),
+                        },
                     };
                     rows.item(
                         ListCell {
@@ -1024,8 +1399,18 @@ impl App {
                             subtitle: item_line(item).into(),
                             has_art: art.is_some(),
                             art: art.unwrap_or_default(),
-                            glyph: if item.item_type.eq_ignore_ascii_case("stream") || x2rock::sonos::smapi::is_program(&item.item_type) { Glyph::Radio } else { Glyph::None },
-                            status: if resumes { "Resumes at".into() } else { Default::default() },
+                            glyph: if item.item_type.eq_ignore_ascii_case("stream")
+                                || x2rock::sonos::smapi::is_program(&item.item_type)
+                            {
+                                Glyph::Radio
+                            } else {
+                                Glyph::None
+                            },
+                            status: if resumes {
+                                "Resumes at".into()
+                            } else {
+                                Default::default()
+                            },
                             active: resumes,
                             ..Default::default()
                         },
@@ -1042,30 +1427,50 @@ impl App {
         let side: Vec<SideItem> = if kind == Kind::Radio {
             // A stream's own address, one press up from Popular: the directory is
             // the cheap path on a remote, and typing the exception.
-            std::iter::once(SideItem { label: "Play a URL".into(), selected: url_mode })
-                .chain(radio_categories().into_iter().enumerate().map(|(i, (label, _))| SideItem { label: label.into(), selected: !url_mode && i == category }))
-                .collect()
+            std::iter::once(SideItem {
+                label: "Play a URL".into(),
+                selected: url_mode,
+            })
+            .chain(
+                radio_categories()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (label, _))| SideItem {
+                        label: label.into(),
+                        selected: !url_mode && i == category,
+                    }),
+            )
+            .collect()
         } else {
             vec![]
         };
         let header_buttons: Vec<HeaderButton> = header
             .iter()
-            .map(|(_, icon, label)| HeaderButton { has_icon: icon.is_some(), icon: icon.clone().unwrap_or_default(), label: (*label).into() })
+            .map(|(_, icon, label)| HeaderButton {
+                has_icon: icon.is_some(),
+                icon: icon.clone().unwrap_or_default(),
+                label: (*label).into(),
+            })
             .collect();
         let bar = self.bar_state(&group);
         let focus = self.focus;
         if let Some(screen) = self.stack.last_mut() {
-            screen.header = std::iter::once(HeaderAction::Back).chain(header.into_iter().map(|(a, _, _)| a)).collect();
+            screen.header = std::iter::once(HeaderAction::Back)
+                .chain(header.into_iter().map(|(a, _, _)| a))
+                .collect();
             // Focus follows its row, not its index, when rows move under it: a
             // search section answering sorts in above the one being read.
             if focus.0 == zone::LIST
-                && let Some(at) = follow_row(&screen.actions, &rows.actions, focus.1) {
-                    self.focus.1 = at;
-                }
+                && let Some(at) = follow_row(&screen.actions, &rows.actions, focus.1)
+            {
+                self.focus.1 = at;
+            }
             // A book's chapters open on the one it resumes at, once it is known.
             // Only while focus is in the list: a viewer gone up to the header stays there.
             if let (Some(book), false, zone::LIST) = (&screen.book, screen.resume_placed, focus.0) {
-                let at = rows.actions.iter().position(|a| matches!(a, RowAction::ServiceItem { item, .. } if item.id == book.id));
+                let at = rows.actions.iter().position(
+                    |a| matches!(a, RowAction::ServiceItem { item, .. } if item.id == book.id),
+                );
                 if let Some(at) = at {
                     screen.resume_placed = true;
                     self.focus = (zone::LIST, at as i32);
@@ -1086,14 +1491,19 @@ impl App {
             let screen = self.stack.last_mut()?;
             if screen.report_qr.as_ref().is_none_or(|(u, _)| *u != url) {
                 let (side, pixels) = crate::report::qr_pixels(&url)?;
-                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels, side, side);
+                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &pixels, side, side,
+                );
                 screen.report_qr = Some((url, slint::Image::from_rgba8(buffer)));
             }
             screen.report_qr.as_ref().map(|(_, image)| image.clone())
         });
         ui.set_list_aside_shown(qr.is_some());
         ui.set_list_aside_image(qr.unwrap_or_default());
-        ui.set_pin_shown(matches!(kind, Kind::Browse | Kind::Radio | Kind::Search | Kind::Services | Kind::ServicePage { .. }));
+        ui.set_pin_shown(matches!(
+            kind,
+            Kind::Browse | Kind::Radio | Kind::Search | Kind::Services | Kind::ServicePage { .. }
+        ));
         self.render_search_bar(&ui, &kind);
         ui.set_pin_held(self.prefs.after_playing.as_deref() == Some("stay"));
         ui.set_bar(bar);
@@ -1105,14 +1515,35 @@ impl App {
     }
 
     pub(super) fn screen_zone_len(&self, z: i32) -> i32 {
-        let Some(screen) = self.stack.last() else { return 0 };
+        let Some(screen) = self.stack.last() else {
+            return 0;
+        };
         (match z {
             zone::HEADER => screen.header.len(),
             zone::LIST => screen.actions.len(),
             zone::BAR => usize::from(self.ui.upgrade().is_some_and(|ui| ui.get_bar().shown)),
-            zone::PIN => usize::from(matches!(screen.kind, Kind::Browse | Kind::Radio | Kind::Search | Kind::Services | Kind::ServicePage { .. })),
-            zone::FIELD => if screen.kind == Kind::Search || (screen.kind == Kind::Radio && screen.url_mode) { 2 } else { 0 },
-            zone::SIDE => if screen.kind == Kind::Radio { radio_categories().len() + 1 } else { 0 },
+            zone::PIN => usize::from(matches!(
+                screen.kind,
+                Kind::Browse
+                    | Kind::Radio
+                    | Kind::Search
+                    | Kind::Services
+                    | Kind::ServicePage { .. }
+            )),
+            zone::FIELD => {
+                if screen.kind == Kind::Search || (screen.kind == Kind::Radio && screen.url_mode) {
+                    2
+                } else {
+                    0
+                }
+            }
+            zone::SIDE => {
+                if screen.kind == Kind::Radio {
+                    radio_categories().len() + 1
+                } else {
+                    0
+                }
+            }
             zone::FULL => 1,
             _ => 0,
         }) as i32
@@ -1128,13 +1559,19 @@ impl App {
         let list_len = self.screen_zone_len(zone::LIST);
         match (z, action) {
             (zone::HEADER, Action::Left) if i > 0 => self.focus.1 = i - 1,
-            (zone::HEADER, Action::Right) if i + 1 < self.screen_zone_len(zone::HEADER) => self.focus.1 = i + 1,
+            (zone::HEADER, Action::Right) if i + 1 < self.screen_zone_len(zone::HEADER) => {
+                self.focus.1 = i + 1
+            }
             (zone::HEADER, Action::Right) if has_pin => self.set_focus(zone::PIN, 0),
             (zone::HEADER | zone::PIN, Action::Down) => {
                 if self.screen_zone_len(zone::FIELD) > 0 {
                     self.set_focus(zone::FIELD, 0);
                 } else if has_side {
-                    let at = self.stack.last().map(|s| if s.url_mode { 0 } else { s.category + 1 }).unwrap_or(1) as i32;
+                    let at = self
+                        .stack
+                        .last()
+                        .map(|s| if s.url_mode { 0 } else { s.category + 1 })
+                        .unwrap_or(1) as i32;
                     self.set_focus(zone::SIDE, at);
                 } else if list_len > 0 {
                     self.set_focus(zone::LIST, 0);
@@ -1152,19 +1589,35 @@ impl App {
             (zone::FIELD, Action::Down) if list_len > 0 => self.set_focus(zone::LIST, 0),
             (zone::SIDE, Action::Up) if i > 0 => self.focus.1 = i - 1,
             (zone::SIDE, Action::Up) => self.set_focus(zone::HEADER, 0),
-            (zone::SIDE, Action::Down) if i + 1 < self.screen_zone_len(zone::SIDE) => self.focus.1 = i + 1,
+            (zone::SIDE, Action::Down) if i + 1 < self.screen_zone_len(zone::SIDE) => {
+                self.focus.1 = i + 1
+            }
             (zone::SIDE, Action::Right) if list_len > 0 => self.set_focus(zone::LIST, 0),
-            (zone::LIST, _) if self.stack.last().and_then(|s| s.actions.get(i.max(0) as usize)).cloned().is_some_and(|row| self.alarm_key(&row, action)) => {}
+            (zone::LIST, _)
+                if self
+                    .stack
+                    .last()
+                    .and_then(|s| s.actions.get(i.max(0) as usize))
+                    .cloned()
+                    .is_some_and(|row| self.alarm_key(&row, action)) => {}
             (zone::LIST, _) => {
-                let Some(screen) = self.stack.last() else { return };
+                let Some(screen) = self.stack.last() else {
+                    return;
+                };
                 // A list still loading, or empty, still lets Up and Down out.
                 let Some(&(row, col)) = screen.cells.get(i.max(0) as usize) else {
                     match action {
-                        Action::Up if self.screen_zone_len(zone::FIELD) > 0 => self.set_focus(zone::FIELD, 0),
+                        Action::Up if self.screen_zone_len(zone::FIELD) > 0 => {
+                            self.set_focus(zone::FIELD, 0)
+                        }
                         Action::Up => self.set_focus(zone::HEADER, 0),
                         Action::Down if has_bar => self.set_focus(zone::BAR, 0),
                         Action::Left if has_side => {
-                            let at = if screen.url_mode { 0 } else { screen.category as i32 + 1 };
+                            let at = if screen.url_mode {
+                                0
+                            } else {
+                                screen.category as i32 + 1
+                            };
                             self.set_focus(zone::SIDE, at);
                         }
                         _ => {}
@@ -1173,24 +1626,48 @@ impl App {
                 };
                 match action {
                     Action::Up | Action::Down => {
-                        let target = if action == Action::Down { Some(row + 1) } else { row.checked_sub(1) };
+                        let target = if action == Action::Down {
+                            Some(row + 1)
+                        } else {
+                            row.checked_sub(1)
+                        };
                         let found = target.and_then(|t| {
-                            let in_row: Vec<usize> = screen.cells.iter().enumerate().filter(|(_, c)| c.0 == t).map(|(k, _)| k).collect();
-                            in_row.iter().copied().find(|&k| screen.cells[k].1 == col).or(in_row.last().copied())
+                            let in_row: Vec<usize> = screen
+                                .cells
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, c)| c.0 == t)
+                                .map(|(k, _)| k)
+                                .collect();
+                            in_row
+                                .iter()
+                                .copied()
+                                .find(|&k| screen.cells[k].1 == col)
+                                .or(in_row.last().copied())
                         });
                         let has_field = self.screen_zone_len(zone::FIELD) > 0;
                         match found {
                             Some(k) => self.focus.1 = k as i32,
-                            None if action == Action::Up && has_field => self.set_focus(zone::FIELD, 0),
+                            None if action == Action::Up && has_field => {
+                                self.set_focus(zone::FIELD, 0)
+                            }
                             None if action == Action::Up => self.set_focus(zone::HEADER, 0),
                             None if has_bar => self.set_focus(zone::BAR, 0),
                             None => {}
                         }
                     }
-                    Action::Left => match screen.cells.iter().position(|&c| c == (row, col.wrapping_sub(1))) {
+                    Action::Left => match screen
+                        .cells
+                        .iter()
+                        .position(|&c| c == (row, col.wrapping_sub(1)))
+                    {
                         Some(k) if col > 0 => self.focus.1 = k as i32,
                         _ if has_side => {
-                            let at = if screen.url_mode { 0 } else { screen.category as i32 + 1 };
+                            let at = if screen.url_mode {
+                                0
+                            } else {
+                                screen.category as i32 + 1
+                            };
                             self.set_focus(zone::SIDE, at);
                         }
                         _ => {}
@@ -1215,11 +1692,15 @@ impl App {
     }
 
     pub(super) fn screen_click(&mut self, z: i32, index: i32) {
-        let Some(screen) = self.stack.last() else { return };
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
         let group = screen.group.clone();
         match z {
             zone::HEADER => {
-                let Some(action) = screen.header.get(index.max(0) as usize).cloned() else { return };
+                let Some(action) = screen.header.get(index.max(0) as usize).cloned() else {
+                    return;
+                };
                 match action {
                     HeaderAction::Back => {
                         if !self.alarm_back() {
@@ -1230,18 +1711,28 @@ impl App {
                         // Two presses, as the TV app's Clear.
                         let armed = screen.clear_armed;
                         if armed {
-                            let edit = Box::new(Command::ClearQueue { group: group.clone() });
+                            let edit = Box::new(Command::ClearQueue {
+                                group: group.clone(),
+                            });
                             let id = self.next_request_id();
                             if let Some(s) = self.stack.last_mut() {
                                 s.requests.queue = Some(id);
                             }
-                            self.send(Command::EditThenRead { edit, read: Fetch::Queue { id: Some(id), group } });
+                            self.send(Command::EditThenRead {
+                                edit,
+                                read: Fetch::Queue {
+                                    id: Some(id),
+                                    group,
+                                },
+                            });
                         }
                         if let Some(s) = self.stack.last_mut() {
                             s.clear_armed = !armed;
                         }
                     }
-                    HeaderAction::SaveQueue => self.notice("Saving the queue is on its way in a later build"),
+                    HeaderAction::SaveQueue => {
+                        self.notice("Saving the queue is on its way in a later build")
+                    }
                     HeaderAction::MusicServices => self.open_screen(Kind::Services),
                     HeaderAction::Radio => self.open_screen(Kind::Radio),
                 }
@@ -1261,7 +1752,9 @@ impl App {
             }
             zone::SIDE => {
                 let categories = radio_categories();
-                let Some((_, tag)) = categories.get(index.max(1) as usize - 1).cloned() else { return };
+                let Some((_, tag)) = categories.get(index.max(1) as usize - 1).cloned() else {
+                    return;
+                };
                 let id = self.next_request_id();
                 if let Some(s) = self.stack.last_mut() {
                     s.requests.stations = Some(id);
@@ -1269,12 +1762,20 @@ impl App {
                     s.stations = None;
                     s.url_mode = false;
                 }
-                self.send(Command::Fetch(Fetch::Stations { id: Some(id), tag, country: None }));
+                self.send(Command::Fetch(Fetch::Stations {
+                    id: Some(id),
+                    tag,
+                    country: None,
+                }));
             }
             zone::LIST => {
-                let Some(action) = screen.actions.get(index.max(0) as usize).cloned() else { return };
+                let Some(action) = screen.actions.get(index.max(0) as usize).cloned() else {
+                    return;
+                };
                 match action {
-                    RowAction::QueueTrack(n) => self.send(Command::PlayQueueTrack { group, index: n }),
+                    RowAction::QueueTrack(n) => {
+                        self.send(Command::PlayQueueTrack { group, index: n })
+                    }
                     RowAction::Favorite(id, name) => {
                         self.send(Command::PlayFavorite { group, id });
                         self.notice(&format!("Starting {name}"));
@@ -1286,23 +1787,43 @@ impl App {
                         self.played();
                     }
                     RowAction::Station(station) => {
-                        let url = if station.url_resolved.is_empty() { station.url.clone() } else { station.url_resolved.clone() };
-                        self.send(Command::PlayStream { group, url, title: station.name.trim().to_owned() });
+                        let url = if station.url_resolved.is_empty() {
+                            station.url.clone()
+                        } else {
+                            station.url_resolved.clone()
+                        };
+                        self.send(Command::PlayStream {
+                            group,
+                            url,
+                            title: station.name.trim().to_owned(),
+                        });
                         self.notice(&format!("Starting {}", station.name.trim()));
                         self.played();
                     }
                     RowAction::Retry => self.refetch(),
                     RowAction::OpenService(service) => {
                         let title = service.name.clone();
-                        self.open_screen(Kind::ServicePage { service: service.id, container: "root".into(), title });
+                        self.open_screen(Kind::ServicePage {
+                            service: service.id,
+                            container: "root".into(),
+                            title,
+                        });
                     }
                     RowAction::ServiceItem { service, item } => {
                         if item.opens() {
                             // A place to go: an album, a playlist, a shelf.
-                            self.open_screen(Kind::ServicePage { service, container: item.id.clone(), title: item.title.clone() });
+                            self.open_screen(Kind::ServicePage {
+                                service,
+                                container: item.id.clone(),
+                                title: item.title.clone(),
+                            });
                         } else {
                             let title = item.title.clone();
-                            self.send(Command::PlayServiceItem { group, service, item });
+                            self.send(Command::PlayServiceItem {
+                                group,
+                                service,
+                                item,
+                            });
                             self.notice(&format!("Starting {title}"));
                             self.played();
                         }
@@ -1314,7 +1835,10 @@ impl App {
                         if let Some(s) = self.stack.last_mut() {
                             s.requests.alarms = Some(id);
                         }
-                        self.send(Command::EditThenRead { edit: Box::new(Command::SetAlarmEnabled { alarm, enabled }), read: Fetch::Alarms { id: Some(id) } });
+                        self.send(Command::EditThenRead {
+                            edit: Box::new(Command::SetAlarmEnabled { alarm, enabled }),
+                            read: Fetch::Alarms { id: Some(id) },
+                        });
                     }
                     RowAction::Speaker | RowAction::ReportBlock => {}
                     RowAction::AlarmEditor(row) => self.alarm_click(row),
@@ -1333,7 +1857,11 @@ impl App {
                         self.prefs.save();
                     }
                     RowAction::Preset(preset) => {
-                        let host = preset.player_ids.first().cloned().map(|h| (h, preset.player_ids.len(), Instant::now()));
+                        let host = preset
+                            .player_ids
+                            .first()
+                            .cloned()
+                            .map(|h| (h, preset.player_ids.len(), Instant::now()));
                         let name = preset.name.clone();
                         self.send(Command::ApplyPreset(preset));
                         self.notice(&format!("Starting {name}"));
@@ -1350,9 +1878,13 @@ impl App {
                     RowAction::LoadMore => {
                         let target = match self.stack.last() {
                             Some(screen) => match &screen.kind {
-                                Kind::ServicePage { service, container, .. } => {
-                                    Some((service.clone(), container.clone(), screen.page.len() as u32))
-                                }
+                                Kind::ServicePage {
+                                    service, container, ..
+                                } => Some((
+                                    service.clone(),
+                                    container.clone(),
+                                    screen.page.len() as u32,
+                                )),
                                 _ => None,
                             },
                             None => None,
@@ -1363,7 +1895,12 @@ impl App {
                                 screen.requests.page = Some(id);
                                 screen.page_loading = true;
                             }
-                            self.send(Command::Fetch(Fetch::ServicePage { id: Some(id), service, container, index }));
+                            self.send(Command::Fetch(Fetch::ServicePage {
+                                id: Some(id),
+                                service,
+                                container,
+                                index,
+                            }));
                         }
                     }
                 }
@@ -1384,11 +1921,15 @@ impl App {
 
     /// Menu, or a hold, on a row: its item menu.
     pub(super) fn screen_hold(&mut self, z: i32, index: i32) {
-        let Some(screen) = self.stack.last() else { return };
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
         if z != zone::LIST {
             return;
         }
-        let Some(row) = screen.actions.get(index.max(0) as usize).cloned() else { return };
+        let Some(row) = screen.actions.get(index.max(0) as usize).cloned() else {
+            return;
+        };
         let title = match &row {
             RowAction::QueueTrack(n) => screen
                 .queue
@@ -1417,29 +1958,49 @@ impl App {
     /// What the item menu's choice does to its row.
     pub(super) fn menu_chosen(&mut self, choice: super::panels::PanelAction, row: RowAction) {
         use super::panels::PanelAction as P;
-        let Some(screen) = self.stack.last() else { return };
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
         let group = screen.group.clone();
         match (choice.clone(), row) {
             (P::MenuPlay | P::MenuOpen, row) => {
                 // The row's own action, as Select on it.
-                let index = screen.actions.iter().position(|a| format!("{a:?}") == format!("{row:?}"));
+                let index = screen
+                    .actions
+                    .iter()
+                    .position(|a| format!("{a:?}") == format!("{row:?}"));
                 if let Some(i) = index {
                     self.screen_click(zone::LIST, i as i32);
                 }
             }
             (P::MenuPlayNext | P::MenuAddToQueue, RowAction::ServiceItem { service, item }) => {
                 let next = matches!(choice, P::MenuPlayNext);
-                self.send(Command::QueueServiceItem { group, service, item, next });
+                self.send(Command::QueueServiceItem {
+                    group,
+                    service,
+                    item,
+                    next,
+                });
             }
             (P::MenuRemoveFromQueue, RowAction::QueueTrack(n)) => {
                 if let Some(Ok(q)) = &screen.queue {
                     let update_id = q.update_id.clone();
-                    let edit = Box::new(Command::RemoveFromQueue { group: group.clone(), index: n, update_id });
+                    let edit = Box::new(Command::RemoveFromQueue {
+                        group: group.clone(),
+                        index: n,
+                        update_id,
+                    });
                     let id = self.next_request_id();
                     if let Some(s) = self.stack.last_mut() {
                         s.requests.queue = Some(id);
                     }
-                    self.send(Command::EditThenRead { edit, read: Fetch::Queue { id: Some(id), group } });
+                    self.send(Command::EditThenRead {
+                        edit,
+                        read: Fetch::Queue {
+                            id: Some(id),
+                            group,
+                        },
+                    });
                     self.notice("Removed from the queue");
                 }
             }
@@ -1449,16 +2010,28 @@ impl App {
                 self.notice(&format!("Deleted {}", preset.name));
             }
             (P::MenuAddFavorite, RowAction::ServiceItem { service, item }) => {
-                self.send(Command::ServiceFavorite { service, item, add: true });
+                self.send(Command::ServiceFavorite {
+                    service,
+                    item,
+                    add: true,
+                });
             }
             (P::MenuRemoveFavorite, RowAction::ServiceItem { service, item }) => {
-                self.send(Command::ServiceFavorite { service, item, add: false });
+                self.send(Command::ServiceFavorite {
+                    service,
+                    item,
+                    add: false,
+                });
             }
             (P::MenuRemoveFavorite, RowAction::Favorite(id, name)) => {
                 self.send(Command::RemoveFavorite { id, name });
             }
             (P::MenuChapters, RowAction::ServiceItem { service, item }) => {
-                self.open_screen(Kind::ServicePage { service: service.clone(), container: item.id.clone(), title: item.title.clone() });
+                self.open_screen(Kind::ServicePage {
+                    service: service.clone(),
+                    container: item.id.clone(),
+                    title: item.title.clone(),
+                });
                 let book = item.id.clone();
                 if let Some(s) = self.stack.last_mut() {
                     s.book = Some(item);
@@ -1474,7 +2047,9 @@ impl App {
     }
 
     pub(super) fn refetch_screen_index(&mut self, i: usize) {
-        let Some(screen) = self.stack.get(i) else { return };
+        let Some(screen) = self.stack.get(i) else {
+            return;
+        };
         let kind = screen.kind.clone();
         let group = screen.group.clone();
         let category = screen.category;
@@ -1484,7 +2059,10 @@ impl App {
                 let screen = &mut self.stack[i];
                 screen.requests.queue = Some(id);
                 screen.queue = None;
-                self.send(Command::Fetch(Fetch::Queue { id: Some(id), group }));
+                self.send(Command::Fetch(Fetch::Queue {
+                    id: Some(id),
+                    group,
+                }));
             }
             Kind::Browse => {
                 let fav_id = self.next_request_id();
@@ -1507,7 +2085,11 @@ impl App {
                 screen.requests.stations = Some(id);
                 screen.stations = None;
                 let tag = radio_categories().get(category).and_then(|c| c.1.clone());
-                self.send(Command::Fetch(Fetch::Stations { id: Some(id), tag, country: None }));
+                self.send(Command::Fetch(Fetch::Stations {
+                    id: Some(id),
+                    tag,
+                    country: None,
+                }));
             }
             Kind::Services | Kind::PreferredServices => {
                 let id = self.next_request_id();
@@ -1516,18 +2098,28 @@ impl App {
                 screen.services = None;
                 self.send(Command::Fetch(Fetch::Services { id: Some(id) }));
             }
-            Kind::ServicePage { service, container, .. } => {
+            Kind::ServicePage {
+                service, container, ..
+            } => {
                 let id = self.next_request_id();
                 let screen = &mut self.stack[i];
                 screen.requests.page = Some(id);
                 screen.page.clear();
                 screen.page_error = None;
                 screen.page_loading = true;
-                self.send(Command::Fetch(Fetch::ServicePage { id: Some(id), service, container, index: 0 }));
+                self.send(Command::Fetch(Fetch::ServicePage {
+                    id: Some(id),
+                    service,
+                    container,
+                    index: 0,
+                }));
             }
             Kind::Alarms => {
                 let id = self.next_request_id();
-                let sound_step = self.stack[i].alarm_draft.as_ref().is_some_and(|d| d.step == super::alarms::Step::Sound);
+                let sound_step = self.stack[i]
+                    .alarm_draft
+                    .as_ref()
+                    .is_some_and(|d| d.step == super::alarms::Step::Sound);
                 self.stack[i].requests.alarms = Some(id);
                 self.stack[i].alarms = None;
                 self.send(Command::Fetch(Fetch::Alarms { id: Some(id) }));
@@ -1587,7 +2179,10 @@ impl App {
             if interrupted.queue {
                 let id = self.next_request_id();
                 self.stack[i].requests.queue = Some(id);
-                self.send(Command::Fetch(Fetch::Queue { id: Some(id), group: group.clone() }));
+                self.send(Command::Fetch(Fetch::Queue {
+                    id: Some(id),
+                    group: group.clone(),
+                }));
             }
             if interrupted.favorites {
                 let id = self.next_request_id();
@@ -1608,7 +2203,11 @@ impl App {
                 let id = self.next_request_id();
                 self.stack[i].requests.stations = Some(id);
                 let tag = radio_categories().get(category).and_then(|c| c.1.clone());
-                self.send(Command::Fetch(Fetch::Stations { id: Some(id), tag, country: None }));
+                self.send(Command::Fetch(Fetch::Stations {
+                    id: Some(id),
+                    tag,
+                    country: None,
+                }));
             }
             if interrupted.services {
                 let id = self.next_request_id();
@@ -1616,7 +2215,9 @@ impl App {
                 self.send(Command::Fetch(Fetch::Services { id: Some(id) }));
             }
             if interrupted.page
-                && let Kind::ServicePage { service, container, .. } = &kind
+                && let Kind::ServicePage {
+                    service, container, ..
+                } = &kind
             {
                 let id = self.next_request_id();
                 self.stack[i].requests.page = Some(id);
@@ -1664,20 +2265,38 @@ impl App {
     fn bar_play_pause(&mut self, group: &str) {
         let live = self.live(group);
         let command = if live.playing() { "pause" } else { "play" };
-        self.send(Command::Playback { group: group.to_owned(), command });
+        self.send(Command::Playback {
+            group: group.to_owned(),
+            command,
+        });
     }
 
     /// The queue follows the room: a new track or an edit elsewhere moves its
     /// version, and the open Queue reads again.
     pub(super) fn queue_follows(&mut self, before: Option<String>) {
-        let Some(group) = self.stack.last().filter(|s| s.kind == Kind::Queue).map(|s| s.group.clone()) else { return };
-        let now = self.live(&group).metadata.as_ref().and_then(|m| m.track()).and_then(|t| t.name.clone());
+        let Some(group) = self
+            .stack
+            .last()
+            .filter(|s| s.kind == Kind::Queue)
+            .map(|s| s.group.clone())
+        else {
+            return;
+        };
+        let now = self
+            .live(&group)
+            .metadata
+            .as_ref()
+            .and_then(|m| m.track())
+            .and_then(|t| t.name.clone());
         if now != before {
             let id = self.next_request_id();
             if let Some(screen) = self.stack.last_mut() {
                 screen.requests.queue = Some(id);
             }
-            self.send(Command::Fetch(Fetch::Queue { id: Some(id), group }));
+            self.send(Command::Fetch(Fetch::Queue {
+                id: Some(id),
+                group,
+            }));
         }
         let _ = Duration::ZERO;
         let _ = model::time_text;
@@ -1693,26 +2312,56 @@ impl App {
     /// What Send a report is made from: the speakers as read, with what the
     /// household says each can do, the rooms with a line-in as they are now,
     /// the connection and the last refusal.
-    fn report_input(&self, speakers: Vec<crate::household::SpeakerInfo>, sign_ins: Option<Result<usize, String>>) -> crate::report::Input {
+    fn report_input(
+        &self,
+        speakers: Vec<crate::household::SpeakerInfo>,
+        sign_ins: Option<Result<usize, String>>,
+    ) -> crate::report::Input {
         use crate::household::Status;
-        let players = self.house.groups.as_ref().map(|g| g.players.as_slice()).unwrap_or(&[]);
-        let capabilities = |id: &str| players.iter().find(|p| p.id == id).map(|p| p.capabilities.clone()).unwrap_or_default();
+        let players = self
+            .house
+            .groups
+            .as_ref()
+            .map(|g| g.players.as_slice())
+            .unwrap_or(&[]);
+        let capabilities = |id: &str| {
+            players
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.capabilities.clone())
+                .unwrap_or_default()
+        };
         let speakers = speakers
             .into_iter()
             .map(|s| {
-                let what = [s.model.trim_start_matches("Sonos ").to_owned(), s.version.clone(), if s.software.is_empty() { String::new() } else { format!("({})", s.software) }]
-                    .into_iter()
-                    .filter(|p| !p.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                crate::report::Speaker { room: s.room, what: (!what.is_empty()).then_some(what), capabilities: capabilities(&s.id) }
+                let what = [
+                    s.model.trim_start_matches("Sonos ").to_owned(),
+                    s.version.clone(),
+                    if s.software.is_empty() {
+                        String::new()
+                    } else {
+                        format!("({})", s.software)
+                    },
+                ]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+                crate::report::Speaker {
+                    room: s.room,
+                    what: (!what.is_empty()).then_some(what),
+                    capabilities: capabilities(&s.id),
+                }
             })
             .collect();
         let line_in_rooms = players
             .iter()
             .filter(|p| p.capabilities.iter().any(|c| c == crate::report::LINE_IN))
             .filter_map(|p| {
-                let group = self.groups().iter().find(|g| g.player_ids.contains(&p.id))?;
+                let group = self
+                    .groups()
+                    .iter()
+                    .find(|g| g.player_ids.contains(&p.id))?;
                 let live = self.live(&group.id);
                 let container = live.metadata.as_ref().and_then(|m| m.container.clone());
                 let field = |v: Option<String>| v.unwrap_or_else(|| "none".into());
@@ -1722,7 +2371,11 @@ impl App {
                     live.state.as_deref().unwrap_or("unknown"),
                     field(container.as_ref().and_then(|c| c.kind.clone())),
                     field(container.as_ref().and_then(|c| c.name.clone())),
-                    field(container.as_ref().and_then(|c| c.service.as_ref()?.name.clone())),
+                    field(
+                        container
+                            .as_ref()
+                            .and_then(|c| c.service.as_ref()?.name.clone())
+                    ),
                 ))
             })
             .collect();
@@ -1730,7 +2383,10 @@ impl App {
             Status::Reconnecting(reason) => Some(reason.clone()),
             _ => None,
         };
-        let refused = |t: &Option<String>| t.as_deref().is_some_and(|t| t.contains("ERROR_NO_PERMISSION"));
+        let refused = |t: &Option<String>| {
+            t.as_deref()
+                .is_some_and(|t| t.contains("ERROR_NO_PERMISSION"))
+        };
         crate::report::Input {
             app: format!("x2rock-deck {}", env!("CARGO_PKG_VERSION")),
             device: crate::report::device(),
@@ -1767,19 +2423,38 @@ pub fn item_line(item: &Item) -> String {
         "show" | "podcast" => Some("Podcast"),
         _ => None,
     };
-    [kind, item.summary.as_deref().filter(|s| !s.trim().is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" \u{00B7} ")
+    [
+        kind,
+        item.summary.as_deref().filter(|s| !s.trim().is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" \u{00B7} ")
 }
 
 impl App {
     /// Search's results, or, before a search, this device's recent ones.
     fn search_rows(&mut self, rows: &mut Rows) {
-        let Some(screen) = self.stack.last() else { return };
-        let (searched, sections, searching) = (screen.searched.clone(), screen.sections.clone(), screen.searching);
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
+        let (searched, sections, searching) = (
+            screen.searched.clone(),
+            screen.sections.clone(),
+            screen.searching,
+        );
         let Some(_) = searched else {
             if !self.prefs.recent_searches.is_empty() {
                 rows.heading("Recent searches");
                 for term in self.prefs.recent_searches.clone() {
-                    rows.item(ListCell { title: term.as_str().into(), ..Default::default() }, RowAction::Recent(term));
+                    rows.item(
+                        ListCell {
+                            title: term.as_str().into(),
+                            ..Default::default()
+                        },
+                        RowAction::Recent(term),
+                    );
                 }
             }
             return;
@@ -1810,21 +2485,33 @@ impl App {
                         focus: rows.actions.len() as i32,
                         ..Default::default()
                     });
-                    rows.actions.push(RowAction::ServiceItem { service: section.service.id.clone(), item: item.clone() });
+                    rows.actions.push(RowAction::ServiceItem {
+                        service: section.service.id.clone(),
+                        item: item.clone(),
+                    });
                     rows.cells.push((rows.row, col));
                 }
                 rows.row += 1;
-                rows.rows.push(ListRow { kind: RowKind::Grid, cells: ModelRc::new(VecModel::from(cells)), ..Default::default() });
+                rows.rows.push(ListRow {
+                    kind: RowKind::Grid,
+                    cells: ModelRc::new(VecModel::from(cells)),
+                    ..Default::default()
+                });
             }
         }
-        if sections.iter().all(|s| s.result.as_ref().map(|r| r.is_empty()).unwrap_or(true)) && !searching {
+        if sections
+            .iter()
+            .all(|s| s.result.as_ref().map(|r| r.is_empty()).unwrap_or(true))
+            && !searching
+        {
             rows.message("Nothing found");
         }
         for section in &sections {
             if let Err(why) = &section.result
-                && why != "didn't answer" {
-                    rows.message(&format!("Couldn't search {}: {why}", section.service.name));
-                }
+                && why != "didn't answer"
+            {
+                rows.message(&format!("Couldn't search {}: {why}", section.service.name));
+            }
         }
     }
 
@@ -1835,7 +2522,9 @@ impl App {
         if !shown {
             return;
         }
-        let Some(screen) = self.stack.last() else { return };
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
         ui.set_search_text(screen.query.as_str().into());
         if radio_url {
             ui.set_search_placeholder("http://\u{2026}".into());
@@ -1847,12 +2536,23 @@ impl App {
         let (summary, unanswered) = match &screen.searched {
             None => (String::new(), String::new()),
             Some(_) => {
-                let answered: Vec<&Section> = screen.sections.iter().filter(|s| matches!(&s.result, Ok(r) if !r.is_empty())).collect();
-                let results: usize = answered.iter().map(|s| s.result.as_ref().map(|r| r.len()).unwrap_or(0)).sum();
+                let answered: Vec<&Section> = screen
+                    .sections
+                    .iter()
+                    .filter(|s| matches!(&s.result, Ok(r) if !r.is_empty()))
+                    .collect();
+                let results: usize = answered
+                    .iter()
+                    .map(|s| s.result.as_ref().map(|r| r.len()).unwrap_or(0))
+                    .sum();
                 let services = answered.len();
                 // Only one that ran out of time "didn't answer"; one that refused
                 // is named under the results instead.
-                let failed = screen.sections.iter().filter(|s| matches!(&s.result, Err(e) if e == "didn't answer")).count();
+                let failed = screen
+                    .sections
+                    .iter()
+                    .filter(|s| matches!(&s.result, Err(e) if e == "didn't answer"))
+                    .count();
                 let summary = if screen.searching && results == 0 {
                     "Searching\u{2026}".to_owned()
                 } else {
@@ -1892,7 +2592,9 @@ impl App {
             screen.searching = true;
         }
         self.keyboard = None;
-        self.prefs.recent_searches.retain(|t| !t.eq_ignore_ascii_case(&term));
+        self.prefs
+            .recent_searches
+            .retain(|t| !t.eq_ignore_ascii_case(&term));
         self.prefs.recent_searches.insert(0, term.clone());
         self.prefs.recent_searches.truncate(8);
         self.prefs.save();
@@ -1911,7 +2613,11 @@ pub fn recurrence_words(recurrence: &str) -> String {
         other => match other.strip_prefix("ON_") {
             Some(days) => {
                 const NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-                days.chars().filter_map(|d| d.to_digit(10)).filter_map(|d| NAMES.get(d as usize).copied()).collect::<Vec<_>>().join(" ")
+                days.chars()
+                    .filter_map(|d| d.to_digit(10))
+                    .filter_map(|d| NAMES.get(d as usize).copied())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             }
             None => other.to_owned(),
         },
@@ -1925,7 +2631,11 @@ pub fn alarm_sound(alarm: &x2rock::sonos::upnp::Alarm) -> String {
     }
     let meta = &alarm.program_metadata;
     meta.find("<dc:title>")
-        .and_then(|a| meta[a + 10..].find("</dc:title>").map(|b| meta[a + 10..a + 10 + b].to_owned()))
+        .and_then(|a| {
+            meta[a + 10..]
+                .find("</dc:title>")
+                .map(|b| meta[a + 10..a + 10 + b].to_owned())
+        })
         .map(|t| t.replace("&amp;", "&"))
         .unwrap_or_else(|| "Music".into())
 }
@@ -1933,7 +2643,9 @@ pub fn alarm_sound(alarm: &x2rock::sonos::upnp::Alarm) -> String {
 impl App {
     /// Play the typed address as a station, named by its host.
     pub(super) fn play_url(&mut self) {
-        let Some(screen) = self.stack.last() else { return };
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
         let group = screen.group.clone();
         let Some(url) = crate::model::stream_url(&screen.query) else {
             self.notice("That isn't an http or https address");
@@ -1941,7 +2653,11 @@ impl App {
         };
         let title = crate::model::stream_name(&url);
         self.keyboard = None;
-        self.send(Command::PlayStream { group, url, title: title.clone() });
+        self.send(Command::PlayStream {
+            group,
+            url,
+            title: title.clone(),
+        });
         self.notice(&format!("Starting {title}"));
         self.played();
     }
@@ -1952,12 +2668,29 @@ mod tests {
 
     #[test]
     fn focus_follows_its_row_when_rows_move_and_stands_when_it_goes() {
-        let old = vec![RowAction::QueueTrack(1), RowAction::Recent("a".into()), RowAction::Recent("b".into())];
-        let moved = vec![RowAction::Recent("x".into()), RowAction::QueueTrack(1), RowAction::Recent("a".into()), RowAction::Recent("b".into())];
-        assert_eq!(follow_row(&old, &moved, 2), Some(3), "rows arriving above move it down");
+        let old = vec![
+            RowAction::QueueTrack(1),
+            RowAction::Recent("a".into()),
+            RowAction::Recent("b".into()),
+        ];
+        let moved = vec![
+            RowAction::Recent("x".into()),
+            RowAction::QueueTrack(1),
+            RowAction::Recent("a".into()),
+            RowAction::Recent("b".into()),
+        ];
+        assert_eq!(
+            follow_row(&old, &moved, 2),
+            Some(3),
+            "rows arriving above move it down"
+        );
         assert_eq!(follow_row(&old, &old, 1), Some(1));
         let gone = vec![RowAction::QueueTrack(1), RowAction::Recent("b".into())];
-        assert_eq!(follow_row(&old, &gone, 1), None, "a row that went leaves the index to stand");
+        assert_eq!(
+            follow_row(&old, &gone, 1),
+            None,
+            "a row that went leaves the index to stand"
+        );
         assert_eq!(follow_row(&[], &old, 0), None);
     }
 
@@ -1979,8 +2712,24 @@ mod tests {
             }))
             .unwrap()
         };
-        let items = vec![fav(Some("TRACK")), fav(Some("PLAYLIST")), fav(None), fav(Some("STREAM"))];
-        let groups: Vec<&str> = favorite_groups(&items).into_iter().map(|(t, _)| t).collect();
-        assert_eq!(groups, ["Favorite playlists", "Favorite songs", "Favorite stations", "Favorites"]);
+        let items = vec![
+            fav(Some("TRACK")),
+            fav(Some("PLAYLIST")),
+            fav(None),
+            fav(Some("STREAM")),
+        ];
+        let groups: Vec<&str> = favorite_groups(&items)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                "Favorite playlists",
+                "Favorite songs",
+                "Favorite stations",
+                "Favorites"
+            ]
+        );
     }
 }

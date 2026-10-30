@@ -16,7 +16,9 @@ pub struct Kept<T: Clone + 'static> {
 
 impl<T: Clone + PartialEq + 'static> Kept<T> {
     pub fn new() -> Self {
-        Kept { model: Rc::new(VecModel::default()) }
+        Kept {
+            model: Rc::new(VecModel::default()),
+        }
     }
 
     pub fn model(&self) -> ModelRc<T> {

@@ -47,7 +47,8 @@ pub struct Prefs {
 
 impl Prefs {
     pub fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "rahga", "x2rock-deck").map(|d| d.config_dir().join("prefs.json"))
+        directories::ProjectDirs::from("", "rahga", "x2rock-deck")
+            .map(|d| d.config_dir().join("prefs.json"))
     }
 
     pub fn load() -> Self {
@@ -58,18 +59,27 @@ impl Prefs {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         prefs.path = path;
-        prefs.theme = prefs.color_theme.clone().unwrap_or_else(|| "DEFAULT".into());
+        prefs.theme = prefs
+            .color_theme
+            .clone()
+            .unwrap_or_else(|| "DEFAULT".into());
         prefs
     }
 
     /// Kept in memory only: the demo and the screenshots.
     pub fn ephemeral(theme: &str) -> Self {
-        Prefs { theme: theme.to_owned(), color_theme: Some(theme.to_owned()), ..Default::default() }
+        Prefs {
+            theme: theme.to_owned(),
+            color_theme: Some(theme.to_owned()),
+            ..Default::default()
+        }
     }
 
     pub fn save(&mut self) {
         self.color_theme = Some(self.theme.clone());
-        let Some(path) = self.path.clone() else { return };
+        let Some(path) = self.path.clone() else {
+            return;
+        };
         let result = (|| -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
@@ -79,7 +89,10 @@ impl Prefs {
             std::fs::rename(&tmp, &path)
         })();
         if let Err(e) = result {
-            eprintln!("x2rock-deck: could not save settings to {}: {e}", path.display());
+            eprintln!(
+                "x2rock-deck: could not save settings to {}: {e}",
+                path.display()
+            );
         }
     }
 }

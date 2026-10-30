@@ -36,20 +36,32 @@ pub fn iso_duration(text: &str) -> Option<std::time::Duration> {
             '0'..='9' | '.' => number.push(c),
             'H' | 'M' | 'S' => {
                 let n: f64 = number.parse().ok()?;
-                total += n * match c { 'H' => 3600.0, 'M' => 60.0, _ => 1.0 };
+                total += n * match c {
+                    'H' => 3600.0,
+                    'M' => 60.0,
+                    _ => 1.0,
+                };
                 number.clear();
             }
             _ => return None,
         }
     }
-    number.is_empty().then(|| std::time::Duration::from_secs_f64(total))
+    number
+        .is_empty()
+        .then(|| std::time::Duration::from_secs_f64(total))
 }
 
 impl GroupLive {
     /// A `sleepTimerStatus`: armed with what is left, or not.
     pub fn apply_sleep(&mut self, body: &serde_json::Value, now: Instant) {
-        let active = body.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
-        let left = body.get("remainingTimeDuration").and_then(|d| d.as_str()).and_then(iso_duration);
+        let active = body
+            .get("active")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false);
+        let left = body
+            .get("remainingTimeDuration")
+            .and_then(|d| d.as_str())
+            .and_then(iso_duration);
         self.sleep_ends_at = match (active, left) {
             (true, Some(left)) => Some(now + left),
             _ => None,
@@ -58,7 +70,9 @@ impl GroupLive {
 
     /// What is left on the sleep timer, if it is running.
     pub fn sleep_left(&self, now: Instant) -> Option<std::time::Duration> {
-        self.sleep_ends_at.and_then(|end| end.checked_duration_since(now)).filter(|d| !d.is_zero())
+        self.sleep_ends_at
+            .and_then(|end| end.checked_duration_since(now))
+            .filter(|d| !d.is_zero())
     }
 
     pub fn apply_playback(&mut self, status: &PlaybackStatus, now: Instant) {
@@ -81,7 +95,10 @@ impl GroupLive {
     }
 
     pub fn playing(&self) -> bool {
-        matches!(self.state.as_deref(), Some("PLAYBACK_STATE_PLAYING" | "PLAYBACK_STATE_BUFFERING" | "PLAYING" | "BUFFERING"))
+        matches!(
+            self.state.as_deref(),
+            Some("PLAYBACK_STATE_PLAYING" | "PLAYBACK_STATE_BUFFERING" | "PLAYING" | "BUFFERING")
+        )
     }
 
     pub fn duration_ms(&self) -> u64 {
@@ -98,9 +115,10 @@ impl GroupLive {
     pub fn live_position(&self, now: Instant) -> u64 {
         let mut position = self.position_ms;
         if self.playing()
-            && let Some(at) = self.position_at {
-                position += now.saturating_duration_since(at).as_millis() as u64;
-            }
+            && let Some(at) = self.position_at
+        {
+            position += now.saturating_duration_since(at).as_millis() as u64;
+        }
         match self.duration_ms() {
             0 => position,
             duration => position.min(duration),
@@ -126,14 +144,21 @@ impl Household {
     /// How many of a room's bonded speakers have dropped off: a Sub, a
     /// surround. The topology may no longer list them; `zones:1` still does.
     pub fn offline_in(&self, room: &str) -> usize {
-        self.bonds.values().filter(|b| b.zone == room && b.disconnected == Some(true)).count()
+        self.bonds
+            .values()
+            .filter(|b| b.zone == room && b.disconnected == Some(true))
+            .count()
     }
 
     /// Whether `player`'s room has a speaker on any of these channels: `SW`
     /// for a Sub, `LR`/`RR` for surrounds, as `zones:1` names them.
     fn room_has(&self, player: &str, channels: &[&str]) -> bool {
-        let Some(room) = self.bonds.get(player).map(|b| &b.zone) else { return false };
-        self.bonds.values().any(|b| &b.zone == room && b.channels.iter().any(|c| channels.contains(&c.as_str())))
+        let Some(room) = self.bonds.get(player).map(|b| &b.zone) else {
+            return false;
+        };
+        self.bonds
+            .values()
+            .any(|b| &b.zone == room && b.channels.iter().any(|c| channels.contains(&c.as_str())))
     }
 
     pub fn has_sub(&self, player: &str) -> bool {
@@ -201,9 +226,13 @@ impl RoomInfo {
         let container = meta.and_then(|m| m.container.as_ref());
         let track = meta.and_then(|m| m.track());
         let format = meta.and_then(|m| m.input_format());
-        let source = container.and_then(|c| c.name.clone()).filter(|s| !s.trim().is_empty());
+        let source = container
+            .and_then(|c| c.name.clone())
+            .filter(|s| !s.trim().is_empty());
         RoomInfo {
-            track_name: track.and_then(|t| t.name.clone()).filter(|s| !s.trim().is_empty()),
+            track_name: track
+                .and_then(|t| t.name.clone())
+                .filter(|s| !s.trim().is_empty()),
             artist: track.and_then(|t| t.artist_name()).map(str::to_owned),
             album: track
                 .and_then(|t| t.album.as_ref())
@@ -212,7 +241,9 @@ impl RoomInfo {
             art_url: meta.and_then(|m| m.art_url()).map(str::to_owned),
             on_tv_input: format.is_some(),
             input_format: format.map(|f| f.summary()).unwrap_or_default(),
-            alarm_ringing: source.as_deref().is_some_and(|s| s.starts_with("x-rincon-buzzer")),
+            alarm_ringing: source
+                .as_deref()
+                .is_some_and(|s| s.starts_with("x-rincon-buzzer")),
             source,
             stream_info: meta.and_then(|m| m.stream_info()).map(str::to_owned),
             is_radio: container.and_then(|c| c.kind.as_deref()) == Some("station"),
@@ -225,14 +256,21 @@ impl RoomInfo {
 
     /// Whether anything is loaded, by what the player has told us.
     pub fn has_source(&self) -> bool {
-        self.on_tv_input || self.is_radio || self.track_name.is_some() || self.source.is_some() || self.stream_info.is_some()
+        self.on_tv_input
+            || self.is_radio
+            || self.track_name.is_some()
+            || self.source.is_some()
+            || self.stream_info.is_some()
     }
 }
 
 /// The lines under a room's name in the room list (HomeViewModel.roomRowLines).
 pub fn room_row_lines(info: &RoomInfo, state: Option<&str>) -> Vec<String> {
     if info.alarm_ringing {
-        return ["Alarm".to_owned()].into_iter().chain(info.track_name.clone()).collect();
+        return ["Alarm".to_owned()]
+            .into_iter()
+            .chain(info.track_name.clone())
+            .collect();
     }
     if info.on_tv_input {
         let first = if info.input_format.is_empty() {
@@ -250,20 +288,35 @@ pub fn room_row_lines(info: &RoomInfo, state: Option<&str>) -> Vec<String> {
         return [name.clone()].into_iter().chain(second).collect();
     }
     if let Some(stream) = &info.stream_info {
-        return [stream.clone()].into_iter().chain(info.source.clone()).collect();
+        return [stream.clone()]
+            .into_iter()
+            .chain(info.source.clone())
+            .collect();
     }
     if info.is_radio
-        && let Some(source) = &info.source {
-            return vec![source.clone()];
-        }
+        && let Some(source) = &info.source
+    {
+        return vec![source.clone()];
+    }
     vec![activity(state, info.has_source()).label().to_owned()]
 }
 
 /// The line under a track's title in the pane: artist • album, and a station
 /// after them where it says something new (PlayerViewModel.trackLine).
-pub fn track_line(artist: Option<&str>, album: Option<&str>, source: Option<&str>, is_radio: bool, track: Option<&str>) -> String {
-    let station = source.filter(|s| is_radio && !s.trim().is_empty() && Some(*s) != album && Some(*s) != track);
-    [artist, album, station].into_iter().flatten().collect::<Vec<_>>().join(" \u{2022} ")
+pub fn track_line(
+    artist: Option<&str>,
+    album: Option<&str>,
+    source: Option<&str>,
+    is_radio: bool,
+    track: Option<&str>,
+) -> String {
+    let station = source
+        .filter(|s| is_radio && !s.trim().is_empty() && Some(*s) != album && Some(*s) != track);
+    [artist, album, station]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{2022} ")
 }
 
 /// "Up next · I'll Be Missing You — Diddy", or nothing where nothing is named.
@@ -282,10 +335,16 @@ pub fn stream_url(input: &str) -> Option<String> {
     if typed.is_empty() {
         return None;
     }
-    let url = if typed.contains("://") { typed.to_owned() } else { format!("http://{typed}") };
+    let url = if typed.contains("://") {
+        typed.to_owned()
+    } else {
+        format!("http://{typed}")
+    };
     let (scheme, rest) = url.split_once("://")?;
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let ok = matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") && !host.is_empty() && !host.starts_with(':');
+    let ok = matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+        && !host.is_empty()
+        && !host.starts_with(':');
     ok.then_some(url)
 }
 
@@ -293,7 +352,11 @@ pub fn stream_url(input: &str) -> Option<String> {
 pub fn stream_name(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let host = rest.split('/').next().unwrap_or("");
-    if host.is_empty() { url.to_owned() } else { host.to_owned() }
+    if host.is_empty() {
+        url.to_owned()
+    } else {
+        host.to_owned()
+    }
 }
 
 /// A group's name as a listener reads it: "Kitchen + 2".
@@ -335,7 +398,9 @@ impl VolumeBurst {
     pub fn step(&mut self, level: i32, direction: i32, now_ms: u64) -> i32 {
         let fresh = match self.last_at {
             None => true,
-            Some(at) => direction != self.last_direction || now_ms.saturating_sub(at) > Self::GAP_MS,
+            Some(at) => {
+                direction != self.last_direction || now_ms.saturating_sub(at) > Self::GAP_MS
+            }
         };
         if fresh {
             self.presses = 0;
@@ -374,7 +439,9 @@ impl SeekBurst {
     /// The signed step for one press, and the total so far clamped to the
     /// track: `position` is where the bar is now, `duration` the track's length.
     pub fn step(&mut self, direction: i64, position: i64, duration: i64, now_ms: u64) -> i64 {
-        let fresh = self.last_at.is_none_or(|at| now_ms.saturating_sub(at) > Self::SHOWN_MS);
+        let fresh = self
+            .last_at
+            .is_none_or(|at| now_ms.saturating_sub(at) > Self::SHOWN_MS);
         if fresh {
             self.presses = 0;
             self.total_ms = 0;
@@ -383,13 +450,15 @@ impl SeekBurst {
         self.last_at = Some(now_ms);
         let delta = direction * Self::STEPS_MS[self.presses.min(Self::STEPS_MS.len() - 1)];
         self.presses += 1;
-        self.total_ms = (self.total_ms + delta).clamp(-self.from_ms, (duration - self.from_ms).max(0));
+        self.total_ms =
+            (self.total_ms + delta).clamp(-self.from_ms, (duration - self.from_ms).max(0));
         delta
     }
 
     /// Whether the total is still showing at `now_ms`.
     pub fn shown(&self, now_ms: u64) -> bool {
-        self.last_at.is_some_and(|at| now_ms.saturating_sub(at) <= Self::SHOWN_MS)
+        self.last_at
+            .is_some_and(|at| now_ms.saturating_sub(at) <= Self::SHOWN_MS)
     }
 
     /// "+0:30" or "−1:00".
@@ -415,14 +484,20 @@ mod tests {
     #[test]
     fn a_streams_own_text_goes_on_top_its_host_beneath() {
         assert_eq!(
-            room_row_lines(&stream(Some("Blancmange - Don't Tell Me")), Some("PLAYBACK_STATE_PLAYING")),
+            room_row_lines(
+                &stream(Some("Blancmange - Don't Tell Me")),
+                Some("PLAYBACK_STATE_PLAYING")
+            ),
             ["Blancmange - Don't Tell Me", "ice1.somafm.com"]
         );
     }
 
     #[test]
     fn a_stream_with_no_text_is_named_by_its_host() {
-        assert_eq!(room_row_lines(&stream(None), Some("PLAYBACK_STATE_PLAYING")), ["ice1.somafm.com"]);
+        assert_eq!(
+            room_row_lines(&stream(None), Some("PLAYBACK_STATE_PLAYING")),
+            ["ice1.somafm.com"]
+        );
     }
 
     #[test]
@@ -433,7 +508,10 @@ mod tests {
             source: Some("TV Audio".into()),
             ..Default::default()
         };
-        assert_eq!(room_row_lines(&tv, Some("PLAYBACK_STATE_PLAYING")), ["Dolby Digital 5.1", "TV Audio"]);
+        assert_eq!(
+            room_row_lines(&tv, Some("PLAYBACK_STATE_PLAYING")),
+            ["Dolby Digital 5.1", "TV Audio"]
+        );
     }
 
     #[test]
@@ -443,12 +521,18 @@ mod tests {
             alarm_ringing: true,
             ..Default::default()
         };
-        assert_eq!(room_row_lines(&chime, Some("PLAYBACK_STATE_PLAYING")), ["Alarm"]);
+        assert_eq!(
+            room_row_lines(&chime, Some("PLAYBACK_STATE_PLAYING")),
+            ["Alarm"]
+        );
     }
 
     #[test]
     fn a_room_with_nothing_loaded_says_its_state() {
-        assert_eq!(room_row_lines(&RoomInfo::default(), Some("PLAYBACK_STATE_IDLE")), ["Nothing playing"]);
+        assert_eq!(
+            room_row_lines(&RoomInfo::default(), Some("PLAYBACK_STATE_IDLE")),
+            ["Nothing playing"]
+        );
     }
 
     #[test]
@@ -458,8 +542,14 @@ mod tests {
             source: Some("TV Audio".into()),
             ..Default::default()
         };
-        assert_eq!(room_row_lines(&tv, Some("PLAYBACK_STATE_IDLE")), ["Stopped", "TV Audio"]);
-        assert_eq!(room_row_lines(&tv, Some("PLAYBACK_STATE_PLAYING")), ["Playing", "TV Audio"]);
+        assert_eq!(
+            room_row_lines(&tv, Some("PLAYBACK_STATE_IDLE")),
+            ["Stopped", "TV Audio"]
+        );
+        assert_eq!(
+            room_row_lines(&tv, Some("PLAYBACK_STATE_PLAYING")),
+            ["Playing", "TV Audio"]
+        );
     }
 
     #[test]
@@ -481,7 +571,13 @@ mod tests {
     #[test]
     fn a_stations_track_names_the_station_after_its_artist() {
         assert_eq!(
-            track_line(Some("The Weeknd"), None, Some("Hit List"), true, Some("Save Your Tears (Remix)")),
+            track_line(
+                Some("The Weeknd"),
+                None,
+                Some("Hit List"),
+                true,
+                Some("Save Your Tears (Remix)")
+            ),
             "The Weeknd \u{2022} Hit List"
         );
     }
@@ -489,14 +585,29 @@ mod tests {
     #[test]
     fn a_track_off_the_queue_is_its_artist_and_album_alone() {
         assert_eq!(
-            track_line(Some("Travis Scott"), Some("UTOPIA"), Some("Favorite tracks"), false, Some("FE!N")),
+            track_line(
+                Some("Travis Scott"),
+                Some("UTOPIA"),
+                Some("Favorite tracks"),
+                false,
+                Some("FE!N")
+            ),
             "Travis Scott \u{2022} UTOPIA"
         );
     }
 
     #[test]
     fn a_station_named_as_its_album_is_not_said_twice() {
-        assert_eq!(track_line(Some("A"), Some("Hit List"), Some("Hit List"), true, Some("x")), "A \u{2022} Hit List");
+        assert_eq!(
+            track_line(
+                Some("A"),
+                Some("Hit List"),
+                Some("Hit List"),
+                true,
+                Some("x")
+            ),
+            "A \u{2022} Hit List"
+        );
     }
 
     #[test]
@@ -505,7 +616,10 @@ mod tests {
             track_caption("Up next", Some("I\u{2019}ll Be Missing You"), Some("Diddy")).unwrap(),
             "Up next \u{00B7} I\u{2019}ll Be Missing You \u{2014} Diddy"
         );
-        assert_eq!(track_caption("Up next", Some("Intro"), Some(" ")).unwrap(), "Up next \u{00B7} Intro");
+        assert_eq!(
+            track_caption("Up next", Some("Intro"), Some(" ")).unwrap(),
+            "Up next \u{00B7} Intro"
+        );
         assert_eq!(track_caption("Up next", None, Some("Diddy")), None);
         assert_eq!(track_caption("Up next", Some(""), None), None);
     }
@@ -523,12 +637,21 @@ mod tests {
 
     #[test]
     fn a_typed_stream_address_is_http_or_https_and_named_by_its_host() {
-        assert_eq!(stream_url("ice1.somafm.com/groovesalad-128-mp3").as_deref(), Some("http://ice1.somafm.com/groovesalad-128-mp3"));
-        assert_eq!(stream_url("https://a.b:8000/x").as_deref(), Some("https://a.b:8000/x"));
+        assert_eq!(
+            stream_url("ice1.somafm.com/groovesalad-128-mp3").as_deref(),
+            Some("http://ice1.somafm.com/groovesalad-128-mp3")
+        );
+        assert_eq!(
+            stream_url("https://a.b:8000/x").as_deref(),
+            Some("https://a.b:8000/x")
+        );
         assert_eq!(stream_url("ftp://a.b/x"), None);
         assert_eq!(stream_url("  "), None);
         assert_eq!(stream_url("http:///x"), None);
-        assert_eq!(stream_name("http://ice1.somafm.com/groovesalad-128-mp3"), "ice1.somafm.com");
+        assert_eq!(
+            stream_name("http://ice1.somafm.com/groovesalad-128-mp3"),
+            "ice1.somafm.com"
+        );
         assert_eq!(stream_name("https://a.b:8000/x"), "a.b:8000");
     }
 
@@ -539,7 +662,14 @@ mod tests {
         assert_eq!(group_label("Kitchen + 2", 3), "Kitchen + 2");
     }
 
-    fn presses(burst: &mut VolumeBurst, now: &mut u64, from: i32, direction: i32, count: usize, gap: u64) -> Vec<i32> {
+    fn presses(
+        burst: &mut VolumeBurst,
+        now: &mut u64,
+        from: i32,
+        direction: i32,
+        count: usize,
+        gap: u64,
+    ) -> Vec<i32> {
         let mut level = from;
         (0..count)
             .map(|_| {
@@ -553,7 +683,10 @@ mod tests {
     #[test]
     fn a_volume_burst_climbs_2_3_then_5() {
         let (mut b, mut now) = (VolumeBurst::default(), 0);
-        assert_eq!(presses(&mut b, &mut now, 20, 1, 5, 200), [22, 25, 30, 35, 40]);
+        assert_eq!(
+            presses(&mut b, &mut now, 20, 1, 5, 200),
+            [22, 25, 30, 35, 40]
+        );
     }
 
     #[test]
@@ -569,9 +702,15 @@ mod tests {
     #[test]
     fn quiet_levels_step_finely_both_ways_and_loud_ones_are_not_capped() {
         let (mut b, mut now) = (VolumeBurst::default(), 0);
-        assert_eq!(presses(&mut b, &mut now, 0, 1, 8, 200), [1, 2, 3, 4, 6, 8, 10, 15]);
+        assert_eq!(
+            presses(&mut b, &mut now, 0, 1, 8, 200),
+            [1, 2, 3, 4, 6, 8, 10, 15]
+        );
         let (mut b, mut now) = (VolumeBurst::default(), 0);
-        assert_eq!(presses(&mut b, &mut now, 30, -1, 10, 200), [28, 25, 20, 15, 10, 8, 6, 4, 3, 2]);
+        assert_eq!(
+            presses(&mut b, &mut now, 30, -1, 10, 200),
+            [28, 25, 20, 15, 10, 8, 6, 4, 3, 2]
+        );
         let (mut b, mut now) = (VolumeBurst::default(), 0);
         assert_eq!(presses(&mut b, &mut now, 90, 1, 3, 200), [92, 95, 100]);
     }
@@ -596,13 +735,25 @@ mod tests {
 
     #[test]
     fn the_sleep_timer_reads_its_iso_duration_and_clears_on_inactive() {
-        assert_eq!(iso_duration("PT0H15M0S"), Some(std::time::Duration::from_secs(900)));
-        assert_eq!(iso_duration("PT1H30M"), Some(std::time::Duration::from_secs(5400)));
+        assert_eq!(
+            iso_duration("PT0H15M0S"),
+            Some(std::time::Duration::from_secs(900))
+        );
+        assert_eq!(
+            iso_duration("PT1H30M"),
+            Some(std::time::Duration::from_secs(5400))
+        );
         assert_eq!(iso_duration("15 minutes"), None);
         let t0 = Instant::now();
         let mut live = GroupLive::default();
-        live.apply_sleep(&serde_json::json!({ "active": true, "remainingTimeDuration": "PT0H15M0S" }), t0);
-        assert_eq!(live.sleep_left(t0), Some(std::time::Duration::from_secs(900)));
+        live.apply_sleep(
+            &serde_json::json!({ "active": true, "remainingTimeDuration": "PT0H15M0S" }),
+            t0,
+        );
+        assert_eq!(
+            live.sleep_left(t0),
+            Some(std::time::Duration::from_secs(900))
+        );
         live.apply_sleep(&serde_json::json!({ "active": false }), t0);
         assert_eq!(live.sleep_left(t0), None);
     }
@@ -616,9 +767,15 @@ mod tests {
             position_at: Some(t0),
             ..Default::default()
         };
-        assert_eq!(live.live_position(t0 + std::time::Duration::from_secs(2)), 3_000);
+        assert_eq!(
+            live.live_position(t0 + std::time::Duration::from_secs(2)),
+            3_000
+        );
         live.state = Some("PLAYBACK_STATE_PAUSED".into());
-        assert_eq!(live.live_position(t0 + std::time::Duration::from_secs(2)), 1_000);
+        assert_eq!(
+            live.live_position(t0 + std::time::Duration::from_secs(2)),
+            1_000
+        );
     }
 }
 

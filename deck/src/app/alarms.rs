@@ -22,7 +22,13 @@ pub enum Step {
     Confirm,
 }
 
-const STEPS: [Step; 5] = [Step::Room, Step::Time, Step::Repeat, Step::Sound, Step::Confirm];
+const STEPS: [Step; 5] = [
+    Step::Room,
+    Step::Time,
+    Step::Repeat,
+    Step::Sound,
+    Step::Confirm,
+];
 
 /// How often, in the order the TV app offers it.
 pub const RECURRENCES: [&str; 4] = ["DAILY", "WEEKDAYS", "WEEKENDS", "ONCE"];
@@ -87,9 +93,17 @@ impl Draft {
         let at = STEPS.iter().position(|s| *s == self.step).unwrap_or(0);
         match (self.editing, self.step) {
             (Some(_), Step::Confirm) => None,
-            (Some(_), _) => Some(Draft { step: Step::Confirm, remove_armed: None, ..self.clone() }),
+            (Some(_), _) => Some(Draft {
+                step: Step::Confirm,
+                remove_armed: None,
+                ..self.clone()
+            }),
             (None, _) if at == 0 => None,
-            (None, _) => Some(Draft { step: STEPS[at - 1], remove_armed: None, ..self.clone() }),
+            (None, _) => Some(Draft {
+                step: STEPS[at - 1],
+                remove_armed: None,
+                ..self.clone()
+            }),
         }
     }
 
@@ -142,7 +156,13 @@ impl App {
 
     /// The editor's title: "New alarm" or "Change alarm".
     pub(super) fn alarm_title(&self) -> Option<&'static str> {
-        self.alarm_draft().map(|d| if d.editing.is_some() { "Change alarm" } else { "New alarm" })
+        self.alarm_draft().map(|d| {
+            if d.editing.is_some() {
+                "Change alarm"
+            } else {
+                "New alarm"
+            }
+        })
     }
 
     /// Open alarm `alarm` to change it, on its summary, as it was read.
@@ -184,7 +204,9 @@ impl App {
     /// The summary opens on Make or Save, past the volume; every other step on
     /// its first choice.
     fn alarm_first_focus(&self) -> i32 {
-        let Some(screen) = self.stack.last() else { return 0 };
+        let Some(screen) = self.stack.last() else {
+            return 0;
+        };
         screen
             .actions
             .iter()
@@ -195,10 +217,15 @@ impl App {
     /// Asked again while there are none, so one failed read does not leave
     /// only the chime for good.
     pub(super) fn read_alarm_sounds(&mut self) {
-        let have = self.stack.last().is_some_and(|s| matches!(&s.alarm_sounds, Some(Ok(list)) if !list.is_empty()));
+        let have = self
+            .stack
+            .last()
+            .is_some_and(|s| matches!(&s.alarm_sounds, Some(Ok(list)) if !list.is_empty()));
         if !have {
             let id = self.next_request_id();
-            let Some(s) = self.stack.last_mut() else { return };
+            let Some(s) = self.stack.last_mut() else {
+                return;
+            };
             s.alarm_sounds = None;
             s.requests.alarm_sounds = Some(id);
             self.send(Command::Fetch(Fetch::AlarmSounds { id: Some(id) }));
@@ -207,7 +234,9 @@ impl App {
 
     /// Back inside the editor: true when it took the press.
     pub(super) fn alarm_back(&mut self) -> bool {
-        let Some(draft) = self.alarm_draft().cloned() else { return false };
+        let Some(draft) = self.alarm_draft().cloned() else {
+            return false;
+        };
         let back = draft.back();
         if let Some(s) = self.stack.last_mut() {
             s.alarm_draft = back.clone();
@@ -224,8 +253,12 @@ impl App {
     /// when the row took the key.
     pub(super) fn alarm_key(&mut self, row: &RowAction, action: crate::input::Action) -> bool {
         use crate::input::Action;
-        let RowAction::AlarmEditor(row) = row else { return false };
-        let Some(d) = self.draft_mut() else { return false };
+        let RowAction::AlarmEditor(row) = row else {
+            return false;
+        };
+        let Some(d) = self.draft_mut() else {
+            return false;
+        };
         match (row, action) {
             (AlarmRow::Hour, Action::Up | Action::Down) => {
                 let step: i32 = if action == Action::Up { 1 } else { -1 };
@@ -250,15 +283,29 @@ impl App {
             self.open_draft(Draft::default());
             return;
         }
-        let Some(draft) = self.alarm_draft().cloned() else { return };
+        let Some(draft) = self.alarm_draft().cloned() else {
+            return;
+        };
         let was = draft.step;
         let next = match row {
             AlarmRow::New | AlarmRow::Volume => return,
-            AlarmRow::Room(id, name) => Draft { room: Some((id, name)), ..draft }.advanced(),
+            AlarmRow::Room(id, name) => Draft {
+                room: Some((id, name)),
+                ..draft
+            }
+            .advanced(),
             AlarmRow::Hour | AlarmRow::Minute => draft.advanced(),
-            AlarmRow::Repeat(recurrence) => Draft { recurrence, ..draft }.advanced(),
+            AlarmRow::Repeat(recurrence) => Draft {
+                recurrence,
+                ..draft
+            }
+            .advanced(),
             AlarmRow::Sound(program) => Draft { program, ..draft }.advanced(),
-            AlarmRow::Change(step) => Draft { step, remove_armed: None, ..draft },
+            AlarmRow::Change(step) => Draft {
+                step,
+                remove_armed: None,
+                ..draft
+            },
             AlarmRow::Make | AlarmRow::Save => {
                 if draft.writing {
                     self.notice("Saving\u{2026}");
@@ -270,16 +317,26 @@ impl App {
                     None => AlarmWrite::Create(fields),
                 };
                 self.send(Command::WriteAlarm(write));
-                Draft { writing: true, ..draft }
+                Draft {
+                    writing: true,
+                    ..draft
+                }
             }
             AlarmRow::Remove => {
                 let Some(id) = draft.editing else { return };
                 match draft.remove_armed {
                     Some(at) if at.elapsed() < REMOVE_CONFIRM => {
                         self.send(Command::WriteAlarm(AlarmWrite::Remove(id)));
-                        Draft { writing: true, remove_armed: None, ..draft }
+                        Draft {
+                            writing: true,
+                            remove_armed: None,
+                            ..draft
+                        }
                     }
-                    _ => Draft { remove_armed: Some(Instant::now()), ..draft },
+                    _ => Draft {
+                        remove_armed: Some(Instant::now()),
+                        ..draft
+                    },
                 }
             }
         };
@@ -301,8 +358,16 @@ impl App {
     /// out and another alarm opened since used to be closed by it. A refusal
     /// with no such editor open is still said.
     pub(super) fn alarm_written(&mut self, alarm: Option<u32>, result: Result<(), String>) {
-        let screen = self.stack.iter_mut().rev().find(|s| s.kind == super::screens::Kind::Alarms);
-        let Some(screen) = screen.filter(|s| s.alarm_draft.as_ref().is_some_and(|d| d.writing && d.editing == alarm)) else {
+        let screen = self
+            .stack
+            .iter_mut()
+            .rev()
+            .find(|s| s.kind == super::screens::Kind::Alarms);
+        let Some(screen) = screen.filter(|s| {
+            s.alarm_draft
+                .as_ref()
+                .is_some_and(|d| d.writing && d.editing == alarm)
+        }) else {
             if let Err(e) = result {
                 self.notice(&e);
             }
@@ -323,23 +388,46 @@ impl App {
     }
 
     /// The rows of the step on screen.
-    pub(super) fn alarm_rows(&self, rows: &mut Rows, draft: &Draft, sounds: Option<&Result<Vec<AlarmProgram>, String>>) {
-        let cell = |title: String, subtitle: &str| ListCell { title: title.into(), subtitle: subtitle.into(), ..Default::default() };
+    pub(super) fn alarm_rows(
+        &self,
+        rows: &mut Rows,
+        draft: &Draft,
+        sounds: Option<&Result<Vec<AlarmProgram>, String>>,
+    ) {
+        let cell = |title: String, subtitle: &str| ListCell {
+            title: title.into(),
+            subtitle: subtitle.into(),
+            ..Default::default()
+        };
         match draft.step {
             Step::Room => {
                 rows.heading("Which room?");
                 for (id, name) in self.alarm_rooms() {
                     let chosen = draft.room.as_ref().is_some_and(|r| r.0 == id);
-                    rows.item(ListCell { active: chosen, ..cell(name.clone(), "") }, RowAction::AlarmEditor(AlarmRow::Room(id, name)));
+                    rows.item(
+                        ListCell {
+                            active: chosen,
+                            ..cell(name.clone(), "")
+                        },
+                        RowAction::AlarmEditor(AlarmRow::Room(id, name)),
+                    );
                 }
             }
             Step::Time => {
                 rows.heading("What time?");
-                rows.message("Up and Down change it, Left and Right move between them, Select goes on.");
-                let hour = ListCell { focus: rows.actions.len() as i32, ..cell(format!("{:02}", draft.hour), "Hour") };
+                rows.message(
+                    "Up and Down change it, Left and Right move between them, Select goes on.",
+                );
+                let hour = ListCell {
+                    focus: rows.actions.len() as i32,
+                    ..cell(format!("{:02}", draft.hour), "Hour")
+                };
                 rows.actions.push(RowAction::AlarmEditor(AlarmRow::Hour));
                 rows.cells.push((rows.row, 0));
-                let minute = ListCell { focus: rows.actions.len() as i32, ..cell(format!("{:02}", draft.minute), "Minute") };
+                let minute = ListCell {
+                    focus: rows.actions.len() as i32,
+                    ..cell(format!("{:02}", draft.minute), "Minute")
+                };
                 rows.actions.push(RowAction::AlarmEditor(AlarmRow::Minute));
                 rows.cells.push((rows.row, 1));
                 rows.row += 1;
@@ -353,19 +441,38 @@ impl App {
                 rows.heading("How often?");
                 for r in RECURRENCES {
                     let chosen = draft.recurrence == r;
-                    rows.item(ListCell { active: chosen, ..cell(super::screens::recurrence_words(r), "") }, RowAction::AlarmEditor(AlarmRow::Repeat(r.into())));
+                    rows.item(
+                        ListCell {
+                            active: chosen,
+                            ..cell(super::screens::recurrence_words(r), "")
+                        },
+                        RowAction::AlarmEditor(AlarmRow::Repeat(r.into())),
+                    );
                 }
             }
             Step::Sound => {
                 rows.heading("What should it play?");
-                rows.item(ListCell { active: draft.program.is_none(), ..cell("Chime".into(), "The speaker's own") }, RowAction::AlarmEditor(AlarmRow::Sound(None)));
+                rows.item(
+                    ListCell {
+                        active: draft.program.is_none(),
+                        ..cell("Chime".into(), "The speaker's own")
+                    },
+                    RowAction::AlarmEditor(AlarmRow::Sound(None)),
+                );
                 match sounds {
                     None => rows.message("Reading the Sonos favourites\u{2026}"),
                     Some(Err(e)) => rows.message(&format!("Couldn't read the favourites: {e}")),
                     Some(Ok(list)) => {
                         for program in list {
-                            let chosen = draft.program.as_ref().is_some_and(|p| p.uri == program.uri);
-                            rows.item(ListCell { active: chosen, ..cell(program.title.clone(), "A Sonos favourite") }, RowAction::AlarmEditor(AlarmRow::Sound(Some(program.clone()))));
+                            let chosen =
+                                draft.program.as_ref().is_some_and(|p| p.uri == program.uri);
+                            rows.item(
+                                ListCell {
+                                    active: chosen,
+                                    ..cell(program.title.clone(), "A Sonos favourite")
+                                },
+                                RowAction::AlarmEditor(AlarmRow::Sound(Some(program.clone()))),
+                            );
                         }
                     }
                 }
@@ -374,8 +481,17 @@ impl App {
                 let room = draft.room.as_ref().map(|r| r.1.as_str()).unwrap_or("");
                 rows.heading(&format!("{} \u{00B7} {room}", draft.time()));
                 let sound = draft.program.as_ref().map_or("Chime", |p| p.title.as_str());
-                rows.message(&format!("{} \u{00B7} {sound}", super::screens::recurrence_words(&draft.recurrence)));
-                rows.item(cell(format!("Volume {}", draft.volume), "Left and Right to change"), RowAction::AlarmEditor(AlarmRow::Volume));
+                rows.message(&format!(
+                    "{} \u{00B7} {sound}",
+                    super::screens::recurrence_words(&draft.recurrence)
+                ));
+                rows.item(
+                    cell(
+                        format!("Volume {}", draft.volume),
+                        "Left and Right to change",
+                    ),
+                    RowAction::AlarmEditor(AlarmRow::Volume),
+                );
                 match draft.editing {
                     None => rows.button("Make this alarm", RowAction::AlarmEditor(AlarmRow::Make)),
                     Some(_) => {
@@ -383,8 +499,17 @@ impl App {
                         for (step, label) in CHANGES {
                             rows.button(label, RowAction::AlarmEditor(AlarmRow::Change(step)));
                         }
-                        let armed = draft.remove_armed.is_some_and(|at| at.elapsed() < REMOVE_CONFIRM);
-                        rows.button(if armed { "Press again to remove" } else { "Remove this alarm" }, RowAction::AlarmEditor(AlarmRow::Remove));
+                        let armed = draft
+                            .remove_armed
+                            .is_some_and(|at| at.elapsed() < REMOVE_CONFIRM);
+                        rows.button(
+                            if armed {
+                                "Press again to remove"
+                            } else {
+                                "Remove this alarm"
+                            },
+                            RowAction::AlarmEditor(AlarmRow::Remove),
+                        );
                     }
                 }
             }
@@ -397,7 +522,12 @@ impl App {
             .house
             .groups
             .as_ref()
-            .map(|g| g.players.iter().map(|p| (p.id.clone(), p.name.clone())).collect())
+            .map(|g| {
+                g.players
+                    .iter()
+                    .map(|p| (p.id.clone(), p.name.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         rooms.sort_by_key(|r| r.1.to_lowercase());
         rooms
@@ -413,21 +543,52 @@ mod tests {
         let new = Draft::default();
         assert_eq!(new.clone().advanced().step, Step::Time);
         assert_eq!(new.back(), None, "Back from the first step leaves");
-        let at_sound = Draft { step: Step::Sound, ..Draft::default() };
+        let at_sound = Draft {
+            step: Step::Sound,
+            ..Draft::default()
+        };
         assert_eq!(at_sound.back().map(|d| d.step), Some(Step::Repeat));
-        let editing = Draft { step: Step::Time, editing: Some(3), ..Draft::default() };
-        assert_eq!(editing.clone().advanced().step, Step::Confirm, "a change comes back to the summary");
+        let editing = Draft {
+            step: Step::Time,
+            editing: Some(3),
+            ..Draft::default()
+        };
+        assert_eq!(
+            editing.clone().advanced().step,
+            Step::Confirm,
+            "a change comes back to the summary"
+        );
         assert_eq!(editing.back().map(|d| d.step), Some(Step::Confirm));
-        assert_eq!(Draft { step: Step::Confirm, editing: Some(3), ..Draft::default() }.back(), None);
+        assert_eq!(
+            Draft {
+                step: Step::Confirm,
+                editing: Some(3),
+                ..Draft::default()
+            }
+            .back(),
+            None
+        );
     }
 
     #[test]
     fn the_fields_written_are_the_drafts() {
-        let d = Draft { room: Some(("RINCON_K1".into(), "Kitchen".into())), hour: 6, minute: 45, volume: 12, ..Draft::default() };
+        let d = Draft {
+            room: Some(("RINCON_K1".into(), "Kitchen".into())),
+            hour: 6,
+            minute: 45,
+            volume: 12,
+            ..Draft::default()
+        };
         let f = d.fields().unwrap();
         assert_eq!(f.start, "06:45:00");
-        assert_eq!((f.room.as_str(), f.volume, f.recurrence.as_str()), ("RINCON_K1", 12, "DAILY"));
+        assert_eq!(
+            (f.room.as_str(), f.volume, f.recurrence.as_str()),
+            ("RINCON_K1", 12, "DAILY")
+        );
         assert!(f.program.is_none(), "the chime");
-        assert!(Draft::default().fields().is_none(), "no room, nothing to write");
+        assert!(
+            Draft::default().fields().is_none(),
+            "no room, nothing to write"
+        );
     }
 }

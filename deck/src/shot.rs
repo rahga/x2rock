@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::Rgb8Pixel;
-use slint::platform::{EventLoopProxy, Platform, WindowAdapter, WindowEvent};
 use slint::EventLoopError;
+use slint::Rgb8Pixel;
+use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+use slint::platform::{EventLoopProxy, Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, PhysicalSize};
 
 use crate::app::{self, App, with_app};
@@ -63,8 +63,12 @@ pub type HeadlessPlatform = (Rc<MinimalSoftwareWindow>, Arc<Mutex<Vec<Queued>>>)
 pub fn install_headless() -> Result<HeadlessPlatform> {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     let queue: Arc<Mutex<Vec<Queued>>> = Arc::default();
-    slint::platform::set_platform(Box::new(Headless { window: window.clone(), start: Instant::now(), queue: queue.clone() }))
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    slint::platform::set_platform(Box::new(Headless {
+        window: window.clone(),
+        start: Instant::now(),
+        queue: queue.clone(),
+    }))
+    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     Ok((window, queue))
 }
 
@@ -136,8 +140,12 @@ pub fn run(options: Options) -> Result<()> {
             for (url, cover) in demo::covers() {
                 app.put_art(url, cover);
             }
-            app.update(crate::household::Update::Status(crate::household::Status::Connected));
-            app.update(crate::household::Update::Household(Box::new(demo::household())));
+            app.update(crate::household::Update::Status(
+                crate::household::Status::Connected,
+            ));
+            app.update(crate::household::Update::Household(Box::new(
+                demo::household(),
+            )));
         }),
         Some(wait) => {
             // The household's own runtime, read-only: lists are fetched, nothing
@@ -156,7 +164,9 @@ pub fn run(options: Options) -> Result<()> {
 
     window.set_size(PhysicalSize::new(options.width, options.height));
     if std::env::var_os("X2ROCK_SHOT_NATIVE").is_none() {
-        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale::factor_for(options.width, options.height) });
+        window.dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale::factor_for(options.width, options.height),
+        });
     }
     ui.show()?;
     for step in &options.keys {
@@ -209,8 +219,14 @@ pub fn run(options: Options) -> Result<()> {
         renderer.render(&mut buffer, w);
     });
     let bytes: Vec<u8> = buffer.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
-    image::save_buffer(&options.path, &bytes, options.width, options.height, image::ColorType::Rgb8)
-        .with_context(|| format!("writing {}", options.path))?;
+    image::save_buffer(
+        &options.path,
+        &bytes,
+        options.width,
+        options.height,
+        image::ColorType::Rgb8,
+    )
+    .with_context(|| format!("writing {}", options.path))?;
     ui.hide()?;
     Ok(())
 }

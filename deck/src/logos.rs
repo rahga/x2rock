@@ -11,14 +11,19 @@ static TABLE: &str = include_str!("../ui/assets/service-logos.json");
 const MIN_PREFIX: usize = 5;
 
 fn letters(s: &str) -> String {
-    s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 fn by_letters() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
         let raw: HashMap<String, String> = serde_json::from_str(TABLE).unwrap_or_default();
-        raw.into_iter().map(|(name, url)| (letters(&name), url)).collect()
+        raw.into_iter()
+            .map(|(name, url)| (letters(&name), url))
+            .collect()
     })
 }
 

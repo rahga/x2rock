@@ -23,7 +23,15 @@ fn group(id: &str, name: &str, coordinator: &str, players: &[&str], state: &str)
     json!({ "id": id, "name": name, "coordinatorId": coordinator, "playbackState": state, "playerIds": players })
 }
 
-fn live(state: &str, position: u64, actions: Value, modes: Value, metadata: Value, volume: u8, muted: bool) -> GroupLive {
+fn live(
+    state: &str,
+    position: u64,
+    actions: Value,
+    modes: Value,
+    metadata: Value,
+    volume: u8,
+    muted: bool,
+) -> GroupLive {
     let mut g = GroupLive::default();
     let status: PlaybackStatus = serde_json::from_value(json!({
         "playbackState": state,
@@ -33,8 +41,14 @@ fn live(state: &str, position: u64, actions: Value, modes: Value, metadata: Valu
     }))
     .expect("a playback status");
     g.apply_playback(&status, Instant::now());
-    g.metadata = Some(serde_json::from_value::<MetadataStatus>(metadata).expect("a metadata status"));
-    g.volume = Some(serde_json::from_value::<Volume>(json!({ "volume": volume, "muted": muted, "fixed": false })).expect("a volume"));
+    g.metadata =
+        Some(serde_json::from_value::<MetadataStatus>(metadata).expect("a metadata status"));
+    g.volume = Some(
+        serde_json::from_value::<Volume>(
+            json!({ "volume": volume, "muted": muted, "fixed": false }),
+        )
+        .expect("a volume"),
+    );
     g
 }
 
@@ -72,7 +86,10 @@ pub fn household() -> Household {
     }))
     .expect("a topology");
 
-    let mut house = Household { groups: Some(groups), ..Default::default() };
+    let mut house = Household {
+        groups: Some(groups),
+        ..Default::default()
+    };
     house.live.insert(
         "RINCON_B1:1".into(),
         live(
@@ -152,10 +169,18 @@ pub fn household() -> Household {
             false,
         ),
     );
-    for (id, level) in [("RINCON_D1", 25), ("RINCON_D2", 18), ("RINCON_B1", 22), ("RINCON_G1", 18), ("RINCON_K1", 14), ("RINCON_L1", 30)] {
-        house
-            .player_volumes
-            .insert(id.into(), serde_json::from_value(json!({ "volume": level, "muted": false })).unwrap());
+    for (id, level) in [
+        ("RINCON_D1", 25),
+        ("RINCON_D2", 18),
+        ("RINCON_B1", 22),
+        ("RINCON_G1", 18),
+        ("RINCON_K1", 14),
+        ("RINCON_L1", 30),
+    ] {
+        house.player_volumes.insert(
+            id.into(),
+            serde_json::from_value(json!({ "volume": level, "muted": false })).unwrap(),
+        );
     }
     house.home_theater.insert("RINCON_L1".into(), (true, false));
     house
@@ -165,10 +190,22 @@ pub fn household() -> Household {
 /// disc, enough to give the pane its shade and Artwork its accent.
 pub fn covers() -> Vec<(&'static str, Decoded)> {
     vec![
-        (COVER_LOVE_SONGS, cover([250, 236, 236], [214, 40, 70], [190, 20, 60])),
-        (COVER_HOT_HOUSE, cover([24, 20, 18], [196, 150, 60], [230, 190, 90])),
-        (COVER_GAME, cover([40, 70, 140], [120, 60, 40], [230, 140, 60])),
-        (COVER_KID_KOALA, cover([230, 226, 214], [40, 80, 140], [30, 40, 70])),
+        (
+            COVER_LOVE_SONGS,
+            cover([250, 236, 236], [214, 40, 70], [190, 20, 60]),
+        ),
+        (
+            COVER_HOT_HOUSE,
+            cover([24, 20, 18], [196, 150, 60], [230, 190, 90]),
+        ),
+        (
+            COVER_GAME,
+            cover([40, 70, 140], [120, 60, 40], [230, 140, 60]),
+        ),
+        (
+            COVER_KID_KOALA,
+            cover([230, 226, 214], [40, 80, 140], [30, 40, 70]),
+        ),
     ]
 }
 
@@ -187,15 +224,31 @@ fn cover(top: [u8; 3], bottom: [u8; 3], disc: [u8; 3]) -> Decoded {
             rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
         }
     }
-    let pixels: Vec<[u8; 4]> = rgba.chunks(4).step_by(37).map(|p| [p[0], p[1], p[2], p[3]]).collect();
-    Decoded { width: side, height: side, colors: crate::palette::art_colors(&pixels), rgba, _permit: None }
+    let pixels: Vec<[u8; 4]> = rgba
+        .chunks(4)
+        .step_by(37)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect();
+    Decoded {
+        width: side,
+        height: side,
+        colors: crate::palette::art_colors(&pixels),
+        rgba,
+        _permit: None,
+    }
 }
 
 /// A room's settings, as a read would find them: Living Room has a Sub and
 /// surrounds, as the household the TV app was built against does.
 pub fn room_details(group: &str, player: &str) -> crate::household::RoomDetails {
     use x2rock::sonos::upnp::Tone;
-    let tone = Tone { bass: 2, treble: -1, loudness: true, trueplay: false, trueplay_available: false };
+    let tone = Tone {
+        bass: 2,
+        treble: -1,
+        loudness: true,
+        trueplay: false,
+        trueplay_available: false,
+    };
     let satellites = (player == "RINCON_L1").then(|| crate::household::Satellites {
         player: player.to_owned(),
         sub_on: Some(true),
@@ -214,9 +267,18 @@ pub fn room_details(group: &str, player: &str) -> crate::household::RoomDetails 
         satellites,
         // A limit is said where one is set: the Kitchen's.
         volume_limit: (player == "RINCON_K1").then_some(70),
-        remote: ["RINCON_B1", "RINCON_G1", "RINCON_L1"].contains(&player).then(|| {
-            (player.to_owned(), x2rock::sonos::upnp::RemoteSettings { feedback: true, repeater: "Off".into(), configured: true })
-        }),
+        remote: ["RINCON_B1", "RINCON_G1", "RINCON_L1"]
+            .contains(&player)
+            .then(|| {
+                (
+                    player.to_owned(),
+                    x2rock::sonos::upnp::RemoteSettings {
+                        feedback: true,
+                        repeater: "Off".into(),
+                        configured: true,
+                    },
+                )
+            }),
         read_at: Some(std::time::Instant::now()),
         ..Default::default()
     }
@@ -264,6 +326,10 @@ pub fn alarms() -> Vec<x2rock::sonos::upnp::Alarm> {
 pub fn alarm_sounds() -> Vec<crate::household::AlarmProgram> {
     ["Smooth Jazz", "Morning Edition"]
         .into_iter()
-        .map(|t| crate::household::AlarmProgram { title: t.into(), uri: format!("x-demo:{t}"), metadata: String::new() })
+        .map(|t| crate::household::AlarmProgram {
+            title: t.into(),
+            uri: format!("x-demo:{t}"),
+            metadata: String::new(),
+        })
         .collect()
 }

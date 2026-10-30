@@ -13,22 +13,37 @@ pub const RELEASES: &str = "github.com/rahga/x2rockdeck/releases";
 /// The newest release's version, where it is newer than this build.
 pub async fn newer_release() -> Result<Option<String>> {
     let agent = format!("x2rock-deck/{}", env!("CARGO_PKG_VERSION"));
-    let (status, body) = x2rock::sonos::http::get_with(LATEST, Duration::from_secs(10), &[("User-Agent", &agent), ("Accept", "application/vnd.github+json")])
-        .await
-        .context("asking GitHub for the latest release")?;
+    let (status, body) = x2rock::sonos::http::get_with(
+        LATEST,
+        Duration::from_secs(10),
+        &[
+            ("User-Agent", &agent),
+            ("Accept", "application/vnd.github+json"),
+        ],
+    )
+    .await
+    .context("asking GitHub for the latest release")?;
     if status == 404 {
         return Ok(None);
     }
     anyhow::ensure!(status == 200, "GitHub answered HTTP {status}");
     let json: serde_json::Value = serde_json::from_str(&body)?;
-    let tag = json.get("tag_name").and_then(|t| t.as_str()).unwrap_or_default();
+    let tag = json
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
     Ok(newer(tag, env!("CARGO_PKG_VERSION")).then(|| tag.trim_start_matches('v').to_owned()))
 }
 
 /// Whether `tag` (v1.2.3) is a later version than `current` (1.2.0).
 pub fn newer(tag: &str, current: &str) -> bool {
     let parse = |v: &str| -> Option<Vec<u64>> {
-        v.trim_start_matches('v').split(['-', '+']).next()?.split('.').map(|n| n.parse().ok()).collect()
+        v.trim_start_matches('v')
+            .split(['-', '+'])
+            .next()?
+            .split('.')
+            .map(|n| n.parse().ok())
+            .collect()
     };
     match (parse(tag), parse(current)) {
         (Some(a), Some(b)) => a > b,

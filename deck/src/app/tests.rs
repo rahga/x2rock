@@ -3,10 +3,10 @@
 //! is set once a process.
 
 use super::{App, Place, Transport, with_app, zone};
-use slint::Model;
 use crate::input::{Action, Phase};
 use crate::prefs::Prefs;
 use crate::{AppWindow, demo, household, shot};
+use slint::Model;
 
 fn press(action: Action) {
     with_app(|app| {
@@ -23,13 +23,27 @@ fn focus() -> (i32, i32) {
 
 fn transport_at(t: Transport) -> i32 {
     let mut i = -1;
-    with_app(|app| i = app.transport.iter().position(|x| *x == t).map(|p| p as i32).unwrap_or(-1));
+    with_app(|app| {
+        i = app
+            .transport
+            .iter()
+            .position(|x| *x == t)
+            .map(|p| p as i32)
+            .unwrap_or(-1)
+    });
     i
 }
 
 fn place_at(p: Place) -> i32 {
     let mut i = -1;
-    with_app(|app| i = app.places.iter().position(|x| *x == p).map(|p| p as i32).unwrap_or(-1));
+    with_app(|app| {
+        i = app
+            .places
+            .iter()
+            .position(|x| *x == p)
+            .map(|p| p as i32)
+            .unwrap_or(-1)
+    });
     i
 }
 
@@ -37,13 +51,23 @@ fn place_at(p: Place) -> i32 {
 fn sent() -> Vec<household::Command> {
     let mut s = vec![];
     with_app(|app| s = app.sent.borrow().clone());
-    s.retain(|c| !matches!(c, household::Command::Fetch(_) | household::Command::ReadRoom { .. }));
+    s.retain(|c| {
+        !matches!(
+            c,
+            household::Command::Fetch(_) | household::Command::ReadRoom { .. }
+        )
+    });
     s
 }
 
 fn selected_name() -> String {
     let mut n = String::new();
-    with_app(|app| n = app.selected_entry().map(|e| app.room_label(e)).unwrap_or_default());
+    with_app(|app| {
+        n = app
+            .selected_entry()
+            .map(|e| app.room_label(e))
+            .unwrap_or_default()
+    });
     n
 }
 
@@ -69,7 +93,10 @@ fn navigation_follows_the_tv_apps_rules() {
 
     // Right from a room enters the pane at Play/Pause.
     press(Action::Right);
-    assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::PlayPause)));
+    assert_eq!(
+        focus(),
+        (zone::TRANSPORT, transport_at(Transport::PlayPause))
+    );
 
     // Up and Down move between the pane's rows and never leave it.
     press(Action::Up);
@@ -80,7 +107,11 @@ fn navigation_follows_the_tv_apps_rules() {
     assert_eq!(focus().0, zone::VOLUME, "Up from the top stays in the pane");
     press(Action::Down);
     press(Action::Down);
-    assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::PlayPause)), "Play/Pause is remembered");
+    assert_eq!(
+        focus(),
+        (zone::TRANSPORT, transport_at(Transport::PlayPause)),
+        "Play/Pause is remembered"
+    );
 
     // Left from a row's leftmost control returns to the selected room.
     while focus().1 > 0 {
@@ -91,7 +122,10 @@ fn navigation_follows_the_tv_apps_rules() {
 
     // Select on a room enters the pane; it does not open the panel.
     press(Action::Select);
-    assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::PlayPause)));
+    assert_eq!(
+        focus(),
+        (zone::TRANSPORT, transport_at(Transport::PlayPause))
+    );
 
     // Back from the pane goes to the room list.
     press(Action::Back);
@@ -115,9 +149,17 @@ fn navigation_follows_the_tv_apps_rules() {
     });
     assert!(on_own_row, "the Group panel opens on the room's own row");
     press(Action::Select);
-    assert!(sent().is_empty(), "Select on the coordinator's row sends nothing: {:?}", sent());
+    assert!(
+        sent().is_empty(),
+        "Select on the coordinator's row sends nothing: {:?}",
+        sent()
+    );
     press(Action::Back);
-    assert_eq!(focus(), group_button, "closing the panel hands focus back to its opener");
+    assert_eq!(
+        focus(),
+        group_button,
+        "closing the panel hands focus back to its opener"
+    );
 
     // Settings sits at the foot of the list; Back from it returns to the rooms.
     press(Action::Back);
@@ -126,7 +168,11 @@ fn navigation_follows_the_tv_apps_rules() {
     }
     assert_eq!(focus().0, zone::SETTINGS);
     press(Action::Select);
-    assert_eq!(focus(), (zone::SETTINGS_PANEL, 0), "Settings opens on the theme");
+    assert_eq!(
+        focus(),
+        (zone::SETTINGS_PANEL, 0),
+        "Settings opens on the theme"
+    );
     press(Action::Right);
     let mut theme = String::new();
     with_app(|app| theme = app.prefs.theme.clone());
@@ -153,7 +199,13 @@ fn navigation_follows_the_tv_apps_rules() {
     with_app(|app| moving = app.moving.is_some());
     assert!(!moving, "Select puts it down");
     let mut first = String::new();
-    with_app(|app| first = app.rooms.get(app.rooms.len() - 2).map(|e| app.room_label(e)).unwrap_or_default());
+    with_app(|app| {
+        first = app
+            .rooms
+            .get(app.rooms.len() - 2)
+            .map(|e| app.room_label(e))
+            .unwrap_or_default()
+    });
     assert_eq!(first, carried, "the carried room moved up one place");
 
     // Full screen closes on any key's release but Back's. From a music room:
@@ -171,7 +223,11 @@ fn navigation_follows_the_tv_apps_rules() {
     press(Action::Select);
     assert_eq!(focus().0, zone::FULL);
     press(Action::Down);
-    assert_eq!(focus(), (zone::PLACES, place_at(Place::FullScreen)), "a key's release closes full screen onto its button");
+    assert_eq!(
+        focus(),
+        (zone::PLACES, place_at(Place::FullScreen)),
+        "a key's release closes full screen onto its button"
+    );
 
     // A control that leaves the row under focus hands it to Play/Pause, not
     // to whatever slid into its place: Next at a queue's end, then Repeat.
@@ -184,20 +240,42 @@ fn navigation_follows_the_tv_apps_rules() {
     }
     assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::Next)));
     let mut house = demo::household();
-    house.live.get_mut("RINCON_B1:1").expect("Bedroom").actions.can_repeat = true;
+    house
+        .live
+        .get_mut("RINCON_B1:1")
+        .expect("Bedroom")
+        .actions
+        .can_repeat = true;
     with_app(|app| app.update(household::Update::Household(Box::new(house.clone()))));
     assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::Next)));
-    house.live.get_mut("RINCON_B1:1").expect("Bedroom").actions.can_skip = false;
+    house
+        .live
+        .get_mut("RINCON_B1:1")
+        .expect("Bedroom")
+        .actions
+        .can_skip = false;
     with_app(|app| app.update(household::Update::Household(Box::new(house.clone()))));
     assert_eq!(transport_at(Transport::Next), -1, "Next is gone");
-    assert_eq!(focus(), (zone::TRANSPORT, transport_at(Transport::PlayPause)), "focus went to Play/Pause");
+    assert_eq!(
+        focus(),
+        (zone::TRANSPORT, transport_at(Transport::PlayPause)),
+        "focus went to Play/Pause"
+    );
     // And a control that stays keeps focus when others arrive before it.
     let bedroom = house.live.get_mut("RINCON_B1:1").expect("Bedroom");
     bedroom.actions.can_shuffle = true;
     bedroom.actions.can_skip_back = true;
     with_app(|app| app.update(household::Update::Household(Box::new(house))));
-    assert_eq!(transport_at(Transport::PlayPause), 2, "Shuffle and Previous arrived before it");
-    assert_eq!(focus(), (zone::TRANSPORT, 2), "Play/Pause keeps focus as they arrive");
+    assert_eq!(
+        transport_at(Transport::PlayPause),
+        2,
+        "Shuffle and Previous arrived before it"
+    );
+    assert_eq!(
+        focus(),
+        (zone::TRANSPORT, 2),
+        "Play/Pause keeps focus as they arrive"
+    );
     with_app(|app| app.update(household::Update::Household(Box::new(demo::household()))));
     while focus().1 > 0 {
         press(Action::Left);
@@ -222,7 +300,10 @@ fn navigation_follows_the_tv_apps_rules() {
     assert_eq!(selected_name(), chosen);
     let mut on_selected = false;
     with_app(|app| on_selected = app.selected_index() == Some(app.focus.1 as usize));
-    assert!(on_selected, "focus stays on the selected room's row as a row above it goes");
+    assert!(
+        on_selected,
+        "focus stays on the selected room's row as a row above it goes"
+    );
     with_app(|app| app.update(household::Update::Household(Box::new(demo::household()))));
     with_app(|app| on_selected = app.selected_index() == Some(app.focus.1 as usize));
     assert!(on_selected, "and as it comes back");
@@ -237,11 +318,21 @@ fn navigation_follows_the_tv_apps_rules() {
     with_app(|app| {
         app.open_screen(super::screens::Kind::Browse);
         app.open_screen(super::screens::Kind::Services);
-        let favorite: x2rock::sonos::proto::Favorite = serde_json::from_value(serde_json::json!({ "id": "1", "name": "Jazz" })).unwrap();
+        let favorite: x2rock::sonos::proto::Favorite =
+            serde_json::from_value(serde_json::json!({ "id": "1", "name": "Jazz" })).unwrap();
         let id = app.stack[0].requests.favorites;
-        app.update(household::Update::Fetched(household::Fetched::Favorites { id, result: Ok(vec![favorite]) }));
-        assert!(app.stack[1].favorites.is_none(), "Music Services took Browse's favourites");
-        assert!(app.stack[0].favorites.is_some(), "Browse has its favourites");
+        app.update(household::Update::Fetched(household::Fetched::Favorites {
+            id,
+            result: Ok(vec![favorite]),
+        }));
+        assert!(
+            app.stack[1].favorites.is_none(),
+            "Music Services took Browse's favourites"
+        );
+        assert!(
+            app.stack[0].favorites.is_some(),
+            "Browse has its favourites"
+        );
         app.close_screen();
         app.close_screen();
     });
@@ -252,15 +343,26 @@ fn navigation_follows_the_tv_apps_rules() {
     with_app(|app| {
         use super::panels::PanelAction;
         app.open_place(Place::Configure);
-        let bass = app.panel.as_ref().and_then(|p| p.actions.iter().position(|a| *a == PanelAction::Bass)).expect("a Bass row");
+        let bass = app
+            .panel
+            .as_ref()
+            .and_then(|p| p.actions.iter().position(|a| *a == PanelAction::Bass))
+            .expect("a Bass row");
         app.focus.1 = bass as i32;
         let details = app.room_details.as_mut().expect("the demo's settings");
         details.sleep_left = Some(std::time::Duration::from_secs(600));
         details.read_at = Some(std::time::Instant::now());
         app.render_panel();
-        let at = app.panel.as_ref().and_then(|p| p.actions.get(app.focus.1 as usize).cloned());
+        let at = app
+            .panel
+            .as_ref()
+            .and_then(|p| p.actions.get(app.focus.1 as usize).cloned());
         assert_eq!(at, Some(PanelAction::Bass), "focus stayed on Bass");
-        assert!(app.panel.as_ref().is_some_and(|p| p.actions.contains(&PanelAction::CancelSleep)));
+        assert!(
+            app.panel
+                .as_ref()
+                .is_some_and(|p| p.actions.contains(&PanelAction::CancelSleep))
+        );
         app.close_panel();
     });
 
@@ -277,7 +379,12 @@ fn navigation_follows_the_tv_apps_rules() {
         app.key(&enter, false, false);
         app.pad_action(Action::Select, Phase::Release);
         let screen = app.stack.last().expect("Search");
-        assert_eq!(screen.query.chars().count(), 2, "one key typed after the x: {:?}", screen.query);
+        assert_eq!(
+            screen.query.chars().count(),
+            2,
+            "one key typed after the x: {:?}",
+            screen.query
+        );
         assert!(screen.searched.is_none(), "nothing searched");
         app.close_screen();
     });
@@ -297,7 +404,11 @@ fn navigation_follows_the_tv_apps_rules() {
         }
         app.close_screen();
     });
-    assert!(matches!(sent().as_slice(), [household::Command::CancelSearch]), "{:?}", sent());
+    assert!(
+        matches!(sent().as_slice(), [household::Command::CancelSearch]),
+        "{:?}",
+        sent()
+    );
     with_app(|app| app.sent.borrow_mut().clear());
 
     // A line-in is offered only with Beta features on, the room's own as
@@ -311,7 +422,13 @@ fn navigation_follows_the_tv_apps_rules() {
             }
         }
         app.update(household::Update::Household(Box::new(house)));
-        let line_in = |app: &App| app.panel.as_ref().and_then(|p| p.actions.iter().position(|a| *a == PanelAction::LineIn("RINCON_K1".into())));
+        let line_in = |app: &App| {
+            app.panel.as_ref().and_then(|p| {
+                p.actions
+                    .iter()
+                    .position(|a| *a == PanelAction::LineIn("RINCON_K1".into()))
+            })
+        };
         app.prefs.beta_features = false;
         app.open_place(Place::Configure);
         assert!(line_in(app).is_none(), "no line-in without Beta features");
@@ -320,7 +437,14 @@ fn navigation_follows_the_tv_apps_rules() {
         app.open_place(Place::Configure);
         let at = line_in(app).expect("Kitchen's line-in offered");
         use slint::Model;
-        let label = app.models.panel_items.model().iter().find(|i| i.focus == at as i32).map(|i| i.label.to_string()).unwrap_or_default();
+        let label = app
+            .models
+            .panel_items
+            .model()
+            .iter()
+            .find(|i| i.focus == at as i32)
+            .map(|i| i.label.to_string())
+            .unwrap_or_default();
         app.sent.borrow_mut().clear();
         app.focus.1 = at as i32;
         app.panel_click(at as i32);
@@ -343,11 +467,20 @@ fn navigation_follows_the_tv_apps_rules() {
         app.open_screen(super::screens::Kind::Alarms);
         let id = app.requests().expect("requests").alarms;
         let read = Ok((vec![], "2026-10-29 06:30:00".to_owned(), true));
-        app.update(household::Update::Fetched(household::Fetched::Alarms { id, result: read }));
+        app.update(household::Update::Fetched(household::Fetched::Alarms {
+            id,
+            result: read,
+        }));
     });
     let editor_rows = || {
         let mut a = vec![];
-        with_app(|app| a = app.stack.last().map(|s| s.actions.clone()).unwrap_or_default());
+        with_app(|app| {
+            a = app
+                .stack
+                .last()
+                .map(|s| s.actions.clone())
+                .unwrap_or_default()
+        });
         a
     };
     let step = || {
@@ -355,7 +488,9 @@ fn navigation_follows_the_tv_apps_rules() {
         with_app(|app| s = app.alarm_draft().map(|d| d.step));
         s
     };
-    let at = |want: &dyn Fn(&super::screens::RowAction) -> bool| editor_rows().iter().position(want).expect("a row") as i32;
+    let at = |want: &dyn Fn(&super::screens::RowAction) -> bool| {
+        editor_rows().iter().position(want).expect("a row") as i32
+    };
     use super::alarms::{AlarmRow, Step};
     use super::screens::RowAction as R;
     with_app(|app| app.focus = (zone::LIST, 0));
@@ -367,7 +502,14 @@ fn navigation_follows_the_tv_apps_rules() {
     with_app(|app| app.focus = (zone::LIST, kitchen));
     press(Action::Select);
     assert_eq!(step(), Some(Step::Time));
-    assert_eq!(focus(), (zone::LIST, at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Hour)))), "the hour first");
+    assert_eq!(
+        focus(),
+        (
+            zone::LIST,
+            at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Hour)))
+        ),
+        "the hour first"
+    );
     press(Action::Up);
     press(Action::Up);
     press(Action::Right);
@@ -387,29 +529,79 @@ fn navigation_follows_the_tv_apps_rules() {
     assert_eq!(step(), Some(Step::Sound));
     with_app(|app| {
         let id = app.requests().expect("requests").alarm_sounds;
-        app.update(household::Update::Fetched(household::Fetched::AlarmSounds { id, result: Ok(vec![]) }));
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmSounds {
+                id,
+                result: Ok(vec![]),
+            },
+        ));
     });
     press(Action::Select);
     assert_eq!(step(), Some(Step::Confirm));
-    assert_eq!(focus(), (zone::LIST, at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Make)))), "the summary opens on Make");
+    assert_eq!(
+        focus(),
+        (
+            zone::LIST,
+            at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Make)))
+        ),
+        "the summary opens on Make"
+    );
     press(Action::Up);
     press(Action::Right);
     press(Action::Right);
     press(Action::Down);
     press(Action::Select);
     let made = sent();
-    let expected = household::AlarmFields { start: "09:59:00".into(), recurrence: "WEEKDAYS".into(), room: "RINCON_K1".into(), program: None, volume: 22 };
-    assert!(matches!(made.as_slice(), [household::Command::WriteAlarm(household::AlarmWrite::Create(f))] if *f == expected), "{made:?}");
+    let expected = household::AlarmFields {
+        start: "09:59:00".into(),
+        recurrence: "WEEKDAYS".into(),
+        room: "RINCON_K1".into(),
+        program: None,
+        volume: 22,
+    };
+    assert!(
+        matches!(made.as_slice(), [household::Command::WriteAlarm(household::AlarmWrite::Create(f))] if *f == expected),
+        "{made:?}"
+    );
     // A second press while the write is out sends nothing more.
     press(Action::Select);
     assert_eq!(sent().len(), 1, "one write");
-    with_app(|app| app.update(household::Update::Fetched(household::Fetched::AlarmWritten { alarm: None, result: Err("Kitchen already has an alarm at 09:59".into()) })));
-    assert_eq!(step(), Some(Step::Confirm), "a refusal keeps the editor open");
+    with_app(|app| {
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmWritten {
+                alarm: None,
+                result: Err("Kitchen already has an alarm at 09:59".into()),
+            },
+        ))
+    });
+    assert_eq!(
+        step(),
+        Some(Step::Confirm),
+        "a refusal keeps the editor open"
+    );
     press(Action::Select);
     assert_eq!(sent().len(), 2, "after a refusal, Make sends again");
-    with_app(|app| app.update(household::Update::Fetched(household::Fetched::AlarmWritten { alarm: Some(3), result: Ok(()) })));
-    assert_eq!(step(), Some(Step::Confirm), "another write's answer leaves it open");
-    with_app(|app| app.update(household::Update::Fetched(household::Fetched::AlarmWritten { alarm: None, result: Ok(()) })));
+    with_app(|app| {
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmWritten {
+                alarm: Some(3),
+                result: Ok(()),
+            },
+        ))
+    });
+    assert_eq!(
+        step(),
+        Some(Step::Confirm),
+        "another write's answer leaves it open"
+    );
+    with_app(|app| {
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmWritten {
+                alarm: None,
+                result: Ok(()),
+            },
+        ))
+    });
     assert_eq!(step(), None, "success closes it");
 
     // A hold on an alarm opens it on its summary; Remove takes two presses.
@@ -430,21 +622,54 @@ fn navigation_follows_the_tv_apps_rules() {
         app.sent.borrow_mut().clear();
         let id = app.requests().expect("requests").alarms;
         let read = Ok((vec![alarm.clone()], "2026-10-29 06:30:00".to_owned(), true));
-        app.update(household::Update::Fetched(household::Fetched::Alarms { id, result: read }));
-        let row = app.stack.last().and_then(|s| s.actions.iter().position(|a| matches!(a, R::Alarm(a) if a.id == 7))).expect("the alarm") as i32;
+        app.update(household::Update::Fetched(household::Fetched::Alarms {
+            id,
+            result: read,
+        }));
+        let row = app
+            .stack
+            .last()
+            .and_then(|s| {
+                s.actions
+                    .iter()
+                    .position(|a| matches!(a, R::Alarm(a) if a.id == 7))
+            })
+            .expect("the alarm") as i32;
         app.focus = (zone::LIST, row);
         app.screen_hold(zone::LIST, row);
     });
     assert_eq!(step(), Some(Step::Confirm));
-    assert_eq!(focus(), (zone::LIST, at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Save)))), "it opens on Save");
+    assert_eq!(
+        focus(),
+        (
+            zone::LIST,
+            at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Save)))
+        ),
+        "it opens on Save"
+    );
     let remove = at(&|a| matches!(a, R::AlarmEditor(AlarmRow::Remove)));
     with_app(|app| app.focus = (zone::LIST, remove));
     press(Action::Select);
     assert!(sent().is_empty(), "one press only arms Remove");
     press(Action::Select);
     let removed = sent();
-    assert!(matches!(removed.as_slice(), [household::Command::WriteAlarm(household::AlarmWrite::Remove(7))]), "{removed:?}");
-    with_app(|app| app.update(household::Update::Fetched(household::Fetched::AlarmWritten { alarm: Some(7), result: Ok(()) })));
+    assert!(
+        matches!(
+            removed.as_slice(),
+            [household::Command::WriteAlarm(
+                household::AlarmWrite::Remove(7)
+            )]
+        ),
+        "{removed:?}"
+    );
+    with_app(|app| {
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmWritten {
+                alarm: Some(7),
+                result: Ok(()),
+            },
+        ))
+    });
     assert_eq!(step(), None);
 
     // A save answered after Back, with another alarm opened since, leaves
@@ -454,22 +679,44 @@ fn navigation_follows_the_tv_apps_rules() {
     eight.start = "08:00:00".into();
     let hold = |id: u32| {
         with_app(|app| {
-            let row = app.stack.last().and_then(|s| s.actions.iter().position(|a| matches!(a, R::Alarm(a) if a.id == id))).expect("the alarm") as i32;
+            let row = app
+                .stack
+                .last()
+                .and_then(|s| {
+                    s.actions
+                        .iter()
+                        .position(|a| matches!(a, R::Alarm(a) if a.id == id))
+                })
+                .expect("the alarm") as i32;
             app.focus = (zone::LIST, row);
             app.screen_hold(zone::LIST, row);
         })
     };
     with_app(|app| {
         let id = app.requests().expect("requests").alarms;
-        let read = Ok((vec![alarm.clone(), eight.clone()], "2026-10-29 06:30:00".to_owned(), true));
-        app.update(household::Update::Fetched(household::Fetched::Alarms { id, result: read }));
+        let read = Ok((
+            vec![alarm.clone(), eight.clone()],
+            "2026-10-29 06:30:00".to_owned(),
+            true,
+        ));
+        app.update(household::Update::Fetched(household::Fetched::Alarms {
+            id,
+            result: read,
+        }));
     });
     hold(7);
     press(Action::Select);
     press(Action::Back);
     assert_eq!(step(), None);
     hold(8);
-    with_app(|app| app.update(household::Update::Fetched(household::Fetched::AlarmWritten { alarm: Some(7), result: Ok(()) })));
+    with_app(|app| {
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmWritten {
+                alarm: Some(7),
+                result: Ok(()),
+            },
+        ))
+    });
     let mut open = None;
     with_app(|app| open = app.alarm_draft().and_then(|d| d.editing));
     assert_eq!(open, Some(8), "alarm 8's editor stays open");
@@ -483,24 +730,75 @@ fn navigation_follows_the_tv_apps_rules() {
         use super::screens::RowAction;
         app.sent.borrow_mut().clear();
         app.open_screen(super::screens::Kind::Browse);
-        let favorite: x2rock::sonos::proto::Favorite = serde_json::from_value(serde_json::json!({ "id": "4", "name": "Jazz" })).unwrap();
+        let favorite: x2rock::sonos::proto::Favorite =
+            serde_json::from_value(serde_json::json!({ "id": "4", "name": "Jazz" })).unwrap();
         let id = app.requests().expect("requests").favorites;
-        app.update(household::Update::Fetched(household::Fetched::Favorites { id, result: Ok(vec![favorite]) }));
-        let row = app.stack.last().and_then(|s| s.actions.iter().position(|a| matches!(a, RowAction::Favorite(id, _) if id == "4"))).expect("the favourite") as i32;
+        app.update(household::Update::Fetched(household::Fetched::Favorites {
+            id,
+            result: Ok(vec![favorite]),
+        }));
+        let row = app
+            .stack
+            .last()
+            .and_then(|s| {
+                s.actions
+                    .iter()
+                    .position(|a| matches!(a, RowAction::Favorite(id, _) if id == "4"))
+            })
+            .expect("the favourite") as i32;
         app.screen_hold(zone::LIST, row);
-        let remove = app.panel.as_ref().and_then(|p| p.actions.iter().position(|a| *a == PanelAction::MenuRemoveFavorite)).expect("Remove offered") as i32;
+        let remove = app
+            .panel
+            .as_ref()
+            .and_then(|p| {
+                p.actions
+                    .iter()
+                    .position(|a| *a == PanelAction::MenuRemoveFavorite)
+            })
+            .expect("Remove offered") as i32;
         app.panel_click(remove);
         assert!(app.panel.is_some(), "the first press only arms it");
         app.panel_click(remove);
         assert!(app.panel.is_none());
 
-        let item = x2rock::sonos::smapi::Item { id: "track:9".into(), title: "Song".into(), item_type: "track".into(), summary: None, art_url: None, container: false };
-        app.open_item_menu(RowAction::ServiceItem { service: "160".into(), item: item.clone() }, "Song".into());
-        let offered = |app: &App, want: PanelAction| app.panel.as_ref().is_some_and(|p| p.actions.contains(&want));
-        assert!(!offered(app, PanelAction::MenuAddFavorite), "nothing offered before it is known");
-        app.update(household::Update::Fetched(household::Fetched::IsFavorite { item_id: "track:9".into(), yes: false }));
+        let item = x2rock::sonos::smapi::Item {
+            id: "track:9".into(),
+            title: "Song".into(),
+            item_type: "track".into(),
+            summary: None,
+            art_url: None,
+            container: false,
+        };
+        app.open_item_menu(
+            RowAction::ServiceItem {
+                service: "160".into(),
+                item: item.clone(),
+            },
+            "Song".into(),
+        );
+        let offered = |app: &App, want: PanelAction| {
+            app.panel
+                .as_ref()
+                .is_some_and(|p| p.actions.contains(&want))
+        };
+        assert!(
+            !offered(app, PanelAction::MenuAddFavorite),
+            "nothing offered before it is known"
+        );
+        app.update(household::Update::Fetched(household::Fetched::IsFavorite {
+            item_id: "track:9".into(),
+            yes: false,
+        }));
         assert!(offered(app, PanelAction::MenuAddFavorite));
-        let add = app.panel.as_ref().and_then(|p| p.actions.iter().position(|a| *a == PanelAction::MenuAddFavorite)).unwrap() as i32;
+        let add = app
+            .panel
+            .as_ref()
+            .and_then(|p| {
+                p.actions
+                    .iter()
+                    .position(|a| *a == PanelAction::MenuAddFavorite)
+            })
+            .unwrap() as i32;
         app.panel_click(add);
         app.close_screen();
     });
@@ -518,21 +816,66 @@ fn navigation_follows_the_tv_apps_rules() {
     with_app(|app| {
         use super::panels::PanelAction;
         use super::screens::RowAction;
-        let item = |id: &str, kind: &str| x2rock::sonos::smapi::Item { id: id.into(), title: id.into(), item_type: kind.into(), summary: None, art_url: None, container: false };
+        let item = |id: &str, kind: &str| x2rock::sonos::smapi::Item {
+            id: id.into(),
+            title: id.into(),
+            item_type: kind.into(),
+            summary: None,
+            art_url: None,
+            container: false,
+        };
         let book = item("book:1", "audiobook");
         app.open_screen(super::screens::Kind::Browse);
-        app.open_item_menu(RowAction::ServiceItem { service: "239".into(), item: book.clone() }, "Dune".into());
-        let chapters = app.panel.as_ref().and_then(|p| p.actions.iter().position(|a| *a == PanelAction::MenuChapters)).expect("Chapters offered") as i32;
+        app.open_item_menu(
+            RowAction::ServiceItem {
+                service: "239".into(),
+                item: book.clone(),
+            },
+            "Dune".into(),
+        );
+        let chapters = app
+            .panel
+            .as_ref()
+            .and_then(|p| {
+                p.actions
+                    .iter()
+                    .position(|a| *a == PanelAction::MenuChapters)
+            })
+            .expect("Chapters offered") as i32;
         app.panel_click(chapters);
         let id = app.requests().expect("requests").page;
-        let page = household::Fetched::ServicePage { id, service: "239".into(), container: "book:1".into(), index: 0, result: Ok((vec![item("ch:1", "track"), item("ch:2", "track")], 2)) };
+        let page = household::Fetched::ServicePage {
+            id,
+            service: "239".into(),
+            container: "book:1".into(),
+            index: 0,
+            result: Ok((vec![item("ch:1", "track"), item("ch:2", "track")], 2)),
+        };
         app.update(household::Update::Fetched(page));
-        app.update(household::Update::Fetched(household::Fetched::Resume { book: "book:1".into(), chapter: Some("ch:2".into()) }));
+        app.update(household::Update::Fetched(household::Fetched::Resume {
+            book: "book:1".into(),
+            chapter: Some("ch:2".into()),
+        }));
         app.render_screen();
-        let actions = app.stack.last().map(|s| s.actions.clone()).unwrap_or_default();
-        let plays = |a: &RowAction| match a { RowAction::ServiceItem { item, .. } => item.id.clone(), _ => String::new() };
-        assert_eq!(actions.iter().map(plays).collect::<Vec<_>>(), ["ch:1", "book:1"], "the resumed chapter plays the book");
-        assert_eq!(app.focus, (zone::LIST, 1), "it opens on the chapter it resumes at");
+        let actions = app
+            .stack
+            .last()
+            .map(|s| s.actions.clone())
+            .unwrap_or_default();
+        let plays = |a: &RowAction| match a {
+            RowAction::ServiceItem { item, .. } => item.id.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            actions.iter().map(plays).collect::<Vec<_>>(),
+            ["ch:1", "book:1"],
+            "the resumed chapter plays the book"
+        );
+        assert_eq!(
+            app.focus,
+            (zone::LIST, 1),
+            "it opens on the chapter it resumes at"
+        );
         app.close_screen();
         app.close_screen();
     });
@@ -549,7 +892,10 @@ fn navigation_follows_the_tv_apps_rules() {
     });
     assert_eq!(focus().0, zone::ROOMS);
     with_app(|app| moving = app.moving.is_some());
-    assert!(!moving, "a Left held from the pane does not pick the room up");
+    assert!(
+        !moving,
+        "a Left held from the pane does not pick the room up"
+    );
     assert!(sent().is_empty(), "nothing sent: {:?}", sent());
 
     // Held on the room itself it picks it up, and goes no further.
@@ -593,11 +939,27 @@ fn navigation_follows_the_tv_apps_rules() {
             if now_playing {
                 app.open_screen(super::screens::Kind::NowPlaying);
             }
-            app.models.list_rows.set(vec![crate::ListRow { icon: image.clone(), has_icon: true, ..Default::default() }]);
-            ui.set_bar(crate::BarState { art: image.clone(), has_art: true, ..Default::default() });
+            app.models.list_rows.set(vec![crate::ListRow {
+                icon: image.clone(),
+                has_icon: true,
+                ..Default::default()
+            }]);
+            ui.set_bar(crate::BarState {
+                art: image.clone(),
+                has_art: true,
+                ..Default::default()
+            });
             app.render_screen();
-            assert_eq!(app.models.list_rows.model().row_count(), 0, "hidden rows must release their cover images");
-            assert_eq!(ui.get_bar().art.size().width, 0, "the hidden player bar must release its cover too");
+            assert_eq!(
+                app.models.list_rows.model().row_count(),
+                0,
+                "hidden rows must release their cover images"
+            );
+            assert_eq!(
+                ui.get_bar().art.size().width,
+                0,
+                "the hidden player bar must release its cover too"
+            );
         }
 
         // A failed displayed cover schedules its own wakeup, even with no
@@ -605,22 +967,33 @@ fn navigation_follows_the_tv_apps_rules() {
         app.tick.stop();
         let now = std::time::Instant::now();
         let failed_key = super::ArtKey::new("synthetic-failed-cover", super::ArtSize::Full);
-        app.art.failed(failed_key.clone(), now + std::time::Duration::from_secs(60));
+        app.art
+            .failed(failed_key.clone(), now + std::time::Duration::from_secs(60));
         app.art.begin(super::ArtSurface::Pane);
         app.art.get(&failed_key, now);
         app.finish_art_render();
-        assert!(app.art_retry.running(), "idle playback must not prevent art retries");
-        assert!(!app.tick.running(), "art retries must not depend on playback ticking");
+        assert!(
+            app.art_retry.running(),
+            "idle playback must not prevent art retries"
+        );
+        assert!(
+            !app.tick.running(),
+            "art retries must not depend on playback ticking"
+        );
         // The deadline can pass between looking up a cover and scheduling
         // its timer. Slint must get a nonzero interval even at that boundary.
         app.art.failed(failed_key.clone(), now);
         app.art.begin(super::ArtSurface::Pane);
-        app.art.get(&failed_key, now - std::time::Duration::from_nanos(1));
+        app.art
+            .get(&failed_key, now - std::time::Duration::from_nanos(1));
         app.finish_art_render();
         assert!(app.art_retry.interval() >= std::time::Duration::from_millis(1));
         app.art.begin(super::ArtSurface::Pane);
         app.finish_art_render();
-        assert!(!app.art_retry.running(), "hidden failures must not keep waking the UI");
+        assert!(
+            !app.art_retry.running(),
+            "hidden failures must not keep waking the UI"
+        );
     });
     drop(ui);
 }
@@ -628,8 +1001,19 @@ fn navigation_follows_the_tv_apps_rules() {
 fn test_same_search_query_twice_ignores_late_response() {
     with_app(|app| {
         let dummy_section = |title: &str| crate::services::Section {
-            service: crate::services::ServiceInfo { id: "svc1".into(), name: "Service 1".into(), linked: true },
-            result: Ok(vec![x2rock::sonos::smapi::Item { id: title.into(), title: title.into(), item_type: "track".into(), summary: None, art_url: None, container: false }]),
+            service: crate::services::ServiceInfo {
+                id: "svc1".into(),
+                name: "Service 1".into(),
+                linked: true,
+            },
+            result: Ok(vec![x2rock::sonos::smapi::Item {
+                id: title.into(),
+                title: title.into(),
+                item_type: "track".into(),
+                summary: None,
+                art_url: None,
+                container: false,
+            }]),
         };
 
         app.open_screen(super::screens::Kind::Search);
@@ -647,25 +1031,56 @@ fn test_same_search_query_twice_ignores_late_response() {
         assert_ne!(id1, id2, "distinct request ids for two searches");
 
         // Late response from search 1 arrives:
-        app.fetched(household::Fetched::SearchSection { id: id1, term: "beatles".into(), section: dummy_section("late track") });
-        assert_eq!(app.stack.last().map(|s| s.sections.len()), Some(0), "late section from first search ignored");
+        app.fetched(household::Fetched::SearchSection {
+            id: id1,
+            term: "beatles".into(),
+            section: dummy_section("late track"),
+        });
+        assert_eq!(
+            app.stack.last().map(|s| s.sections.len()),
+            Some(0),
+            "late section from first search ignored"
+        );
 
         // Response from search 2 arrives:
-        app.fetched(household::Fetched::SearchSection { id: id2, term: "beatles".into(), section: dummy_section("fresh track") });
-        assert_eq!(app.stack.last().map(|s| s.sections.len()), Some(1), "section for current search accepted");
+        app.fetched(household::Fetched::SearchSection {
+            id: id2,
+            term: "beatles".into(),
+            section: dummy_section("fresh track"),
+        });
+        assert_eq!(
+            app.stack.last().map(|s| s.sections.len()),
+            Some(1),
+            "section for current search accepted"
+        );
         app.close_screen();
     });
 }
 
 fn test_close_and_reopen_service_page_ignores_old_page() {
     with_app(|app| {
-        let item = |id: &str| x2rock::sonos::smapi::Item { id: id.into(), title: id.into(), item_type: "track".into(), summary: None, art_url: None, container: false };
+        let item = |id: &str| x2rock::sonos::smapi::Item {
+            id: id.into(),
+            title: id.into(),
+            item_type: "track".into(),
+            summary: None,
+            art_url: None,
+            container: false,
+        };
 
-        app.open_screen(super::screens::Kind::ServicePage { service: "svc1".into(), container: "top".into(), title: "Top".into() });
+        app.open_screen(super::screens::Kind::ServicePage {
+            service: "svc1".into(),
+            container: "top".into(),
+            title: "Top".into(),
+        });
         let page_id1 = app.requests().expect("page id 1").page;
         app.close_screen();
 
-        app.open_screen(super::screens::Kind::ServicePage { service: "svc1".into(), container: "top".into(), title: "Top".into() });
+        app.open_screen(super::screens::Kind::ServicePage {
+            service: "svc1".into(),
+            container: "top".into(),
+            title: "Top".into(),
+        });
         let page_id2 = app.requests().expect("page id 2").page;
         assert_ne!(page_id1, page_id2);
 
@@ -677,7 +1092,11 @@ fn test_close_and_reopen_service_page_ignores_old_page() {
             index: 0,
             result: Ok((vec![item("t1"), item("t2")], 2)),
         });
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(0), "late response from closed page ignored");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(0),
+            "late response from closed page ignored"
+        );
 
         // Response for second page arrives:
         app.fetched(household::Fetched::ServicePage {
@@ -687,18 +1106,36 @@ fn test_close_and_reopen_service_page_ignores_old_page() {
             index: 0,
             result: Ok((vec![item("t1"), item("t2")], 4)),
         });
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2), "response for open page accepted");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(2),
+            "response for open page accepted"
+        );
         app.close_screen();
     });
 }
 
 fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
     with_app(|app| {
-        let item = |id: &str| x2rock::sonos::smapi::Item { id: id.into(), title: id.into(), item_type: "track".into(), summary: None, art_url: None, container: false };
+        let item = |id: &str| x2rock::sonos::smapi::Item {
+            id: id.into(),
+            title: id.into(),
+            item_type: "track".into(),
+            summary: None,
+            art_url: None,
+            container: false,
+        };
 
-        app.open_screen(super::screens::Kind::ServicePage { service: "svc1".into(), container: "top".into(), title: "Top".into() });
+        app.open_screen(super::screens::Kind::ServicePage {
+            service: "svc1".into(),
+            container: "top".into(),
+            title: "Top".into(),
+        });
         let page_id = app.requests().expect("page id").page;
-        assert!(app.stack.last().is_some_and(|s| s.page_loading), "initially loading");
+        assert!(
+            app.stack.last().is_some_and(|s| s.page_loading),
+            "initially loading"
+        );
 
         // First page (index 0) arrives:
         app.fetched(household::Fetched::ServicePage {
@@ -709,8 +1146,16 @@ fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
             result: Ok((vec![item("t1"), item("t2")], 4)),
         });
         assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2));
-        assert_eq!(app.stack.last().and_then(|s| s.page.first().map(|i| i.id.as_str())), Some("t1"));
-        assert!(!app.stack.last().is_some_and(|s| s.page_loading), "loading finished after index 0");
+        assert_eq!(
+            app.stack
+                .last()
+                .and_then(|s| s.page.first().map(|i| i.id.as_str())),
+            Some("t1")
+        );
+        assert!(
+            !app.stack.last().is_some_and(|s| s.page_loading),
+            "loading finished after index 0"
+        );
 
         // Trigger LoadMore:
         let next_page_id = app.next_request_id();
@@ -724,7 +1169,10 @@ fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
             container: "top".into(),
             index: 2,
         }));
-        assert!(app.stack.last().is_some_and(|s| s.page_loading), "loading while load-more in flight");
+        assert!(
+            app.stack.last().is_some_and(|s| s.page_loading),
+            "loading while load-more in flight"
+        );
 
         // Duplicate index 0 arrives: ignored, original t1 preserved, page_loading remains true:
         app.fetched(household::Fetched::ServicePage {
@@ -734,9 +1182,22 @@ fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
             index: 0,
             result: Ok((vec![item("t1_dup"), item("t2_dup")], 4)),
         });
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2), "duplicate index 0 ignored");
-        assert_eq!(app.stack.last().and_then(|s| s.page.first().map(|i| i.id.as_str())), Some("t1"), "original item preserved");
-        assert!(app.stack.last().is_some_and(|s| s.page_loading), "loading remains true while load-more is still pending");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(2),
+            "duplicate index 0 ignored"
+        );
+        assert_eq!(
+            app.stack
+                .last()
+                .and_then(|s| s.page.first().map(|i| i.id.as_str())),
+            Some("t1"),
+            "original item preserved"
+        );
+        assert!(
+            app.stack.last().is_some_and(|s| s.page_loading),
+            "loading remains true while load-more is still pending"
+        );
 
         // Valid continuation arrives (index 2 == page.len()):
         app.fetched(household::Fetched::ServicePage {
@@ -746,9 +1207,21 @@ fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
             index: 2,
             result: Ok((vec![item("t3"), item("t4")], 4)),
         });
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(4), "valid continuation appended");
-        assert_eq!(app.stack.last().and_then(|s| s.page.get(2).map(|i| i.id.as_str())), Some("t3"));
-        assert!(!app.stack.last().is_some_and(|s| s.page_loading), "loading finished after continuation");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(4),
+            "valid continuation appended"
+        );
+        assert_eq!(
+            app.stack
+                .last()
+                .and_then(|s| s.page.get(2).map(|i| i.id.as_str())),
+            Some("t3")
+        );
+        assert!(
+            !app.stack.last().is_some_and(|s| s.page_loading),
+            "loading finished after continuation"
+        );
 
         // Duplicate continuation arrives (index 2 < page.len()):
         app.fetched(household::Fetched::ServicePage {
@@ -758,7 +1231,11 @@ fn test_duplicate_page_offsets_dropped_and_loading_preserved() {
             index: 2,
             result: Ok((vec![item("t3_dup"), item("t4_dup")], 4)),
         });
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(4), "duplicate continuation ignored");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(4),
+            "duplicate continuation ignored"
+        );
         app.close_screen();
     });
 }
@@ -771,23 +1248,51 @@ fn test_reconnect_invalidates_pre_reconnect_fetches_and_recovers_on_connected() 
         let group = app.stack.last().map(|s| s.group.clone()).unwrap();
 
         // Connection drops: drives through Update::Status
-        app.update(household::Update::Status(household::Status::Reconnecting("network lost".into())));
-        assert_eq!(app.requests().expect("requests").queue, None, "request id cleared on reconnecting status");
+        app.update(household::Update::Status(household::Status::Reconnecting(
+            "network lost".into(),
+        )));
+        assert_eq!(
+            app.requests().expect("requests").queue,
+            None,
+            "request id cleared on reconnecting status"
+        );
 
         // Stale pre-reconnect response arrives:
-        let qview = household::QueueView { items: vec![], total: 0, update_id: "u1".into(), current: None };
-        app.update(household::Update::Fetched(household::Fetched::Queue { id: queue_id1, group: group.clone(), result: Ok(qview.clone()) }));
-        assert!(app.stack.last().and_then(|s| s.queue.as_ref()).is_none(), "stale queue response dropped");
+        let qview = household::QueueView {
+            items: vec![],
+            total: 0,
+            update_id: "u1".into(),
+            current: None,
+        };
+        app.update(household::Update::Fetched(household::Fetched::Queue {
+            id: queue_id1,
+            group: group.clone(),
+            result: Ok(qview.clone()),
+        }));
+        assert!(
+            app.stack.last().and_then(|s| s.queue.as_ref()).is_none(),
+            "stale queue response dropped"
+        );
 
         // Connection restored:
         app.update(household::Update::Status(household::Status::Connected));
         let queue_id2 = app.requests().expect("requests").queue;
         assert!(queue_id2.is_some(), "re-requested on Connected");
-        assert_ne!(queue_id1, queue_id2, "fresh request id allocated on reconnect recovery");
+        assert_ne!(
+            queue_id1, queue_id2,
+            "fresh request id allocated on reconnect recovery"
+        );
 
         // Fresh response arrives:
-        app.update(household::Update::Fetched(household::Fetched::Queue { id: queue_id2, group, result: Ok(qview) }));
-        assert!(app.stack.last().and_then(|s| s.queue.as_ref()).is_some(), "queue populated on reconnect recovery");
+        app.update(household::Update::Fetched(household::Fetched::Queue {
+            id: queue_id2,
+            group,
+            result: Ok(qview),
+        }));
+        assert!(
+            app.stack.last().and_then(|s| s.queue.as_ref()).is_some(),
+            "queue populated on reconnect recovery"
+        );
         app.close_screen();
     });
 }
@@ -798,7 +1303,10 @@ fn test_screen_reads_of_different_kinds_do_not_void_each_other() {
         app.open_screen(super::screens::Kind::Alarms);
         let alarms_read = Ok((vec![], "2026-10-29 06:30:00".to_owned(), true));
         let alarms_id = app.requests().expect("requests").alarms;
-        app.update(household::Update::Fetched(household::Fetched::Alarms { id: alarms_id, result: alarms_read }));
+        app.update(household::Update::Fetched(household::Fetched::Alarms {
+            id: alarms_id,
+            result: alarms_read,
+        }));
 
         let alarm = x2rock::sonos::upnp::Alarm {
             id: 5,
@@ -820,8 +1328,13 @@ fn test_screen_reads_of_different_kinds_do_not_void_each_other() {
             s.requests.alarms = Some(toggle_id);
         }
         app.send(household::Command::EditThenRead {
-            edit: Box::new(household::Command::SetAlarmEnabled { alarm: alarm.clone(), enabled: true }),
-            read: household::Fetch::Alarms { id: Some(toggle_id) },
+            edit: Box::new(household::Command::SetAlarmEnabled {
+                alarm: alarm.clone(),
+                enabled: true,
+            }),
+            read: household::Fetch::Alarms {
+                id: Some(toggle_id),
+            },
         });
 
         // While toggle is in flight, read alarm sounds (e.g. editor sound step):
@@ -830,12 +1343,27 @@ fn test_screen_reads_of_different_kinds_do_not_void_each_other() {
         }
         app.read_alarm_sounds();
         let sounds_id = app.requests().expect("requests").alarm_sounds;
-        assert_eq!(app.requests().expect("requests").alarms, Some(toggle_id), "alarms toggle request id preserved");
+        assert_eq!(
+            app.requests().expect("requests").alarms,
+            Some(toggle_id),
+            "alarms toggle request id preserved"
+        );
         assert!(sounds_id.is_some(), "alarm sounds got an id");
 
         // Both arrive in any order:
-        app.update(household::Update::Fetched(household::Fetched::AlarmSounds { id: sounds_id, result: Ok(vec![]) }));
-        assert!(app.stack.last().and_then(|s| s.alarm_sounds.as_ref()).is_some(), "alarm sounds accepted");
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmSounds {
+                id: sounds_id,
+                result: Ok(vec![]),
+            },
+        ));
+        assert!(
+            app.stack
+                .last()
+                .and_then(|s| s.alarm_sounds.as_ref())
+                .is_some(),
+            "alarm sounds accepted"
+        );
 
         let mut enabled_alarm = alarm.clone();
         enabled_alarm.enabled = true;
@@ -843,7 +1371,10 @@ fn test_screen_reads_of_different_kinds_do_not_void_each_other() {
             id: Some(toggle_id),
             result: Ok((vec![enabled_alarm], "2026-10-29 06:30:00".to_owned(), true)),
         }));
-        assert!(app.stack.last().and_then(|s| s.alarms.as_ref()).is_some(), "alarms toggle answer accepted");
+        assert!(
+            app.stack.last().and_then(|s| s.alarms.as_ref()).is_some(),
+            "alarms toggle answer accepted"
+        );
         app.close_screen();
     });
 }
@@ -873,8 +1404,14 @@ fn test_reconnect_re_requests_pending_alarm_sounds() {
         assert!(sound_id1.is_some(), "sound fetch initiated on Sound step");
 
         // Connection drops:
-        app.update(household::Update::Status(household::Status::Reconnecting("network drop".into())));
-        assert_eq!(app.requests().expect("requests").alarm_sounds, None, "id cleared on reconnecting");
+        app.update(household::Update::Status(household::Status::Reconnecting(
+            "network drop".into(),
+        )));
+        assert_eq!(
+            app.requests().expect("requests").alarm_sounds,
+            None,
+            "id cleared on reconnecting"
+        );
 
         // Stale pre-reconnect response arrives:
         let program = household::AlarmProgram {
@@ -882,16 +1419,27 @@ fn test_reconnect_re_requests_pending_alarm_sounds() {
             uri: "x-rincon-cpcontainer:1".into(),
             metadata: String::new(),
         };
-        app.update(household::Update::Fetched(household::Fetched::AlarmSounds {
-            id: sound_id1,
-            result: Ok(vec![program]),
-        }));
-        assert!(app.stack.last().and_then(|s| s.alarm_sounds.as_ref()).is_none(), "stale sound response ignored");
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmSounds {
+                id: sound_id1,
+                result: Ok(vec![program]),
+            },
+        ));
+        assert!(
+            app.stack
+                .last()
+                .and_then(|s| s.alarm_sounds.as_ref())
+                .is_none(),
+            "stale sound response ignored"
+        );
 
         // Reconnect:
         app.update(household::Update::Status(household::Status::Connected));
         let sound_id2 = app.requests().expect("requests").alarm_sounds;
-        assert!(sound_id2.is_some(), "alarm sounds re-requested on Connected");
+        assert!(
+            sound_id2.is_some(),
+            "alarm sounds re-requested on Connected"
+        );
         assert_ne!(sound_id1, sound_id2, "fresh request id allocated");
         let sounds_sent = app.sent.borrow().iter().any(|cmd| matches!(cmd, household::Command::Fetch(household::Fetch::AlarmSounds { id: Some(id) }) if *id == sound_id2.unwrap()));
         assert!(sounds_sent, "new AlarmSounds fetch command sent to speaker");
@@ -902,12 +1450,18 @@ fn test_reconnect_re_requests_pending_alarm_sounds() {
             uri: "x-rincon-cpcontainer:2".into(),
             metadata: String::new(),
         };
-        app.update(household::Update::Fetched(household::Fetched::AlarmSounds {
-            id: sound_id2,
-            result: Ok(vec![fresh_program]),
-        }));
+        app.update(household::Update::Fetched(
+            household::Fetched::AlarmSounds {
+                id: sound_id2,
+                result: Ok(vec![fresh_program]),
+            },
+        ));
         assert_eq!(
-            app.stack.last().and_then(|s| s.alarm_sounds.as_ref()).and_then(|r| r.as_ref().ok()).map(|l| l.len()),
+            app.stack
+                .last()
+                .and_then(|s| s.alarm_sounds.as_ref())
+                .and_then(|r| r.as_ref().ok())
+                .map(|l| l.len()),
             Some(1),
             "sounds populated after recovery"
         );
@@ -942,21 +1496,45 @@ fn test_reconnect_preserves_loaded_service_page_without_refetch() {
             result: Ok((vec![item("t1"), item("t2")], 2)),
         });
         assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2));
-        assert!(app.requests().expect("requests").page.is_none(), "fetch completed");
+        assert!(
+            app.requests().expect("requests").page.is_none(),
+            "fetch completed"
+        );
 
         // Clear sent commands:
         app.sent.borrow_mut().clear();
 
         // Disconnect and reconnect:
-        app.update(household::Update::Status(household::Status::Reconnecting("network drop".into())));
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2), "items preserved while reconnecting");
+        app.update(household::Update::Status(household::Status::Reconnecting(
+            "network drop".into(),
+        )));
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(2),
+            "items preserved while reconnecting"
+        );
 
         app.update(household::Update::Status(household::Status::Connected));
-        assert_eq!(app.stack.last().map(|s| s.page.len()), Some(2), "items preserved on connected");
-        assert!(app.requests().expect("requests").page.is_none(), "no fetch pending on connected");
+        assert_eq!(
+            app.stack.last().map(|s| s.page.len()),
+            Some(2),
+            "items preserved on connected"
+        );
+        assert!(
+            app.requests().expect("requests").page.is_none(),
+            "no fetch pending on connected"
+        );
 
-        let refetched = app.sent.borrow().iter().any(|cmd| matches!(cmd, household::Command::Fetch(household::Fetch::ServicePage { .. })));
-        assert!(!refetched, "no ServicePage fetch sent on reconnect for already loaded page");
+        let refetched = app.sent.borrow().iter().any(|cmd| {
+            matches!(
+                cmd,
+                household::Command::Fetch(household::Fetch::ServicePage { .. })
+            )
+        });
+        assert!(
+            !refetched,
+            "no ServicePage fetch sent on reconnect for already loaded page"
+        );
         app.close_screen();
     });
 }
@@ -970,7 +1548,11 @@ fn test_reconnect_partially_answered_search_does_not_duplicate_sections() {
         app.submit_search();
         let old_id = app.requests().expect("requests").search;
         let section = |svc_id: &str, track: &str| crate::services::Section {
-            service: crate::services::ServiceInfo { id: svc_id.into(), name: svc_id.into(), linked: true },
+            service: crate::services::ServiceInfo {
+                id: svc_id.into(),
+                name: svc_id.into(),
+                linked: true,
+            },
             result: Ok(vec![x2rock::sonos::smapi::Item {
                 id: track.into(),
                 title: track.into(),
@@ -982,31 +1564,40 @@ fn test_reconnect_partially_answered_search_does_not_duplicate_sections() {
         };
 
         // Deliver one section before disconnect; SearchDone has not arrived:
-        app.update(household::Update::Fetched(household::Fetched::SearchSection {
-            id: old_id,
-            term: "partial search".into(),
-            section: section("svc1", "track1"),
-        }));
+        app.update(household::Update::Fetched(
+            household::Fetched::SearchSection {
+                id: old_id,
+                term: "partial search".into(),
+                section: section("svc1", "track1"),
+            },
+        ));
         assert_eq!(app.stack.last().map(|s| s.sections.len()), Some(1));
 
         // Connection drops and reconnects while search was in flight:
-        app.update(household::Update::Status(household::Status::Reconnecting("network drop".into())));
+        app.update(household::Update::Status(household::Status::Reconnecting(
+            "network drop".into(),
+        )));
         app.update(household::Update::Status(household::Status::Connected));
         let fresh_id = app.requests().expect("requests").search;
         assert_ne!(old_id, fresh_id);
 
         // Restarted search delivers section for svc1 and then SearchDone:
-        app.update(household::Update::Fetched(household::Fetched::SearchSection {
-            id: fresh_id,
-            term: "partial search".into(),
-            section: section("svc1", "track1"),
-        }));
+        app.update(household::Update::Fetched(
+            household::Fetched::SearchSection {
+                id: fresh_id,
+                term: "partial search".into(),
+                section: section("svc1", "track1"),
+            },
+        ));
         app.update(household::Update::Fetched(household::Fetched::SearchDone {
             id: fresh_id,
             term: "partial search".into(),
         }));
         let sections = app.stack.last().map(|s| s.sections.len()).unwrap_or(0);
-        assert_eq!(sections, 1, "reconnected search does not duplicate service sections");
+        assert_eq!(
+            sections, 1,
+            "reconnected search does not duplicate service sections"
+        );
         app.close_screen();
     });
 }
@@ -1035,9 +1626,17 @@ fn test_rejected_favorites_response_does_not_overwrite_cache() {
             id: fresh_id,
             result: Ok(vec![favorite("fresh-id")]),
         }));
-        assert_eq!(app.favorites_cache.first().map(|f| f.id.as_str()), Some("fresh-id"));
         assert_eq!(
-            app.stack.last().and_then(|s| s.favorites.as_ref()).and_then(|r| r.as_ref().ok()).and_then(|l| l.first()).map(|f| f.id.as_str()),
+            app.favorites_cache.first().map(|f| f.id.as_str()),
+            Some("fresh-id")
+        );
+        assert_eq!(
+            app.stack
+                .last()
+                .and_then(|s| s.favorites.as_ref())
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|l| l.first())
+                .map(|f| f.id.as_str()),
             Some("fresh-id")
         );
 
@@ -1053,7 +1652,12 @@ fn test_rejected_favorites_response_does_not_overwrite_cache() {
             "rejected response does not overwrite shared favorites cache"
         );
         assert_eq!(
-            app.stack.last().and_then(|s| s.favorites.as_ref()).and_then(|r| r.as_ref().ok()).and_then(|l| l.first()).map(|f| f.id.as_str()),
+            app.stack
+                .last()
+                .and_then(|s| s.favorites.as_ref())
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|l| l.first())
+                .map(|f| f.id.as_str()),
             Some("fresh-id"),
             "rejected response does not overwrite Browse screen"
         );

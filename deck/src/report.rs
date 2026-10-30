@@ -62,9 +62,18 @@ pub fn report(input: &Input) -> Report {
             .iter()
             .map(|s| {
                 let what = s.what.as_deref().unwrap_or("didn't answer");
-                let mut shown: Vec<&str> = s.capabilities.iter().map(String::as_str).filter(|c| with_capabilities || *c == LINE_IN).collect();
+                let mut shown: Vec<&str> = s
+                    .capabilities
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|c| with_capabilities || *c == LINE_IN)
+                    .collect();
                 shown.sort_unstable();
-                let caps = if shown.is_empty() { String::new() } else { format!(" \u{00B7} {}", shown.join(",")) };
+                let caps = if shown.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \u{00B7} {}", shown.join(","))
+                };
                 format!("- {}: {what}{caps}", s.room)
             })
             .collect()
@@ -81,7 +90,10 @@ pub fn report(input: &Input) -> Report {
         // Said above the speakers, where cutting the end to fit cannot take it.
         match &input.sign_ins {
             Some(Ok(n)) => t.push_str(&format!("\n**Service sign-ins:** {n} read\n")),
-            Some(Err(why)) => t.push_str(&format!("\n**Service sign-ins:** none usable, {}\n", redact(why))),
+            Some(Err(why)) => t.push_str(&format!(
+                "\n**Service sign-ins:** none usable, {}\n",
+                redact(why)
+            )),
             None => {}
         }
         t.push_str("\n**Speakers**\n");
@@ -103,7 +115,13 @@ pub fn report(input: &Input) -> Report {
         }
         t.trim_end().to_owned()
     };
-    let url = |body: &str| format!("{ISSUES}?title={}&body={}", query_encode(&format!("Beta report: {}", input.app)), query_encode(body));
+    let url = |body: &str| {
+        format!(
+            "{ISSUES}?title={}&body={}",
+            query_encode(&format!("Beta report: {}", input.app)),
+            query_encode(body)
+        )
+    };
 
     let mut body = text(true);
     if url(&body).len() > URL_LIMIT {
@@ -111,7 +129,10 @@ pub fn report(input: &Input) -> Report {
     }
     while url(&body).len() > URL_LIMIT {
         let keep = body.chars().count() * 9 / 10;
-        body = format!("{}\n(cut to fit)", body.chars().take(keep).collect::<String>().trim_end());
+        body = format!(
+            "{}\n(cut to fit)",
+            body.chars().take(keep).collect::<String>().trim_end()
+        );
     }
     let url = url(&body);
     Report { text: body, url }
@@ -141,7 +162,10 @@ static REDACTIONS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"(?i)sonos-[0-9A-F]{12}(?:\.local)?", "<speaker>"),
         (r"(?i)\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b", "<mac>"),
         (r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b", "<address>"),
-        (r"(?i)\[?\b[0-9A-F]{0,4}(?::[0-9A-F]{0,4}){2,7}\b\]?(?::\d+)?", "<address>"),
+        (
+            r"(?i)\[?\b[0-9A-F]{0,4}(?::[0-9A-F]{0,4}){2,7}\b\]?(?::\d+)?",
+            "<address>",
+        ),
     ]
     .into_iter()
     .map(|(pattern, mark)| (Regex::new(pattern).expect("a redaction pattern"), mark))
@@ -152,7 +176,9 @@ static REDACTIONS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 /// for the fields whose words come from elsewhere: an error's message, a read's
 /// reason. Room names are not touched.
 pub fn redact(text: &str) -> String {
-    REDACTIONS.iter().fold(text.to_owned(), |t, (re, mark)| re.replace_all(&t, *mark).into_owned())
+    REDACTIONS.iter().fold(text.to_owned(), |t, (re, mark)| {
+        re.replace_all(&t, *mark).into_owned()
+    })
 }
 
 /// What this runs on, in a few words: "SteamOS 3.7.13 (x86_64), Steam Deck".
@@ -169,7 +195,11 @@ pub fn device() -> String {
 fn os_name() -> Option<String> {
     let release = std::fs::read_to_string("/etc/os-release").ok()?;
     let line = release.lines().find(|l| l.starts_with("PRETTY_NAME="))?;
-    Some(line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_owned())
+    Some(
+        line.trim_start_matches("PRETTY_NAME=")
+            .trim_matches('"')
+            .to_owned(),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -191,7 +221,8 @@ const MODULE: usize = 6;
 /// `text` as a QR code: RGBA pixels, black on white with its quiet zone, and
 /// the side's length.
 pub fn qr_pixels(text: &str) -> Option<(u32, Vec<u8>)> {
-    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::L).ok()?;
+    let code =
+        qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::L).ok()?;
     let modules = code.width();
     let colors = code.to_colors();
     let side = (modules + 2 * QUIET) * MODULE;
@@ -235,17 +266,37 @@ mod tests {
         Input {
             app: "x2rock-deck 0.1.0".into(),
             device: "SteamOS (x86_64), Steam Deck".into(),
-            speakers: vec![Speaker { room: "Kitchen".into(), what: Some("One SL 18.8 (97.1-80312)".into()), capabilities: vec!["PLAYBACK".into(), "CLOUD".into()] }],
+            speakers: vec![Speaker {
+                room: "Kitchen".into(),
+                what: Some("One SL 18.8 (97.1-80312)".into()),
+                capabilities: vec!["PLAYBACK".into(), "CLOUD".into()],
+            }],
             ..Default::default()
         }
     }
 
     #[test]
     fn it_says_what_each_speaker_is() {
-        let r = report(&Input { refusal: Some("Line-In (Kitchen): ERROR_NOT_CAPABLE".into()), ..input() });
-        assert!(r.text.contains("- Kitchen: One SL 18.8 (97.1-80312) \u{00B7} CLOUD,PLAYBACK"), "{}", r.text);
-        assert!(r.text.contains("**Last refusal:** Line-In (Kitchen): ERROR_NOT_CAPABLE"), "{}", r.text);
-        assert!(!r.text.contains("**Connection:**"), "a working connection has no connection line");
+        let r = report(&Input {
+            refusal: Some("Line-In (Kitchen): ERROR_NOT_CAPABLE".into()),
+            ..input()
+        });
+        assert!(
+            r.text
+                .contains("- Kitchen: One SL 18.8 (97.1-80312) \u{00B7} CLOUD,PLAYBACK"),
+            "{}",
+            r.text
+        );
+        assert!(
+            r.text
+                .contains("**Last refusal:** Line-In (Kitchen): ERROR_NOT_CAPABLE"),
+            "{}",
+            r.text
+        );
+        assert!(
+            !r.text.contains("**Connection:**"),
+            "a working connection has no connection line"
+        );
     }
 
     /// The issue opens holding exactly what the screen showed, even where the
@@ -253,27 +304,58 @@ mod tests {
     /// body at its `&`.
     #[test]
     fn the_link_carries_the_text_as_shown() {
-        let r = report(&Input { refusal: Some("Rock & Roll #2: a+b=c 100% \u{00FC}".into()), ..input() });
+        let r = report(&Input {
+            refusal: Some("Rock & Roll #2: a+b=c 100% \u{00FC}".into()),
+            ..input()
+        });
         assert!(r.url.starts_with(&format!("{ISSUES}?title=")));
         let query = r.url.split_once('?').unwrap().1;
-        let parts: Vec<(&str, String)> = query.split('&').map(|p| { let (k, v) = p.split_once('=').unwrap(); (k, decode(v)) }).collect();
-        assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), ["title", "body"]);
+        let parts: Vec<(&str, String)> = query
+            .split('&')
+            .map(|p| {
+                let (k, v) = p.split_once('=').unwrap();
+                (k, decode(v))
+            })
+            .collect();
+        assert_eq!(
+            parts.iter().map(|p| p.0).collect::<Vec<_>>(),
+            ["title", "body"]
+        );
         assert_eq!(parts[1].1, r.text);
     }
 
     #[test]
     fn a_connection_failure_is_reported_in_its_own_words_redacted() {
-        let r = report(&Input { connection: Some("no reply from sonos-48A6B81853E0.local within 5000ms".into()), ..input() });
-        assert!(r.text.contains("**Connection:** no reply from <speaker> within 5000ms"), "{}", r.text);
+        let r = report(&Input {
+            connection: Some("no reply from sonos-48A6B81853E0.local within 5000ms".into()),
+            ..input()
+        });
+        assert!(
+            r.text
+                .contains("**Connection:** no reply from <speaker> within 5000ms"),
+            "{}",
+            r.text
+        );
     }
 
     #[test]
     fn it_says_whether_the_service_sign_ins_could_be_read() {
-        let good = report(&Input { sign_ins: Some(Ok(4)), ..input() });
+        let good = report(&Input {
+            sign_ins: Some(Ok(4)),
+            ..input()
+        });
         assert!(good.text.contains("**Service sign-ins:** 4 read"));
-        let bad = report(&Input { sign_ins: Some(Err("they could not be read (integrity check failed)".into())), ..input() });
-        assert!(bad.text.contains("**Service sign-ins:** none usable, they could not be read (integrity check failed)"));
-        assert!(bad.text.find("Service sign-ins") < bad.text.find("**Speakers**"), "above the speakers, out of the cut's reach");
+        let bad = report(&Input {
+            sign_ins: Some(Err("they could not be read (integrity check failed)".into())),
+            ..input()
+        });
+        assert!(bad.text.contains(
+            "**Service sign-ins:** none usable, they could not be read (integrity check failed)"
+        ));
+        assert!(
+            bad.text.find("Service sign-ins") < bad.text.find("**Speakers**"),
+            "above the speakers, out of the cut's reach"
+        );
     }
 
     #[test]
@@ -283,20 +365,49 @@ mod tests {
             Sonos_BgzkDDCeWajFguqqdHEXzFKe3x.Zv1xanSF at http://192.168.86.26:1400/x?token=abc, mac 34-7E-5C-31-AF-74";
         let r = report(&Input {
             refusal: Some(refusal.into()),
-            sign_ins: Some(Err("they could not be read (no reply from 10.0.0.7 / RINCON_542A1B83318001400)".into())),
+            sign_ins: Some(Err(
+                "they could not be read (no reply from 10.0.0.7 / RINCON_542A1B83318001400)".into(),
+            )),
             ..input()
         });
         let draft = decode(r.url.split_once("body=").unwrap().1);
-        for leak in ["48A6B818D138", "192.168.86.26", "10.0.0.7", "fe80:", "RINCON_", "Sonos_Bgzk", "token=abc", "34-7E-5C"] {
-            assert!(!r.text.to_lowercase().contains(&leak.to_lowercase()), "{leak} in the shown report: {}", r.text);
-            assert!(!draft.to_lowercase().contains(&leak.to_lowercase()), "{leak} in the issue draft");
+        for leak in [
+            "48A6B818D138",
+            "192.168.86.26",
+            "10.0.0.7",
+            "fe80:",
+            "RINCON_",
+            "Sonos_Bgzk",
+            "token=abc",
+            "34-7E-5C",
+        ] {
+            assert!(
+                !r.text.to_lowercase().contains(&leak.to_lowercase()),
+                "{leak} in the shown report: {}",
+                r.text
+            );
+            assert!(
+                !draft.to_lowercase().contains(&leak.to_lowercase()),
+                "{leak} in the issue draft"
+            );
         }
-        assert!(r.text.contains("Line-In (Kitchen)"), "the room name stays: {}", r.text);
+        assert!(
+            r.text.contains("Line-In (Kitchen)"),
+            "the room name stays: {}",
+            r.text
+        );
     }
 
     #[test]
     fn a_household_that_refuses_this_app_says_so() {
-        assert!(report(&Input { authentication_required: true, ..input() }).text.contains("**Authentication is on:**"));
+        assert!(
+            report(&Input {
+                authentication_required: true,
+                ..input()
+            })
+            .text
+            .contains("**Authentication is on:**")
+        );
         assert!(!report(&input()).text.contains("Authentication is on"));
     }
 
@@ -306,7 +417,10 @@ mod tests {
         i.speakers[0].capabilities.push(LINE_IN.into());
         i.line_in_rooms = vec!["Kitchen: PLAYBACK_STATE_IDLE \u{00B7} container type none".into()];
         let text = report(&i).text;
-        assert!(text.contains("**Rooms with a line-in, now**\n- Kitchen: "), "{text}");
+        assert!(
+            text.contains("**Rooms with a line-in, now**\n- Kitchen: "),
+            "{text}"
+        );
         assert!(text.contains("LINE_IN"), "{text}");
     }
 
@@ -314,10 +428,29 @@ mod tests {
     #[test]
     fn a_large_household_is_cut_to_fit_the_code() {
         let speaker = input().speakers[0].clone();
-        let many = (1..=40).map(|n| Speaker { room: format!("Room {n}"), capabilities: vec!["PLAYBACK".into(), "CLOUD".into(), "AIRPLAY".into(), "VOICE".into()], ..speaker.clone() }).collect();
-        let r = report(&Input { speakers: many, ..input() });
+        let many = (1..=40)
+            .map(|n| Speaker {
+                room: format!("Room {n}"),
+                capabilities: vec![
+                    "PLAYBACK".into(),
+                    "CLOUD".into(),
+                    "AIRPLAY".into(),
+                    "VOICE".into(),
+                ],
+                ..speaker.clone()
+            })
+            .collect();
+        let r = report(&Input {
+            speakers: many,
+            ..input()
+        });
         assert!(r.url.len() <= URL_LIMIT, "{}", r.url.len());
-        assert!(r.text.contains("(capabilities left out to fit, but a line-in)"), "{}", r.text);
+        assert!(
+            r.text
+                .contains("(capabilities left out to fit, but a line-in)"),
+            "{}",
+            r.text
+        );
         assert!(r.text.ends_with("(cut to fit)"), "{}", r.text);
     }
 
@@ -327,7 +460,12 @@ mod tests {
         assert_eq!(pixels.len(), (side * side * 4) as usize);
         assert_eq!(side as usize % MODULE, 0, "whole modules");
         // The quiet zone is white all round: the first QUIET modules of the top row.
-        assert!(pixels[..side as usize * 4 * QUIET * MODULE].iter().all(|v| *v == 255), "a quiet zone above");
+        assert!(
+            pixels[..side as usize * 4 * QUIET * MODULE]
+                .iter()
+                .all(|v| *v == 255),
+            "a quiet zone above"
+        );
         assert!(pixels.chunks(4).any(|p| p[0] == 0), "something drawn");
     }
 }

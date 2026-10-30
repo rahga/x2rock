@@ -20,7 +20,16 @@ use x2rock::sonos::upnp::Upnp;
 
 /// The order categories are worth asking for, most wanted first (the TV app's
 /// SearchViewModel).
-const PREFERRED: [&str; 8] = ["tracks", "albums", "artists", "playlists", "stations", "live_stations", "podcasts", "audiobooks"];
+const PREFERRED: [&str; 8] = [
+    "tracks",
+    "albums",
+    "artists",
+    "playlists",
+    "stations",
+    "live_stations",
+    "podcasts",
+    "audiobooks",
+];
 /// Each category's results, and the most one service shows.
 pub const PER_CATEGORY: u32 = 6;
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,7 +67,11 @@ pub fn pick_categories(available: &[Category]) -> Vec<Category> {
         .iter()
         .filter_map(|id| available.iter().find(|c| c.id == *id).cloned())
         .collect();
-    let chosen = if preferred.is_empty() { available.to_vec() } else { preferred };
+    let chosen = if preferred.is_empty() {
+        available.to_vec()
+    } else {
+        preferred
+    };
     chosen.into_iter().take(2).collect()
 }
 
@@ -75,13 +88,25 @@ impl Services {
     async fn open(session: &Session) -> Result<Self> {
         let household = session.connection.household_id().await?;
         let mut catalogue = Catalogue::load();
-        catalogue.refresh_and_save(&Upnp::new(session.connection.ip()), false).await?;
+        catalogue
+            .refresh_and_save(&Upnp::new(session.connection.ip()), false)
+            .await?;
         let linked = Credentials::load()?;
-        let mut services = Services { catalogue, linked, household, last_read: None };
-        let none_here = services.catalogue.services().iter().all(|s| services.linked.get(&services.household, &s.id).is_none());
+        let mut services = Services {
+            catalogue,
+            linked,
+            household,
+            last_read: None,
+        };
+        let none_here = services
+            .catalogue
+            .services()
+            .iter()
+            .all(|s| services.linked.get(&services.household, &s.id).is_none());
         if none_here && x2rock::salt::require().is_ok() {
             // Not shared yet: nothing else waits on this one.
-            let (last_read, imported) = import(session, &services.catalogue, &services.household).await;
+            let (last_read, imported) =
+                import(session, &services.catalogue, &services.household).await;
             services.last_read = Some(last_read);
             match imported {
                 Ok(_) => services.linked = Credentials::load()?,
@@ -100,7 +125,11 @@ impl Services {
     }
 
     fn ask(&self, service_id: &str) -> Result<Ask> {
-        let service = self.catalogue.by_id(service_id).cloned().ok_or_else(|| anyhow!("that service is no longer listed"))?;
+        let service = self
+            .catalogue
+            .by_id(service_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("that service is no longer listed"))?;
         let token = self.linked.token_for(&self.household, service_id);
         Ok(Ask { service, token })
     }
@@ -109,10 +138,23 @@ impl Services {
 /// Read the household's stored sign-ins off a speaker into this machine's
 /// store, from a catalogue and credentials of its own: how the read went, for
 /// the report, and the names of the services kept.
-async fn import(session: &Session, catalogue: &Catalogue, household: &str) -> (Result<usize, String>, Result<Vec<String>>) {
+async fn import(
+    session: &Session,
+    catalogue: &Catalogue,
+    household: &str,
+) -> (Result<usize, String>, Result<Vec<String>>) {
     let read = async {
         let mut linked = Credentials::load()?;
-        x2rock::import::household_accounts(session, catalogue, &mut linked, household, None, None, 0).await
+        x2rock::import::household_accounts(
+            session,
+            catalogue,
+            &mut linked,
+            household,
+            None,
+            None,
+            0,
+        )
+        .await
     };
     match read.await {
         Ok(kept) => {
@@ -131,7 +173,9 @@ pub struct Open(std::sync::Mutex<Services>);
 
 impl Open {
     fn lock(&self) -> std::sync::MutexGuard<'_, Services> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn ask(&self, service_id: &str) -> Result<Ask> {
@@ -152,7 +196,12 @@ impl Open {
     /// that answer anyone, each alphabetically.
     pub fn usable(&self) -> Vec<ServiceInfo> {
         let s = self.lock();
-        let mut list: Vec<ServiceInfo> = s.catalogue.usable(&s.linked, &s.household).into_iter().map(|service| s.info(service)).collect();
+        let mut list: Vec<ServiceInfo> = s
+            .catalogue
+            .usable(&s.linked, &s.household)
+            .into_iter()
+            .map(|service| s.info(service))
+            .collect();
         list.sort_by_key(|s| (!s.linked, s.name.to_lowercase()));
         list
     }
@@ -191,7 +240,10 @@ impl Open {
             return;
         }
         let learned = futures_util::future::join_all(cold.iter().map(|s| async move {
-            (s.id.clone(), tokio::time::timeout(SERVICE_TIMEOUT, smapi::categories(s)).await)
+            (
+                s.id.clone(),
+                tokio::time::timeout(SERVICE_TIMEOUT, smapi::categories(s)).await,
+            )
         }))
         .await;
         let mut s = self.lock();
@@ -218,38 +270,63 @@ impl Open {
                 .into_iter()
                 .filter_map(|service| {
                     let categories = pick_categories(s.catalogue.cached_categories(&service.id)?);
-                    (!categories.is_empty()).then(|| (s.info(service), service.clone(), s.linked.token_for(&s.household, &service.id), categories))
+                    (!categories.is_empty()).then(|| {
+                        (
+                            s.info(service),
+                            service.clone(),
+                            s.linked.token_for(&s.household, &service.id),
+                            categories,
+                        )
+                    })
                 })
                 .collect()
         };
         let term = term.to_owned();
-        let mut answers = futures_util::stream::iter(plan.into_iter().map(|(info, service, token, categories)| {
-            let term = term.clone();
-            async move {
-                let asked = async {
-                    let mut items = Vec::new();
-                    let mut token = token;
-                    for category in &categories {
-                        let mut refreshed = None;
-                        let got = smapi::search(&service, token.as_ref(), &category.mapped_id, &term, 0, PER_CATEGORY, &mut refreshed).await;
-                        if refreshed.is_some() {
-                            token = x2rock::play::after_refresh(&service.id, token.as_ref(), refreshed);
-                            // Now, before the next category: a search ended while
-                            // that one is asked must not leave the old token held.
-                            self.follow_store();
+        let mut answers = futures_util::stream::iter(plan.into_iter().map(
+            |(info, service, token, categories)| {
+                let term = term.clone();
+                async move {
+                    let asked = async {
+                        let mut items = Vec::new();
+                        let mut token = token;
+                        for category in &categories {
+                            let mut refreshed = None;
+                            let got = smapi::search(
+                                &service,
+                                token.as_ref(),
+                                &category.mapped_id,
+                                &term,
+                                0,
+                                PER_CATEGORY,
+                                &mut refreshed,
+                            )
+                            .await;
+                            if refreshed.is_some() {
+                                token = x2rock::play::after_refresh(
+                                    &service.id,
+                                    token.as_ref(),
+                                    refreshed,
+                                );
+                                // Now, before the next category: a search ended while
+                                // that one is asked must not leave the old token held.
+                                self.follow_store();
+                            }
+                            items.extend(got?.0);
                         }
-                        items.extend(got?.0);
+                        Ok::<_, anyhow::Error>(items)
+                    };
+                    let result = match tokio::time::timeout(SERVICE_TIMEOUT, asked).await {
+                        Ok(Ok(items)) => Ok(items),
+                        Ok(Err(e)) => Err(crate::household::plain(&e)),
+                        Err(_) => Err("didn't answer".to_owned()),
+                    };
+                    Section {
+                        service: info,
+                        result,
                     }
-                    Ok::<_, anyhow::Error>(items)
-                };
-                let result = match tokio::time::timeout(SERVICE_TIMEOUT, asked).await {
-                    Ok(Ok(items)) => Ok(items),
-                    Ok(Err(e)) => Err(crate::household::plain(&e)),
-                    Err(_) => Err("didn't answer".to_owned()),
-                };
-                Section { service: info, result }
-            }
-        }))
+                }
+            },
+        ))
         .buffer_unordered(MAX_CONCURRENT);
         while let Some(section) = answers.next().await {
             answered(section);
@@ -257,10 +334,24 @@ impl Open {
     }
 
     /// A page of a service: `root` is its front page, where it publishes one.
-    pub async fn browse(&self, service_id: &str, container: &str, index: u32, count: u32) -> Result<(Vec<Item>, u32)> {
+    pub async fn browse(
+        &self,
+        service_id: &str,
+        container: &str,
+        index: u32,
+        count: u32,
+    ) -> Result<(Vec<Item>, u32)> {
         let Ask { service, token } = self.ask(service_id)?;
         let mut refreshed = None;
-        let page = smapi::metadata(&service, token.as_ref(), container, index, count, &mut refreshed).await;
+        let page = smapi::metadata(
+            &service,
+            token.as_ref(),
+            container,
+            index,
+            count,
+            &mut refreshed,
+        )
+        .await;
         if refreshed.is_some() {
             x2rock::play::after_refresh(&service.id, token.as_ref(), refreshed);
             self.follow_store();
@@ -269,11 +360,33 @@ impl Open {
     }
 
     /// Add an item to a room's queue: next after what plays, or at the end.
-    pub async fn enqueue(&self, session: &Session, room: &str, service_id: &str, item: &Item, next: bool) -> Result<()> {
+    pub async fn enqueue(
+        &self,
+        session: &Session,
+        room: &str,
+        service_id: &str,
+        item: &Item,
+        next: bool,
+    ) -> Result<()> {
         let Ask { service, token } = self.ask(service_id)?;
-        let naming = x2rock::play::Naming::of(&service, token.as_ref()).ok_or_else(|| anyhow!("{} has nothing here to name an account with", service.name))?;
-        let how = if next { x2rock::play::Enqueue::Next } else { x2rock::play::Enqueue::End };
-        let done = x2rock::play::enqueue_item(session, Some(room), &service, &naming, &item.id, &item.title, Some(&item.item_type), how).await;
+        let naming = x2rock::play::Naming::of(&service, token.as_ref())
+            .ok_or_else(|| anyhow!("{} has nothing here to name an account with", service.name))?;
+        let how = if next {
+            x2rock::play::Enqueue::Next
+        } else {
+            x2rock::play::Enqueue::End
+        };
+        let done = x2rock::play::enqueue_item(
+            session,
+            Some(room),
+            &service,
+            &naming,
+            &item.id,
+            &item.title,
+            Some(&item.item_type),
+            how,
+        )
+        .await;
         // x2rock's play routes refresh and store a token without saying so.
         self.follow_store();
         done
@@ -284,13 +397,20 @@ impl Open {
     fn source(ask: &Ask, item: &Item) -> Result<(String, String)> {
         use x2rock::bookmarks;
         let Ask { service, token } = ask;
-        let naming = x2rock::play::Naming::of(service, token.as_ref()).ok_or_else(|| anyhow!("{} has nothing here to name an account with", service.name))?;
+        let naming = x2rock::play::Naming::of(service, token.as_ref())
+            .ok_or_else(|| anyhow!("{} has nothing here to name an account with", service.name))?;
         let (cdudn, sn) = (naming.cdudn.as_str(), naming.serial.as_deref());
         let kind = item.item_type.as_str();
         let (uri, didl) = if bookmarks::container_holds_tracks(kind) {
-            (bookmarks::container_uri(&item.id, &service.id, sn), bookmarks::container_didl(&item.id, &item.title, kind, cdudn))
+            (
+                bookmarks::container_uri(&item.id, &service.id, sn),
+                bookmarks::container_didl(&item.id, &item.title, kind, cdudn),
+            )
         } else if kind.eq_ignore_ascii_case("track") {
-            (bookmarks::service_uri(&item.id, &service.id, sn), bookmarks::service_didl(&item.id, &item.title, cdudn))
+            (
+                bookmarks::service_uri(&item.id, &service.id, sn),
+                bookmarks::service_didl(&item.id, &item.title, cdudn),
+            )
         } else {
             anyhow::bail!("Only a song, an album or a playlist can be a Sonos favorite from here");
         };
@@ -300,16 +420,29 @@ impl Open {
     /// The household's Sonos favourites that are this item: by the URI a save
     /// gives it, or by the service's own id inside, which finds one the Sonos
     /// app saved as a shortcut, with no URI at all.
-    fn favorites_of<'a>(favorites: &'a [x2rock::sonos::upnp::BrowseItem], service_id: &str, item: &Item, uri: Option<&str>) -> Vec<&'a x2rock::sonos::upnp::BrowseItem> {
+    fn favorites_of<'a>(
+        favorites: &'a [x2rock::sonos::upnp::BrowseItem],
+        service_id: &str,
+        item: &Item,
+        uri: Option<&str>,
+    ) -> Vec<&'a x2rock::sonos::upnp::BrowseItem> {
         favorites
             .iter()
-            .filter(|f| (uri.is_some() && f.uri.as_deref() == uri) || f.service_object().is_some_and(|(s, o)| s == service_id && o == item.id))
+            .filter(|f| {
+                (uri.is_some() && f.uri.as_deref() == uri)
+                    || f.service_object()
+                        .is_some_and(|(s, o)| s == service_id && o == item.id)
+            })
             .collect()
     }
 
     /// Whether the item is among the household's Sonos favourites.
     pub async fn is_favorite(&self, upnp: &Upnp, service_id: &str, item: &Item) -> Result<bool> {
-        let uri = self.ask(service_id).and_then(|ask| Self::source(&ask, item)).ok().map(|(uri, _)| uri);
+        let uri = self
+            .ask(service_id)
+            .and_then(|ask| Self::source(&ask, item))
+            .ok()
+            .map(|(uri, _)| uri);
         let favorites = upnp.browse_content("FV:2").await?;
         Ok(!Self::favorites_of(&favorites, service_id, item, uri.as_deref()).is_empty())
     }
@@ -337,8 +470,17 @@ impl Open {
     }
 
     /// Take every Sonos favourite that is this item out: how many went.
-    pub async fn remove_favorite(&self, upnp: &Upnp, service_id: &str, item: &Item) -> Result<usize> {
-        let uri = self.ask(service_id).and_then(|ask| Self::source(&ask, item)).ok().map(|(uri, _)| uri);
+    pub async fn remove_favorite(
+        &self,
+        upnp: &Upnp,
+        service_id: &str,
+        item: &Item,
+    ) -> Result<usize> {
+        let uri = self
+            .ask(service_id)
+            .and_then(|ask| Self::source(&ask, item))
+            .ok()
+            .map(|(uri, _)| uri);
         let favorites = upnp.browse_content("FV:2").await?;
         let found = Self::favorites_of(&favorites, service_id, item, uri.as_deref());
         anyhow::ensure!(!found.is_empty(), "{} is not a Sonos favorite", item.title);
@@ -361,9 +503,25 @@ impl Open {
     }
 
     /// Play an item in a room, by the CLI's own routes.
-    pub async fn play(&self, session: &Session, room: &str, service_id: &str, item: &Item) -> Result<()> {
+    pub async fn play(
+        &self,
+        session: &Session,
+        room: &str,
+        service_id: &str,
+        item: &Item,
+    ) -> Result<()> {
         let Ask { service, token } = self.ask(service_id)?;
-        let done = x2rock::play::play_item(session, Some(room), &service, token.as_ref(), Some(&item.item_type), &item.id, &item.title, false).await;
+        let done = x2rock::play::play_item(
+            session,
+            Some(room),
+            &service,
+            token.as_ref(),
+            Some(&item.item_type),
+            &item.id,
+            &item.title,
+            false,
+        )
+        .await;
         // x2rock's play routes refresh and store a token without saying so.
         self.follow_store();
         done
@@ -378,7 +536,13 @@ pub struct Lazy(tokio::sync::OnceCell<Open>);
 
 impl Lazy {
     pub async fn open(&self, session: &Session) -> Result<&Open> {
-        self.0.get_or_try_init(|| async { Services::open(session).await.map(|s| Open(std::sync::Mutex::new(s))) }).await
+        self.0
+            .get_or_try_init(|| async {
+                Services::open(session)
+                    .await
+                    .map(|s| Open(std::sync::Mutex::new(s)))
+            })
+            .await
     }
 }
 
@@ -390,19 +554,34 @@ mod tests {
     use super::*;
 
     fn cat(id: &str) -> Category {
-        Category { id: id.into(), mapped_id: id.into(), default: false }
+        Category {
+            id: id.into(),
+            mapped_id: id.into(),
+            default: false,
+        }
     }
 
     #[test]
     fn two_categories_are_asked_the_two_most_wanted() {
-        let got = pick_categories(&[cat("artists"), cat("stations"), cat("albums"), cat("tracks")]);
-        assert_eq!(got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["tracks", "albums"]);
+        let got = pick_categories(&[
+            cat("artists"),
+            cat("stations"),
+            cat("albums"),
+            cat("tracks"),
+        ]);
+        assert_eq!(
+            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["tracks", "albums"]
+        );
     }
 
     #[test]
     fn a_service_with_none_of_the_wanted_ones_is_asked_its_first_two() {
         let got = pick_categories(&[cat("genres"), cat("moods"), cat("hosts")]);
-        assert_eq!(got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["genres", "moods"]);
+        assert_eq!(
+            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["genres", "moods"]
+        );
     }
 
     /// Services on local listeners: each id with its port, and the categories
@@ -420,7 +599,12 @@ mod tests {
             }).collect::<std::collections::BTreeMap<_, _>>(),
         }))
         .expect("a catalogue");
-        Open(std::sync::Mutex::new(Services { catalogue, linked: Credentials::default(), household: "Sonos_test".into(), last_read: None }))
+        Open(std::sync::Mutex::new(Services {
+            catalogue,
+            linked: Credentials::default(),
+            household: "Sonos_test".into(),
+            last_read: None,
+        }))
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -430,7 +614,10 @@ mod tests {
         // every connection at once, so a request to it fails straight away.
         let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let open = Arc::new(opened(&[("1", stalled.local_addr().unwrap().port(), &["tracks"]), ("2", closed.local_addr().unwrap().port(), &[])]));
+        let open = Arc::new(opened(&[
+            ("1", stalled.local_addr().unwrap().port(), &["tracks"]),
+            ("2", closed.local_addr().unwrap().port(), &[]),
+        ]));
         let (asked, being_asked) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (held, _) = stalled.accept().await.unwrap();
@@ -448,7 +635,9 @@ mod tests {
             let open = open.clone();
             async move { open.search("anything", |_| {}).await }
         });
-        being_asked.await.expect("the search reached the stalled service");
+        being_asked
+            .await
+            .expect("the search reached the stalled service");
         let browse = tokio::spawn(async move { open.browse("2", "root", 0, 10).await });
         tokio::select! {
             browsed = browse => assert!(browsed.unwrap().is_err(), "the closed service's page fails, and at once"),
@@ -462,7 +651,10 @@ mod tests {
         // throwaway, as `pl check` makes it, never a person's own accounts.
         let store = x2rock::store::path("credentials.json").unwrap();
         if !store.starts_with(std::env::temp_dir()) {
-            eprintln!("skipped: the credential store {} is not a temporary one", store.display());
+            eprintln!(
+                "skipped: the credential store {} is not a temporary one",
+                store.display()
+            );
             return;
         }
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -478,7 +670,11 @@ mod tests {
                     let head = String::from_utf8_lossy(&bytes[..end]);
                     let length: usize = head
                         .lines()
-                        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim().parse().unwrap()))
+                        .find_map(|l| {
+                            l.split_once(':')
+                                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, v)| v.trim().parse().unwrap())
+                        })
                         .unwrap();
                     if bytes.len() >= end + 4 + length {
                         return String::from_utf8(bytes).unwrap();
@@ -493,7 +689,11 @@ mod tests {
         // retry, and takes the second category without answering it. Synthetic
         // SOAP, after codex's reproduction in D3's first review.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let open = Arc::new(opened(&[("1", listener.local_addr().unwrap().port(), &["tracks", "albums"])]));
+        let open = Arc::new(opened(&[(
+            "1",
+            listener.local_addr().unwrap().port(),
+            &["tracks", "albums"],
+        )]));
         let account = serde_json::from_value(serde_json::json!({
             "service_name": "Service 1", "auth_token": "synthetic-old", "private_key": "synthetic-key", "household": "Sonos_test", "linked": 0,
         }))
@@ -525,10 +725,25 @@ mod tests {
             async move { open.search("anything", |_| {}).await }
         });
         // The timeout only turns a hang into a failure.
-        tokio::time::timeout(Duration::from_secs(10), second_category).await.expect("the second category was asked").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), second_category)
+            .await
+            .expect("the second category was asked")
+            .unwrap();
         search.abort();
         assert!(search.await.unwrap_err().is_cancelled());
-        assert_eq!(Credentials::load().unwrap().token_for("Sonos_test", "1").unwrap().token, "synthetic-new", "stored");
-        assert_eq!(open.ask("1").unwrap().token.unwrap().token, "synthetic-new", "and held, though the search ended before its section");
+        assert_eq!(
+            Credentials::load()
+                .unwrap()
+                .token_for("Sonos_test", "1")
+                .unwrap()
+                .token,
+            "synthetic-new",
+            "stored"
+        );
+        assert_eq!(
+            open.ask("1").unwrap().token.unwrap().token,
+            "synthetic-new",
+            "and held, though the search ended before its section"
+        );
     }
 }

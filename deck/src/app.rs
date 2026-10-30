@@ -24,16 +24,18 @@ use crate::sync::Kept;
 use x2rock::sonos::proto::{Group, Repeat};
 
 use crate::art::Decoded;
-use crate::art::cache::{Cache as ArtCache, State as ArtState, Surface as ArtSurface, Key as ArtKey, Size as ArtSize};
+use crate::art::cache::{
+    Cache as ArtCache, Key as ArtKey, Size as ArtSize, State as ArtState, Surface as ArtSurface,
+};
 use crate::household::{Command, Handle, RoomDetails, Status, Update};
-use panels::OpenPanel;
-use screens::{Kind, ScreenState};
 use crate::input::{Action, Phase};
 use crate::model::{self, GroupLive, Household, RoomInfo, SeekBurst, VolumeBurst};
 use crate::palette::{self, Rgb};
 use crate::prefs::Prefs;
 use crate::theme;
 use crate::{AppWindow, Glyph, Icons, Nav, PaneButton, PaneState, RoomRow, SpeakerRow};
+use panels::OpenPanel;
+use screens::{Kind, ScreenState};
 
 /// Focus zones; ui/home.slint's `Zones` holds the same numbers.
 pub mod zone {
@@ -356,7 +358,12 @@ impl App {
 
     /// Where focus is, for the screenshot's report.
     pub fn focus_report(&self) -> String {
-        let list = self.stack.last().map(|s| (s.actions.len(), s.cells.get(self.focus.1.max(0) as usize).copied()));
+        let list = self.stack.last().map(|s| {
+            (
+                s.actions.len(),
+                s.cells.get(self.focus.1.max(0) as usize).copied(),
+            )
+        });
         format!("focus {:?}, list {:?}", self.focus, list)
     }
 
@@ -387,7 +394,10 @@ impl App {
             Update::Status(status) => {
                 let was_connected = matches!(self.status, Status::Connected);
                 let now_connected = matches!(status, Status::Connected);
-                if matches!(status, Status::Reconnecting(_) | Status::Searching | Status::Connecting) {
+                if matches!(
+                    status,
+                    Status::Reconnecting(_) | Status::Searching | Status::Connecting
+                ) {
                     self.reconnected();
                 }
                 self.status = status;
@@ -398,7 +408,12 @@ impl App {
             }
             Update::Household(house) => {
                 let track = |app: &App| {
-                    app.stack.last().and_then(|s| app.house.live.get(&s.group)).and_then(|l| l.metadata.as_ref()).and_then(|m| m.track()).and_then(|t| t.name.clone())
+                    app.stack
+                        .last()
+                        .and_then(|s| app.house.live.get(&s.group))
+                        .and_then(|l| l.metadata.as_ref())
+                        .and_then(|m| m.track())
+                        .and_then(|t| t.name.clone())
                 };
                 let before = track(self);
                 self.house = *house;
@@ -407,13 +422,24 @@ impl App {
                 self.render();
             }
             Update::Fetched(fetched) => {
-                if let crate::household::Fetched::RatingOffers { group, track, offers } = &fetched {
-                    self.ratings.insert(group.clone(), (track.clone(), offers.clone()));
+                if let crate::household::Fetched::RatingOffers {
+                    group,
+                    track,
+                    offers,
+                } = &fetched
+                {
+                    self.ratings
+                        .insert(group.clone(), (track.clone(), offers.clone()));
                 }
                 if let crate::household::Fetched::Previous { group, key, track } = &fetched
-                    && self.previous.get(group).is_some_and(|(asked, _)| asked == key) {
-                        self.previous.insert(group.clone(), (key.clone(), track.clone()));
-                    }
+                    && self
+                        .previous
+                        .get(group)
+                        .is_some_and(|(asked, _)| asked == key)
+                {
+                    self.previous
+                        .insert(group.clone(), (key.clone(), track.clone()));
+                }
                 self.fetched(fetched);
                 self.render();
             }
@@ -435,11 +461,12 @@ impl App {
         let Some(ui) = self.ui.upgrade() else { return };
         ui.set_notice(text.into());
         let weak = self.ui.clone();
-        self.notice_timer.start(slint::TimerMode::SingleShot, NOTICE, move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_notice(SharedString::new());
-            }
-        });
+        self.notice_timer
+            .start(slint::TimerMode::SingleShot, NOTICE, move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_notice(SharedString::new());
+                }
+            });
     }
 
     /// Keep the room chosen through a regroup: the group now holding its
@@ -447,7 +474,11 @@ impl App {
     /// selection fall to the first room.
     fn follow_selection(&mut self) {
         self.rooms = self.sorted_rooms();
-        if self.pending_select.as_ref().is_some_and(|(_, _, at)| at.elapsed() > Duration::from_secs(30)) {
+        if self
+            .pending_select
+            .as_ref()
+            .is_some_and(|(_, _, at)| at.elapsed() > Duration::from_secs(30))
+        {
             // A speaker left out never joins: the room is as formed as it gets.
             self.pending_select = None;
         }
@@ -461,7 +492,10 @@ impl App {
                 }
             }
         }
-        let still = self.selected.as_ref().is_some_and(|id| self.rooms.iter().any(|r| &r.group_id == id));
+        let still = self
+            .selected
+            .as_ref()
+            .is_some_and(|id| self.rooms.iter().any(|r| &r.group_id == id));
         if !still {
             let by_anchor = self
                 .anchor
@@ -480,7 +514,11 @@ impl App {
     }
 
     fn groups(&self) -> &[Group] {
-        self.house.groups.as_ref().map(|g| g.groups.as_slice()).unwrap_or(&[])
+        self.house
+            .groups
+            .as_ref()
+            .map(|g| g.groups.as_slice())
+            .unwrap_or(&[])
     }
 
     fn player_name(&self, id: &str) -> String {
@@ -496,13 +534,21 @@ impl App {
     /// group stands where its best-placed speaker does.
     fn sorted_rooms(&self) -> Vec<RoomEntry> {
         let ranks = &self.prefs.room_ranks;
-        let rank = |g: &Group| g.player_ids.iter().filter_map(|p| ranks.iter().position(|r| r == p)).min();
+        let rank = |g: &Group| {
+            g.player_ids
+                .iter()
+                .filter_map(|p| ranks.iter().position(|r| r == p))
+                .min()
+        };
         let mut groups: Vec<&Group> = self.groups().iter().collect();
         groups.sort_by(|a, b| match (rank(a), rank(b)) {
             (Some(x), Some(y)) => x.cmp(&y),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => self.player_name(&a.coordinator_id).to_lowercase().cmp(&self.player_name(&b.coordinator_id).to_lowercase()),
+            (None, None) => self
+                .player_name(&a.coordinator_id)
+                .to_lowercase()
+                .cmp(&self.player_name(&b.coordinator_id).to_lowercase()),
         });
         groups
             .into_iter()
@@ -533,7 +579,11 @@ impl App {
 
     fn has_tv(&self, entry: &RoomEntry) -> Option<String> {
         let groups = self.house.groups.as_ref()?;
-        entry.players.iter().find(|p| groups.player(p).is_some_and(|p| p.has_tv())).cloned()
+        entry
+            .players
+            .iter()
+            .find(|p| groups.player(p).is_some_and(|p| p.has_tv()))
+            .cloned()
     }
 
     // ----- Rendering ---------------------------------------------------------------
@@ -565,10 +615,14 @@ impl App {
             None => {
                 // Demo covers are already in hand at full size, without a
                 // runtime. Reuse those shared pixels for its thumbnails.
-                if self.runtime.is_none() && size == ArtSize::Thumbnail
-                    && let Some(ArtState::Ready(art)) = self.art.get(&ArtKey::new(url, ArtSize::Full), Instant::now()) {
-                        return Some(art.image.clone());
-                    }
+                if self.runtime.is_none()
+                    && size == ArtSize::Thumbnail
+                    && let Some(ArtState::Ready(art)) = self
+                        .art
+                        .get(&ArtKey::new(url, ArtSize::Full), Instant::now())
+                {
+                    return Some(art.image.clone());
+                }
                 self.request_art(key);
                 None
             }
@@ -583,12 +637,15 @@ impl App {
     }
 
     fn request_art(&mut self, key: ArtKey) {
-        let Some(runtime) = self.runtime.clone() else { return };
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
         self.art.loading(key.clone());
         let loader = self.art_loader.clone();
         runtime.spawn(async move {
             let result = loader.load(key.url.clone(), key.size).await;
-            let _ = slint::invoke_from_event_loop(move || with_app(|app| app.art_arrived(key, result)));
+            let _ =
+                slint::invoke_from_event_loop(move || with_app(|app| app.art_arrived(key, result)));
         });
     }
 
@@ -601,12 +658,25 @@ impl App {
         match result {
             Ok(d) => {
                 let bytes = d.rgba.len();
-                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&d.rgba, d.width, d.height);
-                self.art.ready(key, ReadyArt { image: slint::Image::from_rgba8(buffer), colors: d.colors }, bytes);
+                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &d.rgba, d.width, d.height,
+                );
+                self.art.ready(
+                    key,
+                    ReadyArt {
+                        image: slint::Image::from_rgba8(buffer),
+                        colors: d.colors,
+                    },
+                    bytes,
+                );
             }
             Err(e) => {
                 let retry_at = Instant::now() + e.retry_after();
-                eprintln!("x2rock-deck: no art for {url}: {error:#}", url = key.url, error = e.error);
+                eprintln!(
+                    "x2rock-deck: no art for {url}: {error:#}",
+                    url = key.url,
+                    error = e.error
+                );
                 self.art.failed(key, retry_at);
             }
         }
@@ -621,10 +691,13 @@ impl App {
         if let Some(deadline) = self.art.next_retry() {
             // Slint uses whole milliseconds. Do not turn a sub-ms remainder
             // into repeated immediate wakeups just before the deadline.
-            let delay = deadline.saturating_duration_since(now).max(Duration::from_millis(1));
-            self.art_retry.start(slint::TimerMode::SingleShot, delay, move || {
-                with_app(|app| app.render());
-            });
+            let delay = deadline
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1));
+            self.art_retry
+                .start(slint::TimerMode::SingleShot, delay, move || {
+                    with_app(|app| app.render());
+                });
         } else {
             self.art_retry.stop();
         }
@@ -652,14 +725,22 @@ impl App {
             let moving = moving_group.as_ref() == Some(&entry.group_id);
             if moving {
                 lines = match &self.moving {
-                    Some(Moving::OfferingParty(_)) => vec!["Play everywhere? Select".into(), "Left: also even volume".into()],
-                    _ => vec!["Moving \u{00B7} Up/Down, Select".into(), "Left: play everywhere".into()],
+                    Some(Moving::OfferingParty(_)) => vec![
+                        "Play everywhere? Select".into(),
+                        "Left: also even volume".into(),
+                    ],
+                    _ => vec![
+                        "Moving \u{00B7} Up/Down, Select".into(),
+                        "Left: play everywhere".into(),
+                    ],
                 };
             }
             let art = self.thumbnail(info.art_url.as_deref());
             let playing = live.playing();
             let has_tv = self.has_tv(entry);
-            let is_this_tv = this_tv.as_ref().is_some_and(|tv| entry.players.contains(tv));
+            let is_this_tv = this_tv
+                .as_ref()
+                .is_some_and(|tv| entry.players.contains(tv));
             let tv_badge = if is_this_tv {
                 2
             } else if has_tv.is_some() && !info.on_tv_input {
@@ -733,8 +814,12 @@ impl App {
         // The control focus is on, by what it is: rows are rebuilt from what the
         // player allows, and an index would land on whatever moved into its place.
         let (fz, fi) = (self.focus.0, self.focus.1.max(0) as usize);
-        let held_transport = (fz == zone::TRANSPORT).then(|| self.transport.get(fi).copied()).flatten();
-        let held_place = (fz == zone::PLACES).then(|| self.places.get(fi).copied()).flatten();
+        let held_transport = (fz == zone::TRANSPORT)
+            .then(|| self.transport.get(fi).copied())
+            .flatten();
+        let held_place = (fz == zone::PLACES)
+            .then(|| self.places.get(fi).copied())
+            .flatten();
 
         // The transport, as the player allows it.
         self.transport.clear();
@@ -771,8 +856,12 @@ impl App {
                 }
                 Some((asked, None)) if *asked == track => {}
                 _ if !track.is_empty() => {
-                    self.ratings.insert(entry.group_id.clone(), (track.clone(), None));
-                    self.send(Command::Fetch(crate::household::Fetch::RatingOffers { group: entry.group_id.clone(), track }));
+                    self.ratings
+                        .insert(entry.group_id.clone(), (track.clone(), None));
+                    self.send(Command::Fetch(crate::household::Fetch::RatingOffers {
+                        group: entry.group_id.clone(),
+                        track,
+                    }));
                 }
                 _ => {}
             }
@@ -781,13 +870,29 @@ impl App {
         // only where the player allows a skip back.
         // Not under shuffle: the slot before is the queue's order, not the order it plays in.
         if !tv && actions.can_skip_back && !modes.shuffle {
-            let key = format!("{}|{}", info.track_name.clone().unwrap_or_default(), live.queue_version.clone().unwrap_or_default());
-            if self.previous.get(&entry.group_id).is_none_or(|(asked, _)| *asked != key) {
-                self.previous.insert(entry.group_id.clone(), (key.clone(), None));
-                self.send(Command::Fetch(crate::household::Fetch::Previous { group: entry.group_id.clone(), key }));
+            let key = format!(
+                "{}|{}",
+                info.track_name.clone().unwrap_or_default(),
+                live.queue_version.clone().unwrap_or_default()
+            );
+            if self
+                .previous
+                .get(&entry.group_id)
+                .is_none_or(|(asked, _)| *asked != key)
+            {
+                self.previous
+                    .insert(entry.group_id.clone(), (key.clone(), None));
+                self.send(Command::Fetch(crate::household::Fetch::Previous {
+                    group: entry.group_id.clone(),
+                    key,
+                }));
             }
         }
-        let heart = self.ratings.get(&entry.group_id).and_then(|(_, o)| o.as_ref()).is_some_and(|o| o.heart);
+        let heart = self
+            .ratings
+            .get(&entry.group_id)
+            .and_then(|(_, o)| o.as_ref())
+            .is_some_and(|o| o.heart);
         let transport: Vec<PaneButton> = self
             .transport
             .iter()
@@ -797,7 +902,9 @@ impl App {
                     Transport::Shuffle if modes.shuffle => icons.get_shuffle_on(),
                     Transport::Shuffle => icons.get_shuffle(),
                     Transport::Previous => icons.get_skip_previous(),
-                    Transport::PlayPause if live.playing() && !actions.can_pause => icons.get_stop(),
+                    Transport::PlayPause if live.playing() && !actions.can_pause => {
+                        icons.get_stop()
+                    }
                     Transport::PlayPause if live.playing() => icons.get_pause(),
                     Transport::PlayPause => icons.get_play_arrow(),
                     Transport::Next => icons.get_skip_next(),
@@ -814,7 +921,11 @@ impl App {
                     Transport::RateDown if heart => icons.get_block_outlined(),
                     Transport::RateDown => icons.get_thumb_down_outlined(),
                 };
-                PaneButton { icon, label: SharedString::new(), wide: *t == Transport::PlayPause }
+                PaneButton {
+                    icon,
+                    label: SharedString::new(),
+                    wide: *t == Transport::PlayPause,
+                }
             })
             .collect();
 
@@ -822,7 +933,12 @@ impl App {
         // input or a station: those are not what a favourite saved here holds.
         let savable = !tv
             && !info.is_radio
-            && live.metadata.as_ref().and_then(|m| m.track()).and_then(|t| t.id.as_ref()).is_some_and(|id| id.service_id.is_some());
+            && live
+                .metadata
+                .as_ref()
+                .and_then(|m| m.track())
+                .and_then(|t| t.id.as_ref())
+                .is_some_and(|id| id.service_id.is_some());
         self.places = if tv {
             vec![Place::Browse, Place::Search, Place::Group, Place::Configure]
         } else {
@@ -850,17 +966,26 @@ impl App {
                 // Configure names the time a running sleep timer stops the room.
                 let label = match (p, live.sleep_left(Instant::now())) {
                     (Place::Configure, Some(left)) => {
-                        let ends = chrono::Local::now() + chrono::Duration::from_std(left).unwrap_or_default();
+                        let ends = chrono::Local::now()
+                            + chrono::Duration::from_std(left).unwrap_or_default();
                         format!("Configure \u{00B7} sleep at {}", panels::clock_time(ends))
                     }
                     _ => p.label().to_owned(),
                 };
-                PaneButton { icon, label: label.into(), wide: false }
+                PaneButton {
+                    icon,
+                    label: label.into(),
+                    wide: false,
+                }
             })
             .collect();
 
         // A grouped room's speakers, each with its own volume.
-        self.speakers = if entry.players.len() > 1 { entry.players.clone() } else { Vec::new() };
+        self.speakers = if entry.players.len() > 1 {
+            entry.players.clone()
+        } else {
+            Vec::new()
+        };
         let speakers: Vec<SpeakerRow> = self
             .speakers
             .iter()
@@ -893,14 +1018,24 @@ impl App {
         let (title, subtitle) = match (&info.track_name, &info.stream_info) {
             (Some(track), _) => (
                 track.clone(),
-                model::track_line(info.artist.as_deref(), info.album.as_deref(), info.source.as_deref(), info.is_radio, Some(track)),
+                model::track_line(
+                    info.artist.as_deref(),
+                    info.album.as_deref(),
+                    info.source.as_deref(),
+                    info.is_radio,
+                    Some(track),
+                ),
             ),
             (None, Some(stream)) => (stream.clone(), info.source.clone().unwrap_or_default()),
             (None, None) => (info.source.clone().unwrap_or_default(), String::new()),
         };
         let has_content = !title.is_empty();
         let stream_line = match (&info.track_name, &info.stream_info) {
-            (Some(track), Some(stream)) if stream != track && Some(stream) != info.artist.as_ref() => stream.clone(),
+            (Some(track), Some(stream))
+                if stream != track && Some(stream) != info.artist.as_ref() =>
+            {
+                stream.clone()
+            }
             _ => String::new(),
         };
 
@@ -908,16 +1043,38 @@ impl App {
         let now_ms = self.now_ms();
         let (caption, strong) = if self.seek_burst.shown(now_ms) {
             (self.seek_burst.total_text(), true)
-        } else if self.focus.0 == zone::TRANSPORT && self.transport.get(self.focus.1 as usize) == Some(&Transport::Next) {
-            let next = live.metadata.as_ref().and_then(|m| m.next_item.as_ref()).and_then(|i| i.track.as_ref());
+        } else if self.focus.0 == zone::TRANSPORT
+            && self.transport.get(self.focus.1 as usize) == Some(&Transport::Next)
+        {
+            let next = live
+                .metadata
+                .as_ref()
+                .and_then(|m| m.next_item.as_ref())
+                .and_then(|i| i.track.as_ref());
             (
-                model::track_caption("Up next", next.and_then(|t| t.name.as_deref()), next.and_then(|t| t.artist_name())).unwrap_or_default(),
+                model::track_caption(
+                    "Up next",
+                    next.and_then(|t| t.name.as_deref()),
+                    next.and_then(|t| t.artist_name()),
+                )
+                .unwrap_or_default(),
                 false,
             )
-        } else if self.focus.0 == zone::TRANSPORT && self.transport.get(self.focus.1 as usize) == Some(&Transport::Previous) {
-            let previous = self.previous.get(&entry.group_id).and_then(|(_, t)| t.as_ref()).filter(|_| !modes.shuffle);
+        } else if self.focus.0 == zone::TRANSPORT
+            && self.transport.get(self.focus.1 as usize) == Some(&Transport::Previous)
+        {
+            let previous = self
+                .previous
+                .get(&entry.group_id)
+                .and_then(|(_, t)| t.as_ref())
+                .filter(|_| !modes.shuffle);
             (
-                model::track_caption("Previous", previous.map(|t| t.0.as_str()), previous.and_then(|t| t.1.as_deref())).unwrap_or_default(),
+                model::track_caption(
+                    "Previous",
+                    previous.map(|t| t.0.as_str()),
+                    previous.and_then(|t| t.1.as_deref()),
+                )
+                .unwrap_or_default(),
                 false,
             )
         } else if self.focus.0 == zone::SEEK {
@@ -932,7 +1089,11 @@ impl App {
             .and_then(|p| self.house.home_theater.get(p).copied())
             .unwrap_or((false, false));
         let art = self.art_image(info.art_url.as_deref());
-        let service_logo = info.service.as_deref().and_then(crate::logos::logo_url).and_then(|url| self.thumbnail(Some(&url)));
+        let service_logo = info
+            .service
+            .as_deref()
+            .and_then(crate::logos::logo_url)
+            .and_then(|url| self.thumbnail(Some(&url)));
         let volume = live.volume.clone();
         let pane = PaneState {
             room: self.room_label(&entry).into(),
@@ -955,14 +1116,22 @@ impl App {
             idle_word: activity.label().into(),
             has_art: art.is_some(),
             art: art.unwrap_or_default(),
-            glyph: if info.is_radio { Glyph::Radio } else { Glyph::None },
+            glyph: if info.is_radio {
+                Glyph::Radio
+            } else {
+                Glyph::None
+            },
             // The service's logo over the cover's corner, shown while volume or
             // seek has focus (home.slint decides when).
             has_service_logo: service_logo.is_some(),
             service_logo: service_logo.unwrap_or_default(),
             has_duration: duration > 0 && !tv,
             seekable,
-            progress: if duration > 0 { (position as f32 / duration as f32).clamp(0.0, 1.0) } else { 0.0 },
+            progress: if duration > 0 {
+                (position as f32 / duration as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             position_text: model::time_text(position as i64).into(),
             duration_text: model::time_text(duration as i64).into(),
             caption: caption.into(),
@@ -978,7 +1147,12 @@ impl App {
         self.models.places.set(places);
         self.models.speakers.set(speakers);
         // The cover's shade behind the pane; the plain surface on a TV input.
-        let shade = if tv { None } else { self.art_colors(info.art_url.as_deref()).map(|(_, shade)| shade) };
+        let shade = if tv {
+            None
+        } else {
+            self.art_colors(info.art_url.as_deref())
+                .map(|(_, shade)| shade)
+        };
         ui.set_pane_shade(match shade {
             Some(s) => slint::Color::from_rgb_u8(s[0], s[1], s[2]),
             None => theme::palette_for(&self.prefs.theme, None).surface,
@@ -998,7 +1172,11 @@ impl App {
             Some(None) => self.focus = self.pane_entry(),
             None => {}
         }
-        if !self.panel_open() && !self.screen_open() && self.in_pane() && !self.zone_present(self.focus.0) {
+        if !self.panel_open()
+            && !self.screen_open()
+            && self.in_pane()
+            && !self.zone_present(self.focus.0)
+        {
             self.focus = self.pane_entry();
         }
         self.clamp_focus();
@@ -1020,7 +1198,9 @@ impl App {
     /// The position and the equalizers move only while something plays.
     fn start_ticking(&mut self, needed: bool) {
         // Full screen's clock and drift move whether or not anything plays.
-        let any_playing = needed || self.screen_is(Kind::NowPlaying) || self.house.live.values().any(|l| l.playing());
+        let any_playing = needed
+            || self.screen_is(Kind::NowPlaying)
+            || self.house.live.values().any(|l| l.playing());
         if !any_playing {
             self.tick.stop();
             return;
@@ -1028,9 +1208,13 @@ impl App {
         if self.tick.running() {
             return;
         }
-        self.tick.start(slint::TimerMode::Repeated, Duration::from_millis(33), move || {
-            with_app(|app| app.tick());
-        });
+        self.tick.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(33),
+            move || {
+                with_app(|app| app.tick());
+            },
+        );
     }
 
     fn tick(&mut self) {
@@ -1054,10 +1238,14 @@ impl App {
                 levels[step] + (levels[(step + 1) % levels.len()] - levels[step]) * t
             })
             .collect();
-        ui.global::<crate::Anim>().set_eq(ModelRc::new(VecModel::from(eq)));
+        ui.global::<crate::Anim>()
+            .set_eq(ModelRc::new(VecModel::from(eq)));
         // The position, once a second is enough for the clock and smooth enough
         // for the bar at this size; every frame costs nothing extra while ticking.
-        if ms % 500 < 40 || self.seek_burst.shown(ms) || !self.seek_burst.shown(ms.saturating_sub(40)) {
+        if ms % 500 < 40
+            || self.seek_burst.shown(ms)
+            || !self.seek_burst.shown(ms.saturating_sub(40))
+        {
             self.render_pane();
             if self.screen_is(Kind::NowPlaying) {
                 self.render_screen();
@@ -1070,7 +1258,13 @@ impl App {
     fn in_pane(&self) -> bool {
         matches!(
             self.focus.0,
-            zone::VOLUME | zone::SEEK | zone::TRANSPORT | zone::PLACES | zone::SPEAKERS | zone::TV_BUTTONS | zone::ALARM
+            zone::VOLUME
+                | zone::SEEK
+                | zone::TRANSPORT
+                | zone::PLACES
+                | zone::SPEAKERS
+                | zone::TV_BUTTONS
+                | zone::ALARM
         )
     }
 
@@ -1086,8 +1280,16 @@ impl App {
             zone::PLACES => self.places.len(),
             zone::SPEAKERS => self.speakers.len(),
             zone::TV_BUTTONS | zone::ALARM => 2,
-            zone::SETTINGS_PANEL | zone::ROOM_PANEL => self.panel.as_ref().map_or(0, |p| p.actions.len()),
-            zone::HEADER | zone::LIST | zone::BAR | zone::PIN | zone::SIDE | zone::FULL | zone::FIELD => self.screen_zone_len(z) as usize,
+            zone::SETTINGS_PANEL | zone::ROOM_PANEL => {
+                self.panel.as_ref().map_or(0, |p| p.actions.len())
+            }
+            zone::HEADER
+            | zone::LIST
+            | zone::BAR
+            | zone::PIN
+            | zone::SIDE
+            | zone::FULL
+            | zone::FIELD => self.screen_zone_len(z) as usize,
             zone::KEYS => self.keys.keys.len(),
             _ => 0,
         }) as i32
@@ -1095,7 +1297,11 @@ impl App {
 
     /// Where Right from the room list lands: Play/Pause, else Browse.
     fn pane_entry(&self) -> (i32, i32) {
-        if let Some(i) = self.transport.iter().position(|t| *t == Transport::PlayPause) {
+        if let Some(i) = self
+            .transport
+            .iter()
+            .position(|t| *t == Transport::PlayPause)
+        {
             return (zone::TRANSPORT, i as i32);
         }
         if let Some(i) = self.places.iter().position(|p| *p == Place::Browse) {
@@ -1157,10 +1363,12 @@ impl App {
         };
         // Typing: a real keyboard (or Steam's) writes into Search's field while
         // the field or the on-screen keyboard has focus.
-        if self.typing() && pressed
-            && let Some(edit) = self.typed(text) {
-                return edit;
-            }
+        if self.typing()
+            && pressed
+            && let Some(edit) = self.typed(text)
+        {
+            return edit;
+        }
         if let Some(action) = crate::input::action_for_key(text) {
             if Self::echoes(self.last_pad, action, phase) {
                 return true;
@@ -1170,9 +1378,10 @@ impl App {
         }
         let mut chars = text.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
-            && let Some(action) = crate::input::shortcut_for_char(c) {
-                return self.action(action, phase);
-            }
+            && let Some(action) = crate::input::shortcut_for_char(c)
+        {
+            return self.action(action, phase);
+        }
         false
     }
 
@@ -1188,7 +1397,9 @@ impl App {
     }
 
     fn echoes(other: Option<(Action, Phase, Instant)>, action: Action, phase: Phase) -> bool {
-        other.is_some_and(|(a, p, at)| a == action && p == phase && at.elapsed() < Duration::from_millis(80))
+        other.is_some_and(|(a, p, at)| {
+            a == action && p == phase && at.elapsed() < Duration::from_millis(80)
+        })
     }
 
     /// One key or button, pressed, repeated or released.
@@ -1197,7 +1408,10 @@ impl App {
             // The first key after touching brings focus back, and does only that.
             self.touch = false;
             self.push_focus();
-            if matches!(action, Action::Up | Action::Down | Action::Left | Action::Right) {
+            if matches!(
+                action,
+                Action::Up | Action::Down | Action::Left | Action::Right
+            ) {
                 return true;
             }
         }
@@ -1205,7 +1419,15 @@ impl App {
         // closes it, on the key's release, so the release does not land on the
         // pane's button underneath.
         if self.screen_is(Kind::NowPlaying)
-            && !matches!(action, Action::Back | Action::VolumeUp | Action::VolumeDown | Action::PlayPause | Action::Next | Action::Previous)
+            && !matches!(
+                action,
+                Action::Back
+                    | Action::VolumeUp
+                    | Action::VolumeDown
+                    | Action::PlayPause
+                    | Action::Next
+                    | Action::Previous
+            )
         {
             if phase == Phase::Release {
                 self.close_screen();
@@ -1231,7 +1453,10 @@ impl App {
             Action::Up | Action::Down | Action::Left | Action::Right => {
                 if action == Action::Left {
                     match phase {
-                        Phase::Press => self.left_from_room = self.focus.0 == zone::ROOMS && self.moving.is_none(),
+                        Phase::Press => {
+                            self.left_from_room =
+                                self.focus.0 == zone::ROOMS && self.moving.is_none()
+                        }
                         Phase::Release => self.left_from_room = false,
                         Phase::Repeat => {}
                     }
@@ -1275,7 +1500,11 @@ impl App {
             }
             Action::Next | Action::Previous => {
                 if phase == Phase::Press {
-                    self.transport_press(if action == Action::Next { Transport::Next } else { Transport::Previous });
+                    self.transport_press(if action == Action::Next {
+                        Transport::Next
+                    } else {
+                        Transport::Previous
+                    });
                 }
                 true
             }
@@ -1287,10 +1516,11 @@ impl App {
             }
             Action::Fullscreen => {
                 if phase == Phase::Press
-                    && let Some(ui) = self.ui.upgrade() {
-                        let window = ui.window();
-                        window.set_fullscreen(!window.is_fullscreen());
-                    }
+                    && let Some(ui) = self.ui.upgrade()
+                {
+                    let window = ui.window();
+                    window.set_fullscreen(!window.is_fullscreen());
+                }
                 true
             }
         };
@@ -1302,26 +1532,35 @@ impl App {
         match phase {
             Phase::Press => {
                 let (z, i) = self.focus;
-                self.press = Some(Press { zone: z, index: i, held: false });
-                self.hold_timer.start(slint::TimerMode::SingleShot, HOLD, move || {
-                    with_app(|app| {
-                        if let Some(press) = app.press.as_mut()
-                            && !press.held && (press.zone, press.index) == app.focus {
+                self.press = Some(Press {
+                    zone: z,
+                    index: i,
+                    held: false,
+                });
+                self.hold_timer
+                    .start(slint::TimerMode::SingleShot, HOLD, move || {
+                        with_app(|app| {
+                            if let Some(press) = app.press.as_mut()
+                                && !press.held
+                                && (press.zone, press.index) == app.focus
+                            {
                                 press.held = true;
                                 let (z, i) = (press.zone, press.index);
                                 app.hold(z, i);
                                 app.render();
                             }
+                        });
                     });
-                });
             }
             Phase::Repeat => {}
             Phase::Release => {
                 self.hold_timer.stop();
                 if let Some(press) = self.press.take()
-                    && !press.held && (press.zone, press.index) == self.focus {
-                        self.click(press.zone, press.index);
-                    }
+                    && !press.held
+                    && (press.zone, press.index) == self.focus
+                {
+                    self.click(press.zone, press.index);
+                }
             }
         }
         true
@@ -1402,13 +1641,20 @@ impl App {
 
     fn navigate_pane(&mut self, action: Action) {
         let (z, i) = self.focus;
-        let horizontal = matches!(z, zone::TRANSPORT | zone::PLACES | zone::TV_BUTTONS | zone::ALARM);
+        let horizontal = matches!(
+            z,
+            zone::TRANSPORT | zone::PLACES | zone::TV_BUTTONS | zone::ALARM
+        );
         match action {
             Action::Left | Action::Right => {
                 let d = if action == Action::Right { 1 } else { -1 };
                 match z {
                     zone::VOLUME => {
-                        let fixed = self.selected_entry().map(|e| self.live(&e.group_id)).and_then(|l| l.volume).is_some_and(|v| v.fixed);
+                        let fixed = self
+                            .selected_entry()
+                            .map(|e| self.live(&e.group_id))
+                            .and_then(|l| l.volume)
+                            .is_some_and(|v| v.fixed);
                         if fixed && d < 0 {
                             self.focus_rooms();
                         } else {
@@ -1437,8 +1683,14 @@ impl App {
                         return;
                     }
                 }
-                let Some(at) = self.pane_zones.iter().position(|&p| p == z) else { return };
-                let target = if down { self.pane_zones.get(at + 1) } else { at.checked_sub(1).and_then(|a| self.pane_zones.get(a)) };
+                let Some(at) = self.pane_zones.iter().position(|&p| p == z) else {
+                    return;
+                };
+                let target = if down {
+                    self.pane_zones.get(at + 1)
+                } else {
+                    at.checked_sub(1).and_then(|a| self.pane_zones.get(a))
+                };
                 // Up and Down never leave the pane.
                 let Some(&target) = target else { return };
                 let index = self.entry_index(target, z, i, down);
@@ -1459,11 +1711,12 @@ impl App {
                     self.zone_len(target) - 1
                 }
             }
-            zone::TRANSPORT => self
-                .memory
-                .get(&target)
-                .copied()
-                .unwrap_or_else(|| self.transport.iter().position(|t| *t == Transport::PlayPause).unwrap_or(0) as i32),
+            zone::TRANSPORT => self.memory.get(&target).copied().unwrap_or_else(|| {
+                self.transport
+                    .iter()
+                    .position(|t| *t == Transport::PlayPause)
+                    .unwrap_or(0) as i32
+            }),
             _ => self.memory.get(&target).copied().unwrap_or(0),
         }
     }
@@ -1504,18 +1757,34 @@ impl App {
             }
             zone::SETTINGS => self.open_settings(),
             zone::SETTINGS_PANEL | zone::ROOM_PANEL => self.panel_click(index),
-            zone::HEADER | zone::LIST | zone::BAR | zone::PIN | zone::SIDE | zone::FULL | zone::FIELD => self.screen_click(z, index),
+            zone::HEADER
+            | zone::LIST
+            | zone::BAR
+            | zone::PIN
+            | zone::SIDE
+            | zone::FULL
+            | zone::FIELD => self.screen_click(z, index),
             zone::KEYS => self.key_pressed(index as usize),
             zone::VOLUME => {
                 if let Some(entry) = self.selected_entry().cloned() {
                     let muted = self.live(&entry.group_id).volume.is_some_and(|v| v.muted);
-                    self.send(Command::SetGroupMute { group: entry.group_id, muted: !muted });
+                    self.send(Command::SetGroupMute {
+                        group: entry.group_id,
+                        muted: !muted,
+                    });
                 }
             }
             zone::SPEAKERS => {
                 if let Some(player) = self.speakers.get(index as usize).cloned() {
-                    let muted = self.house.player_volumes.get(&player).is_some_and(|v| v.muted);
-                    self.send(Command::SetPlayerMute { player, muted: !muted });
+                    let muted = self
+                        .house
+                        .player_volumes
+                        .get(&player)
+                        .is_some_and(|v| v.muted);
+                    self.send(Command::SetPlayerMute {
+                        player,
+                        muted: !muted,
+                    });
                 }
             }
             zone::TRANSPORT => {
@@ -1529,13 +1798,25 @@ impl App {
                 }
             }
             zone::TV_BUTTONS => {
-                let Some(entry) = self.selected_entry().cloned() else { return };
-                let Some(player) = self.has_tv(&entry) else { return };
-                let (night, speech) = self.house.home_theater.get(&player).copied().unwrap_or((false, false));
+                let Some(entry) = self.selected_entry().cloned() else {
+                    return;
+                };
+                let Some(player) = self.has_tv(&entry) else {
+                    return;
+                };
+                let (night, speech) = self
+                    .house
+                    .home_theater
+                    .get(&player)
+                    .copied()
+                    .unwrap_or((false, false));
                 self.send(if index == 0 {
                     Command::SetNightSound { player, on: !night }
                 } else {
-                    Command::SetSpeechEnhancement { player, on: !speech }
+                    Command::SetSpeechEnhancement {
+                        player,
+                        on: !speech,
+                    }
                 });
             }
             _ => {}
@@ -1545,7 +1826,9 @@ impl App {
     fn hold(&mut self, z: i32, index: i32) {
         match z {
             // A hold on Play/Pause rates the track up, as on the TV.
-            zone::TRANSPORT if self.transport.get(index.max(0) as usize) == Some(&Transport::PlayPause) => {
+            zone::TRANSPORT
+                if self.transport.get(index.max(0) as usize) == Some(&Transport::PlayPause) =>
+            {
                 if self.transport.contains(&Transport::RateUp) {
                     self.transport_press(Transport::RateUp);
                 }
@@ -1564,7 +1847,9 @@ impl App {
             Place::Search => self.open_screen(Kind::Search),
             Place::SaveFavorite => {
                 if let Some(entry) = self.selected_entry().cloned() {
-                    self.send(Command::SaveFavorite { group: entry.group_id });
+                    self.send(Command::SaveFavorite {
+                        group: entry.group_id,
+                    });
                 }
             }
             Place::Browse => self.open_screen(Kind::Browse),
@@ -1574,18 +1859,24 @@ impl App {
     }
 
     fn transport_press(&mut self, t: Transport) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
         let live = self.live(&entry.group_id);
         let group = entry.group_id.clone();
         // A control the pane does not draw is not acted on from anywhere: the
         // media keys go through here too.
         let allowed = match t {
-            Transport::PlayPause => live.actions.can_play || live.actions.can_pause || live.playing(),
+            Transport::PlayPause => {
+                live.actions.can_play || live.actions.can_pause || live.playing()
+            }
             Transport::Next => live.actions.can_skip,
             Transport::Previous => live.actions.can_skip_back,
             Transport::Shuffle => live.actions.can_shuffle,
             Transport::Repeat => live.actions.can_repeat,
-            Transport::RateUp | Transport::RateDown | Transport::Unfavorite => self.transport.contains(&t),
+            Transport::RateUp | Transport::RateDown | Transport::Unfavorite => {
+                self.transport.contains(&t)
+            }
         };
         if !allowed {
             return;
@@ -1596,10 +1887,22 @@ impl App {
                 // The Control API has no stop: pausing a stream is how it stops.
                 command: "pause",
             },
-            Transport::PlayPause => Command::Playback { group, command: "play" },
-            Transport::Next => Command::Playback { group, command: "skipToNextTrack" },
-            Transport::Previous => Command::Playback { group, command: "skipToPreviousTrack" },
-            Transport::Shuffle => Command::SetShuffle { group, on: !live.modes.shuffle },
+            Transport::PlayPause => Command::Playback {
+                group,
+                command: "play",
+            },
+            Transport::Next => Command::Playback {
+                group,
+                command: "skipToNextTrack",
+            },
+            Transport::Previous => Command::Playback {
+                group,
+                command: "skipToPreviousTrack",
+            },
+            Transport::Shuffle => Command::SetShuffle {
+                group,
+                on: !live.modes.shuffle,
+            },
             Transport::RateUp | Transport::RateDown | Transport::Unfavorite => {
                 use x2rock::sonos::smapi::RatingKind;
                 let kind = match t {
@@ -1624,19 +1927,42 @@ impl App {
     }
 
     fn group_volume_step(&mut self, direction: i32) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
-        let level = self.live(&entry.group_id).volume.map(|v| v.volume as i32).unwrap_or(0);
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        let level = self
+            .live(&entry.group_id)
+            .volume
+            .map(|v| v.volume as i32)
+            .unwrap_or(0);
         let now = self.now_ms();
         let delta = self.volume_burst.step(level, direction, now);
-        self.send(Command::AdjustGroupVolume { group: entry.group_id, delta: delta.clamp(-100, 100) as i8 });
+        self.send(Command::AdjustGroupVolume {
+            group: entry.group_id,
+            delta: delta.clamp(-100, 100) as i8,
+        });
     }
 
     fn speaker_step(&mut self, index: usize, direction: i32) {
-        let Some(player) = self.speakers.get(index).cloned() else { return };
-        let level = self.house.player_volumes.get(&player).map(|v| v.volume as i32).unwrap_or(0);
+        let Some(player) = self.speakers.get(index).cloned() else {
+            return;
+        };
+        let level = self
+            .house
+            .player_volumes
+            .get(&player)
+            .map(|v| v.volume as i32)
+            .unwrap_or(0);
         let now = self.now_ms();
-        let delta = self.speaker_bursts.entry(player.clone()).or_default().step(level, direction, now);
-        self.send(Command::AdjustPlayerVolume { player, delta: delta.clamp(-100, 100) as i8 });
+        let delta = self
+            .speaker_bursts
+            .entry(player.clone())
+            .or_default()
+            .step(level, direction, now);
+        self.send(Command::AdjustPlayerVolume {
+            player,
+            delta: delta.clamp(-100, 100) as i8,
+        });
     }
 
     pub fn volume_step_tapped(&mut self, direction: i32) {
@@ -1652,22 +1978,34 @@ impl App {
     }
 
     fn seek_step(&mut self, direction: i64) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
         let live = self.live(&entry.group_id);
         let position = live.live_position(Instant::now()) as i64;
         let now = self.now_ms();
-        let delta = self.seek_burst.step(direction, position, live.duration_ms() as i64, now);
-        self.send(Command::SeekBy { group: entry.group_id, millis: delta });
+        let delta = self
+            .seek_burst
+            .step(direction, position, live.duration_ms() as i64, now);
+        self.send(Command::SeekBy {
+            group: entry.group_id,
+            millis: delta,
+        });
     }
 
     pub fn seek_to(&mut self, fraction: f32) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
         let duration = self.live(&entry.group_id).duration_ms();
         if duration == 0 {
             return;
         }
         self.touch = true;
-        self.send(Command::SeekTo { group: entry.group_id, millis: (fraction.clamp(0.0, 1.0) * duration as f32) as u64 });
+        self.send(Command::SeekTo {
+            group: entry.group_id,
+            millis: (fraction.clamp(0.0, 1.0) * duration as f32) as u64,
+        });
         self.render();
     }
 
@@ -1687,8 +2025,14 @@ impl App {
     fn navigate_moving(&mut self, moving: Moving, action: Action) {
         match (moving, action) {
             (Moving::Carrying(group), Action::Up | Action::Down) => {
-                let Some(at) = self.rooms.iter().position(|r| r.group_id == group) else { return };
-                let to = if action == Action::Up { at.checked_sub(1) } else { (at + 1 < self.rooms.len()).then_some(at + 1) };
+                let Some(at) = self.rooms.iter().position(|r| r.group_id == group) else {
+                    return;
+                };
+                let to = if action == Action::Up {
+                    at.checked_sub(1)
+                } else {
+                    (at + 1 < self.rooms.len()).then_some(at + 1)
+                };
                 let Some(to) = to else { return };
                 self.rooms.swap(at, to);
                 // A move places the moved room and everything above it as shown.
@@ -1704,9 +2048,15 @@ impl App {
                 self.prefs.room_ranks = ranks;
                 self.prefs.save();
                 self.rooms = self.sorted_rooms();
-                self.focus.1 = self.rooms.iter().position(|r| r.group_id == group).unwrap_or(to) as i32;
+                self.focus.1 = self
+                    .rooms
+                    .iter()
+                    .position(|r| r.group_id == group)
+                    .unwrap_or(to) as i32;
             }
-            (Moving::Carrying(group), Action::Left) => self.moving = Some(Moving::OfferingParty(group)),
+            (Moving::Carrying(group), Action::Left) => {
+                self.moving = Some(Moving::OfferingParty(group))
+            }
             (Moving::OfferingParty(group), Action::Left) => {
                 self.moving = None;
                 self.play_everywhere(&group, true);
@@ -1719,9 +2069,18 @@ impl App {
     /// `even_volume`, every speaker is set to this room's level first, so
     /// nothing joins loud.
     fn play_everywhere(&mut self, group: &str, even_volume: bool) {
-        let level = even_volume.then(|| self.live(group).volume.map(|v| v.volume)).flatten();
-        self.send(Command::PlayEverywhere { group: group.to_owned(), level });
-        self.notice(if even_volume { "Playing everywhere, every speaker at this room's level" } else { "Playing everywhere" });
+        let level = even_volume
+            .then(|| self.live(group).volume.map(|v| v.volume))
+            .flatten();
+        self.send(Command::PlayEverywhere {
+            group: group.to_owned(),
+            level,
+        });
+        self.notice(if even_volume {
+            "Playing everywhere, every speaker at this room's level"
+        } else {
+            "Playing everywhere"
+        });
     }
 
     // ----- The on-screen keyboard ----------------------------------------------
@@ -1732,7 +2091,10 @@ impl App {
 
     /// The text the front screen takes: Search's query, or Radio's address.
     fn query_mut(&mut self) -> Option<&mut String> {
-        self.stack.last_mut().filter(|s| s.kind == Kind::Search || (s.kind == Kind::Radio && s.url_mode)).map(|s| &mut s.query)
+        self.stack
+            .last_mut()
+            .filter(|s| s.kind == Kind::Search || (s.kind == Kind::Radio && s.url_mode))
+            .map(|s| &mut s.query)
     }
 
     /// Done on the keyboard, or Enter: search, or play the address.
@@ -1748,7 +2110,9 @@ impl App {
     fn typed(&mut self, text: &str) -> Option<bool> {
         use slint::platform::Key;
         let mut chars = text.chars();
-        let (Some(c), None) = (chars.next(), chars.next()) else { return None };
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            return None;
+        };
         if c == char::from(Key::Backspace) {
             self.query_mut()?.pop();
         } else if c == char::from(Key::Return) || c == '\r' {
@@ -1798,8 +2162,12 @@ impl App {
     }
 
     fn key_pressed(&mut self, index: usize) {
-        let Some(key) = self.keys.keys.get(index).copied() else { return };
-        let Some(query) = self.query_mut() else { return };
+        let Some(key) = self.keys.keys.get(index).copied() else {
+            return;
+        };
+        let Some(query) = self.query_mut() else {
+            return;
+        };
         if crate::keyboard::apply(key.kind, query).is_none() {
             self.submit_text();
         }
@@ -1807,11 +2175,23 @@ impl App {
 
     fn render_keyboard(&mut self) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let target = self.stack.last().filter(|s| s.kind == Kind::Search || (s.kind == Kind::Radio && s.url_mode)).map(|s| s.kind.clone());
+        let target = self
+            .stack
+            .last()
+            .filter(|s| s.kind == Kind::Search || (s.kind == Kind::Radio && s.url_mode))
+            .map(|s| s.kind.clone());
         let shown = self.keyboard.is_some() && target.is_some();
-        let done = if target == Some(Kind::Radio) { "Play" } else { "Search" };
+        let done = if target == Some(Kind::Radio) {
+            "Play"
+        } else {
+            "Search"
+        };
         if shown && self.keyboard_label != done {
-            self.keys = if done == "Play" { crate::keyboard::Layout::for_urls() } else { crate::keyboard::Layout::new() };
+            self.keys = if done == "Play" {
+                crate::keyboard::Layout::for_urls()
+            } else {
+                crate::keyboard::Layout::new()
+            };
             ui.set_keyboard_rows(self.keys.rows(done));
             self.keyboard_label = done;
         }
@@ -1837,5 +2217,8 @@ impl App {
 #[allow(dead_code)]
 pub fn room_names(ui: &AppWindow) -> Vec<String> {
     let rooms = ui.get_rooms();
-    (0..rooms.row_count()).filter_map(|i| rooms.row_data(i)).map(|r| r.name.to_string()).collect()
+    (0..rooms.row_count())
+        .filter_map(|i| rooms.row_data(i))
+        .map(|r| r.name.to_string())
+        .collect()
 }

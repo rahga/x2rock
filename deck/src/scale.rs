@@ -12,7 +12,9 @@ pub const CANVAS_HEIGHT: f32 = 540.0;
 
 /// The scale factor that fits the canvas into a window of this physical size.
 pub fn factor_for(width: u32, height: u32) -> f32 {
-    (width as f32 / CANVAS_WIDTH).min(height as f32 / CANVAS_HEIGHT).max(0.25)
+    (width as f32 / CANVAS_WIDTH)
+        .min(height as f32 / CANVAS_HEIGHT)
+        .max(0.25)
 }
 
 /// Say how the canvas fits the window, with X2ROCK_DECK_DEBUG set. The fitting

@@ -40,24 +40,49 @@ impl Layout {
 
     fn with_third_row(third: &str) -> Self {
         let mut keys = Vec::new();
-        for (row, chars) in ["abcdefghij", "klmnopqrst", third, "1234567890"].iter().enumerate() {
+        for (row, chars) in ["abcdefghij", "klmnopqrst", third, "1234567890"]
+            .iter()
+            .enumerate()
+        {
             for (col, c) in chars.chars().enumerate() {
-                keys.push(Key { kind: KeyKind::Char(c), row, col, span: 1 });
+                keys.push(Key {
+                    kind: KeyKind::Char(c),
+                    row,
+                    col,
+                    span: 1,
+                });
             }
         }
-        for (kind, col, span) in [(KeyKind::Space, 0, 4), (KeyKind::Delete, 4, 2), (KeyKind::Clear, 6, 2), (KeyKind::Done, 8, 2)] {
-            keys.push(Key { kind, row: 4, col, span });
+        for (kind, col, span) in [
+            (KeyKind::Space, 0, 4),
+            (KeyKind::Delete, 4, 2),
+            (KeyKind::Clear, 6, 2),
+            (KeyKind::Done, 8, 2),
+        ] {
+            keys.push(Key {
+                kind,
+                row: 4,
+                col,
+                span,
+            });
         }
         Layout { keys }
     }
 
     /// Where a D-pad press from key `at` lands; the same key at an edge.
     pub fn step(&self, at: usize, dx: i32, dy: i32) -> usize {
-        let Some(key) = self.keys.get(at) else { return 0 };
+        let Some(key) = self.keys.get(at) else {
+            return 0;
+        };
         if dx != 0 {
-            let row: Vec<usize> = (0..self.keys.len()).filter(|&i| self.keys[i].row == key.row).collect();
+            let row: Vec<usize> = (0..self.keys.len())
+                .filter(|&i| self.keys[i].row == key.row)
+                .collect();
             let pos = row.iter().position(|&i| i == at).unwrap_or(0) as i32 + dx;
-            return row.get(pos.clamp(0, row.len() as i32 - 1) as usize).copied().unwrap_or(at);
+            return row
+                .get(pos.clamp(0, row.len() as i32 - 1) as usize)
+                .copied()
+                .unwrap_or(at);
         }
         let target = key.row as i32 + dy;
         let column = key.col + key.span / 2;
@@ -79,9 +104,19 @@ impl Layout {
                 KeyKind::Clear => ("Clear".to_owned(), 3),
                 KeyKind::Done => (done_label.to_owned(), 4),
             };
-            rows[key.row].push(KeyCap { label: label.into(), span: key.span as i32, focus: i as i32, kind });
+            rows[key.row].push(KeyCap {
+                label: label.into(),
+                span: key.span as i32,
+                focus: i as i32,
+                kind,
+            });
         }
-        let rows: Vec<KeyRow> = rows.into_iter().map(|keys| KeyRow { keys: ModelRc::new(VecModel::from(keys)) }).collect();
+        let rows: Vec<KeyRow> = rows
+            .into_iter()
+            .map(|keys| KeyRow {
+                keys: ModelRc::new(VecModel::from(keys)),
+            })
+            .collect();
         ModelRc::new(VecModel::from(rows))
     }
 }
@@ -107,10 +142,18 @@ mod tests {
     #[test]
     fn down_from_a_letter_lands_on_the_wide_key_below_it() {
         let l = Layout::new();
-        let d = l.keys.iter().position(|k| k.kind == KeyKind::Char('1')).unwrap();
+        let d = l
+            .keys
+            .iter()
+            .position(|k| k.kind == KeyKind::Char('1'))
+            .unwrap();
         let space = l.step(d, 0, 1);
         assert_eq!(l.keys[space].kind, KeyKind::Space);
-        let nine = l.keys.iter().position(|k| k.kind == KeyKind::Char('9')).unwrap();
+        let nine = l
+            .keys
+            .iter()
+            .position(|k| k.kind == KeyKind::Char('9'))
+            .unwrap();
         assert_eq!(l.keys[l.step(nine, 0, 1)].kind, KeyKind::Done);
     }
 

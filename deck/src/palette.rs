@@ -21,8 +21,15 @@ pub fn art_colors(pixels: &[[u8; 4]]) -> Option<(Rgb, Rgb)> {
         return None;
     }
     let palette = Palette::from(&swatches);
-    let vivid = palette.vibrant.or(palette.light_vibrant).or(palette.dominant)?;
-    let dark = palette.dark_muted.or(palette.dark_vibrant).or(palette.dominant).unwrap_or(vivid);
+    let vivid = palette
+        .vibrant
+        .or(palette.light_vibrant)
+        .or(palette.dominant)?;
+    let dark = palette
+        .dark_muted
+        .or(palette.dark_vibrant)
+        .or(palette.dominant)
+        .unwrap_or(vivid);
     Some((readable_accent(vivid), deep_shade(dark)))
 }
 
@@ -44,7 +51,11 @@ pub fn deep_shade(color: Rgb) -> Rgb {
 
 /// Text on an accent fill: dark on a light accent, light on a dark one.
 pub fn on_accent(accent: Rgb) -> Rgb {
-    if luminance(accent) > 0.4 { [0x11, 0x11, 0x11] } else { [255, 255, 255] }
+    if luminance(accent) > 0.4 {
+        [0x11, 0x11, 0x11]
+    } else {
+        [255, 255, 255]
+    }
 }
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
@@ -56,13 +67,21 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 pub fn luminance(c: Rgb) -> f32 {
     let lin = |v: u8| {
         let v = v as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
 }
 
 fn hsl(c: Rgb) -> [f32; 3] {
-    let (r, g, b) = (c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+    let (r, g, b) = (
+        c[0] as f32 / 255.0,
+        c[1] as f32 / 255.0,
+        c[2] as f32 / 255.0,
+    );
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let l = (max + min) / 2.0;
@@ -110,7 +129,14 @@ fn quantize(pixels: &[[u8; 4]], max: usize) -> Vec<Swatch> {
         return Vec::new();
     }
     if colors.len() <= max {
-        return colors.into_iter().map(|(rgb, population)| Swatch { rgb, population, hsl: hsl(rgb) }).collect();
+        return colors
+            .into_iter()
+            .map(|(rgb, population)| Swatch {
+                rgb,
+                population,
+                hsl: hsl(rgb),
+            })
+            .collect();
     }
     // Boxes are index ranges into `colors`; split the largest by volume first.
     let mut boxes: Vec<(usize, usize)> = vec![(0, colors.len())];
@@ -146,10 +172,18 @@ fn quantize(pixels: &[[u8; 4]], max: usize) -> Vec<Swatch> {
             let slice = &colors[a..b];
             let population: u32 = slice.iter().map(|(_, n)| n).sum();
             let avg = |i: usize| {
-                (slice.iter().map(|(c, n)| c[i] as u64 * *n as u64).sum::<u64>() / population.max(1) as u64) as u8
+                (slice
+                    .iter()
+                    .map(|(c, n)| c[i] as u64 * *n as u64)
+                    .sum::<u64>()
+                    / population.max(1) as u64) as u8
             };
             let rgb = [avg(0), avg(1), avg(2)];
-            Swatch { rgb, population, hsl: hsl(rgb) }
+            Swatch {
+                rgb,
+                population,
+                hsl: hsl(rgb),
+            }
         })
         .collect()
 }
@@ -187,12 +221,30 @@ struct Target {
     saturation: (f32, f32, f32),
 }
 
-const LIGHT_VIBRANT: Target = Target { lightness: (0.55, 0.74, 1.0), saturation: (0.35, 1.0, 1.0) };
-const VIBRANT: Target = Target { lightness: (0.3, 0.5, 0.7), saturation: (0.35, 1.0, 1.0) };
-const DARK_VIBRANT: Target = Target { lightness: (0.0, 0.26, 0.45), saturation: (0.35, 1.0, 1.0) };
-const LIGHT_MUTED: Target = Target { lightness: (0.55, 0.74, 1.0), saturation: (0.0, 0.3, 0.4) };
-const MUTED: Target = Target { lightness: (0.3, 0.5, 0.7), saturation: (0.0, 0.3, 0.4) };
-const DARK_MUTED: Target = Target { lightness: (0.0, 0.26, 0.45), saturation: (0.0, 0.3, 0.4) };
+const LIGHT_VIBRANT: Target = Target {
+    lightness: (0.55, 0.74, 1.0),
+    saturation: (0.35, 1.0, 1.0),
+};
+const VIBRANT: Target = Target {
+    lightness: (0.3, 0.5, 0.7),
+    saturation: (0.35, 1.0, 1.0),
+};
+const DARK_VIBRANT: Target = Target {
+    lightness: (0.0, 0.26, 0.45),
+    saturation: (0.35, 1.0, 1.0),
+};
+const LIGHT_MUTED: Target = Target {
+    lightness: (0.55, 0.74, 1.0),
+    saturation: (0.0, 0.3, 0.4),
+};
+const MUTED: Target = Target {
+    lightness: (0.3, 0.5, 0.7),
+    saturation: (0.0, 0.3, 0.4),
+};
+const DARK_MUTED: Target = Target {
+    lightness: (0.0, 0.26, 0.45),
+    saturation: (0.0, 0.3, 0.4),
+};
 
 #[derive(Default)]
 struct Palette {
@@ -236,7 +288,13 @@ impl Palette {
         let _muted = pick(&MUTED);
         let dark_muted = pick(&DARK_MUTED);
         let dominant = swatches.iter().max_by_key(|s| s.population).map(|s| s.rgb);
-        Palette { light_vibrant, vibrant, dark_vibrant, dark_muted, dominant }
+        Palette {
+            light_vibrant,
+            vibrant,
+            dark_vibrant,
+            dark_muted,
+            dominant,
+        }
     }
 }
 
@@ -245,7 +303,10 @@ mod tests {
     use super::*;
 
     fn image(colors: &[(Rgb, usize)]) -> Vec<[u8; 4]> {
-        colors.iter().flat_map(|(c, n)| std::iter::repeat_n([c[0], c[1], c[2], 255], *n)).collect()
+        colors
+            .iter()
+            .flat_map(|(c, n)| std::iter::repeat_n([c[0], c[1], c[2], 255], *n))
+            .collect()
     }
 
     #[test]

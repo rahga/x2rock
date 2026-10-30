@@ -24,7 +24,9 @@ fn grid_dirs(home: &Path) -> Vec<PathBuf> {
     let roots = [home.join(".steam/steam"), home.join(".local/share/Steam")];
     let mut dirs = Vec::new();
     for root in roots {
-        let Ok(users) = std::fs::read_dir(root.join("userdata")) else { continue };
+        let Ok(users) = std::fs::read_dir(root.join("userdata")) else {
+            continue;
+        };
         for user in users.flatten() {
             let grid = user.path().join("config/grid");
             if user.path().is_dir() && !dirs.contains(&grid) {
@@ -37,8 +39,16 @@ fn grid_dirs(home: &Path) -> Vec<PathBuf> {
 
 /// Put the artwork where Steam looks for it, if this is a Steam launch.
 pub fn place_artwork() {
-    let Some(app) = std::env::var("SteamGameId").ok().as_deref().and_then(shortcut_app_id) else { return };
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+    let Some(app) = std::env::var("SteamGameId")
+        .ok()
+        .as_deref()
+        .and_then(shortcut_app_id)
+    else {
+        return;
+    };
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
     for grid in grid_dirs(&home) {
         let _ = place_in(&grid, app);
     }
@@ -46,7 +56,12 @@ pub fn place_artwork() {
 
 fn place_in(grid: &Path, app: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(grid)?;
-    for (name, bytes) in [(format!("{app}p.png"), CAPSULE), (format!("{app}.png"), WIDE), (format!("{app}_hero.png"), HERO), (format!("{app}_logo.png"), LOGO)] {
+    for (name, bytes) in [
+        (format!("{app}p.png"), CAPSULE),
+        (format!("{app}.png"), WIDE),
+        (format!("{app}_hero.png"), HERO),
+        (format!("{app}_logo.png"), LOGO),
+    ] {
         let path = grid.join(name);
         if !path.exists() {
             std::fs::write(path, bytes)?;
@@ -62,7 +77,10 @@ mod tests {
     #[test]
     fn a_shortcuts_game_id_gives_its_app_id_and_a_steam_games_does_not() {
         let app: u64 = 3_456_789_012;
-        assert_eq!(shortcut_app_id(&((app << 32) | 0x0200_0000).to_string()), Some(3_456_789_012));
+        assert_eq!(
+            shortcut_app_id(&((app << 32) | 0x0200_0000).to_string()),
+            Some(3_456_789_012)
+        );
         assert_eq!(shortcut_app_id("1675200"), None, "a Steam game's own id");
         assert_eq!(shortcut_app_id("not a number"), None);
     }

@@ -56,7 +56,10 @@ pub fn wire(ui: &AppWindow) {
 }
 
 fn value(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -64,16 +67,22 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(path) = value(&args, "--screenshot") {
         let (width, height) = value(&args, "--size")
-            .and_then(|s| s.split_once('x').map(|(w, h)| (w.parse().ok(), h.parse().ok())))
+            .and_then(|s| {
+                s.split_once('x')
+                    .map(|(w, h)| (w.parse().ok(), h.parse().ok()))
+            })
             .and_then(|(w, h)| Some((w?, h?)))
             .unwrap_or((1920, 1080));
         return shot::run(shot::Options {
             path,
             width,
             height,
-            theme: value(&args, "--theme").unwrap_or_else(|| "DEFAULT".into()).to_uppercase(),
+            theme: value(&args, "--theme")
+                .unwrap_or_else(|| "DEFAULT".into())
+                .to_uppercase(),
             keys: shot::parse_keys(&value(&args, "--keys").unwrap_or_default())?,
-            live: value(&args, "--live").map(|s| std::time::Duration::from_secs(s.parse().unwrap_or(10))),
+            live: value(&args, "--live")
+                .map(|s| std::time::Duration::from_secs(s.parse().unwrap_or(10))),
         });
     }
 
@@ -83,8 +92,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     let demo = args.iter().any(|a| a == "--demo");
-    let under_steam = std::env::var_os("SteamDeck").is_some() || std::env::var_os("SteamGameId").is_some();
-    let fullscreen = args.iter().any(|a| a == "--fullscreen") || (under_steam && !args.iter().any(|a| a == "--windowed"));
+    let under_steam =
+        std::env::var_os("SteamDeck").is_some() || std::env::var_os("SteamGameId").is_some();
+    let fullscreen = args.iter().any(|a| a == "--fullscreen")
+        || (under_steam && !args.iter().any(|a| a == "--windowed"));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -128,7 +139,9 @@ fn main() -> anyhow::Result<()> {
             runtime.spawn(async {
                 if let Ok(Some(version)) = update::newer_release().await {
                     let _ = slint::invoke_from_event_loop(move || {
-                        with_app(|app| app.notice(&format!("x2rock {version} is out: {}", update::RELEASES)))
+                        with_app(|app| {
+                            app.notice(&format!("x2rock {version} is out: {}", update::RELEASES))
+                        })
                     });
                 }
             });
@@ -158,44 +171,63 @@ fn main() -> anyhow::Result<()> {
         Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
     }) {
         let weak = ui.as_weak();
-        tap_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_secs(2), move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let zoom = ui.get_zoom();
-            let position = slint::LogicalPosition::new(x * zoom, y * zoom);
-            use slint::platform::{PointerEventButton, WindowEvent};
-            let window = ui.window();
-            window.dispatch_event(WindowEvent::PointerMoved { position });
-            window.dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Left });
-            window.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
-        });
+        tap_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_secs(2),
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                let zoom = ui.get_zoom();
+                let position = slint::LogicalPosition::new(x * zoom, y * zoom);
+                use slint::platform::{PointerEventButton, WindowEvent};
+                let window = ui.window();
+                window.dispatch_event(WindowEvent::PointerMoved { position });
+                window.dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                window.dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+            },
+        );
     }
     // X2ROCK_DECK_KEYS="right,down,select" presses those after two seconds, a
     // third of a second apart, in a real window: with the snapshot below, the
     // check of what the real event loop does with them.
     let key_timer = slint::Timer::default();
-    let script: Vec<shot::Step> = std::env::var("X2ROCK_DECK_KEYS").ok().map(|k| shot::parse_keys(&k)).transpose()?.unwrap_or_default();
+    let script: Vec<shot::Step> = std::env::var("X2ROCK_DECK_KEYS")
+        .ok()
+        .map(|k| shot::parse_keys(&k))
+        .transpose()?
+        .unwrap_or_default();
     let script_len = script.len() as u64;
     if !script.is_empty() {
         let steps = std::rc::Rc::new(std::cell::RefCell::new(script.into_iter()));
-        key_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(333), move || {
-            // Not before the rooms are listed: keys pressed earlier land elsewhere.
-            let mut ready = false;
-            with_app(|app| ready = app.has_rooms());
-            if !ready {
-                return;
-            }
-            match steps.borrow_mut().next() {
-            Some(shot::Step::Key(action)) => with_app(|app| {
-                app.action(action, Phase::Press);
-                app.action(action, Phase::Release);
-            }),
-            Some(shot::Step::Type(text)) => with_app(|app| {
-                for c in text.chars() {
-                    app.key(&c.to_string(), false, true);
+        key_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(333),
+            move || {
+                // Not before the rooms are listed: keys pressed earlier land elsewhere.
+                let mut ready = false;
+                with_app(|app| ready = app.has_rooms());
+                if !ready {
+                    return;
                 }
-            }),
-            None => {}
-        }});
+                match steps.borrow_mut().next() {
+                    Some(shot::Step::Key(action)) => with_app(|app| {
+                        app.action(action, Phase::Press);
+                        app.action(action, Phase::Release);
+                    }),
+                    Some(shot::Step::Type(text)) => with_app(|app| {
+                        for c in text.chars() {
+                            app.key(&c.to_string(), false, true);
+                        }
+                    }),
+                    None => {}
+                }
+            },
+        );
     }
     if let Some(path) = std::env::var_os("X2ROCK_DECK_SNAPSHOT") {
         let weak = ui.as_weak();
@@ -204,7 +236,13 @@ fn main() -> anyhow::Result<()> {
             if let Some(ui) = weak.upgrade() {
                 match ui.window().take_snapshot() {
                     Ok(shot) => {
-                        let _ = image::save_buffer(&path, shot.as_bytes(), shot.width(), shot.height(), image::ColorType::Rgba8);
+                        let _ = image::save_buffer(
+                            &path,
+                            shot.as_bytes(),
+                            shot.width(),
+                            shot.height(),
+                            image::ColorType::Rgba8,
+                        );
                     }
                     Err(e) => eprintln!("x2rock-deck: no snapshot ({e})"),
                 }

@@ -89,17 +89,28 @@ impl<K: Eq + Hash + Clone, C: PartialEq, J> Lanes<K, C, J> {
             Order::Free => vec![(self.ticket(), job)],
             Order::Lane(key) => {
                 let epoch = self.sent;
-                let lane = self.lanes.entry(key).or_insert_with(|| Lane { running: None, queue: VecDeque::new() });
+                let lane = self.lanes.entry(key).or_insert_with(|| Lane {
+                    running: None,
+                    queue: VecDeque::new(),
+                });
                 // Not across a barrier: the one waiting before it keeps its place.
                 if let Some(replaces) = replaces.as_ref()
-                    && let Some(pending) = lane.queue.iter_mut().find(|p| p.epoch == epoch && p.replaces.as_ref() == Some(replaces))
+                    && let Some(pending) = lane
+                        .queue
+                        .iter_mut()
+                        .find(|p| p.epoch == epoch && p.replaces.as_ref() == Some(replaces))
                 {
                     pending.job = job;
                     return Vec::new();
                 }
                 self.next += 1;
                 let ticket = Ticket(self.next);
-                lane.queue.push_back(Pending { ticket, epoch, replaces, job });
+                lane.queue.push_back(Pending {
+                    ticket,
+                    epoch,
+                    replaces,
+                    job,
+                });
                 self.start()
             }
             Order::Barrier => {
@@ -134,7 +145,8 @@ impl<K: Eq + Hash + Clone, C: PartialEq, J> Lanes<K, C, J> {
         // Every lane job left is of an epoch not yet passed, so the next
         // barrier waits only on those of the current one.
         let current = |lane: &Lane<C, J>, passed: u64| {
-            lane.running.is_some_and(|(_, e)| e == passed) || lane.queue.front().is_some_and(|p| p.epoch == passed)
+            lane.running.is_some_and(|(_, e)| e == passed)
+                || lane.queue.front().is_some_and(|p| p.epoch == passed)
         };
         if !self.barriers.is_empty() && !self.lanes.values().any(|l| current(l, self.passed)) {
             let (ticket, job) = self.barriers.pop_front().expect("a barrier");
@@ -143,7 +155,8 @@ impl<K: Eq + Hash + Clone, C: PartialEq, J> Lanes<K, C, J> {
         }
         let mut started = Vec::new();
         for (key, lane) in self.lanes.iter_mut() {
-            if lane.running.is_none() && lane.queue.front().is_some_and(|p| p.epoch == self.passed) {
+            if lane.running.is_none() && lane.queue.front().is_some_and(|p| p.epoch == self.passed)
+            {
                 let pending = lane.queue.pop_front().expect("a pending job");
                 lane.running = Some((pending.ticket, pending.epoch));
                 self.running.insert(pending.ticket, key.clone());
@@ -234,8 +247,15 @@ mod tests {
         let mut lanes = Core::new();
         let a = lanes.submit(Order::Lane("kitchen"), None, "a");
         assert_eq!(names(a.clone()), ["a"]);
-        assert!(lanes.submit(Order::Lane("kitchen"), None, "b").is_empty(), "b waits for a");
-        assert_eq!(names(lanes.submit(Order::Lane("office"), None, "c")), ["c"], "another lane is not held");
+        assert!(
+            lanes.submit(Order::Lane("kitchen"), None, "b").is_empty(),
+            "b waits for a"
+        );
+        assert_eq!(
+            names(lanes.submit(Order::Lane("office"), None, "c")),
+            ["c"],
+            "another lane is not held"
+        );
         assert_eq!(names(lanes.finished(a[0].0)), ["b"]);
     }
 
@@ -250,11 +270,31 @@ mod tests {
     fn a_newer_value_takes_a_pending_ones_place_and_nothing_else_is_dropped() {
         let mut lanes = Core::new();
         let first = lanes.submit(Order::Lane("kitchen"), Some("bass"), "bass 1");
-        assert!(lanes.submit(Order::Lane("kitchen"), Some("bass"), "bass 2").is_empty());
-        assert!(lanes.submit(Order::Lane("kitchen"), None, "loudness on").is_empty());
-        assert!(lanes.submit(Order::Lane("kitchen"), None, "loudness off").is_empty());
-        assert!(lanes.submit(Order::Lane("kitchen"), Some("treble"), "treble 4").is_empty());
-        assert!(lanes.submit(Order::Lane("kitchen"), Some("bass"), "bass 3").is_empty());
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), Some("bass"), "bass 2")
+                .is_empty()
+        );
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), None, "loudness on")
+                .is_empty()
+        );
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), None, "loudness off")
+                .is_empty()
+        );
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), Some("treble"), "treble 4")
+                .is_empty()
+        );
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), Some("bass"), "bass 3")
+                .is_empty()
+        );
         let mut ran = Vec::new();
         let mut next = lanes.finished(first[0].0);
         while let Some((ticket, job)) = next.pop() {
@@ -269,10 +309,23 @@ mod tests {
         let mut lanes = Core::new();
         let play = lanes.submit(Order::Lane("kitchen"), None, "play");
         let bass = lanes.submit(Order::Lane("office"), None, "bass");
-        assert!(lanes.submit(Order::Barrier, None, "group").is_empty(), "the barrier waits for both");
-        assert!(lanes.submit(Order::Lane("den"), None, "next").is_empty(), "a later job waits for the barrier, in any lane");
-        assert_eq!(names(lanes.submit(Order::Free, None, "read")), ["read"], "a read is not held");
-        assert!(lanes.finished(play[0].0).is_empty(), "the barrier still waits for the office");
+        assert!(
+            lanes.submit(Order::Barrier, None, "group").is_empty(),
+            "the barrier waits for both"
+        );
+        assert!(
+            lanes.submit(Order::Lane("den"), None, "next").is_empty(),
+            "a later job waits for the barrier, in any lane"
+        );
+        assert_eq!(
+            names(lanes.submit(Order::Free, None, "read")),
+            ["read"],
+            "a read is not held"
+        );
+        assert!(
+            lanes.finished(play[0].0).is_empty(),
+            "the barrier still waits for the office"
+        );
         let group = lanes.finished(bass[0].0);
         assert_eq!(names(group.clone()), ["group"]);
         assert_eq!(names(lanes.finished(group[0].0)), ["next"]);
@@ -283,10 +336,18 @@ mod tests {
         let mut lanes = Core::new();
         let first = lanes.submit(Order::Barrier, None, "split");
         assert_eq!(names(first.clone()), ["split"]);
-        assert!(lanes.submit(Order::Lane("kitchen"), None, "play").is_empty());
+        assert!(
+            lanes
+                .submit(Order::Lane("kitchen"), None, "play")
+                .is_empty()
+        );
         assert!(lanes.submit(Order::Barrier, None, "group").is_empty());
         let play = lanes.finished(first[0].0);
-        assert_eq!(names(play.clone()), ["play"], "work sent between two barriers runs between them");
+        assert_eq!(
+            names(play.clone()),
+            ["play"],
+            "work sent between two barriers runs between them"
+        );
         assert_eq!(names(lanes.finished(play[0].0)), ["group"]);
     }
 
@@ -313,7 +374,10 @@ mod tests {
         gate: Option<oneshot::Receiver<()>>,
     }
 
-    fn driver() -> (Sender<&'static str, &'static str, Gated>, mpsc::UnboundedReceiver<&'static str>) {
+    fn driver() -> (
+        Sender<&'static str, &'static str, Gated>,
+        mpsc::UnboundedReceiver<&'static str>,
+    ) {
         let (done, finished) = mpsc::unbounded_channel();
         let sender = spawn(move |job: Gated| {
             let done = done.clone();
@@ -329,7 +393,13 @@ mod tests {
 
     fn gated(name: &'static str) -> (Gated, oneshot::Sender<()>) {
         let (open, gate) = oneshot::channel();
-        (Gated { name, gate: Some(gate) }, open)
+        (
+            Gated {
+                name,
+                gate: Some(gate),
+            },
+            open,
+        )
     }
 
     fn free(name: &'static str) -> Gated {
@@ -338,7 +408,10 @@ mod tests {
 
     /// The next job to finish. The timeout only turns a hang into a failure.
     async fn next(finished: &mut mpsc::UnboundedReceiver<&'static str>) -> &'static str {
-        tokio::time::timeout(Duration::from_secs(10), finished.recv()).await.expect("a job finished").expect("the driver is running")
+        tokio::time::timeout(Duration::from_secs(10), finished.recv())
+            .await
+            .expect("a job finished")
+            .expect("the driver is running")
     }
 
     #[tokio::test]
@@ -350,7 +423,11 @@ mod tests {
         // A read sent after both: once it is done, the second write would
         // have been done too, had it not waited.
         lanes.submit(Order::Free, None, free("read"));
-        assert_eq!(next(&mut finished).await, "read", "a read beside a stalled lane is answered");
+        assert_eq!(
+            next(&mut finished).await,
+            "read",
+            "a read beside a stalled lane is answered"
+        );
         open.send(()).unwrap();
         assert_eq!(next(&mut finished).await, "first");
         assert_eq!(next(&mut finished).await, "second");
@@ -381,7 +458,12 @@ mod tests {
         open.send(()).unwrap();
         let mut sent = Vec::new();
         while sent.last() != Some(&3) {
-            sent.push(tokio::time::timeout(Duration::from_secs(10), finished.recv()).await.unwrap().unwrap());
+            sent.push(
+                tokio::time::timeout(Duration::from_secs(10), finished.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
         }
         assert_eq!(sent, [1, 3], "the 2 was replaced before it was sent");
         assert_eq!(*level.lock().unwrap(), 3);
