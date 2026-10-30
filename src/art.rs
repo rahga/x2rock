@@ -89,6 +89,56 @@ const MAX_DIM: u32 = 2170;
 /// (see the module docs), so this costs a refetch and nothing else.
 const SANITIZE_VERSION: &str = "s1";
 
+/// How soon a front end should consider retrying a failed cover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// A refused URL, rejected image, or HTTP 404/410. Retry less often.
+    Permanent,
+    /// Transport, timeout, local storage, or other HTTP failures.
+    Transient,
+}
+
+/// Classify a cover error without depending on its human-readable message.
+/// Unknown errors are transient; a permanent failure can still be retried later
+/// because a remote URL's contents or availability may change.
+pub fn failure_kind(error: &anyhow::Error) -> FailureKind {
+    if error.chain().any(|cause| cause.is::<PermanentFailure>()) {
+        FailureKind::Permanent
+    } else {
+        FailureKind::Transient
+    }
+}
+
+#[derive(Debug)]
+struct PermanentFailure(anyhow::Error);
+
+impl std::fmt::Display for PermanentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PermanentFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // Display already includes the wrapped error's message. Keep its
+        // underlying chain without printing that message twice.
+        self.0.source()
+    }
+}
+
+fn permanent(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(PermanentFailure(error))
+}
+
+fn http_failure(status: u16) -> anyhow::Error {
+    let error = anyhow!("HTTP {status}");
+    if matches!(status, 404 | 410) {
+        permanent(error)
+    } else {
+        error
+    }
+}
+
 /// `$XDG_CACHE_HOME/x2rock/art`.
 pub fn dir() -> Result<PathBuf> {
     store::cache_dir("art")
@@ -96,6 +146,10 @@ pub fn dir() -> Result<PathBuf> {
 
 /// Refuse a URL this module will not fetch - see the module docs.
 fn allowed(url: &str) -> Result<()> {
+    allowed_url(url).map_err(permanent)
+}
+
+fn allowed_url(url: &str) -> Result<()> {
     let (scheme, rest) = url.split_once("://").ok_or_else(|| anyhow!("not a URL"))?;
     match scheme {
         "https" => Ok(()),
@@ -174,8 +228,9 @@ fn sanitize(bytes: &[u8], kind: &'static str) -> Result<Vec<u8>> {
     match kind {
         "png" => sanitize_png(bytes),
         "jpg" => sanitize_jpeg(bytes),
-        other => bail!("{other} covers are not shown"),
+        other => Err(anyhow!("{other} covers are not shown")),
     }
+    .map_err(permanent)
 }
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -358,9 +413,9 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, &'static str)> {
         match status {
             200 => {
                 if header(&head, "content-encoding").is_some_and(|v| v != "identity") {
-                    bail!("a compressed body");
+                    return Err(permanent(anyhow!("a compressed body")));
                 }
-                let kind = kind(&body).ok_or_else(|| anyhow!("not an image"))?;
+                let kind = kind(&body).ok_or_else(|| permanent(anyhow!("not an image")))?;
                 return Ok((sanitize(&body, kind)?, kind));
             }
             301 | 302 | 303 | 307 | 308 => {
@@ -368,7 +423,7 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, &'static str)> {
                     header(&head, "location").ok_or_else(|| anyhow!("a redirect to nowhere"))?;
                 current = follow(&current, to);
             }
-            other => bail!("HTTP {other}"),
+            other => return Err(http_failure(other)),
         }
     }
     bail!("more than {REDIRECTS} redirects")
@@ -412,6 +467,8 @@ async fn resolve(dir: &Path, url: &str) -> Result<PathBuf> {
 /// One cover's local file, fetched and sanitised under the rules above if it
 /// is not cached yet: what a front end in this process calls, where the bar
 /// widget runs `x2rock art` as a subprocess. Prunes first, as `run` does.
+/// [`failure_kind`] distinguishes errors deserving a longer retry cooldown;
+/// fetching rules, sanitisation and the disk cache are the same for all callers.
 pub async fn local_file(url: &str) -> Result<PathBuf> {
     let dir = open_dir()?;
     let _ = prune(&dir, SystemTime::now());
@@ -542,6 +599,59 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
 mod tests {
     use super::*;
     use crate::testdir::TempDir;
+
+    #[tokio::test]
+    async fn refused_cover_is_permanent_even_after_adding_context() {
+        // A refused scheme fails before any request or disk-cache access.
+        let error = fetch("file:///synthetic-cover.png").await.unwrap_err();
+        assert_eq!(format!("{error:#}"), "scheme \"file\" is not fetched");
+        let error = error.context("loading a cover");
+        assert_eq!(failure_kind(&error), FailureKind::Permanent);
+        assert_eq!(
+            format!("{error:#}"),
+            "loading a cover: scheme \"file\" is not fetched"
+        );
+    }
+
+    #[test]
+    fn rejected_image_is_permanent_without_changing_the_diagnostic() {
+        // Synthetic malformed PNG, not a captured service response.
+        let bytes = b"\x89PNG\r\n\x1a\ntruncated";
+        let original = sanitize_png(bytes).unwrap_err();
+        let error = sanitize(bytes, "png").unwrap_err();
+        assert_eq!(failure_kind(&error), FailureKind::Permanent);
+        assert_eq!(format!("{error:#}"), format!("{original:#}"));
+        assert_eq!(
+            failure_kind(&sanitize(b"GIF89a....", "gif").unwrap_err()),
+            FailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn missing_covers_retry_less_often_than_transport_and_server_failures() {
+        for status in [404, 410, 401, 403, 429, 500, 503] {
+            let error = http_failure(status);
+            let expected = if [404, 410].contains(&status) {
+                FailureKind::Permanent
+            } else {
+                FailureKind::Transient
+            };
+            assert_eq!(failure_kind(&error), expected, "HTTP {status}");
+            // The CLI's --json/--each rows keep their existing message.
+            assert_eq!(
+                row("https://example.invalid/cover", &Err(error)),
+                json!({"url": "https://example.invalid/cover", "path": null,
+                    "error": format!("HTTP {status}")})
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            let error = anyhow::Error::new(std::io::Error::from(kind)).context("fetching");
+            assert_eq!(failure_kind(&error), FailureKind::Transient);
+        }
+    }
 
     #[test]
     fn only_https_and_a_speakers_own_port_are_fetched() {
