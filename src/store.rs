@@ -73,6 +73,7 @@ pub fn restrict(_path: &Path, _mode: u32) -> std::io::Result<()> {
 
 /// Open options that create a file with `mode` where modes exist.
 fn create_with_mode(mode: u32) -> fs::OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut options = fs::OpenOptions::new();
     #[cfg(unix)]
     options.mode(mode);

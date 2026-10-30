@@ -24,6 +24,7 @@
 //! each. The name is kept alongside for display.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
