@@ -1,3 +1,13 @@
+# The CLI and daemon (this package) and, in deck/, the Slint front end for the
+# Steam Deck, Linux desktops and Windows, which uses this package as a library
+# with its `cli` feature off. A plain `cargo build` or `test` here is this
+# package alone: building the deck beside it would turn `cli` on for the
+# deck too, through feature unification. The deck is `-p x2rock-deck`.
+[workspace]
+members = [".", "deck"]
+default-members = ["."]
+resolver = "3"
+
 [package]
 name = "x2rock"
 version = "0.2.0"
@@ -117,3 +127,13 @@ opt-level = "s"
 # systemd, which restarts it clean with the panic in the journal. Cargo ignores
 # this for the test profile, so `should_panic` and unwinding tests are safe.
 panic = "abort"
+
+# The deck's release build: `cargo build --profile release-deck -p x2rock-deck`, out in
+# target/release-deck. It unwinds rather than aborting because the deck
+# recovers from a panicked task: a command whose job panics frees its lane,
+# and an art load's slot comes back through its JoinError. Under `abort` either
+# would close the whole app. Full optimisation, since it draws frames.
+[profile.release-deck]
+inherits = "release"
+opt-level = 3
+panic = "unwind"
