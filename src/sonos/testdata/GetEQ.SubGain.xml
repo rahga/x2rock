@@ -1,0 +1,1 @@
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetEQResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><CurrentValue>0</CurrentValue></u:GetEQResponse></s:Body></s:Envelope>

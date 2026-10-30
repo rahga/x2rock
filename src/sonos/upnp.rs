@@ -1610,6 +1610,37 @@ impl Upnp {
     /// docs/architecture.md before widening this. A
     /// soundbar accepts it; a non-soundbar answers UPnP 402, so callers gate on
     /// the TV-input capability first and this is the write once that holds.
+    /// A numeric EQ setting: `SubGain`, `SurroundLevel`, `MusicSurroundLevel`
+    /// (each -15..15), or a switch read as 0 or 1 (`SubEnable`,
+    /// `SurroundEnable`). A soundbar's own, asked of the soundbar: the Sub and
+    /// surrounds it is bonded to have none of their own to read.
+    pub async fn eq_value(&self, eq_type: &str) -> Result<i32> {
+        let text = self
+            .soap(
+                Service::RenderingControl,
+                "GetEQ",
+                &[("InstanceID", "0"), ("EQType", eq_type)],
+            )
+            .await?;
+        eq_value_in(&text, eq_type)
+    }
+
+    /// Set a numeric EQ setting, as [`Self::eq_value`] reads it.
+    pub async fn set_eq_value(&self, eq_type: &str, value: i32) -> Result<()> {
+        let value = value.to_string();
+        self.soap(
+            Service::RenderingControl,
+            "SetEQ",
+            &[
+                ("InstanceID", "0"),
+                ("EQType", eq_type),
+                ("DesiredValue", &value),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_eq(&self, eq_type: &str, on: bool) -> Result<()> {
         self.soap(
             Service::RenderingControl,
@@ -2714,8 +2745,24 @@ fn parse_hms(text: &str) -> Option<Duration> {
     Duration::try_from_secs_f64(whole as f64 + s).ok()
 }
 
+/// `GetEQ`'s `CurrentValue`, as a number.
+fn eq_value_in(text: &str, eq_type: &str) -> Result<i32> {
+    let doc = Document::parse(text)?;
+    text_of(&doc, "CurrentValue")
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| anyhow!("no {eq_type} value in the reply"))
+}
+
 #[cfg(test)]
 mod tests {
+    /// Captured off a Beam by x2rock for Android TV (its fixture `GetEQ.SubGain.xml`).
+    #[test]
+    fn a_numeric_eq_setting_reads_its_current_value() {
+        let reply = include_str!("testdata/GetEQ.SubGain.xml");
+        assert_eq!(eq_value_in(reply, "SubGain").unwrap(), 0);
+        assert!(eq_value_in("<a/>", "SubGain").is_err());
+    }
+
     use super::*;
 
     #[test]
