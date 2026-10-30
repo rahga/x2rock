@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=x2rock
+GenericName=Sonos controller
+Comment=Control Sonos speakers with a gamepad, a keyboard or touch
+Exec=@BIN@
+Icon=@ICON@
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=Sonos;speakers;music;
+StartupWMClass=x2rock-deck

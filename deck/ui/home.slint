@@ -1,0 +1,577 @@
+// The home screen: every room down the left, the selected room's player on the
+// right (HomeScreen.kt, PlayerScreen.kt).
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import {
+    Nav, Pressable, Icon, IconButton, PlaceButton, LabelButton, TwoLineButton,
+    Card, Marquee, DotEqualizer, DotScanner, VolumePill, SeekBar,
+} from "components.slint";
+
+// Focus zones. Rust's focus.rs holds the same numbers.
+export global Zones {
+    out property <int> rooms: 1;
+    out property <int> settings-button: 2;
+    out property <int> room-status: 3;
+    out property <int> volume: 10;
+    out property <int> seek: 11;
+    out property <int> transport: 12;
+    out property <int> places: 13;
+    out property <int> speakers: 14;
+    out property <int> tv-buttons: 15;
+    out property <int> alarm: 16;
+    out property <int> settings-panel: 20;
+    out property <int> room-panel: 21;
+}
+
+// What a room's art slot holds when there is no cover.
+export enum Glyph { none, tv, radio }
+
+// A room's row in the list. Lines are already worded (model.rs).
+export struct RoomRow {
+    id: string,
+    name: string,
+    line1: string,
+    line2: string,
+    line3: string,
+    art: image,
+    has-art: bool,
+    glyph: Glyph,
+    playing: bool,
+    // Not playing: the art at 0.62 and the lines in onSurfaceVariant.
+    dim: bool,
+    // 0 none, 1 a television is attached (dim), 2 this device's own TV (accent).
+    tv-badge: int,
+    offline: bool,
+    muted: bool,
+    selected: bool,
+    moving: bool,
+}
+
+// A button in one of the pane's rows, in the order Rust laid them out.
+export struct PaneButton {
+    icon: image,
+    label: string,
+    // Play/Pause is a pill at least 104dp wide with a 36dp icon.
+    wide: bool,
+}
+
+export struct SpeakerRow {
+    name: string,
+    volume: int,
+    has-volume: bool,
+    muted: bool,
+    fixed: bool,
+}
+
+// Everything the player pane draws for the selected room.
+export struct PaneState {
+    room: string,
+    activity: string,
+    playing: bool,
+    has-volume: bool,
+    volume: int,
+    muted: bool,
+    fixed: bool,
+    // Track block.
+    has-content: bool,
+    title: string,
+    subtitle: string,
+    stream-info: string,
+    idle-word: string,
+    art: image,
+    has-art: bool,
+    glyph: Glyph,
+    service-logo: image,
+    has-service-logo: bool,
+    // Seek bar.
+    has-duration: bool,
+    seekable: bool,
+    progress: float,
+    position-text: string,
+    duration-text: string,
+    caption: string,
+    caption-strong: bool,
+    // A soundbar on its TV input gets its own pane.
+    tv: bool,
+    tv-format: string,
+    night: bool,
+    speech: bool,
+    alarm-ringing: bool,
+}
+
+component RoomArt inherits Rectangle {
+    in property <image> art;
+    in property <bool> has-art;
+    in property <Glyph> glyph;
+    in property <bool> dim;
+    in property <length> size: 56px;
+    in property <length> radius: 4px;
+    in property <length> glyph-size: 28px;
+    width: root.size;
+    height: root.size;
+    border-radius: radius;
+    clip: true;
+    background: !has-art && glyph != Glyph.none ? Theme.on-surface.with-alpha(0.1) : transparent;
+    if root.has-art: Image {
+        width: root.size;
+        height: root.size;
+        source: root.art;
+        image-fit: cover;
+        opacity: root.dim ? 0.62 : 1;
+    }
+    if !root.has-art && root.glyph != Glyph.none: Icon {
+        source: root.glyph == Glyph.tv ? Icons.tv : Icons.radio;
+        size: root.glyph-size;
+        colorize: Theme.on-surface.with-alpha(0.7);
+    }
+}
+
+// One room in the list (HomeScreen.kt, RoomSidebar's row).
+component RoomRowView inherits Card {
+    in property <RoomRow> room;
+    rest: root.room.selected ? Theme.on-surface.with-alpha(0.10) : transparent;
+    background: root.focused ? Theme.on-surface.with-alpha(0.14) : root.rest;
+    property <color> line-color: root.room.dim ? Theme.on-surface-variant : Theme.on-surface;
+    min-height: layout.preferred-height;
+    layout := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 14px;
+        RoomArt {
+            y: (parent.height - self.height) / 2;
+            art: root.room.art;
+            has-art: root.room.has-art;
+            glyph: root.room.glyph;
+            dim: root.room.dim;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                height: 24px;
+                vertical-alignment: center;
+                text: root.room.name;
+                color: Theme.on-surface;
+                font-size: Theme.title-medium;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            Marquee {
+                text: root.room.line1;
+                running: root.focused;
+                ink: root.room.moving ? Theme.primary : root.line-color;
+                font-size: Theme.body-small;
+                visible: root.room.line1 != "";
+            }
+            if root.room.line2 != "": Text {
+                text: root.room.line2;
+                color: root.room.moving ? Theme.primary : root.line-color;
+                font-size: Theme.body-small;
+                overflow: elide;
+            }
+            if root.room.line3 != "": Text {
+                text: root.room.line3;
+                color: root.line-color;
+                font-size: Theme.body-small;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            width: 24px;
+            alignment: center;
+            spacing: 6px;
+            Rectangle {
+                height: 24px;
+                if root.room.playing: DotEqualizer { }
+            }
+            HorizontalLayout {
+                height: 18px;
+                alignment: center;
+                spacing: 2px;
+                if root.room.tv-badge > 0: Icon {
+                    source: Icons.tv;
+                    size: 18px;
+                    colorize: root.room.tv-badge == 2 ? Theme.primary : Theme.on-surface.with-alpha(0.5);
+                }
+                if root.room.offline: Icon {
+                    source: Icons.warning;
+                    size: 18px;
+                    colorize: Theme.error;
+                }
+                if root.room.muted: Icon {
+                    source: Icons.volume-off;
+                    size: 18px;
+                    colorize: Theme.on-surface.with-alpha(0.5);
+                }
+            }
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[RoomRow]> rooms;
+    in property <string> status-text;
+    in property <bool> loading;
+    in property <string> footer-note;
+    background: Theme.surface-variant;
+
+    VerticalLayout {
+        padding-top: 20px;
+        padding-bottom: 20px;
+        spacing: 8px;
+        list := Flickable {
+            vertical-stretch: 1;
+            content-height: column.preferred-height;
+            interactive: true;
+            column := VerticalLayout {
+                spacing: 0px;
+                for room[i] in root.rooms: Rectangle {
+                    min-height: card.min-height + 10px;
+                    card := RoomRowView {
+                        x: 32px;
+                        y: 5px;
+                        width: parent.width - 32px - 28px;
+                        height: parent.height - 10px;
+                        zone: Zones.rooms;
+                        index: i;
+                        room: room;
+                    }
+                    // Keep the focused row in view.
+                    property <bool> is-focused: Nav.zone == Zones.rooms && Nav.index == i;
+                    // Keep the focused row in view: when focus reaches it, and when it is
+                    // made already focused (a list opening on its playing track).
+                    function show() {
+                        if (self.y + list.content-y < 0) {
+                            list.content-y = -self.y;
+                        } else if (self.y + self.height + list.content-y > list.height) {
+                            list.content-y = list.height - self.y - self.height;
+                        }
+                    }
+                    changed is-focused => {
+                        if (self.is-focused) {
+                            self.show();
+                        }
+                    }
+                    // At creation the row is not laid out yet: shown a tick later.
+                    property <bool> show-pending: false;
+                    init => {
+                        if (self.is-focused) {
+                            self.show-pending = true;
+                        }
+                    }
+                    Timer {
+                        interval: 1ms;
+                        running: show-pending;
+                        triggered => {
+                            show-pending = false;
+                            show();
+                        }
+                    }
+                }
+                if root.rooms.length == 0: VerticalLayout {
+                    padding-left: 48px;
+                    padding-right: 28px;
+                    padding-top: 24px;
+                    spacing: 16px;
+                    if root.loading: DotScanner { }
+                    Text {
+                        text: root.status-text;
+                        color: Theme.on-surface-variant;
+                        font-size: Theme.body-medium;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        if root.footer-note != "": Text {
+            x: 48px;
+            width: parent.width - 48px - 28px;
+            text: root.footer-note;
+            color: Theme.on-surface-variant;
+            font-size: Theme.body-small;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            padding-left: 32px;
+            alignment: start;
+            LabelButton {
+                zone: Zones.settings-button;
+                index: 0;
+                icon: Icons.settings;
+                text: "Settings";
+            }
+        }
+    }
+}
+
+// The player pane (PlayerScreen.kt).
+export component PlayerPane inherits Rectangle {
+    in property <PaneState> pane;
+    in property <color> shade: Theme.surface;
+    in property <[PaneButton]> transport;
+    in property <[PaneButton]> places;
+    in property <[SpeakerRow]> speakers;
+    in property <bool> volume-focused: Nav.zone == Zones.volume || Nav.zone == Zones.seek;
+    callback volume-step(int);
+    callback speaker-step(int, int);
+    callback seek-to(float);
+
+    background: @linear-gradient(180deg, root.shade 0%, Theme.surface 100%);
+    animate background { duration: 600ms; }
+
+    if root.pane.room == "": Rectangle { }
+
+    // The pane scrolls only from the places row down: to its foot while a
+    // speaker's level has focus, back to the top when focus goes up again.
+    // Where it should be, from the layout as it is now: the speakers' rows may
+    // be made after focus reaches them, so a timer settles it rather than a
+    // one-off change handler. Not while a finger is scrolling it.
+    property <bool> lower: Nav.zone == Zones.speakers;
+    property <length> target: root.lower ? min(0px, flick.height - body.preferred-height) : 0px;
+    Timer {
+        interval: 16ms;
+        running: !Theme.touch-mode && flick.content-y != root.target;
+        triggered => {
+            flick.content-y = root.target;
+        }
+    }
+
+    flick := Flickable {
+        content-height: body.preferred-height;
+        body := VerticalLayout {
+            padding-left: 48px;
+            padding-right: 48px;
+            padding-top: 32px;
+            padding-bottom: 32px;
+            spacing: 20px;
+
+            // Header: the room, kept whole; what it is doing, which gives way
+            // when space is short; and opposite them the room's volume.
+            HorizontalLayout {
+                spacing: 16px;
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        vertical-alignment: center;
+                        text: root.pane.room;
+                        color: Theme.on-surface;
+                        font-size: Theme.title-large;
+                        min-width: self.preferred-width;
+                    }
+                    if root.pane.activity != "": Text {
+                        vertical-alignment: center;
+                        text: "  \u{00B7}  " + root.pane.activity;
+                        color: root.pane.playing ? Theme.primary : Theme.on-surface-variant;
+                        font-size: Theme.title-medium;
+                        font-weight: Theme.weight-medium;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    if root.pane.activity == "": Rectangle { horizontal-stretch: 1; }
+                }
+                VolumePill {
+                    zone: Zones.volume;
+                    index: 0;
+                    volume: root.pane.volume;
+                    has-volume: root.pane.has-volume;
+                    muted: root.pane.muted;
+                    fixed: root.pane.fixed;
+                    step(d) => { root.volume-step(d); }
+                }
+            }
+
+            // The track, or the TV, or the room's word for nothing.
+            HorizontalLayout {
+                min-height: 168px;
+                spacing: 32px;
+                Rectangle {
+                    width: 168px;
+                    height: 168px;
+                    art := RoomArt {
+                        size: 168px;
+                        radius: 8px;
+                        glyph-size: 88px;
+                        art: root.pane.art;
+                        has-art: root.pane.has-art;
+                        glyph: root.pane.tv ? Glyph.tv : root.pane.glyph;
+                        dim: false;
+                    }
+                    if root.volume-focused && root.pane.has-service-logo: Image {
+                        x: 0;
+                        y: parent.height * 0.8;
+                        width: parent.width * 0.2;
+                        height: parent.height * 0.2;
+                        source: root.pane.service-logo;
+                        image-fit: contain;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    if root.pane.tv: HorizontalLayout {
+                        Text {
+                            text: "TV";
+                            color: Theme.on-surface;
+                            font-size: Theme.display-small;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    if root.pane.tv: HorizontalLayout {
+                        Text {
+                            text: "HDMI";
+                            color: Theme.on-surface-variant;
+                            font-size: Theme.body-large;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: root.pane.tv-format;
+                            color: Theme.on-surface;
+                            font-size: Theme.headline-small;
+                            horizontal-alignment: right;
+                        }
+                    }
+                    if !root.pane.tv && root.pane.has-content: Text {
+                        text: root.pane.title;
+                        color: Theme.on-surface;
+                        font-size: Theme.display-small;
+                        wrap: word-wrap;
+                    }
+                    if !root.pane.tv && root.pane.has-content && root.pane.subtitle != "": Text {
+                        text: root.pane.subtitle;
+                        color: Theme.on-surface;
+                        font-size: Theme.body-large;
+                        wrap: word-wrap;
+                    }
+                    if !root.pane.tv && root.pane.has-content && root.pane.stream-info != "": Text {
+                        text: root.pane.stream-info;
+                        color: Theme.on-surface-variant;
+                        font-size: Theme.body-large;
+                        overflow: elide;
+                    }
+                    if !root.pane.tv && !root.pane.has-content: Text {
+                        text: root.pane.idle-word;
+                        color: Theme.on-surface-variant;
+                        font-size: Theme.headline-medium;
+                    }
+                }
+            }
+
+            if !root.pane.tv: SeekBar {
+                zone: Zones.seek;
+                index: 0;
+                enabled: root.pane.seekable;
+                progress: root.pane.progress;
+                has-duration: root.pane.has-duration;
+                position-text: root.pane.position-text;
+                duration-text: root.pane.duration-text;
+                caption: root.pane.caption;
+                caption-strong: root.pane.caption-strong;
+                seek-to(f) => { root.seek-to(f); }
+            }
+
+            // The transport and the places, 16dp apart.
+            VerticalLayout {
+                spacing: 16px;
+                if !root.pane.tv && root.transport.length > 0: HorizontalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    for b[i] in root.transport: IconButton {
+                        zone: Zones.transport;
+                        index: i;
+                        icon: b.icon;
+                        icon-size: b.wide ? 36px : 30px;
+                        wide: b.wide ? 104px : 0px;
+                    }
+                }
+
+                if root.pane.tv: HorizontalLayout {
+                    alignment: center;
+                    spacing: 16px;
+                    TwoLineButton {
+                        zone: Zones.tv-buttons;
+                        index: 0;
+                        title: "Night Sound";
+                        value: root.pane.night ? "On" : "Off";
+                    }
+                    TwoLineButton {
+                        zone: Zones.tv-buttons;
+                        index: 1;
+                        title: "Speech Enhancement";
+                        value: root.pane.speech ? "On" : "Off";
+                    }
+                }
+
+                if root.pane.alarm-ringing: HorizontalLayout {
+                    alignment: center;
+                    spacing: 16px;
+                    Text {
+                        vertical-alignment: center;
+                        text: "Alarm";
+                        color: Theme.primary;
+                        font-size: Theme.headline-small;
+                    }
+                    LabelButton {
+                        zone: Zones.alarm;
+                        index: 0;
+                        has-icon: false;
+                        text: "Snooze";
+                    }
+                    LabelButton {
+                        zone: Zones.alarm;
+                        index: 1;
+                        has-icon: false;
+                        text: "Stop";
+                    }
+                }
+
+                if !root.pane.alarm-ringing: HorizontalLayout {
+                    // The names drawn under the focused place need the gap below.
+                    padding-bottom: 8px;
+                    alignment: center;
+                    spacing: 16px;
+                    for b[i] in root.places: PlaceButton {
+                        zone: Zones.places;
+                        index: i;
+                        icon: b.icon;
+                        label: b.label;
+                    }
+                }
+            }
+
+            if root.speakers.length > 0: VerticalLayout {
+                padding-top: 16px;
+                spacing: 8px;
+                Text {
+                    text: "Speakers";
+                    color: Theme.on-surface-variant;
+                    font-size: Theme.title-small;
+                    font-weight: Theme.weight-medium;
+                }
+                for s[i] in root.speakers: HorizontalLayout {
+                    spacing: 16px;
+                    Text {
+                        width: 150px;
+                        vertical-alignment: center;
+                        text: s.name;
+                        color: Theme.on-surface;
+                        font-size: Theme.body-large;
+                        overflow: elide;
+                    }
+                    VolumePill {
+                        zone: Zones.speakers;
+                        index: i;
+                        volume: s.volume;
+                        has-volume: s.has-volume;
+                        muted: s.muted;
+                        fixed: s.fixed;
+                        step(d) => { root.speaker-step(i, d); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,121 @@
+// Text entry with a pad: a search field, and the keyboard a TV draws for it, a
+// grid of keys walked with the D-pad. A real keyboard types into the field as
+// well, and so does Steam's own (Steam+X), which sends keys.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Nav, Icon, ButtonBase, LabelButton } from "components.slint";
+
+export global KeyZones {
+    out property <int> field: 35;
+    out property <int> keys: 50;
+}
+
+// The field (SearchField.kt): an 8dp outline, the text or its placeholder, and
+// a caret while it is the one being typed into.
+export component SearchField inherits Rectangle {
+    in property <string> text;
+    in property <string> placeholder;
+    in property <bool> typing;
+    in property <int> zone: KeyZones.field;
+    in property <int> index: 0;
+    out property <bool> focused: Nav.show-focus && Nav.zone == root.zone && Nav.index == root.index;
+    callback tapped();
+    height: 52px;
+    border-radius: 8px;
+    border-width: root.focused || root.typing ? 3px : 2px;
+    border-color: root.focused || root.typing ? Theme.primary : Theme.on-surface-variant.with-alpha(0.6);
+    background: Theme.surface;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 2px;
+        Text {
+            vertical-alignment: center;
+            text: root.text == "" ? root.placeholder : root.text;
+            color: root.text == "" ? Theme.on-surface-variant : Theme.on-surface;
+            font-size: Theme.title-medium;
+            overflow: elide;
+        }
+        if root.typing: Rectangle {
+            width: 2px;
+            height: 26px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.primary;
+            opacity: Math.mod(animation-tick() / 1s, 1) < 0.55 ? 1 : 0;
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    TouchArea {
+        clicked => { root.tapped(); }
+    }
+}
+
+export struct KeyCap {
+    label: string,
+    // 1 a letter's width, more for space and the actions.
+    span: int,
+    focus: int,
+    // 0 a character, 1 space, 2 delete, 3 clear, 4 done.
+    kind: int,
+}
+
+export struct KeyRow {
+    keys: [KeyCap],
+}
+
+component Key inherits ButtonBase {
+    in property <KeyCap> cap;
+    height: 48px;
+    border-radius: 10px;
+    // Keys are drawn, unlike a button on the panel's own colour: a keyboard of
+    // bare letters is hard to aim at.
+    background: root.lit ? Theme.primary : Theme.surface;
+    if root.cap.kind == 2: Icon {
+        source: Icons.arrow-back;
+        size: 22px;
+        colorize: root.ink;
+    }
+    if root.cap.kind != 2: Text {
+        text: root.cap.label;
+        color: root.ink;
+        font-size: root.cap.kind == 0 ? Theme.title-medium : Theme.label-large;
+        font-weight: Theme.weight-medium;
+    }
+}
+
+// The keyboard, docked at the foot of the screen over what it types for.
+export component OnScreenKeyboard inherits Rectangle {
+    in property <[KeyRow]> rows;
+    in property <string> text;
+    in property <string> placeholder;
+    in property <string> action-label;
+    background: Theme.surface-variant;
+    height: column.preferred-height;
+    // Taps on the keyboard do not reach what is under it.
+    TouchArea { }
+    column := VerticalLayout {
+        padding-left: 48px;
+        padding-right: 48px;
+        padding-top: 16px;
+        padding-bottom: 20px;
+        spacing: 8px;
+        SearchField {
+            text: root.text;
+            placeholder: root.placeholder;
+            typing: true;
+            zone: -1;
+        }
+        for row in root.rows: HorizontalLayout {
+            spacing: 8px;
+            for cap in row.keys: Key {
+                horizontal-stretch: cap.span;
+                width: (root.width - 96px - 9 * 8px) / 10 * cap.span + (cap.span - 1) * 8px;
+                zone: KeyZones.keys;
+                index: cap.focus;
+                cap: cap;
+            }
+            Rectangle { horizontal-stretch: 0; }
+        }
+    }
+}

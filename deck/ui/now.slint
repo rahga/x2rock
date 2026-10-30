@@ -1,0 +1,104 @@
+// The room's music on the whole screen (NowPlayingScreen.kt): the art as tall
+// as the screen allows, the track, the room, a progress line and the clock, and
+// nothing to press. Any key but Back closes it too, on the key's release.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Icon } from "components.slint";
+import { PaneState, Glyph } from "home.slint";
+
+export component NowPlayingScreen inherits Rectangle {
+    in property <PaneState> pane;
+    in property <color> shade: Theme.surface;
+    in property <string> clock;
+    // A few dp of drift a minute, so nothing sits on the same pixels for an hour.
+    in property <length> drift-x: 0px;
+    in property <length> drift-y: 0px;
+    background: @linear-gradient(180deg, root.shade 0%, Theme.surface 100%);
+
+    HorizontalLayout {
+        x: root.drift-x;
+        y: root.drift-y;
+        width: root.width;
+        height: root.height;
+        padding-left: 64px;
+        padding-right: 64px;
+        padding-top: 56px;
+        padding-bottom: 56px;
+        spacing: 56px;
+        Rectangle {
+            width: self.height;
+            border-radius: 12px;
+            clip: true;
+            background: !root.pane.has-art && (root.pane.tv || root.pane.glyph != Glyph.none) ? Theme.on-surface.with-alpha(0.1) : transparent;
+            if root.pane.has-art: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.pane.art;
+                image-fit: cover;
+            }
+            if !root.pane.has-art && (root.pane.tv || root.pane.glyph != Glyph.none): Icon {
+                source: root.pane.tv ? Icons.tv : Icons.radio;
+                size: 160px;
+                colorize: Theme.on-surface.with-alpha(0.7);
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Text {
+                horizontal-alignment: right;
+                text: root.clock;
+                color: Theme.on-surface-variant;
+                font-size: Theme.headline-medium;
+            }
+            Rectangle { vertical-stretch: 1; }
+            Text {
+                text: root.pane.room;
+                color: Theme.on-surface-variant;
+                font-size: Theme.title-large;
+            }
+            Rectangle { height: 12px; }
+            Text {
+                text: root.pane.tv ? "TV" : (root.pane.has-content ? root.pane.title : root.pane.idle-word);
+                color: Theme.on-surface;
+                font-size: Theme.display-medium;
+                wrap: word-wrap;
+            }
+            if root.pane.subtitle != "" || root.pane.tv: Rectangle { height: 12px; }
+            if root.pane.subtitle != "" || root.pane.tv: Text {
+                text: root.pane.tv ? root.pane.tv-format : root.pane.subtitle;
+                color: Theme.on-surface;
+                font-size: Theme.headline-small;
+                wrap: word-wrap;
+            }
+            Rectangle { vertical-stretch: 1; }
+            if root.pane.has-duration: VerticalLayout {
+                spacing: 8px;
+                Rectangle {
+                    height: 6px;
+                    border-radius: 3px;
+                    background: Theme.surface-variant;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * root.pane.progress;
+                        border-radius: 3px;
+                        background: Theme.primary;
+                    }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: root.pane.position-text;
+                        color: Theme.on-surface;
+                        font-size: Theme.body-medium;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.pane.duration-text;
+                        color: Theme.on-surface;
+                        font-size: Theme.body-medium;
+                    }
+                }
+            }
+        }
+    }
+}

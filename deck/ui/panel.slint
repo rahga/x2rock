@@ -1,0 +1,314 @@
+// The TV app's panels, one component: the room panel (RoomPanel.kt), centred
+// over a scrim, and Settings (HomeScreen.kt's SettingsPanel), down the right.
+// Rust lists the rows; each focusable row carries its focus index, so the
+// panel is one zone and its rows are walked with Up and Down.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Nav, Pressable, Icon, ButtonBase, StepMark } from "components.slint";
+
+export enum PanelKind {
+    // A small heading, labelMedium at 60% (the room panel's PanelSection).
+    section,
+    // A large heading, titleMedium, 32dp above it (Settings' sections).
+    heading,
+    // A full-width button: a label, and a second line under it if `detail`.
+    button,
+    // A room as a pill, with its join or leave mark at the end.
+    room,
+    // Bass or treble: the label, then − value + at the end.
+    stepper,
+    // Two buttons side by side: the sleep timer's lengths.
+    pair,
+    // ‹ swatch name ›: the theme.
+    theme,
+    // A line of explanation under a row.
+    note,
+}
+
+export struct PanelItem {
+    kind: PanelKind,
+    label: string,
+    detail: string,
+    value: string,
+    label2: string,
+    // 0 none, 1 leave (⊖), 2 join (⊕).
+    mark: int,
+    icon: image,
+    has-icon: bool,
+    swatch: color,
+    // The focus index this row answers to, -1 for none; `focus2` for a pair's
+    // right half.
+    focus: int,
+    focus2: int,
+    beta: bool,
+}
+
+component PanelButton inherits ButtonBase {
+    in property <string> label;
+    in property <string> detail;
+    in property <image> icon;
+    in property <bool> has-icon;
+    in property <int> mark;
+    in property <bool> centered;
+    in property <bool> beta;
+    min-height: max(44px, row.preferred-height);
+    border-radius: 22px;
+    row := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 8px;
+        if root.has-icon: Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            size: 24px;
+            colorize: root.ink;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: root.ink;
+                font-size: Theme.body-large;
+                horizontal-alignment: root.centered ? center : left;
+                overflow: elide;
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                color: root.ink;
+                font-size: Theme.body-small;
+                overflow: elide;
+            }
+        }
+        if root.beta: Text {
+            vertical-alignment: center;
+            text: "Beta";
+            color: root.ink.with-alpha(0.7);
+            font-size: Theme.label-large;
+            font-weight: Theme.weight-medium;
+        }
+        if root.mark > 0: Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.mark == 2 ? Icons.add-circle-outline : Icons.remove-circle-outline;
+            size: 28px;
+            colorize: root.ink;
+        }
+    }
+}
+
+component StepperRow inherits ButtonBase {
+    in property <string> label;
+    in property <string> value;
+    callback step(int);
+    property <bool> shown: root.focused || Theme.touch-mode;
+    height: 44px;
+    border-radius: 22px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 8px;
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.ink;
+            font-size: Theme.body-large;
+        }
+        StepMark {
+            mark: "\u{2212}";
+            shown: root.shown;
+            ink: root.ink;
+            tapped => { root.step(-1); }
+        }
+        Text {
+            min-width: 36px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            text: root.value;
+            color: root.ink;
+            font-size: Theme.body-large;
+        }
+        StepMark {
+            mark: "+";
+            shown: root.shown;
+            ink: root.ink;
+            tapped => { root.step(1); }
+        }
+    }
+}
+
+component ThemeRow inherits ButtonBase {
+    in property <string> label;
+    in property <color> swatch;
+    callback step(int);
+    height: 52px;
+    border-radius: 26px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: Icons.keyboard-arrow-left;
+            size: 20px;
+            colorize: root.ink;
+        }
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.swatch;
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.ink;
+            font-size: Theme.body-large;
+        }
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: Icons.keyboard-arrow-right;
+            size: 20px;
+            colorize: root.ink;
+        }
+    }
+    // A tap on either half steps that way.
+    TouchArea {
+        clicked => { root.step(self.mouse-x < self.width / 2 ? -1 : 1); }
+    }
+}
+
+// The rows, in order, with the focused one kept in view.
+export component PanelBody inherits Rectangle {
+    in property <[PanelItem]> items;
+    in property <int> zone;
+    in property <string> title;
+    // The room panel's title is titleMedium; Settings' headlineMedium.
+    in property <bool> large-title;
+    in property <length> pad-x: 24px;
+    in property <length> pad-y: 24px;
+    in property <length> gap: 8px;
+    callback step(int, int);
+    out property <length> content-height: body.preferred-height;
+
+    flick := Flickable {
+        content-height: body.preferred-height;
+        body := VerticalLayout {
+            padding-left: root.pad-x;
+            padding-right: root.pad-x;
+            padding-top: root.pad-y;
+            padding-bottom: root.pad-y;
+            spacing: root.gap;
+            Text {
+                text: root.title;
+                color: Theme.on-surface;
+                font-size: root.large-title ? Theme.headline-medium : Theme.title-medium;
+                font-weight: root.large-title ? Theme.weight-regular : Theme.weight-medium;
+                overflow: elide;
+            }
+            for item in root.items: Rectangle {
+                property <bool> is-focused: Nav.zone == root.zone && (Nav.index == item.focus || Nav.index == item.focus2);
+                min-height: content.min-height;
+                // Keep the focused row in view: when focus reaches it, and when it is
+                // made already focused (a list opening on its playing track).
+                function show() {
+                    if (self.y + flick.content-y < 0) {
+                        flick.content-y = -self.y + (self.y < 80px ? self.y : 0px);
+                    } else if (self.y + self.height + flick.content-y > flick.height) {
+                        flick.content-y = flick.height - self.y - self.height - root.pad-y;
+                    }
+                }
+                changed is-focused => {
+                    if (self.is-focused) {
+                        self.show();
+                    }
+                }
+                // At creation the row is not laid out yet: shown a tick later.
+                property <bool> show-pending: false;
+                init => {
+                    if (self.is-focused) {
+                        self.show-pending = true;
+                    }
+                }
+                Timer {
+                    interval: 1ms;
+                    running: show-pending;
+                    triggered => {
+                        show-pending = false;
+                        show();
+                    }
+                }
+                content := VerticalLayout {
+                    if item.kind == PanelKind.section: Text {
+                        text: item.label;
+                        color: Theme.on-surface.with-alpha(0.6);
+                        font-size: Theme.label-medium;
+                        font-weight: Theme.weight-medium;
+                        // 8dp above, as PanelSection pads it.
+                        height: self.preferred-height + 8px;
+                        vertical-alignment: bottom;
+                    }
+                    if item.kind == PanelKind.heading: Text {
+                        text: item.label;
+                        color: Theme.on-surface;
+                        font-size: Theme.title-medium;
+                        font-weight: Theme.weight-medium;
+                        height: self.preferred-height + 24px;
+                        vertical-alignment: bottom;
+                    }
+                    if item.kind == PanelKind.note: Text {
+                        text: item.label;
+                        color: Theme.on-surface-variant;
+                        font-size: Theme.body-medium;
+                        wrap: word-wrap;
+                    }
+                    if item.kind == PanelKind.button || item.kind == PanelKind.room: PanelButton {
+                        zone: root.zone;
+                        index: item.focus;
+                        label: item.label;
+                        detail: item.detail;
+                        icon: item.icon;
+                        has-icon: item.has-icon;
+                        mark: item.mark;
+                        beta: item.beta;
+                    }
+                    if item.kind == PanelKind.stepper: StepperRow {
+                        zone: root.zone;
+                        index: item.focus;
+                        label: item.label;
+                        value: item.value;
+                        step(d) => { root.step(item.focus, d); }
+                    }
+                    if item.kind == PanelKind.theme: ThemeRow {
+                        zone: root.zone;
+                        index: item.focus;
+                        label: item.label;
+                        swatch: item.swatch;
+                        step(d) => { root.step(item.focus, d); }
+                    }
+                    if item.kind == PanelKind.pair: HorizontalLayout {
+                        spacing: 8px;
+                        PanelButton {
+                            horizontal-stretch: 1;
+                            zone: root.zone;
+                            index: item.focus;
+                            label: item.label;
+                            centered: true;
+                        }
+                        PanelButton {
+                            horizontal-stretch: 1;
+                            zone: root.zone;
+                            index: item.focus2;
+                            label: item.label2;
+                            centered: true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

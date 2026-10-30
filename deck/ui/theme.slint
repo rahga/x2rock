@@ -1,0 +1,79 @@
+// The look of x2rock for Android TV, as Slint globals.
+//
+// Every length here is a TV app dp: the window is scaled so its narrow side is
+// 960 or 540 of these, whatever the screen (see `scale.rs`), so the TV app's
+// numbers are used as they are.
+
+// One colour scheme. The names are Material 3's, as tv-material3 has them.
+export struct Palette {
+    primary: color,
+    on-primary: color,
+    primary-container: color,
+    on-primary-container: color,
+    secondary: color,
+    on-secondary: color,
+    background: color,
+    on-background: color,
+    surface: color,
+    on-surface: color,
+    surface-variant: color,
+    on-surface-variant: color,
+    inverse-surface: color,
+    inverse-on-surface: color,
+    error: color,
+    on-error: color,
+}
+
+export global Theme {
+    // Rust sets this whenever the theme or, for Artwork, the cover changes.
+    in property <Palette> palette: {
+        primary: #D0BCFF, on-primary: #381E72,
+        primary-container: #4F378B, on-primary-container: #EADDFF,
+        secondary: #CCC2DC, on-secondary: #332D41,
+        background: #1C1B1F, on-background: #E6E1E5,
+        surface: #1C1B1F, on-surface: #E6E1E5,
+        surface-variant: #49454F, on-surface-variant: #CAC4D0,
+        inverse-surface: #E6E1E5, inverse-on-surface: #313033,
+        error: #F2B8B5, on-error: #601410,
+    };
+
+    // Shorthands, so components read like the TV app's code.
+    out property <color> primary: palette.primary;
+    out property <color> on-primary: palette.on-primary;
+    out property <color> secondary: palette.secondary;
+    out property <color> background: palette.background;
+    out property <color> surface: palette.surface;
+    out property <color> on-surface: palette.on-surface;
+    out property <color> surface-variant: palette.surface-variant;
+    out property <color> on-surface-variant: palette.on-surface-variant;
+    out property <color> inverse-surface: palette.inverse-surface;
+    out property <color> inverse-on-surface: palette.inverse-on-surface;
+    out property <color> error: palette.error;
+
+    // Whether the screen is being touched rather than driven by keys: StepMarks
+    // show, and code-driven focus is not drawn.
+    in property <bool> touch-mode: false;
+
+    // tv-material3's type scale with x2rock's 14sp floor (TenFootTypography).
+    out property <length> display-medium: 45px;
+    out property <length> display-small: 36px;
+    out property <length> headline-medium: 28px;
+    out property <length> headline-small: 24px;
+    out property <length> title-large: 22px;
+    out property <length> title-medium: 18px;
+    out property <length> title-small: 16px;
+    out property <length> body-large: 18px;
+    out property <length> body-medium: 16px;
+    out property <length> body-small: 14px;
+    out property <length> label-large: 16px;
+    out property <length> label-medium: 14px;
+    out property <length> label-small: 14px;
+
+    out property <int> weight-regular: 400;
+    out property <int> weight-medium: 500;
+
+    // Shapes and spacing.
+    out property <length> card-radius: 8px;
+    out property <length> safe-margin: 48px;
+    out property <length> focus-border: 3px;
+}

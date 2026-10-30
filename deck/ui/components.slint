@@ -1,0 +1,486 @@
+// The TV app's components (Theme.kt, components/*, HeaderVolume.kt, SeekBar.kt),
+// redrawn in Slint. None of them owns keyboard focus: focus is a (zone, index)
+// pair the Rust side moves (see focus.rs), and a component draws itself focused
+// when the pair names it. Touch is the one input a component handles itself,
+// and it reports a tap or a hold back to Rust by its zone and index too.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+
+// Where focus is, and how a component reports a touch.
+export global Nav {
+    in property <int> zone: 0;
+    in property <int> index: 0;
+    // False while the screen is being touched: a focus a finger did not choose
+    // is not drawn (the TV app's touch mode).
+    in property <bool> show-focus: true;
+    callback tap(int, int);
+    callback hold(int, int);
+}
+
+// Shared clocks, ticked by Rust only while something needs them, so a screen
+// at rest costs nothing.
+export global Anim {
+    // The four columns' current heights for every playing room's equalizer.
+    in property <[float]> eq: [1, 1, 1, 1];
+    // 0..1, the loading scanner's sweep.
+    in property <float> scan: 0;
+}
+
+// Anything that can be focused, tapped or held. A finger's tap is a click; a
+// finger held 500ms is a hold, which the TV app gives to a long press of Select.
+export component Pressable inherits Rectangle {
+    in property <int> zone;
+    in property <int> index;
+    in property <bool> enabled: true;
+    out property <bool> focused: Nav.show-focus && Nav.zone == zone && Nav.index == index;
+    out property <bool> pressed: touch.pressed;
+    property <bool> held-fired: false;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.held-fired = false;
+            }
+        }
+        clicked => {
+            if (!root.held-fired) {
+                Nav.tap(root.zone, root.index);
+            }
+        }
+    }
+
+    Timer {
+        interval: 500ms;
+        running: touch.pressed && !root.held-fired;
+        triggered => {
+            root.held-fired = true;
+            Nav.hold(root.zone, root.index);
+        }
+    }
+}
+
+// An icon in the content colour.
+export component Icon inherits Image {
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    image-fit: contain;
+}
+
+// AppButton's colours: a focused or pressed button is filled with the primary
+// colour, the one focus language. tv-material3's resting button is
+// surfaceVariant, which is also the sidebar, so a button there reads as bare.
+export component ButtonBase inherits Pressable {
+    in property <bool> active: false;
+    out property <bool> lit: root.focused || root.pressed;
+    out property <color> ink: root.lit ? Theme.on-primary : Theme.on-surface-variant;
+    border-radius: self.height / 2;
+    background: root.lit ? Theme.primary : Theme.surface-variant;
+    animate background { duration: 120ms; }
+}
+
+// IconAppButton: an icon with 12dp of padding all round; a circle unless told
+// to be wider, as Play/Pause is.
+export component IconButton inherits ButtonBase {
+    in property <image> icon;
+    in property <length> icon-size: 30px;
+    in property <length> wide: 0px;
+    // 14dp round the icon: the TV app's buttons measure 58dp on its screenshots.
+    width: max(root.wide, root.icon-size + 28px);
+    height: root.wide > 0 ? 56px : root.icon-size + 28px;
+    Icon {
+        source: root.icon;
+        size: root.icon-size;
+        colorize: root.ink;
+    }
+}
+
+// A place in the pane's row: an icon button whose name is drawn under it while
+// it has focus, taking no room of its own (PaneButtons.kt, Named).
+export component PlaceButton inherits IconButton {
+    in property <string> label;
+    Text {
+        y: root.height + 4px;
+        width: 200px;
+        x: (root.width - self.width) / 2;
+        horizontal-alignment: center;
+        text: root.label;
+        visible: root.focused;
+        color: Theme.on-surface;
+        font-size: Theme.label-large;
+        font-weight: Theme.weight-medium;
+    }
+}
+
+// IconLabelButton: a 24dp icon, 8dp, then the label. Also a plain text button
+// when it has no icon.
+export component LabelButton inherits ButtonBase {
+    in property <image> icon;
+    in property <bool> has-icon: true;
+    in property <string> text;
+    in property <length> least-width: 0px;
+    // A full-width button in a column reads from the left, as the TV app's do.
+    in property <bool> from-start: false;
+    min-width: max(root.least-width, row.preferred-width);
+    height: 44px;
+    row := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 8px;
+        alignment: root.from-start ? LayoutAlignment.start : LayoutAlignment.center;
+        if root.has-icon: Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            size: 24px;
+            colorize: root.ink;
+        }
+        Text {
+            vertical-alignment: center;
+            text: root.text;
+            color: root.ink;
+            font-size: Theme.label-large;
+            font-weight: Theme.weight-medium;
+        }
+    }
+}
+
+// A setting and the value it holds, the way the Sonos app draws them: Night
+// Sound "On". At least 220dp wide.
+export component TwoLineButton inherits ButtonBase {
+    in property <string> title;
+    in property <string> value;
+    min-width: max(220px, col.preferred-width);
+    height: 60px;
+    border-radius: 30px;
+    col := VerticalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        alignment: center;
+        Text {
+            horizontal-alignment: center;
+            text: root.title;
+            color: root.ink;
+            font-size: Theme.body-large;
+        }
+        Text {
+            horizontal-alignment: center;
+            text: root.value;
+            color: root.ink;
+            font-size: Theme.body-small;
+        }
+    }
+}
+
+// AppCard: a list row. Its focus is a 3dp border in the primary colour, never a
+// grow; `selected` is the room list's chosen room.
+export component Card inherits Pressable {
+    in property <color> rest: Theme.surface-variant;
+    in property <bool> selected: false;
+    in property <bool> active: false;
+    border-radius: Theme.card-radius;
+    background: root.rest;
+    Rectangle {
+        border-radius: Theme.card-radius;
+        border-width: root.focused ? Theme.focus-border : (root.active ? 2px : 0px);
+        border-color: Theme.primary;
+    }
+}
+
+// Text that scrolls while its row has focus, rather than being cut short, and
+// is elided otherwise.
+export component Marquee inherits Rectangle {
+    in property <string> text;
+    in property <bool> running: false;
+    in property <color> ink: Theme.on-surface;
+    in property <length> font-size: Theme.title-medium;
+    in property <int> font-weight: Theme.weight-regular;
+    property <length> full: measure.preferred-width;
+    property <bool> overflows: root.full > root.width;
+    property <duration> travel: (root.full - root.width) / 30px * 1s;
+    // Never asks for its text's width: a long title scrolls, it does not widen its row.
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+    min-height: measure.preferred-height;
+    clip: true;
+    measure := Text {
+        visible: false;
+        text: root.text;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        wrap: no-wrap;
+    }
+    if !(root.running && root.overflows): Text {
+        width: root.width;
+        height: root.height;
+        vertical-alignment: center;
+        text: root.text;
+        color: root.ink;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    if root.running && root.overflows: Text {
+        // Out over the length of the overflow, a pause, and back to the start.
+        property <float> phase: Math.mod(animation-tick() / (root.travel + 3s), 1);
+        property <float> along: Math.clamp((phase * (root.travel + 3s) - 1s) / root.travel, 0, 1);
+        x: -along * (root.full - root.width);
+        width: root.full;
+        height: root.height;
+        vertical-alignment: center;
+        text: root.text;
+        color: root.ink;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        wrap: no-wrap;
+    }
+}
+
+// A playing room's mark: four columns of dots on a flat bottom, a hi-fi's LED
+// meter. Decoration, not a meter: the levels come from Anim.eq.
+export component DotEqualizer inherits Rectangle {
+    in property <color> tint: Theme.primary.with-alpha(0.8);
+    in property <length> size: 18px;
+    width: root.size;
+    height: root.size;
+    property <length> pitch: root.size / 4;
+    property <length> row-pitch: root.size / 5;
+    property <length> dot: min(root.pitch, root.row-pitch) * 0.62;
+    for i in 20: Rectangle {
+        property <int> column: Math.mod(i, 4);
+        property <int> level: (i - column) / 4;
+        property <float> on: Math.clamp(Anim.eq[column] - level, 0, 1);
+        x: column * root.pitch + (root.pitch - root.dot) / 2;
+        y: root.height - (level + 1) * root.row-pitch + (root.row-pitch - root.dot) / 2;
+        width: root.dot;
+        height: root.dot;
+        border-radius: root.dot * 0.3;
+        background: root.tint.with-alpha(root.tint.to-hsv().alpha * (0.14 + (0.8 - 0.14) * on));
+    }
+}
+
+// Loading, in the equalizer's dots: a lit head sweeping back and forth with a
+// fading trail (KITT's scanner). The sweep comes from Anim.scan.
+export component DotScanner inherits Rectangle {
+    in property <color> tint: Theme.primary.with-alpha(0.8);
+    property <bool> outward: Anim.scan < 0.5;
+    property <float> sweep: root.outward ? Anim.scan * 2 : 2 - Anim.scan * 2;
+    property <float> head: (1 - Math.cos(root.sweep * 180deg)) / 2 * 7;
+    width: 8 * 12px + 7 * 5px;
+    height: 12px;
+    for i in 8: Rectangle {
+        property <float> behind: (root.head - i) * (root.outward ? 1 : -1);
+        property <float> glow: Math.clamp(behind >= 0 ? 1 - behind / 3 : 1 + behind / 0.7, 0, 1);
+        x: i * 17px;
+        width: 12px;
+        height: 12px;
+        border-radius: 2.4px;
+        background: root.tint.with-alpha(0.8 * (0.14 + 0.86 * glow * glow));
+    }
+}
+
+// "−" and "+" either side of a level: shown while their control has focus or the
+// screen is touched, holding their space otherwise so nothing moves.
+export component StepMark inherits Rectangle {
+    in property <string> mark;
+    in property <bool> shown;
+    in property <color> ink;
+    in property <int> zone;
+    in property <int> index;
+    callback tapped();
+    width: label.preferred-width + 16px;
+    label := Text {
+        text: root.mark;
+        color: root.ink;
+        opacity: root.shown ? 1 : 0;
+        font-size: Theme.title-medium;
+        font-weight: Theme.weight-medium;
+    }
+    TouchArea {
+        enabled: root.shown;
+        clicked => { root.tapped(); }
+    }
+}
+
+// The volume as one pill: − mark, speaker, wedge, level, + mark. The header's,
+// and each grouped speaker's. A tv-material3 Surface, so its focus is the
+// inverse surface rather than the primary fill.
+export component VolumePill inherits Pressable {
+    in property <int> volume: 0;
+    in property <bool> has-volume: true;
+    in property <bool> muted: false;
+    in property <bool> fixed: false;
+    callback step(int);
+    property <bool> lit: root.focused || root.pressed;
+    property <color> ink: root.lit ? Theme.inverse-on-surface : Theme.on-surface;
+    property <color> mark-ink: root.ink.with-alpha(root.muted ? 0.4 : 1);
+    property <bool> steps: !root.fixed && (root.focused || Theme.touch-mode);
+    background: root.lit ? Theme.inverse-surface : Theme.surface;
+    border-radius: self.height / 2;
+    height: 46px;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        alignment: center;
+        StepMark {
+            mark: "\u{2212}";
+            shown: root.steps;
+            ink: root.ink;
+            tapped => { root.step(-1); }
+        }
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.muted ? Icons.volume-off : Icons.volume-up;
+            size: 30px;
+            colorize: root.ink;
+        }
+        if !root.fixed: Rectangle {
+            width: 84px;
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            // The level as a wedge rising left to right, filled up to it.
+            Path {
+                width: 84px;
+                height: 28px;
+                viewbox-width: 84;
+                viewbox-height: 28;
+                fill: root.mark-ink.with-alpha(root.mark-ink.to-hsv().alpha * 0.25);
+                commands: "M 0 28 L 84 0 L 84 28 Z";
+            }
+            Rectangle {
+                x: 0;
+                width: 84px * Math.clamp(root.volume, 0, 100) / 100;
+                height: 28px;
+                clip: true;
+                Path {
+                    x: 0;
+                    width: 84px;
+                    height: 28px;
+                    viewbox-width: 84;
+                    viewbox-height: 28;
+                    fill: root.mark-ink;
+                    commands: "M 0 28 L 84 0 L 84 28 Z";
+                }
+            }
+        }
+        Text {
+            min-width: 42px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: root.fixed ? "Fixed" : (root.has-volume ? root.volume : "\u{2014}");
+            color: root.ink;
+            font-size: Theme.headline-small;
+        }
+        StepMark {
+            mark: "+";
+            shown: root.steps;
+            ink: root.ink;
+            tapped => { root.step(1); }
+        }
+    }
+}
+
+// The seek bar: an 8dp line (12dp focused) with a knob at the playhead while
+// focused, the time either side under it and a caption between. Always laid
+// out; blank where there is no duration, so the pane keeps one shape.
+export component SeekBar inherits Pressable {
+    in property <float> progress: 0;
+    in property <bool> has-duration: true;
+    in property <string> position-text;
+    in property <string> duration-text;
+    // "Up next · …", the burst total, or the hint, in that order.
+    in property <string> caption;
+    in property <bool> caption-strong: false;
+    callback seek-to(float);
+    property <color> bar: root.focused ? Theme.secondary : Theme.primary;
+    property <length> thickness: root.focused ? 12px : 8px;
+    property <length> gap: 4px;
+    opacity: root.has-duration ? 1 : 0;
+    height: 44px + 24px;
+    strip := Rectangle {
+        y: 12px;
+        height: 20px;
+        // Material 3's line: the progress, a gap, the track, and a stop at the end.
+        if root.progress > 0: Rectangle {
+            x: 0;
+            width: max(root.thickness, (strip.width) * root.progress);
+            height: root.thickness;
+            border-radius: root.thickness / 2;
+            background: root.bar;
+        }
+        Rectangle {
+            x: strip.width * root.progress + (root.progress > 0 ? root.gap : 0px);
+            width: max(0px, strip.width - self.x);
+            height: root.thickness;
+            border-radius: root.thickness / 2;
+            background: Theme.surface-variant;
+        }
+        Rectangle {
+            x: strip.width - 4px - (root.thickness - 4px) / 2;
+            width: 4px;
+            height: 4px;
+            border-radius: 2px;
+            background: root.bar;
+        }
+        if root.focused: Rectangle {
+            x: (strip.width - 20px) * root.progress;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.bar;
+        }
+        TouchArea {
+            enabled: root.has-duration;
+            clicked => { root.seek-to(Math.clamp(self.mouse-x / self.width, 0, 1)); }
+        }
+    }
+    HorizontalLayout {
+        y: 44px;
+        height: 20px;
+        Text {
+            text: root.position-text;
+            color: Theme.on-surface;
+            font-size: Theme.body-small;
+            horizontal-stretch: 1;
+        }
+        Text {
+            horizontal-alignment: center;
+            text: root.caption;
+            color: root.caption-strong ? Theme.secondary : Theme.on-surface-variant;
+            font-size: root.caption-strong ? Theme.title-medium : Theme.body-small;
+            overflow: elide;
+            horizontal-stretch: 4;
+        }
+        Text {
+            horizontal-alignment: right;
+            text: root.duration-text;
+            color: Theme.on-surface;
+            font-size: Theme.body-small;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// A transient line at the foot of the screen, never focusable.
+export component NoticeBanner inherits Rectangle {
+    in property <string> text;
+    in property <bool> shown: root.text != "";
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: 200ms; }
+    width: min(720px, label.preferred-width + 48px);
+    height: label.preferred-height + 28px;
+    background: Theme.inverse-surface;
+    border-radius: 12px;
+    label := Text {
+        x: 24px;
+        width: parent.width - 48px;
+        text: root.text;
+        color: Theme.inverse-on-surface;
+        font-size: Theme.body-large;
+        wrap: word-wrap;
+    }
+}

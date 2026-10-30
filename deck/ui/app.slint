@@ -1,0 +1,258 @@
+// x2rock for the Steam Deck: the window.
+
+import "assets/fonts/Roboto-Regular.ttf";
+import "assets/fonts/Roboto-Medium.ttf";
+import "assets/fonts/Roboto-Bold.ttf";
+
+import { Theme, Palette } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Nav, Anim, NoticeBanner } from "components.slint";
+import {
+    Zones, Glyph, RoomRow, PaneButton, SpeakerRow, PaneState, Sidebar, PlayerPane,
+} from "home.slint";
+import { PanelKind, PanelItem, PanelBody } from "panel.slint";
+import { RowKind, ListCell, ListRow, HeaderButton, BarState, ListZones, SideItem, ListScreen } from "list.slint";
+import { NowPlayingScreen } from "now.slint";
+import { KeyZones, KeyCap, KeyRow, SearchField, OnScreenKeyboard } from "keyboard.slint";
+import { LabelButton } from "components.slint";
+
+export { Theme, Palette, Icons, Nav, Anim, Zones, Glyph, RoomRow, PaneButton, SpeakerRow, PaneState, PanelKind, PanelItem }
+export { RowKind, ListCell, ListRow, HeaderButton, BarState, ListZones, SideItem, KeyZones, KeyCap, KeyRow }
+
+// Which screen is in front.
+export enum Screen { home, list, now-playing }
+
+// What is open over the home screen.
+export enum Overlay { none, settings, room-panel }
+
+export component AppWindow inherits Window {
+    title: "x2rock";
+    icon: @image-url("assets/icon.png");
+    preferred-width: 960px;
+    preferred-height: 600px;
+    min-width: 640px;
+    min-height: 400px;
+    background: Theme.background;
+    default-font-family: "Roboto";
+
+    // Every key, pressed and released, goes to Rust, which owns focus. `text` is
+    // Slint's key text (a control character for a named key); `repeat` is the
+    // platform's auto-repeat. Returns whether it was used.
+    callback key(string, bool, bool) -> bool;
+    // The window's size in logical pixels changed: Rust rescales it to the canvas.
+    callback resized();
+
+    in property <[RoomRow]> rooms;
+    in property <string> rooms-status: "Looking for speakers\u{2026}";
+    in property <bool> rooms-loading: true;
+    in property <string> rooms-footer;
+    in property <PaneState> pane;
+    in property <color> pane-shade: Theme.surface;
+    in property <[PaneButton]> transport;
+    in property <[PaneButton]> places;
+    in property <[SpeakerRow]> speakers;
+    in property <string> notice;
+
+    in property <Screen> screen: Screen.home;
+    in property <string> list-title;
+    in property <string> list-room;
+    in property <[HeaderButton]> list-actions;
+    in property <[ListRow]> list-rows;
+    in property <bool> list-loading;
+    in property <BarState> bar;
+    in property <bool> pin-shown;
+    in property <bool> pin-held;
+    in property <[SideItem]> side;
+    // Send a report's QR code, beside its list.
+    in property <bool> list-aside-shown;
+    in property <image> list-aside-image;
+    // Search's field, between the header and the results.
+    in property <bool> search-shown;
+    in property <string> search-text;
+    in property <string> search-placeholder;
+    in property <string> search-summary;
+    in property <string> search-unanswered;
+    in property <string> search-button: "Search";
+    // The on-screen keyboard.
+    in property <bool> keyboard-shown;
+    in property <[KeyRow]> keyboard-rows;
+    in property <string> clock;
+    in property <length> drift-x;
+    in property <length> drift-y;
+
+    in property <Overlay> overlay: Overlay.none;
+    in property <[PanelItem]> panel-items;
+    in property <string> panel-title;
+    callback panel-step(int, int);
+    // A tap on the scrim, outside what is open.
+    callback dismiss();
+
+    callback volume-step(int);
+    callback speaker-step(int, int);
+    callback seek-to(float);
+
+    // The TV app's canvas, 960x540dp at the least, scaled to fill the window:
+    // a 16:9 screen gets the TV layout exactly, the Deck's 16:10 gets 960x600.
+    // Every dp number from the TV app is a length here, unchanged.
+    out property <float> zoom: max(0.25, min(root.width / 960px, root.height / 540px));
+    out property <length> cw: root.width / root.zoom;
+    out property <length> ch: root.height / root.zoom;
+    changed width => { root.resized(); }
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.key(event.text, event.repeat, true)) {
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if (root.key(event.text, false, false)) {
+                return accept;
+            }
+            return reject;
+        }
+
+        canvas := Rectangle {
+            x: 0;
+            y: 0;
+            width: root.cw;
+            height: root.ch;
+            transform-scale: root.zoom;
+            transform-origin: { x: 0, y: 0 };
+
+            if root.screen == Screen.home: HorizontalLayout {
+                Sidebar {
+                    width: 340px;
+                    rooms: root.rooms;
+                    status-text: root.rooms-status;
+                    loading: root.rooms-loading;
+                    footer-note: root.rooms-footer;
+                }
+                PlayerPane {
+                    horizontal-stretch: 1;
+                    pane: root.pane;
+                    shade: root.pane-shade;
+                    transport: root.transport;
+                    places: root.places;
+                    speakers: root.speakers;
+                    volume-step(d) => { root.volume-step(d); }
+                    speaker-step(i, d) => { root.speaker-step(i, d); }
+                    seek-to(f) => { root.seek-to(f); }
+                }
+            }
+
+            if root.screen == Screen.list: ListScreen {
+                title: root.list-title;
+                room: root.list-room;
+                actions: root.list-actions;
+                rows: root.list-rows;
+                loading: root.list-loading;
+                bar: root.bar;
+                pin-shown: root.pin-shown;
+                pin-held: root.pin-held;
+                side: root.side;
+                aside-shown: root.list-aside-shown;
+                aside-image: root.list-aside-image;
+                if root.search-shown: VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        spacing: 24px;
+                        SearchField {
+                            horizontal-stretch: 1;
+                            index: 0;
+                            text: root.search-text;
+                            placeholder: root.search-placeholder;
+                            typing: root.keyboard-shown;
+                            tapped => { Nav.tap(KeyZones.field, 0); }
+                        }
+                        LabelButton {
+                            y: (parent.height - self.height) / 2;
+                            zone: KeyZones.field;
+                            index: 1;
+                            has-icon: false;
+                            text: "Search";
+                        }
+                    }
+                    if root.search-summary != "" || root.search-unanswered != "": HorizontalLayout {
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.search-summary;
+                            color: Theme.on-surface;
+                            font-size: Theme.title-medium;
+                        }
+                        Text {
+                            text: root.search-unanswered;
+                            color: Theme.on-surface;
+                            font-size: Theme.title-medium;
+                        }
+                    }
+                }
+            }
+
+            if root.screen == Screen.now-playing: NowPlayingScreen {
+                pane: root.pane;
+                shade: root.pane-shade;
+                clock: root.clock;
+                drift-x: root.drift-x;
+                drift-y: root.drift-y;
+            }
+
+            if root.keyboard-shown: OnScreenKeyboard {
+                y: root.ch - self.height;
+                width: root.cw;
+                rows: root.keyboard-rows;
+                text: root.search-text;
+                placeholder: root.search-placeholder;
+            }
+
+            if root.overlay == Overlay.settings: Rectangle {
+                background: #00000099;
+                TouchArea { clicked => { root.dismiss(); } }
+                Rectangle {
+                    x: parent.width - self.width;
+                    width: 380px;
+                    background: Theme.surface-variant;
+                    // Taps on the panel itself do not reach the scrim.
+                    TouchArea { }
+                    PanelBody {
+                        zone: Zones.settings-panel;
+                        title: root.panel-title;
+                        large-title: true;
+                        pad-x: 32px;
+                        pad-y: 48px;
+                        gap: 8px;
+                        items: root.panel-items;
+                        step(f, d) => { root.panel-step(f, d); }
+                    }
+                }
+            }
+
+            if root.overlay == Overlay.room-panel: Rectangle {
+                background: #00000080;
+                TouchArea { clicked => { root.dismiss(); } }
+                Rectangle {
+                    width: 480px;
+                    height: min(520px, min(root.ch - 40px, room-panel.content-height));
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    background: Theme.surface;
+                    TouchArea { }
+                    room-panel := PanelBody {
+                        zone: Zones.room-panel;
+                        title: root.panel-title;
+                        items: root.panel-items;
+                        step(f, d) => { root.panel-step(f, d); }
+                    }
+                }
+            }
+
+            NoticeBanner {
+                x: (root.cw - self.width) / 2;
+                y: root.ch - self.height - 32px;
+                text: root.notice;
+            }
+        }
+    }
+}

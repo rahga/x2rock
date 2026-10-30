@@ -1,0 +1,460 @@
+// A screen opened from a room: the TV app's ScreenHeader over a list of
+// MediaRows in sections, with the room's now-playing bar at the foot. Queue,
+// Browse, Radio, a service's pages, Search's results, Alarms and About are all
+// this, with rows Rust lists.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import {
+    Nav, Pressable, Icon, IconButton, LabelButton, Card, Marquee, DotScanner,
+} from "components.slint";
+import { Glyph } from "home.slint";
+
+export enum RowKind {
+    // A section's title, titleLarge.
+    heading,
+    // One MediaRow, full width.
+    item,
+    // Several MediaRows side by side: Search's results.
+    grid,
+    // A line of text in the list: "Nothing in the queue", an error.
+    message,
+    // A button in the list: Retry, Try again, Load more.
+    button,
+    // A block of wrapped text that takes focus, so a long one scrolls: Send a
+    // report's paragraphs.
+    block,
+}
+
+export struct ListCell {
+    title: string,
+    subtitle: string,
+    // A queue's track number, drawn before the art.
+    number: string,
+    art: image,
+    has-art: bool,
+    glyph: Glyph,
+    // What the room is playing now, outlined.
+    active: bool,
+    // At the row's end: "Starting…", "Resumes at".
+    status: string,
+    // A small logo over the art's corner: Search's service.
+    focus: int,
+}
+
+export struct ListRow {
+    kind: RowKind,
+    text: string,
+    cells: [ListCell],
+    // A heading's icon: a service's logo.
+    icon: image,
+    has-icon: bool,
+}
+
+export struct HeaderButton {
+    icon: image,
+    has-icon: bool,
+    label: string,
+}
+
+export struct BarState {
+    shown: bool,
+    title: string,
+    subtitle: string,
+    art: image,
+    has-art: bool,
+    play-icon: image,
+}
+
+export global ListZones {
+    out property <int> header: 30;
+    out property <int> list: 31;
+    out property <int> bar: 32;
+    out property <int> pin: 33;
+    out property <int> side: 34;
+}
+
+// A way into a list, down its left: Radio's Popular and genres.
+export struct SideItem {
+    label: string,
+    selected: bool,
+}
+
+// One row of a list (MediaRow.kt).
+export component MediaRow inherits Card {
+    in property <ListCell> cell;
+    active: cell.active;
+    min-height: layout.preferred-height;
+    layout := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 0px;
+        if root.cell.number != "": Text {
+            width: 40px;
+            vertical-alignment: center;
+            text: root.cell.number;
+            color: Theme.on-surface;
+            font-size: Theme.body-medium;
+        }
+        // The art slot is always laid out, so every title starts at the same x.
+        Rectangle {
+            width: 56px;
+            height: 56px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            clip: true;
+            background: !root.cell.has-art && root.cell.glyph != Glyph.none ? Theme.on-surface.with-alpha(0.1) : transparent;
+            if root.cell.has-art: Image {
+                width: 56px;
+                height: 56px;
+                source: root.cell.art;
+                image-fit: cover;
+            }
+            if !root.cell.has-art && root.cell.glyph != Glyph.none: Icon {
+                source: root.cell.glyph == Glyph.tv ? Icons.tv : Icons.radio;
+                size: 28px;
+                colorize: Theme.on-surface.with-alpha(0.7);
+            }
+        }
+        Rectangle { width: 16px; }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Marquee {
+                text: root.cell.title;
+                running: root.focused;
+                ink: Theme.on-surface;
+                font-size: Theme.title-medium;
+                font-weight: Theme.weight-medium;
+            }
+            if root.cell.subtitle != "": Text {
+                text: root.cell.subtitle;
+                color: Theme.on-surface;
+                font-size: Theme.body-medium;
+                overflow: elide;
+            }
+        }
+        if root.cell.status != "": Text {
+            vertical-alignment: center;
+            text: root.cell.status;
+            color: Theme.primary;
+            font-size: Theme.body-medium;
+        }
+    }
+}
+
+// The top of every screen opened from a room: Back, the screen's name, the
+// room it acts on, then its actions (MediaRow.kt's ScreenHeader).
+export component ScreenHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> room;
+    in property <[HeaderButton]> actions;
+    // The Stay pin at the right end of Browse's headers: shown, and held.
+    in property <bool> pin-shown;
+    in property <bool> pin-held;
+    spacing: 24px;
+    LabelButton {
+        y: (parent.height - self.height) / 2;
+        zone: ListZones.header;
+        index: 0;
+        icon: Icons.arrow-back;
+        text: "Back";
+    }
+    VerticalLayout {
+        alignment: center;
+        Text {
+            text: root.title;
+            color: Theme.on-surface;
+            font-size: Theme.headline-medium;
+            overflow: elide;
+        }
+        if root.room != "": Text {
+            text: "in " + root.room;
+            color: Theme.primary;
+            font-size: Theme.title-small;
+            font-weight: Theme.weight-medium;
+            overflow: elide;
+        }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        alignment: start;
+        horizontal-stretch: 1;
+        for action[i] in root.actions: LabelButton {
+            y: (parent.height - self.height) / 2;
+            zone: ListZones.header;
+            index: i + 1;
+            icon: action.icon;
+            has-icon: action.has-icon;
+            text: action.label;
+        }
+    }
+    // Outlined: back to the player after starting something. Filled: stay here.
+    // Named while focused by what a press will do.
+    if root.pin-shown: Rectangle {
+        width: 56px;
+        pin := IconButton {
+            y: (parent.height - self.height) / 2;
+            zone: ListZones.pin;
+            index: 0;
+            icon: root.pin-held ? Icons.push-pin : Icons.push-pin-outlined;
+            icon-size: 24px;
+        }
+        Text {
+            y: pin.y + pin.height + 4px;
+            x: (parent.width - self.width) / 2;
+            visible: pin.focused;
+            text: root.pin-held ? "Release" : "Hold";
+            color: Theme.on-surface;
+            font-size: Theme.label-large;
+            font-weight: Theme.weight-medium;
+        }
+    }
+}
+
+// What the room plays, at the foot of a screen opened from it (NowPlayingBar.kt).
+export component NowPlayingBar inherits Rectangle {
+    in property <BarState> bar;
+    height: 80px;
+    background: Theme.surface;
+    HorizontalLayout {
+        padding-left: 48px;
+        padding-right: 48px;
+        spacing: 16px;
+        Rectangle {
+            width: 56px;
+            height: 56px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            clip: true;
+            if root.bar.has-art: Image {
+                width: 56px;
+                height: 56px;
+                source: root.bar.art;
+                image-fit: cover;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.bar.title;
+                color: Theme.on-surface;
+                font-size: Theme.title-medium;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            if root.bar.subtitle != "": Text {
+                text: root.bar.subtitle;
+                color: Theme.on-surface;
+                font-size: Theme.body-medium;
+                overflow: elide;
+            }
+        }
+        IconButton {
+            y: (parent.height - self.height) / 2;
+            zone: ListZones.bar;
+            index: 0;
+            icon: root.bar.play-icon;
+        }
+    }
+}
+
+export component ListScreen inherits Rectangle {
+    in property <string> title;
+    in property <string> room;
+    in property <[HeaderButton]> actions;
+    in property <[ListRow]> rows;
+    in property <bool> loading;
+    in property <BarState> bar;
+    in property <bool> pin-shown;
+    in property <bool> pin-held;
+    in property <[SideItem]> side;
+    // Down the right: Send a report's QR code, and what scanning it does.
+    in property <bool> aside-shown;
+    in property <image> aside-image;
+    background: Theme.background;
+
+    VerticalLayout {
+        VerticalLayout {
+            vertical-stretch: 1;
+            padding-left: 48px;
+            padding-right: 48px;
+            padding-top: 32px;
+            spacing: 16px;
+            ScreenHeader {
+                title: root.title;
+                room: root.room;
+                actions: root.actions;
+                pin-shown: root.pin-shown;
+                pin-held: root.pin-held;
+            }
+            @children
+            if root.loading && root.rows.length == 0: HorizontalLayout {
+                padding-top: 24px;
+                alignment: start;
+                DotScanner { }
+            }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 32px;
+                if root.side.length > 0: Flickable {
+                    width: 240px;
+                    content-height: side-column.preferred-height;
+                    side-column := VerticalLayout {
+                        padding-bottom: 48px;
+                        spacing: 8px;
+                        for item[i] in root.side: Rectangle {
+                            height: 44px;
+                            side-button := LabelButton {
+                                width: parent.width;
+                                from-start: true;
+                                zone: ListZones.side;
+                                index: i;
+                                has-icon: false;
+                                text: item.label;
+                            }
+                            // The category shown, outlined.
+                            Rectangle {
+                                visible: item.selected;
+                                border-radius: side-button.height / 2;
+                                border-width: 2px;
+                                border-color: Theme.primary;
+                            }
+                        }
+                    }
+                }
+                flick := Flickable {
+                    vertical-stretch: 1;
+                    content-height: column.preferred-height;
+                    column := VerticalLayout {
+                        padding-bottom: 24px;
+                        spacing: 8px;
+                        for row in root.rows: Rectangle {
+                            // Keep the focused row in view.
+                            property <bool> is-focused: Nav.zone == ListZones.list && row.cells.length > 0 && Nav.index >= row.cells[0].focus && Nav.index <= row.cells[row.cells.length - 1].focus && row.cells[0].focus >= 0;
+                            min-height: content.min-height;
+                            // Keep the focused row in view: when focus reaches it, and when it is
+                            // made already focused (a list opening on its playing track).
+                            function show() {
+                                if (self.y + flick.content-y < 0) {
+                                    flick.content-y = -self.y;
+                                } else if (self.y + self.height + flick.content-y > flick.height) {
+                                    flick.content-y = flick.height - self.y - self.height;
+                                }
+                            }
+                            changed is-focused => {
+                                if (self.is-focused) {
+                                    self.show();
+                                }
+                            }
+                            // At creation the row is not laid out yet: shown a tick later.
+                            property <bool> show-pending: false;
+                            init => {
+                                if (self.is-focused) {
+                                    self.show-pending = true;
+                                }
+                            }
+                            Timer {
+                                interval: 1ms;
+                                running: show-pending;
+                                triggered => {
+                                    show-pending = false;
+                                    show();
+                                }
+                            }
+                            content := VerticalLayout {
+                                if row.kind == RowKind.heading: HorizontalLayout {
+                                    padding-top: 12px;
+                                    padding-bottom: 4px;
+                                    spacing: 16px;
+                                    if row.has-icon: Image {
+                                        width: 32px;
+                                        height: 32px;
+                                        source: row.icon;
+                                        image-fit: contain;
+                                    }
+                                    Text {
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        text: row.text;
+                                        color: Theme.on-surface;
+                                        font-size: Theme.title-large;
+                                    }
+                                }
+                                if row.kind == RowKind.message: Text {
+                                    text: row.text;
+                                    color: Theme.on-surface-variant;
+                                    font-size: Theme.body-large;
+                                    wrap: word-wrap;
+                                }
+                                if row.kind == RowKind.item && row.cells.length > 0: MediaRow {
+                                    zone: ListZones.list;
+                                    index: row.cells[0].focus;
+                                    cell: row.cells[0];
+                                }
+                                if row.kind == RowKind.grid: HorizontalLayout {
+                                    spacing: 16px;
+                                    for cell in row.cells: MediaRow {
+                                        horizontal-stretch: 1;
+                                        width: (root.width - 96px - 32px) / 3;
+                                        zone: ListZones.list;
+                                        index: cell.focus;
+                                        cell: cell;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                if row.kind == RowKind.block && row.cells.length > 0: Card {
+                                    zone: ListZones.list;
+                                    index: row.cells[0].focus;
+                                    min-height: block-text.preferred-height + 24px;
+                                    block-text := Text {
+                                        x: 16px;
+                                        y: 12px;
+                                        width: parent.width - 32px;
+                                        text: row.text;
+                                        color: Theme.on-surface;
+                                        font-size: Theme.body-medium;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                if row.kind == RowKind.button && row.cells.length > 0: HorizontalLayout {
+                                    alignment: start;
+                                    LabelButton {
+                                        zone: ListZones.list;
+                                        index: row.cells[0].focus;
+                                        has-icon: false;
+                                        text: row.text;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.aside-shown: VerticalLayout {
+                    width: 300px;
+                    spacing: 16px;
+                    alignment: start;
+                    // Black on white, whatever the theme.
+                    // The code carries its own white quiet zone.
+                    Image {
+                        height: self.width;
+                        source: root.aside-image;
+                        image-fit: contain;
+                    }
+                    Text {
+                        text: "Scan with your phone to open this as a GitHub issue. Issues there are public. Nothing is sent until you submit it, and you can edit it first. It holds no addresses, serial numbers or Sonos ids.";
+                        color: Theme.on-surface-variant;
+                        font-size: Theme.body-medium;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        if root.bar.shown: NowPlayingBar {
+            bar: root.bar;
+        }
+    }
+}
