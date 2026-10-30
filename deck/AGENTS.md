@@ -5,6 +5,10 @@ x2rock-deck is the Slint front end for Sonos on the Steam Deck, Linux desktops a
 root, used as a library (`default-features = false`). The root's `AGENTS.md` and
 `CONTRIBUTING.md` set the standard here too.
 
+Open deck work is tracked as GitHub issues on `rahga/x2rock` labelled `deck`
+(`gh issue list -R rahga/x2rock --label deck`); each says what is wrong, where, and when it is
+done. Issues also labelled `hardware` are the owner's to check on real devices.
+
 Where the owner keeps a local work queue (`.local-work/`, ignored by Git), read its `README.md`
 and follow it. Where there is none, use the task the user gives you; its absence is not a reason
 to invent or reconstruct a backlog.
