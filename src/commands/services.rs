@@ -22,9 +22,9 @@ use crate::sonos::proto::Player;
 use crate::sonos::upnp::{self, Upnp};
 use crate::state::State;
 use crate::{bookmarks, catalogue, credentials, hint, sonos};
+use x2rock::import::{capture_stored, default_nickname};
 #[allow(unused_imports)]
 pub use x2rock::play::*;
-use x2rock::import::{capture_stored, default_nickname};
 
 /// A Plex account token as what a link yields: Plex sends no private key and
 /// no user hash, however the token was come by.

@@ -276,8 +276,8 @@ pub async fn play_track(player: &Connection, target: &Target, n: u32) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use crate::sonos;
     use super::*;
+    use crate::sonos;
     use serde_json::json;
 
     /// Each mode carries its own JSON key (the skill documents `repeat`,

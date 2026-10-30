@@ -148,11 +148,15 @@ pub async fn scan_local_subnet() -> Result<Scan> {
 pub async fn ssdp(window: std::time::Duration) -> Result<Vec<Ipv4Addr>> {
     let socket = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     let search = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n";
-    socket.send_to(search.as_bytes(), (Ipv4Addr::new(239, 255, 255, 250), 1900)).await?;
+    socket
+        .send_to(search.as_bytes(), (Ipv4Addr::new(239, 255, 255, 250), 1900))
+        .await?;
     let mut found = Vec::new();
     let deadline = tokio::time::Instant::now() + window;
     let mut buf = [0u8; 2048];
-    while let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
+    while let Ok(Ok((n, from))) =
+        tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
+    {
         let reply = String::from_utf8_lossy(&buf[..n]);
         if let Some(ip) = ssdp_player(&reply).or(match from.ip() {
             std::net::IpAddr::V4(v4) if reply.contains("ZonePlayer") => Some(v4),
@@ -171,9 +175,11 @@ fn ssdp_player(reply: &str) -> Option<Ipv4Addr> {
     if !reply.contains("ZonePlayer") {
         return None;
     }
-    let location = reply
-        .lines()
-        .find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("LOCATION")).map(|(_, v)| v.trim()))?;
+    let location = reply.lines().find_map(|l| {
+        l.split_once(':')
+            .filter(|(k, _)| k.trim().eq_ignore_ascii_case("LOCATION"))
+            .map(|(_, v)| v.trim())
+    })?;
     let host = location.split("://").nth(1)?.split(['/', ':']).next()?;
     host.parse().ok()
 }
@@ -186,7 +192,12 @@ mod tests {
     fn an_ssdp_reply_gives_the_player_address_from_its_location() {
         let reply = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age = 1800\r\nLOCATION: http://192.168.77.94:1400/xml/device_description.xml\r\nST: urn:schemas-upnp-org:device:ZonePlayer:1\r\nHOUSEHOLD.SMARTSPEAKER.AUDIO: Sonos_x.y\r\n\r\n";
         assert_eq!(ssdp_player(reply), Some(Ipv4Addr::new(192, 168, 77, 94)));
-        assert_eq!(ssdp_player("HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.2:80/\r\nST: upnp:rootdevice\r\n"), None);
+        assert_eq!(
+            ssdp_player(
+                "HTTP/1.1 200 OK\r\nLOCATION: http://10.0.0.2:80/\r\nST: upnp:rootdevice\r\n"
+            ),
+            None
+        );
     }
 
     fn net(ip: [u8; 4], mask: [u8; 4]) -> LocalNetwork {

@@ -1,5 +1,8 @@
 #[allow(unused_imports)]
-use x2rock::{art,bookmarks,catalogue,credentials,discover,frontpage,hint,iheart,itunes,netid,rereads,salt,session,sonos,state,stations,store,streams,testdir};
+use x2rock::{
+    art, bookmarks, catalogue, credentials, discover, frontpage, hint, iheart, itunes, netid,
+    rereads, salt, session, sonos, state, stations, store, streams, testdir,
+};
 
 mod cli;
 mod clipserve;

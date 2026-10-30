@@ -18,7 +18,6 @@ use crate::sonos::proto::{ContentId, HistoryItem};
 use crate::sonos::upnp::{self, Upnp};
 use crate::{bookmarks, catalogue, credentials, hint, sonos, streams};
 
-
 /// "a" or "an" for a word about to follow it.
 ///
 /// Only ever used on SMAPI item types - `artist`, `album`, `genre`, `playlist` -
@@ -62,7 +61,6 @@ pub fn is_refusal(e: &anyhow::Error) -> bool {
 pub fn upnp_ip(target: &Target, fallback: IpAddr) -> IpAddr {
     target.coordinator_ip.unwrap_or(fallback)
 }
-
 
 /// Play one item from a service in a room, by the id a search or browse returned.
 ///
@@ -543,7 +541,10 @@ impl Naming {
     /// queued row is left disagreeing, until a `link --from-household` fills
     /// the selector in. `None` when the service has no type in the player's
     /// list, so no cdudn can be built at all.
-    pub fn of(service: &sonos::smapi::Service, token: Option<&sonos::smapi::Token>) -> Option<Self> {
+    pub fn of(
+        service: &sonos::smapi::Service,
+        token: Option<&sonos::smapi::Token>,
+    ) -> Option<Self> {
         Some(Self {
             cdudn: service.cdudn_for(token.and_then(|t| t.selector.as_deref()))?,
             serial: token.and_then(|t| t.serial).map(|n| n.to_string()),
@@ -691,7 +692,6 @@ pub async fn arrived(
     let now = playing_identity(&player.metadata(&target.group_id).await?);
     Ok(&now != before || now.1.as_deref() == Some(name))
 }
-
 
 /// Whether a stream is starting fresh or replacing one whose URL expired.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1062,7 +1062,6 @@ pub async fn stream_url(
 /// until 2026-10-05. Under rahga.com, the project's own domain.
 pub const APP_ID: &str = "com.rahga.x2rock";
 
-
 /// Ask a room to play, then confirm it actually did.
 ///
 /// `play` on a room whose source has gone stale - an expired stream URL, a
@@ -1139,7 +1138,6 @@ pub async fn play_confirmed(
         _ => Ok(()),
     }
 }
-
 
 /// Persist a token a service handed back inside a `tokenRefreshRequired`
 /// fault, so the next command does not pay for the same refresh again.
@@ -1253,7 +1251,6 @@ pub fn use_refreshed_token(
     Some(fresh)
 }
 
-
 /// A `play` the player refused because it cannot play what it holds, read off
 /// the typed refusal; `None` for any other failure (a lost socket, a stale
 /// group id), which is not about the source and must not be treated as one.
@@ -1283,7 +1280,6 @@ pub async fn playback_failed(
     let from_queue = upnp.playing_from_queue().await.unwrap_or(false);
     playback_failed_message(room, error, from_queue)
 }
-
 
 /// How often to ask. Cheap - it is one Control API call to a player on the LAN.
 pub const STREAM_POLL: Duration = Duration::from_millis(500);
@@ -1369,7 +1365,6 @@ pub fn audio_type(head: &str) -> Option<String> {
     })
 }
 
-
 /// How long `replay` keeps pressing play after `loadContent`. The load is
 /// asynchronous, and a `play` that overtakes it goes one of two ways: refused
 /// as `ERROR_PLAYBACK_NO_CONTENT`, or - worse - accepted and then lost, the
@@ -1377,7 +1372,6 @@ pub fn audio_type(head: &str) -> Option<String> {
 /// 2026-09-26). A play sent two seconds after the load started every item
 /// tried, so the play is repeated until the room is seen playing.
 pub const LOAD_SETTLE: std::time::Duration = std::time::Duration::from_secs(12);
-
 
 /// A play the player accepted without ever leaving idle, and without raising an
 /// error to say why - most often a room with nothing loaded.
@@ -1394,7 +1388,6 @@ pub fn stayed_idle(room: &str) -> anyhow::Error {
     )
     .into()
 }
-
 
 pub fn playback_failed_message(
     room: &str,
@@ -1418,7 +1411,6 @@ pub fn playback_failed_message(
     };
     hint::Hint::new(message, hint::Code::PlaybackFailed, None).into()
 }
-
 
 /// The token and cdudn for `bookmark`'s own account on `service`.
 ///
@@ -1530,7 +1522,6 @@ pub fn favorites_of<'a>(
         .collect()
 }
 
-
 /// The service catalogue, brought up to date against the player the session
 /// reached. Every by-id lookup wants this before it trusts an id: a cleared or
 /// schema-bumped cache would otherwise make a bookmark or a remembered stream
@@ -1571,7 +1562,12 @@ pub async fn save_playing_favorite(
     let catalogue = refreshed_catalogue(session).await?;
     let service = catalogue
         .by_id(&item.service_id)
-        .ok_or_else(|| anyhow!("service {} is not in this player's service list", item.service_id))?
+        .ok_or_else(|| {
+            anyhow!(
+                "service {} is not in this player's service list",
+                item.service_id
+            )
+        })?
         .clone();
     item.service_name = Some(service.name.clone());
     let (_, cdudn) = account_naming(session, &service, &item).await?;
@@ -1592,10 +1588,18 @@ pub async fn save_playing_favorite(
             .await?
         }
     };
-    let id = saved.as_deref().or(already.first().map(|f| f.id.as_str())).map(|i| i.trim_start_matches("FV:2/").to_owned());
-    Ok(SavedFavorite { name: item.name.clone(), service: service.name.clone(), kind: item.kind.clone(), id, saved: saved.is_some() })
+    let id = saved
+        .as_deref()
+        .or(already.first().map(|f| f.id.as_str()))
+        .map(|i| i.trim_start_matches("FV:2/").to_owned());
+    Ok(SavedFavorite {
+        name: item.name.clone(),
+        service: service.name.clone(),
+        kind: item.kind.clone(),
+        id,
+        saved: saved.is_some(),
+    })
 }
-
 
 /// What `rate` did: `{service, rating, action, should_skip, skipped,
 /// message}` as JSON, and one line of text.
@@ -1807,10 +1811,19 @@ pub async fn rating_offers(player: &Connection, group: &str) -> Result<Option<Ra
     let mut catalogue = catalogue::Catalogue::load();
     let upnp = Upnp::new(player.ip());
     let (meta, dirty) = tokio::try_join!(player.metadata(group), catalogue.refresh(&upnp, false))?;
-    let Some(track_id) = meta.track().and_then(|t| t.id.as_ref()).filter(|id| id.is_real()) else {
+    let Some(track_id) = meta
+        .track()
+        .and_then(|t| t.id.as_ref())
+        .filter(|id| id.is_real())
+    else {
         return Ok(None);
     };
-    let Some(service) = track_id.service_id.as_deref().and_then(|id| catalogue.by_id(id)).cloned() else {
+    let Some(service) = track_id
+        .service_id
+        .as_deref()
+        .and_then(|id| catalogue.by_id(id))
+        .cloned()
+    else {
         return Ok(None);
     };
     let learned = !catalogue.ratings_cached(&service.id);
@@ -1825,22 +1838,37 @@ pub async fn rating_offers(player: &Connection, group: &str) -> Result<Option<Ra
     let household = player.household_id().await?;
     let token = linked.token_for(&household, &service.id);
     let mut refreshed = None;
-    let properties = sonos::smapi::extended_metadata(&service, token.as_ref(), &track_id.object_id, &mut refreshed).await?;
+    let properties = sonos::smapi::extended_metadata(
+        &service,
+        token.as_ref(),
+        &track_id.object_id,
+        &mut refreshed,
+    )
+    .await?;
     let _ = use_refreshed_token(&mut linked, &service.id, token, refreshed);
     let offered: Vec<&sonos::smapi::Rating> = properties
         .iter()
-        .filter_map(|(propname, value)| sonos::smapi::RatingsMatch::offered(&ratings, propname, value))
+        .filter_map(|(propname, value)| {
+            sonos::smapi::RatingsMatch::offered(&ratings, propname, value)
+        })
         .flatten()
         .collect();
     if offered.is_empty() {
         return Ok(None);
     }
-    let heart = offered.iter().any(|r| r.string_id.to_uppercase().starts_with("SAVE") || r.kind() == Some(sonos::smapi::RatingKind::Unfavorite));
-    let mut kinds: Vec<sonos::smapi::RatingKind> = offered.iter().filter_map(|r| r.kind()).collect();
+    let heart = offered.iter().any(|r| {
+        r.string_id.to_uppercase().starts_with("SAVE")
+            || r.kind() == Some(sonos::smapi::RatingKind::Unfavorite)
+    });
+    let mut kinds: Vec<sonos::smapi::RatingKind> =
+        offered.iter().filter_map(|r| r.kind()).collect();
     kinds.dedup();
-    Ok(Some(RatingOffers { service: service.name.clone(), kinds, heart }))
+    Ok(Some(RatingOffers {
+        service: service.name.clone(),
+        kinds,
+        heart,
+    }))
 }
-
 
 /// A recently played item as it can be played *now*.
 pub struct Replayable<'a> {
@@ -1944,7 +1972,6 @@ pub async fn history_catalogue(session: &Session) -> catalogue::Catalogue {
     }
     catalogue
 }
-
 
 /// The service id `getHistory` gives a saved Sonos playlist, which is no music
 /// service and has no account: its `objectId` is the playlist's bare id.

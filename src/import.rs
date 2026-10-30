@@ -10,7 +10,6 @@ use anyhow::{Result, ensure};
 
 use crate::{catalogue, credentials, session, sonos};
 
-
 /// What the household should call this machine's account, when nothing was given.
 ///
 /// The hostname, because a household can have several machines linked to the
