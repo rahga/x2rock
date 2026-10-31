@@ -425,15 +425,17 @@ impl VolumeBurst {
 /// held control repeats at most every 250ms and moves at most 20 per hold;
 /// release and press again to go further. While a burst lasts, it steps from
 /// the level it last asked for, since the speaker's events lag behind; but
-/// not once the speaker says a level off the way from where the burst began
-/// to there, which means something else moved it.
+/// not once the speaker says a level outside every level the burst went
+/// through (give or take 1, as a group's level can round), which means
+/// something else moved it.
 #[derive(Debug, Default)]
 pub struct VolumeHold {
     burst: VolumeBurst,
     held: i32,
     last_at: Option<u64>,
-    /// Where the burst began and the level it last asked for.
-    target: Option<(i32, i32)>,
+    /// The lowest and highest levels the burst has been at, and the level it
+    /// last asked for.
+    target: Option<(i32, i32, i32)>,
 }
 
 impl VolumeHold {
@@ -457,19 +459,19 @@ impl VolumeHold {
         } else if since.is_some_and(|ms| ms < Self::REPEAT_MS) {
             return None;
         }
-        let (began, from) = match self.target {
-            Some((began, target))
+        let (low, high, from) = match self.target {
+            Some((low, high, target))
                 if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS)
-                    && (began.min(target)..=began.max(target)).contains(&level) =>
+                    && (low - 1..=high + 1).contains(&level) =>
             {
-                (began, target)
+                (low, high, target)
             }
             // Moved elsewhere mid-burst: start a fresh one from there.
             Some(_) if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS) => {
                 self.burst = VolumeBurst::default();
-                (level, level)
+                (level, level, level)
             }
-            _ => (level, level),
+            _ => (level, level, level),
         };
         let step = self.burst.step(from, direction, now_ms);
         let step = (self.held + step).clamp(-Self::MOST, Self::MOST) - self.held;
@@ -479,7 +481,7 @@ impl VolumeHold {
         }
         self.held += to - from;
         self.last_at = Some(now_ms);
-        self.target = Some((began, to));
+        self.target = Some((low.min(to), high.max(to), to));
         Some((from, to))
     }
 }
@@ -809,6 +811,18 @@ mod tests {
         assert_eq!(h.step(51, 1, false, 300), Some((52, 55)));
         // A phone took it down to 20: from there, not back up to 58.
         assert_eq!(h.step(20, 1, false, 600), Some((20, 22)));
+
+        // Turning back mid-burst, the speaker catching up to the highest
+        // level is the burst's own, not someone else's.
+        let mut h = VolumeHold::default();
+        assert_eq!(h.step(50, 1, false, 0), Some((50, 52)));
+        assert_eq!(h.step(51, 1, false, 300), Some((52, 55)));
+        assert_eq!(h.step(52, -1, false, 600), Some((55, 53)));
+        assert_eq!(h.step(55, -1, false, 900), Some((53, 50)));
+        // A group reporting one above what was set is not an outside change.
+        let mut h = VolumeHold::default();
+        assert_eq!(h.step(50, 1, false, 0), Some((50, 52)));
+        assert_eq!(h.step(53, 1, false, 300), Some((52, 55)));
     }
 
     #[test]
