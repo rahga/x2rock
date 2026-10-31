@@ -37,7 +37,7 @@ pub struct Prefs {
     pub after_playing: Option<String>,
     pub beta_features: bool,
     pub presets: Vec<Preset>,
-    /// Off by default: a newer release is looked for once a launch when on.
+    /// On by default: a newer release is looked for once a launch when on.
     pub check_for_updates: Option<bool>,
     #[serde(skip)]
     pub theme: String,

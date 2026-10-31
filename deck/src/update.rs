@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-const LIST: &str = "https://api.github.com/repos/rahga/x2rock/releases?per_page=30";
+const LIST: &str = "https://api.github.com/repos/rahga/x2rock/releases?per_page=100";
 pub const RELEASES: &str = "github.com/rahga/x2rock/releases";
 /// What the deck's release tags start with.
 const TAG: &str = "deck-v";
@@ -40,33 +40,40 @@ pub async fn newer_release() -> Result<Option<String>> {
     Ok(newer(&version, env!("CARGO_PKG_VERSION")).then_some(version))
 }
 
+fn parse_version(v: &str) -> Option<Vec<u64>> {
+    v.trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?
+        .split('.')
+        .map(|n| n.parse().ok())
+        .collect()
+}
+
 /// The newest published deck release's version (`1.2.3` of `deck-v1.2.3`), from
-/// GitHub's list of releases, newest first. Drafts and pre-releases are not
-/// offered, as `releases/latest` never offered them.
+/// GitHub's list of releases. The release with the highest parsed version is taken
+/// so that maintenance releases for older lines (e.g. 0.1.1 published after 0.2.0)
+/// do not mask newer lines. Drafts and pre-releases are not offered, as
+/// `releases/latest` never offered them.
 fn newest_deck(releases: &serde_json::Value) -> Option<String> {
-    releases.as_array()?.iter().find_map(|r| {
-        let flag = |name| r.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
-        if flag("draft") || flag("prerelease") {
-            return None;
-        }
-        r.get("tag_name")?
-            .as_str()?
-            .strip_prefix(TAG)
-            .map(str::to_owned)
-    })
+    releases
+        .as_array()?
+        .iter()
+        .filter_map(|r| {
+            let flag = |name| r.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+            if flag("draft") || flag("prerelease") {
+                return None;
+            }
+            let version = r.get("tag_name")?.as_str()?.strip_prefix(TAG)?;
+            let parsed = parse_version(version)?;
+            Some((parsed, version.to_owned()))
+        })
+        .max_by(|(p1, _), (p2, _)| p1.cmp(p2))
+        .map(|(_, version)| version)
 }
 
 /// Whether `tag` (v1.2.3) is a later version than `current` (1.2.0).
 pub fn newer(tag: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Option<Vec<u64>> {
-        v.trim_start_matches('v')
-            .split(['-', '+'])
-            .next()?
-            .split('.')
-            .map(|n| n.parse().ok())
-            .collect()
-    };
-    match (parse(tag), parse(current)) {
+    match (parse_version(tag), parse_version(current)) {
         (Some(a), Some(b)) => a > b,
         _ => false,
     }
@@ -108,5 +115,38 @@ mod tests {
             None,
             "only CLI releases: nothing to offer"
         );
+    }
+
+    #[test]
+    fn older_line_created_later_does_not_mask_newer_line() {
+        // GitHub lists releases in reverse chronological creation order.
+        // If 0.1.1 is published as a maintenance release after 0.2.0,
+        // it appears first in the list, but 0.2.0 should still be selected as newest.
+        let releases = serde_json::json!([
+            { "tag_name": "deck-v0.1.1", "draft": false, "prerelease": false },
+            { "tag_name": "deck-v0.2.0", "draft": false, "prerelease": false },
+        ]);
+        assert_eq!(newest_deck(&releases).as_deref(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn deck_release_past_first_page_of_cli_releases_is_found() {
+        // When there are more than 30 CLI releases preceding the deck release,
+        // a 100-item page still finds the deck release.
+        let mut list = Vec::new();
+        for i in 1..=35 {
+            list.push(serde_json::json!({
+                "tag_name": format!("v0.{i}.0"),
+                "draft": false,
+                "prerelease": false
+            }));
+        }
+        list.push(serde_json::json!({
+            "tag_name": "deck-v0.1.0",
+            "draft": false,
+            "prerelease": false
+        }));
+        let releases = serde_json::Value::Array(list);
+        assert_eq!(newest_deck(&releases).as_deref(), Some("0.1.0"));
     }
 }

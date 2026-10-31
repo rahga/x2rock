@@ -140,7 +140,10 @@ fn main() -> anyhow::Result<()> {
                 if let Ok(Some(version)) = update::newer_release().await {
                     let _ = slint::invoke_from_event_loop(move || {
                         with_app(|app| {
-                            app.notice(&format!("x2rock {version} is out: {}", update::RELEASES))
+                            app.notice(&format!(
+                                "x2rock-deck {version} is out: {}",
+                                update::RELEASES
+                            ))
                         })
                     });
                 }
