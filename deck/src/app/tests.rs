@@ -930,6 +930,7 @@ fn navigation_follows_the_tv_apps_rules() {
     test_reconnect_preserves_loaded_service_page_without_refetch();
     test_reconnect_partially_answered_search_does_not_duplicate_sections();
     test_rejected_favorites_response_does_not_overwrite_cache();
+    test_speaker_row_follows_speaker_across_regroup();
 
     // Closing a list (or opening full screen) must release the model's cover
     // references too, otherwise evicting the cache cannot release those pixels.
@@ -1664,6 +1665,115 @@ fn test_rejected_favorites_response_does_not_overwrite_cache() {
             "rejected response does not overwrite Browse screen"
         );
         app.close_screen();
+    });
+}
+
+fn test_speaker_row_follows_speaker_across_regroup() {
+    let mut house = demo::household();
+    if let Some(groups) = house.groups.as_mut()
+        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
+    {
+        dining.player_ids = vec!["RINCON_D1".into(), "RINCON_D2".into(), "RINCON_D3".into()];
+        groups.players.push(x2rock::sonos::proto::Player {
+            id: "RINCON_D3".into(),
+            name: "Dining Room Sub".into(),
+            websocket_url: "wss://192.168.1.28:1443/websocket/api".into(),
+            capabilities: vec![],
+        });
+    }
+    house.player_volumes.insert(
+        "RINCON_D3".into(),
+        serde_json::from_value(serde_json::json!({ "volume": 15, "muted": false })).unwrap(),
+    );
+    with_app(|app| {
+        app.update(household::Update::Household(Box::new(house.clone())));
+        let dining_idx = app
+            .rooms
+            .iter()
+            .position(|r| r.group_id == "RINCON_D1:2")
+            .expect("Dining Room");
+        app.select_row(dining_idx);
+        app.render_pane();
+        assert_eq!(
+            app.speakers,
+            vec!["RINCON_D1", "RINCON_D2", "RINCON_D3"],
+            "three speakers in Dining Room"
+        );
+        app.set_focus(zone::SPEAKERS, 1);
+    });
+    assert_eq!(focus(), (zone::SPEAKERS, 1), "focused on RINCON_D2");
+
+    // Remove earlier speaker RINCON_D1: RINCON_D2 slides to index 0.
+    if let Some(groups) = house.groups.as_mut()
+        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
+    {
+        dining.player_ids = vec!["RINCON_D2".into(), "RINCON_D3".into()];
+    }
+    with_app(|app| {
+        app.update(household::Update::Household(Box::new(house.clone())));
+        app.sent.borrow_mut().clear();
+    });
+
+    // Right steps volume on the speaker that had focus (RINCON_D2), not whichever speaker slid into row 1.
+    press(Action::Right);
+    assert_eq!(
+        focus(),
+        (zone::SPEAKERS, 0),
+        "focus followed RINCON_D2 to index 0"
+    );
+    let s = sent();
+    assert!(
+        matches!(
+            s.as_slice(),
+            [household::Command::AdjustPlayerVolume { player, .. }] if player == "RINCON_D2"
+        ),
+        "volume delta sent to RINCON_D2: {:?}",
+        s
+    );
+
+    // Touch tap on index 0 also routes to RINCON_D2 through speaker_step.
+    with_app(|app| {
+        app.sent.borrow_mut().clear();
+        app.speaker_step_tapped(0, 1);
+    });
+    let s = sent();
+    assert!(
+        matches!(
+            s.as_slice(),
+            [household::Command::AdjustPlayerVolume { player, .. }] if player == "RINCON_D2"
+        ),
+        "touch tap on row 0 adjusted RINCON_D2: {:?}",
+        s
+    );
+
+    // When the focused speaker is removed, focus leaves for a safe row (pane_entry),
+    // and subsequent Right does not adjust speaker volume.
+    if let Some(groups) = house.groups.as_mut()
+        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
+    {
+        dining.player_ids = vec!["RINCON_D3".into()];
+    }
+    with_app(|app| {
+        app.update(household::Update::Household(Box::new(house.clone())));
+        app.sent.borrow_mut().clear();
+    });
+    assert_ne!(
+        focus().0,
+        zone::SPEAKERS,
+        "focus left speakers zone when focused speaker was removed"
+    );
+    press(Action::Right);
+    let s = sent();
+    assert!(
+        s.iter()
+            .all(|c| !matches!(c, household::Command::AdjustPlayerVolume { .. })),
+        "no speaker volume adjusted after focused speaker removed: {:?}",
+        s
+    );
+
+    // Restore demo household for subsequent tests.
+    with_app(|app| {
+        app.update(household::Update::Household(Box::new(demo::household())));
     });
 }
 

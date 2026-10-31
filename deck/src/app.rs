@@ -834,6 +834,9 @@ impl App {
         let held_place = (fz == zone::PLACES)
             .then(|| self.places.get(fi).copied())
             .flatten();
+        let held_speaker = (fz == zone::SPEAKERS)
+            .then(|| self.speakers.get(fi).cloned())
+            .flatten();
 
         // The transport, as the player allows it.
         self.transport.clear();
@@ -1176,9 +1179,10 @@ impl App {
         // no longer draws hands focus to Play/Pause (handFocusOnLeave), never to
         // whichever control slid into its index: Next leaving at a queue's end
         // used to leave a press on Repeat.
-        let followed = match (held_transport, held_place) {
-            (Some(t), _) => Some(self.transport.iter().position(|x| *x == t)),
-            (_, Some(p)) => Some(self.places.iter().position(|x| *x == p)),
+        let followed = match (held_transport, held_place, held_speaker) {
+            (Some(t), _, _) => Some(self.transport.iter().position(|x| *x == t)),
+            (_, Some(p), _) => Some(self.places.iter().position(|x| *x == p)),
+            (_, _, Some(s)) => Some(self.speakers.iter().position(|x| *x == s)),
             _ => None,
         };
         match followed {
