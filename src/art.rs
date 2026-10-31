@@ -8,7 +8,10 @@
 //! **What may be fetched.** `https://` from anywhere, which is where services
 //! keep their covers, and `http://` only from a private-network address on
 //! port 1400: a Sonos player's own `/getaa`, which is how now-playing and the
-//! queue arrive. Nothing else, and a redirect is held to the same rule before
+//! queue arrive. Plain-`http://img.iheart.com/` is rewritten to `https://`
+//! before evaluation because iHeartRadio serves covers over plain HTTP that
+//! are available identically over HTTPS; other plain-HTTP hosts remain refused.
+//! Nothing else, and a redirect is held to the same rule before
 //! it is followed. What comes back must be at most [`MAX_BYTES`], arrive within
 //! [`TIMEOUT`], carry no `Content-Encoding` (which would undo the cap), and be a
 //! JPEG or a PNG - or it is not kept, and the widget shows its placeholder.
@@ -37,6 +40,7 @@
 //! "talking to a service never enters the daemon" (docs/architecture.md). The
 //! widget runs this as a subprocess, as it does search.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -144,9 +148,23 @@ pub fn dir() -> Result<PathBuf> {
     store::cache_dir("art")
 }
 
+/// Upgrades known legacy plain-HTTP art hosts to HTTPS.
+///
+/// iHeartRadio serves cover art URLs as `http://img.iheart.com/...`, which is
+/// refused under our strict plain-HTTP speaker policy. The exact host is
+/// rewritten to HTTPS here; general HTTP-to-HTTPS upgrades are not permitted.
+fn rewrite_url(url: &str) -> Cow<'_, str> {
+    if let Some(rest) = url.strip_prefix("http://img.iheart.com/") {
+        Cow::Owned(format!("https://img.iheart.com/{rest}"))
+    } else {
+        Cow::Borrowed(url)
+    }
+}
+
 /// Refuse a URL this module will not fetch - see the module docs.
 fn allowed(url: &str) -> Result<()> {
-    allowed_url(url).map_err(permanent)
+    let url = rewrite_url(url);
+    allowed_url(&url).map_err(permanent)
 }
 
 fn allowed_url(url: &str) -> Result<()> {
@@ -405,7 +423,7 @@ fn follow(from: &str, location: &str) -> String {
 /// Fetch one image, holding every hop to [`allowed`].
 async fn fetch(url: &str) -> Result<(Vec<u8>, &'static str)> {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
-    let mut current = url.to_owned();
+    let mut current = rewrite_url(url).into_owned();
     for _ in 0..=REDIRECTS {
         allowed(&current)?;
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -421,7 +439,7 @@ async fn fetch(url: &str) -> Result<(Vec<u8>, &'static str)> {
             301 | 302 | 303 | 307 | 308 => {
                 let to =
                     header(&head, "location").ok_or_else(|| anyhow!("a redirect to nowhere"))?;
-                current = follow(&current, to);
+                current = rewrite_url(&follow(&current, to)).into_owned();
             }
             other => return Err(http_failure(other)),
         }
@@ -455,13 +473,14 @@ fn open_dir() -> Result<PathBuf> {
 
 /// The local file for one URL: the cached copy, or a fresh one.
 async fn resolve(dir: &Path, url: &str) -> Result<PathBuf> {
-    if let Some(path) = cached(dir, url) {
+    let url = rewrite_url(url);
+    if let Some(path) = cached(dir, &url) {
         // Bumped for `prune`'s least-recently-used order.
         store::touch(&path);
         return Ok(path);
     }
-    let (bytes, ext) = fetch(url).await?;
-    store(dir, url, &bytes, ext)
+    let (bytes, ext) = fetch(&url).await?;
+    store(dir, &url, &bytes, ext)
 }
 
 /// One cover's local file, fetched and sanitised under the rules above if it
@@ -681,6 +700,7 @@ mod tests {
         assert!(allowed("https://c.saavncdn.com/art.jpg").is_ok());
         assert!(allowed("http://192.168.77.94:1400/getaa?s=1&u=x").is_ok());
         assert!(allowed("http://10.0.0.5:1400/getaa").is_ok());
+        assert!(allowed("http://img.iheart.com/sca/imscale?w=500&img=x").is_ok());
 
         assert!(allowed("http://example.com/art.jpg").is_err());
         assert!(
@@ -695,6 +715,26 @@ mod tests {
         assert!(allowed("file:///etc/passwd").is_err());
         assert!(allowed("data:image/png;base64,AAAA").is_err());
         assert!(allowed("ftp://x/y").is_err());
+    }
+
+    #[test]
+    fn iheart_plain_http_is_rewritten_to_https_and_other_http_refused() {
+        let iheart_http = "http://img.iheart.com/sca/imscale?w=500&img=https://i.iheart.com/x.jpg";
+        let iheart_https =
+            "https://img.iheart.com/sca/imscale?w=500&img=https://i.iheart.com/x.jpg";
+
+        assert_eq!(rewrite_url(iheart_http), iheart_https);
+        assert_eq!(rewrite_url(iheart_https), iheart_https);
+        assert!(allowed(iheart_http).is_ok());
+        assert!(allowed(iheart_https).is_ok());
+
+        let other_http = "http://example.com/art.jpg";
+        assert_eq!(rewrite_url(other_http), other_http);
+        assert!(allowed(other_http).is_err());
+        assert_eq!(
+            allowed(other_http).unwrap_err().to_string(),
+            "plain http only to a speaker on port 1400"
+        );
     }
 
     #[test]
