@@ -57,7 +57,9 @@ When an update is released:
    ```
 
 It replaces the app in `~/Applications/x2rock` and updates the menu entry. The existing Steam
-shortcut, custom artwork, controller layout, and settings are preserved.
+shortcut, custom artwork, controller layout, and settings are preserved. An update never adds a
+second shortcut: if the first install could not add one, it says how to add it by hand. To have
+the script add it again, run `./install.sh --remove`, then `./install.sh`.
 
 ## Controls in Gaming Mode
 
