@@ -97,9 +97,9 @@ So the first workspace commit puts the deck on a tree it hasn't been tested with
 suites on it (section 6). Then `cargo update` the workspace in a commit of its own, if newer pins
 are wanted.
 
-**`rust-version` and edition** are 1.89 and 2024 in both. They can move to `[workspace.package]`
-and be inherited, but that's optional. **Resolver:** `"3"`, the 2024 edition's default, stated
-explicitly because a workspace root should state it.
+**`rust-version` and edition:** Edition is 2024 in both. MSRV is 1.89 for the CLI and 1.92 for the
+deck (Slint 1.18.1 requires 1.92, so the two cannot share a single workspace `rust-version`).
+**Resolver:** `"3"`, the 2024 edition's default, stated explicitly because a workspace root should state it.
 
 **Feature unification (checked).** `cargo tree -e features -i x2rock`:
 

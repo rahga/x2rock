@@ -96,7 +96,7 @@ and so does Steam's (Steam + X in Gaming Mode).
 
 ## Building
 
-You need Rust (1.89 or newer). The deck is the `deck/` member of the x2rock repository and
+You need Rust (1.92 or newer). The deck is the `deck/` member of the x2rock repository and
 uses the x2rock package at its root as a library, with the CLI left out. Build it by name from
 the repository root: a plain `cargo build` there is the CLI alone.
 

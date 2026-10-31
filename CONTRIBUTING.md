@@ -63,7 +63,7 @@ bodies, so do not paste them unedited. Never include credentials, tokens or pass
 
 ## Build and check
 
-Use Rust 1.89 or newer and a C compiler for `ring`. No CMake or Sonos SDK is required.
+Use Rust 1.89 or newer (1.92 or newer for `x2rock-deck`, which depends on Slint) and a C compiler for `ring`. No CMake or Sonos SDK is required.
 Keep `Cargo.lock` in use so local checks build the same dependency set as CI:
 
 ```sh
@@ -82,6 +82,10 @@ version locally with rustup:
 ```sh
 rustup toolchain install 1.89 --profile minimal
 cargo +1.89 check --all-targets --locked
+
+# For the deck front end (Slint requires 1.92):
+rustup toolchain install 1.92 --profile minimal
+cargo +1.92 check --locked -p x2rock-deck
 ```
 
 Tests live beside the implementation in `#[cfg(test)]` modules. Run a subset by name, for example

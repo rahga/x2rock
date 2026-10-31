@@ -27,7 +27,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Install 1.92 toolchain
+        run: rustup toolchain install 1.92 --profile minimal
       - uses: Swatinem/rust-cache@v2
+      - name: Check MSRV (1.92)
+        run: cargo +1.92 check --locked -p x2rock-deck
       # A credential store of its own, so the token-refresh test runs here
       # rather than skipping (it refuses to touch a store that is not temporary).
       - name: Test
