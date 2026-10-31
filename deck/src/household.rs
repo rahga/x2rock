@@ -862,6 +862,33 @@ fn unwired_targets(
     (groups_to_wire, players_to_wire)
 }
 
+/// Unregisters a group, unless disarmed, when dropped: on an error, and when
+/// the pass is aborted (a regrouping, the retry timer) between registering
+/// the group and subscribing it, which would otherwise leave it counted as
+/// wired and never subscribed.
+struct Unregister {
+    tx: mpsc::UnboundedSender<WireUpdate>,
+    id: String,
+    ip: IpAddr,
+}
+
+impl Unregister {
+    fn disarm(&mut self) {
+        self.id.clear();
+    }
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        if !self.id.is_empty() {
+            let _ = self.tx.send(WireUpdate::GroupFailed {
+                id: std::mem::take(&mut self.id),
+                ip: self.ip,
+            });
+        }
+    }
+}
+
 fn spawn_wire(
     session: Session,
     events_tx: mpsc::UnboundedSender<Tagged>,
@@ -899,18 +926,17 @@ fn spawn_wire(
                         ip,
                         live: Box::new(live),
                     });
-                    let subscribed = tokio::try_join!(
+                    let mut unregister = Unregister {
+                        tx: wire_tx.clone(),
+                        id: group.id.clone(),
+                        ip,
+                    };
+                    tokio::try_join!(
                         conn.subscribe_group("playback:1", &group.id),
                         conn.subscribe_group("playbackMetadata:1", &group.id),
                         conn.subscribe_group("groupVolume:1", &group.id),
-                    );
-                    if subscribed.is_err() {
-                        let _ = wire_tx.send(WireUpdate::GroupFailed {
-                            id: group.id.clone(),
-                            ip,
-                        });
-                    }
-                    subscribed?;
+                    )?;
+                    unregister.disarm();
                     let _ = conn.subscribe_group("sleepTimer:1", &group.id).await;
                     Ok(())
                 }
@@ -2814,9 +2840,16 @@ mod tests {
         // machine (not the session's own 127.0.0.1, which it would reuse):
         // the probe gets through and the handshake waits. Nothing leaves the
         // host.
-        let listener = std::net::TcpListener::bind("127.0.0.2:1443")
-            .expect("127.0.0.2:1443 free for the stalled-speaker test");
-        let unreachable_ip: IpAddr = "127.0.0.2".parse().unwrap();
+        // The port is the speakers' own, so the address varies: the first free
+        // one, as two test runs at once would collide on one.
+        let (listener, unreachable_ip) = (2..=250)
+            .find_map(|n| {
+                let ip: IpAddr = format!("127.0.3.{n}").parse().unwrap();
+                std::net::TcpListener::bind((ip, 1443))
+                    .ok()
+                    .map(|l| (l, ip))
+            })
+            .expect("a free 127.0.3.x:1443 for the stalled-speaker test");
         let groups = proto::Groups {
             groups: vec![proto::Group {
                 id: "GROUP_1".into(),
@@ -2874,6 +2907,38 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn a_pass_aborted_between_registering_and_subscribing_unregisters() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let task = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                let _unregister = Unregister {
+                    tx,
+                    id: "G1".into(),
+                    ip,
+                };
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WireUpdate::GroupFailed { id, .. }) if id == "G1"
+        ));
+        let mut done = Unregister {
+            tx,
+            id: "G2".into(),
+            ip,
+        };
+        done.disarm();
+        drop(done);
+        assert!(rx.try_recv().is_err(), "subscribed: nothing to undo");
     }
 
     #[test]
