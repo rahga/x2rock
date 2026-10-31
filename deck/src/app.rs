@@ -29,7 +29,7 @@ use crate::art::cache::{
 };
 use crate::household::{Command, Handle, RoomDetails, Status, Update};
 use crate::input::{Action, Phase};
-use crate::model::{self, GroupLive, Household, RoomInfo, SeekBurst, VolumeBurst};
+use crate::model::{self, GroupLive, Household, RoomInfo, SeekBurst, VolumeHold};
 use crate::palette::{self, Rgb};
 use crate::prefs::Prefs;
 use crate::theme;
@@ -218,11 +218,14 @@ pub struct App {
     /// What was sent, for the tests: there is no household behind them.
     #[cfg(test)]
     pub(crate) sent: std::cell::RefCell<Vec<Command>>,
+    /// Added to the clock, for the tests: holds and bursts are timed.
+    #[cfg(test)]
+    pub(crate) skew_ms: u64,
     menu_down: bool,
     hold_timer: slint::Timer,
     moving: Option<Moving>,
-    volume_burst: VolumeBurst,
-    speaker_bursts: HashMap<String, VolumeBurst>,
+    volume_holds: HashMap<String, VolumeHold>,
+    speaker_holds: HashMap<String, VolumeHold>,
     seek_burst: SeekBurst,
     art: ArtCache<ReadyArt>,
     art_loader: crate::art::Loader,
@@ -289,11 +292,13 @@ impl App {
             left_from_room: false,
             #[cfg(test)]
             sent: Default::default(),
+            #[cfg(test)]
+            skew_ms: 0,
             menu_down: false,
             hold_timer: slint::Timer::default(),
             moving: None,
-            volume_burst: VolumeBurst::default(),
-            speaker_bursts: HashMap::new(),
+            volume_holds: HashMap::new(),
+            speaker_holds: HashMap::new(),
             seek_burst: SeekBurst::default(),
             art: ArtCache::default(),
             art_loader: crate::art::Loader::default(),
@@ -372,7 +377,10 @@ impl App {
     }
 
     fn now_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
+        let ms = self.started.elapsed().as_millis() as u64;
+        #[cfg(test)]
+        let ms = ms + self.skew_ms;
+        ms
     }
 
     fn send(&self, command: Command) {
@@ -1510,7 +1518,8 @@ impl App {
             }
             Action::VolumeUp | Action::VolumeDown => {
                 if phase != Phase::Release {
-                    self.group_volume_step(if action == Action::VolumeUp { 1 } else { -1 });
+                    let direction = if action == Action::VolumeUp { 1 } else { -1 };
+                    self.group_volume_step(direction, phase == Phase::Repeat);
                 }
                 true
             }
@@ -1635,11 +1644,11 @@ impl App {
                 }
                 _ => {}
             },
-            _ => self.navigate_pane(action),
+            _ => self.navigate_pane(action, repeat),
         }
     }
 
-    fn navigate_pane(&mut self, action: Action) {
+    fn navigate_pane(&mut self, action: Action, repeat: bool) {
         let (z, i) = self.focus;
         let horizontal = matches!(
             z,
@@ -1658,11 +1667,11 @@ impl App {
                         if fixed && d < 0 {
                             self.focus_rooms();
                         } else {
-                            self.group_volume_step(d);
+                            self.group_volume_step(d, repeat);
                         }
                     }
                     zone::SEEK => self.seek_step(d as i64),
-                    zone::SPEAKERS => self.speaker_step(i as usize, d),
+                    zone::SPEAKERS => self.speaker_step(i as usize, d, repeat),
                     _ if horizontal => {
                         let next = i + d;
                         if next < 0 {
@@ -1926,24 +1935,27 @@ impl App {
         self.send(command);
     }
 
-    fn group_volume_step(&mut self, direction: i32) {
+    /// A level, not a delta: a newer one replaces any still waiting to be
+    /// sent, so a released hold leaves at most its last level to arrive.
+    fn group_volume_step(&mut self, direction: i32, repeat: bool) {
         let Some(entry) = self.selected_entry().cloned() else {
             return;
         };
-        let level = self
-            .live(&entry.group_id)
-            .volume
-            .map(|v| v.volume as i32)
-            .unwrap_or(0);
+        // Until the speaker says where it is, there is nothing to step from.
+        let Some(level) = self.live(&entry.group_id).volume.map(|v| v.volume as i32) else {
+            return;
+        };
         let now = self.now_ms();
-        let delta = self.volume_burst.step(level, direction, now);
-        self.send(Command::AdjustGroupVolume {
-            group: entry.group_id,
-            delta: delta.clamp(-100, 100) as i8,
-        });
+        let hold = self.volume_holds.entry(entry.group_id.clone()).or_default();
+        if let Some((_, to)) = hold.step(level, direction, repeat, now) {
+            self.send(Command::SetGroupVolume {
+                group: entry.group_id,
+                level: to as u8,
+            });
+        }
     }
 
-    fn speaker_step(&mut self, index: usize, direction: i32) {
+    fn speaker_step(&mut self, index: usize, direction: i32, repeat: bool) {
         let Some(player) = self.speakers.get(index).cloned() else {
             return;
         };
@@ -1954,26 +1966,24 @@ impl App {
             .map(|v| v.volume as i32)
             .unwrap_or(0);
         let now = self.now_ms();
-        let delta = self
-            .speaker_bursts
-            .entry(player.clone())
-            .or_default()
-            .step(level, direction, now);
-        self.send(Command::AdjustPlayerVolume {
-            player,
-            delta: delta.clamp(-100, 100) as i8,
-        });
+        let hold = self.speaker_holds.entry(player.clone()).or_default();
+        if let Some((from, to)) = hold.step(level, direction, repeat, now) {
+            self.send(Command::AdjustPlayerVolume {
+                player,
+                delta: (to - from) as i8,
+            });
+        }
     }
 
     pub fn volume_step_tapped(&mut self, direction: i32) {
         self.touch = true;
-        self.group_volume_step(direction);
+        self.group_volume_step(direction, false);
         self.render();
     }
 
     pub fn speaker_step_tapped(&mut self, index: usize, direction: i32) {
         self.touch = true;
-        self.speaker_step(index, direction);
+        self.speaker_step(index, direction, false);
         self.render();
     }
 

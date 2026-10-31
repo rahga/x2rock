@@ -84,8 +84,11 @@ launch whether a newer release is out and says so if one is; it sends nothing el
 | LT / RT | `[` / `]`, PgUp / PgDn | Previous / next track |
 | View | F11 | Full screen |
 
-Held gamepad directions and LB/RB repeat after 400 ms, then every 90 ms; volume uses
-its existing acceleration. Each pad tracks its own held controls. Disconnecting a pad
+Held gamepad directions and LB/RB repeat after 400 ms, then every 90 ms. A held volume
+control (LB/RB, `-`/`=`, or Left/Right on a volume bar) steps 2, 3, then 5 at most every
+250 ms and moves at most 20 per hold; release and press again to go further. Group volume
+is sent as a level, so a newer one replaces any still waiting; after release, nothing
+arrives beyond the last level asked for. Each pad tracks its own held controls. Disconnecting a pad
 releases its held actions and stops its repeats. Incoming axis noise does not delay repeats.
 
 Search has its own keyboard on screen, walked with the pad; a real keyboard types into it too,

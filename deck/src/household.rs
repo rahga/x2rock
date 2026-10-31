@@ -381,10 +381,6 @@ pub enum Command {
         group: String,
         millis: i64,
     },
-    AdjustGroupVolume {
-        group: String,
-        delta: i8,
-    },
     SetGroupVolume {
         group: String,
         level: u8,
@@ -1122,7 +1118,6 @@ fn order(command: &Command) -> (Order<Target>, Option<&'static str>) {
         Playback { group: g, .. }
         | SeekTo { group: g, .. }
         | SeekBy { group: g, .. }
-        | AdjustGroupVolume { group: g, .. }
         | SetGroupMute { group: g, .. }
         | SetShuffle { group: g, .. }
         | SetRepeat { group: g, .. }
@@ -1620,12 +1615,6 @@ async fn execute(session: &Session, household: &Household, command: Command) -> 
             coordinator(session, household, &group)
                 .await?
                 .seek_by(&group, millis)
-                .await
-        }
-        Command::AdjustGroupVolume { group, delta } => {
-            coordinator(session, household, &group)
-                .await?
-                .adjust_group_volume(&group, delta)
                 .await
         }
         Command::SetGroupVolume { group, level } => {
@@ -2506,19 +2495,12 @@ mod tests {
             (room.clone(), Some("volume"))
         );
         assert_eq!(
-            order(&Command::AdjustGroupVolume {
-                group: g(),
-                delta: 2
-            }),
-            (room.clone(), None),
-            "a delta is never dropped"
-        );
-        assert_eq!(
             order(&Command::AdjustPlayerVolume {
                 player: p(),
                 delta: -2
             }),
-            (kitchen.clone(), None)
+            (kitchen.clone(), None),
+            "a delta is never dropped"
         );
         assert_eq!(
             order(&Command::SetLoudness {

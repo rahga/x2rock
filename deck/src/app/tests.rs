@@ -912,6 +912,8 @@ fn navigation_follows_the_tv_apps_rules() {
     assert!(sent().is_empty(), "nothing sent: {:?}", sent());
     press(Action::Back);
 
+    held_volume_is_paced_capped_and_ends_on_release();
+
     // Out-of-order and stale responses: matched by request id, dropped after
     // reconnect, duplicate service page offsets ignored, and late search
     // sections from an earlier query with the same term ignored.
@@ -1663,4 +1665,70 @@ fn test_rejected_favorites_response_does_not_overwrite_cache() {
         );
         app.close_screen();
     });
+}
+
+/// Where the selected room's volume would end up after what was sent.
+fn volume_reached(from: i32) -> i32 {
+    sent().iter().fold(from, |level, c| match c {
+        household::Command::SetGroupVolume { level, .. } => *level as i32,
+        _ => level,
+    })
+}
+
+/// A held LB, and a held `=` with the keyboard's own fast repeat: each hold
+/// climbs no more than 20 however long it lasts, and stops on release.
+fn held_volume_is_paced_capped_and_ends_on_release() {
+    let mut from = 0;
+    with_app(|app| {
+        app.sent.borrow_mut().clear();
+        let group = app.selected_entry().expect("a room").group_id.clone();
+        from = app.live(&group).volume.expect("a level").volume as i32;
+        app.action(Action::VolumeUp, Phase::Press);
+        // The pad repeats after 400ms, then every 90ms: 1.5s held.
+        app.skew_ms += 400;
+        for _ in 0..12 {
+            app.action(Action::VolumeUp, Phase::Repeat);
+            app.skew_ms += 90;
+        }
+    });
+    let held = volume_reached(from);
+    assert!(
+        held > from + 10 && held <= from + 20,
+        "1.5s held from {from} reaches {held}: {:?}",
+        sent()
+    );
+    with_app(|app| {
+        for _ in 0..30 {
+            app.action(Action::VolumeUp, Phase::Repeat);
+            app.skew_ms += 90;
+        }
+        app.action(Action::VolumeUp, Phase::Release);
+    });
+    assert_eq!(volume_reached(from), from + 20, "4s held: {:?}", sent());
+    assert!(
+        sent()
+            .iter()
+            .all(|c| matches!(c, household::Command::SetGroupVolume { .. })),
+        "levels, which replace one another in the lane: {:?}",
+        sent()
+    );
+
+    // The keyboard: `=` auto-repeating every 30ms for 3s, after a pause.
+    with_app(|app| {
+        app.sent.borrow_mut().clear();
+        app.skew_ms += 5_000;
+        app.key("=", false, true);
+        for _ in 0..100 {
+            app.skew_ms += 30;
+            app.key("=", true, true);
+        }
+        app.key("=", false, false);
+    });
+    let typed = sent().len();
+    assert!(
+        (2..=5).contains(&typed),
+        "{typed} levels for a 3s key hold: {:?}",
+        sent()
+    );
+    assert!(volume_reached(from) <= from + 20, "{:?}", sent());
 }

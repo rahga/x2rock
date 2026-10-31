@@ -421,6 +421,56 @@ impl VolumeBurst {
     }
 }
 
+/// One volume control's presses and holds, stepped as [`VolumeBurst`] says. A
+/// held control repeats at most every 250ms and moves at most 20 per hold;
+/// release and press again to go further. While a burst lasts, it steps from
+/// the level it last asked for, since the speaker's events lag behind.
+#[derive(Debug, Default)]
+pub struct VolumeHold {
+    burst: VolumeBurst,
+    held: i32,
+    last_at: Option<u64>,
+    target: Option<i32>,
+}
+
+impl VolumeHold {
+    const REPEAT_MS: u64 = 250;
+    const MOST: i32 = 20;
+
+    /// From where and to where a press (or, with `repeat`, a held repeat) in
+    /// `direction` takes the level, given `level`, what the speaker last said;
+    /// None when a repeat comes too soon, the hold has gone far enough, or the
+    /// level is at its end.
+    pub fn step(
+        &mut self,
+        level: i32,
+        direction: i32,
+        repeat: bool,
+        now_ms: u64,
+    ) -> Option<(i32, i32)> {
+        let since = self.last_at.map(|at| now_ms.saturating_sub(at));
+        if !repeat {
+            self.held = 0;
+        } else if since.is_some_and(|ms| ms < Self::REPEAT_MS) {
+            return None;
+        }
+        let from = match self.target {
+            Some(target) if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS) => target,
+            _ => level,
+        };
+        let step = self.burst.step(from, direction, now_ms);
+        let step = (self.held + step).clamp(-Self::MOST, Self::MOST) - self.held;
+        let to = (from + step).clamp(0, 100);
+        if to == from {
+            return None;
+        }
+        self.held += to - from;
+        self.last_at = Some(now_ms);
+        self.target = Some(to);
+        Some((from, to))
+    }
+}
+
 /// The seek bar's presses climb 10s, 20s, then 30s within a burst.
 #[derive(Debug, Default)]
 pub struct SeekBurst {
@@ -713,6 +763,24 @@ mod tests {
         );
         let (mut b, mut now) = (VolumeBurst::default(), 0);
         assert_eq!(presses(&mut b, &mut now, 90, 1, 3, 200), [92, 95, 100]);
+    }
+
+    #[test]
+    fn a_hold_repeats_every_250ms_at_most_and_goes_20_in_all() {
+        let mut h = VolumeHold::default();
+        // The speaker still says 30 throughout: its events lag behind.
+        let mut levels = vec![h.step(30, 1, false, 0)];
+        levels.extend((1..=15).map(|i| h.step(30, 1, true, 400 + i * 90)));
+        let sent: Vec<i32> = levels.into_iter().flatten().map(|(_, to)| to).collect();
+        assert_eq!(sent, [32, 35, 40, 45, 50]);
+        // A fresh press soon after goes on from where the hold left off.
+        assert_eq!(h.step(30, 1, false, 2_000), Some((50, 55)));
+        // After a pause, from what the speaker says.
+        assert_eq!(h.step(50, -1, false, 9_000), Some((50, 48)));
+        // Nowhere to go at the ends.
+        let mut h = VolumeHold::default();
+        assert_eq!(h.step(100, 1, false, 0), None);
+        assert_eq!(h.step(0, -1, false, 0), None);
     }
 
     #[test]
