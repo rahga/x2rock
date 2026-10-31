@@ -33,3 +33,6 @@ x2rock = { path = "..", default-features = false }
 slint-build = "1.18.1"
 # The Windows executable's icon, from dist/x2rock-deck.rc; nothing elsewhere.
 embed-resource = "3"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }

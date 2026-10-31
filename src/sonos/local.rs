@@ -280,6 +280,23 @@ impl Connection {
         Ok(Self { inner })
     }
 
+    #[doc(hidden)]
+    pub fn dummy(ip: IpAddr) -> Self {
+        let (events, _) = broadcast::channel(256);
+        let inner = Arc::new(Inner {
+            ip,
+            sink: tokio::sync::Mutex::new(None),
+            pending: Mutex::new(Pending::default()),
+            events,
+            next_id: AtomicU64::new(1),
+            household_id: Mutex::new(Some("Sonos_dummy".into())),
+            last_rx: Mutex::new(Instant::now()),
+            alive: AtomicBool::new(true),
+            shutdown: Notify::new(),
+        });
+        Self { inner }
+    }
+
     pub fn ip(&self) -> IpAddr {
         self.inner.ip
     }

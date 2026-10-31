@@ -764,7 +764,7 @@ type Tagged = (IpAddr, Arc<Event>);
 struct Wiring {
     events: mpsc::UnboundedSender<Tagged>,
     /// Sockets with a forwarder on them, by address.
-    forwarded: HashSet<IpAddr>,
+    forwarded: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
     /// Groups subscribed, by id, and the coordinator address they were subscribed on.
     groups: HashMap<String, IpAddr>,
     /// Players whose own volume is subscribed.
@@ -790,26 +790,165 @@ fn forward(connection: &Connection, events: mpsc::UnboundedSender<Tagged>) {
     });
 }
 
-impl Wiring {
-    async fn reach(&mut self, session: &Session, ip: Option<IpAddr>) -> Result<Connection> {
-        // A speaker that is unplugged answers nothing; the event loop waits on
-        // this, so it gives up in a second rather than the socket's own timeout.
-        if let Some(ip) = ip.filter(|ip| !self.forwarded.contains(ip)) {
-            let probe = tokio::time::timeout(
-                Duration::from_secs(1),
-                tokio::net::TcpStream::connect((ip, 1443)),
-            )
-            .await;
-            if !matches!(probe, Ok(Ok(_))) {
-                bail!("{ip} did not answer");
-            }
+enum WireUpdate {
+    Group {
+        id: String,
+        ip: IpAddr,
+        live: Box<crate::model::GroupLive>,
+    },
+    Player {
+        id: String,
+        volume: Option<proto::Volume>,
+        ht: Option<(bool, bool)>,
+    },
+    Done,
+}
+
+async fn reach_speaker(
+    session: &Session,
+    ip: IpAddr,
+    events_tx: &mpsc::UnboundedSender<Tagged>,
+    forwarded: &Arc<std::sync::Mutex<HashSet<IpAddr>>>,
+    failed: &Arc<std::sync::Mutex<HashSet<IpAddr>>>,
+) -> Result<Connection> {
+    let needs_probe = !forwarded.lock().unwrap().contains(&ip);
+    if needs_probe {
+        if failed.lock().unwrap().contains(&ip) {
+            bail!("{ip} did not answer");
         }
-        let connection = session.player(ip).await?;
-        if self.forwarded.insert(connection.ip()) {
-            forward(&connection, self.events.clone());
+        let probe = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::net::TcpStream::connect((ip, 1443)),
+        )
+        .await;
+        if !matches!(probe, Ok(Ok(_))) {
+            failed.lock().unwrap().insert(ip);
+            bail!("{ip} did not answer");
         }
-        Ok(connection)
     }
+    let connection = session.player(Some(ip)).await?;
+    if forwarded.lock().unwrap().insert(connection.ip()) {
+        forward(&connection, events_tx.clone());
+    }
+    Ok(connection)
+}
+
+fn unwired_targets(
+    wiring: &Wiring,
+    groups: &Groups,
+) -> (Vec<(proto::Group, IpAddr)>, Vec<proto::Player>) {
+    let mut groups_to_wire = Vec::new();
+    for g in &groups.groups {
+        let coordinator_ip = groups.player(&g.coordinator_id).and_then(proto::Player::ip);
+        if let Some(ip) = coordinator_ip
+            && wiring.groups.get(&g.id) != Some(&ip)
+        {
+            groups_to_wire.push((g.clone(), ip));
+        }
+    }
+    let mut players_to_wire = Vec::new();
+    for p in &groups.players {
+        if p.ip().is_some() && !wiring.players.contains(&p.id) {
+            players_to_wire.push(p.clone());
+        }
+    }
+    (groups_to_wire, players_to_wire)
+}
+
+fn spawn_wire(
+    session: Session,
+    events_tx: mpsc::UnboundedSender<Tagged>,
+    wire_tx: mpsc::UnboundedSender<WireUpdate>,
+    unwired_groups: Vec<(proto::Group, IpAddr)>,
+    unwired_players: Vec<proto::Player>,
+    forwarded: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
+) -> tokio::task::AbortHandle {
+    let task = tokio::spawn(async move {
+        let failed = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let now = Instant::now();
+
+        // Wire groups concurrently:
+        let mut group_futures = Vec::new();
+        for (group, ip) in unwired_groups {
+            let session = session.clone();
+            let events_tx = events_tx.clone();
+            let forwarded = forwarded.clone();
+            let failed = failed.clone();
+            let wire_tx = wire_tx.clone();
+            group_futures.push(async move {
+                let res: Result<()> = async {
+                    let conn = reach_speaker(&session, ip, &events_tx, &forwarded, &failed).await?;
+                    let (playback, metadata, volume) = tokio::try_join!(
+                        conn.playback_status(&group.id),
+                        conn.metadata(&group.id),
+                        conn.group_volume(&group.id),
+                    )?;
+                    let mut live = crate::model::GroupLive::default();
+                    live.apply_playback(&playback, now);
+                    live.metadata = Some(metadata);
+                    live.volume = Some(volume);
+                    tokio::try_join!(
+                        conn.subscribe_group("playback:1", &group.id),
+                        conn.subscribe_group("playbackMetadata:1", &group.id),
+                        conn.subscribe_group("groupVolume:1", &group.id),
+                    )?;
+                    let _ = conn.subscribe_group("sleepTimer:1", &group.id).await;
+                    let _ = wire_tx.send(WireUpdate::Group {
+                        id: group.id.clone(),
+                        ip,
+                        live: Box::new(live),
+                    });
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = res {
+                    eprintln!("x2rock-deck: {}: not followed ({e:#})", group.name);
+                }
+            });
+        }
+        futures_util::future::join_all(group_futures).await;
+
+        // Wire players concurrently:
+        let mut player_futures = Vec::new();
+        for player in unwired_players {
+            let Some(ip) = player.ip() else { continue };
+            let session = session.clone();
+            let events_tx = events_tx.clone();
+            let forwarded = forwarded.clone();
+            let failed = failed.clone();
+            let wire_tx = wire_tx.clone();
+            player_futures.push(async move {
+                let res: Result<()> = async {
+                    let conn = reach_speaker(&session, ip, &events_tx, &forwarded, &failed).await?;
+                    let volume = conn.player_volume(&player.id).await.ok();
+                    conn.subscribe_player("playerVolume:1", &player.id).await?;
+                    let mut ht = None;
+                    if player.has_tv() {
+                        if let Ok(settings) = conn.player_settings(&player.id).await
+                            && let Some(h) = settings.home_theater
+                        {
+                            ht = Some((h.night_mode, h.enhance_dialog));
+                        }
+                        let _ = conn.subscribe_player("homeTheater:1", &player.id).await;
+                    }
+                    let _ = wire_tx.send(WireUpdate::Player {
+                        id: player.id.clone(),
+                        volume,
+                        ht,
+                    });
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = res {
+                    eprintln!("x2rock-deck: {}: no speaker volume ({e:#})", player.name);
+                }
+            });
+        }
+        futures_util::future::join_all(player_futures).await;
+
+        let _ = wire_tx.send(WireUpdate::Done);
+    });
+    task.abort_handle()
 }
 
 /// Whether the topology has a group or a reachable speaker that is not yet
@@ -829,90 +968,6 @@ fn unwired(wiring: &Wiring, household: &Household) -> bool {
             .any(|p| p.ip().is_some() && !wiring.players.contains(&p.id))
 }
 
-/// Subscribe whatever the topology has that is not yet subscribed, seeding each
-/// new group from its coordinator. Best effort per group: one unreachable
-/// coordinator costs its own room, not the household.
-async fn wire(session: &Session, wiring: &mut Wiring, groups: &Groups, household: &mut Household) {
-    let now = Instant::now();
-    for group in &groups.groups {
-        let coordinator_ip = groups
-            .player(&group.coordinator_id)
-            .and_then(proto::Player::ip);
-        let Some(ip) = coordinator_ip else { continue };
-        if wiring.groups.get(&group.id) == Some(&ip) {
-            continue;
-        }
-        let result: Result<()> = async {
-            let conn = wiring.reach(session, Some(ip)).await?;
-            let (playback, metadata, volume) = tokio::try_join!(
-                conn.playback_status(&group.id),
-                conn.metadata(&group.id),
-                conn.group_volume(&group.id),
-            )?;
-            let live = household.live.entry(group.id.clone()).or_default();
-            live.apply_playback(&playback, now);
-            live.metadata = Some(metadata);
-            live.volume = Some(volume);
-            tokio::try_join!(
-                conn.subscribe_group("playback:1", &group.id),
-                conn.subscribe_group("playbackMetadata:1", &group.id),
-                conn.subscribe_group("groupVolume:1", &group.id),
-            )?;
-            // In no published reference, but it pushes the timer at once and on
-            // every set and cancel, whoever made it (the TV app's finding). Best
-            // effort: a room without it simply shows no timer.
-            let _ = conn.subscribe_group("sleepTimer:1", &group.id).await;
-            Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => {
-                wiring.groups.insert(group.id.clone(), ip);
-            }
-            Err(e) => eprintln!("x2rock-deck: {}: not followed ({e:#})", group.name),
-        }
-    }
-    // Each speaker's own volume, on its own socket; and a soundbar's night
-    // sound and speech enhancement. Best effort: a speaker that cannot be
-    // reached loses its own pill and nothing else.
-    for player in &groups.players {
-        if wiring.players.contains(&player.id) {
-            continue;
-        }
-        let Some(ip) = player.ip() else { continue };
-        let result: Result<()> = async {
-            let conn = wiring.reach(session, Some(ip)).await?;
-            if let Ok(volume) = conn.player_volume(&player.id).await {
-                household.player_volumes.insert(player.id.clone(), volume);
-            }
-            conn.subscribe_player("playerVolume:1", &player.id).await?;
-            if player.has_tv() {
-                if let Ok(settings) = conn.player_settings(&player.id).await
-                    && let Some(ht) = settings.home_theater
-                {
-                    household
-                        .home_theater
-                        .insert(player.id.clone(), (ht.night_mode, ht.enhance_dialog));
-                }
-                let _ = conn.subscribe_player("homeTheater:1", &player.id).await;
-            }
-            Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => {
-                wiring.players.insert(player.id.clone());
-            }
-            Err(e) => eprintln!("x2rock-deck: {}: no speaker volume ({e:#})", player.name),
-        }
-    }
-    // Groups that are gone are forgotten, so a regroup's new ids are followed
-    // and the old ones' state does not linger.
-    let current: HashSet<&str> = groups.groups.iter().map(|g| g.id.as_str()).collect();
-    wiring.groups.retain(|id, _| current.contains(id.as_str()));
-    household.live.retain(|id, _| current.contains(id.as_str()));
-}
-
 /// Publish the household and keep it current until a socket that matters is
 /// lost. Returns `Ok` when asked to look again.
 async fn follow(
@@ -922,16 +977,10 @@ async fn follow(
 ) -> Result<()> {
     let primary = session.connection.clone();
     let household_id = primary.household_id().await?;
-    let (events_tx, mut events) = mpsc::unbounded_channel::<Tagged>();
-    let mut wiring = Wiring {
-        events: events_tx,
-        forwarded: HashSet::new(),
-        groups: HashMap::new(),
-        players: HashSet::new(),
-    };
-    // Listen before subscribing, so the first snapshot is not missed.
-    wiring.forwarded.insert(primary.ip());
-    forward(&primary, wiring.events.clone());
+    let (events_tx, events) = mpsc::unbounded_channel::<Tagged>();
+    let forwarded = Arc::new(std::sync::Mutex::new(HashSet::new()));
+    forwarded.lock().unwrap().insert(primary.ip());
+    forward(&primary, events_tx.clone());
     primary
         .subscribe_household("groups:1", &household_id)
         .await?;
@@ -939,12 +988,56 @@ async fn follow(
     // without bonds has nothing to say here.
     let _ = primary.subscribe_household("zones:1", &household_id).await;
 
-    let mut household = Household {
+    let wiring = Wiring {
+        events: events_tx,
+        forwarded,
+        groups: HashMap::new(),
+        players: HashSet::new(),
+    };
+    let household = Household {
         groups: Some(session.groups.clone()),
         ..Default::default()
     };
-    wire(session, &mut wiring, &session.groups, &mut household).await;
+    follow_loop(
+        session,
+        primary.ip(),
+        household,
+        wiring,
+        events,
+        updates,
+        inbox,
+    )
+    .await
+}
+
+async fn follow_loop(
+    session: &Session,
+    primary_ip: IpAddr,
+    mut household: Household,
+    mut wiring: Wiring,
+    mut events: mpsc::UnboundedReceiver<Tagged>,
+    updates: &Sink,
+    inbox: &mut mpsc::UnboundedReceiver<Command>,
+) -> Result<()> {
     updates(Update::Household(Box::new(household.clone())));
+
+    let (wire_tx, mut wire_rx) = mpsc::unbounded_channel::<WireUpdate>();
+    let mut wiring_task = Latest::default();
+
+    if let Some(groups) = household.groups.as_ref() {
+        let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, groups);
+        if !groups_to_wire.is_empty() || !players_to_wire.is_empty() {
+            wiring_task.replace(Some(spawn_wire(
+                session.clone(),
+                wiring.events.clone(),
+                wire_tx.clone(),
+                groups_to_wire,
+                players_to_wire,
+                wiring.forwarded.clone(),
+            )));
+        }
+    }
+
     // A group or speaker that could not be subscribed is tried again, with the
     // reconnect's backoff, until it is or it leaves the topology: Sonos lists
     // an unplugged speaker for minutes, and no topology change may come to try
@@ -986,16 +1079,46 @@ async fn follow(
 
     loop {
         tokio::select! {
+            Some(update) = wire_rx.recv() => {
+                match update {
+                    WireUpdate::Group { id, ip, live } => {
+                        wiring.groups.insert(id.clone(), ip);
+                        household.live.insert(id, *live);
+                        latest.send_replace(household.clone());
+                        updates(Update::Household(Box::new(household.clone())));
+                    }
+                    WireUpdate::Player { id, volume, ht } => {
+                        wiring.players.insert(id.clone());
+                        if let Some(vol) = volume {
+                            household.player_volumes.insert(id.clone(), vol);
+                        }
+                        if let Some(ht) = ht {
+                            household.home_theater.insert(id, ht);
+                        }
+                        latest.send_replace(household.clone());
+                        updates(Update::Household(Box::new(household.clone())));
+                    }
+                    WireUpdate::Done => {
+                        if unwired(&wiring, &household) {
+                            retry_backoff = (retry_backoff * 2).min(Duration::from_secs(60));
+                            next_retry = Some(tokio::time::Instant::now() + retry_backoff);
+                        } else {
+                            retry_backoff = Duration::from_secs(2);
+                            next_retry = None;
+                        }
+                    }
+                }
+            }
             tagged = events.recv() => {
                 let Some((ip, event)) = tagged else { bail!("event channel closed") };
                 if event.kind == Event::LOST {
                     let coordinator = wiring.groups.values().any(|c| *c == ip);
-                    if ip == primary.ip() || coordinator {
+                    if ip == primary_ip || coordinator {
                         bail!("Lost the connection to a speaker");
                     }
                     // A speaker reached only for its own volume: subscribed again
                     // once it can be reached, on a socket of its own.
-                    wiring.forwarded.remove(&ip);
+                    wiring.forwarded.lock().unwrap().remove(&ip);
                     if let Some(groups) = household.groups.as_ref() {
                         for player in groups.players.iter().filter(|p| p.ip() == Some(ip)) {
                             wiring.players.remove(&player.id);
@@ -1007,7 +1130,18 @@ async fn follow(
                 if apply(&mut household, &wiring, ip, &event)? {
                     if event.namespace == "groups:1" {
                         let groups = household.groups.clone().unwrap_or_default_groups();
-                        wire(session, &mut wiring, &groups, &mut household).await;
+                        let current: HashSet<&str> = groups.groups.iter().map(|g| g.id.as_str()).collect();
+                        wiring.groups.retain(|id, _| current.contains(id.as_str()));
+                        household.live.retain(|id, _| current.contains(id.as_str()));
+                        let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, &groups);
+                        wiring_task.replace(Some(spawn_wire(
+                            session.clone(),
+                            wiring.events.clone(),
+                            wire_tx.clone(),
+                            groups_to_wire,
+                            players_to_wire,
+                            wiring.forwarded.clone(),
+                        )));
                         if !unwired(&wiring, &household) {
                             next_retry = None;
                             retry_backoff = Duration::from_secs(2);
@@ -1020,17 +1154,17 @@ async fn follow(
                 }
             }
             _ = tokio::time::sleep_until(next_retry.unwrap_or_else(tokio::time::Instant::now)), if next_retry.is_some() => {
+                next_retry = None;
                 let groups = household.groups.clone().unwrap_or_default_groups();
-                wire(session, &mut wiring, &groups, &mut household).await;
-                if unwired(&wiring, &household) {
-                    retry_backoff = (retry_backoff * 2).min(Duration::from_secs(60));
-                    next_retry = Some(tokio::time::Instant::now() + retry_backoff);
-                } else {
-                    retry_backoff = Duration::from_secs(2);
-                    next_retry = None;
-                }
-                latest.send_replace(household.clone());
-                updates(Update::Household(Box::new(household.clone())));
+                let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, &groups);
+                wiring_task.replace(Some(spawn_wire(
+                    session.clone(),
+                    wiring.events.clone(),
+                    wire_tx.clone(),
+                    groups_to_wire,
+                    players_to_wire,
+                    wiring.forwarded.clone(),
+                )));
             }
             command = inbox.recv() => {
                 let Some(command) = command else { return Ok(()) };
@@ -2430,7 +2564,7 @@ mod wiring_tests {
         let (events, _rx) = mpsc::unbounded_channel();
         let mut wiring = Wiring {
             events,
-            forwarded: HashSet::new(),
+            forwarded: Arc::new(std::sync::Mutex::new(HashSet::new())),
             groups: HashMap::new(),
             players: HashSet::new(),
         };
@@ -2620,5 +2754,67 @@ mod tests {
             matches!(reads.as_slice(), [Command::Fetch(Fetch::Alarms { .. })]),
             "other reads stay, the search goes: {reads:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_command_sent_while_a_probe_is_outstanding_is_dispatched_without_waiting() {
+        let unreachable_ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let groups = proto::Groups {
+            groups: vec![proto::Group {
+                id: "GROUP_1".into(),
+                name: "Living Room".into(),
+                coordinator_id: "PLAYER_1".into(),
+                playback_state: "IDLE".into(),
+                player_ids: vec!["PLAYER_1".into()],
+            }],
+            players: vec![proto::Player {
+                id: "PLAYER_1".into(),
+                name: "Living Room".into(),
+                websocket_url: format!("wss://{unreachable_ip}:1443/websocket/api"),
+                capabilities: vec![],
+            }],
+        };
+        let connection = Connection::dummy("127.0.0.1".parse().unwrap());
+        let session = Session::new(connection, groups);
+        let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let updates: Sink = Arc::new(move |u| {
+            let _ = updates_tx.send(u);
+        });
+
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let wiring = Wiring {
+            events: events_tx,
+            forwarded: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            groups: HashMap::new(),
+            players: HashSet::new(),
+        };
+        let household = Household {
+            groups: Some(session.groups.clone()),
+            ..Default::default()
+        };
+        let follow_task = tokio::spawn(async move {
+            follow_loop(
+                &session,
+                "127.0.0.1".parse().unwrap(),
+                household,
+                wiring,
+                events_rx,
+                &updates,
+                &mut inbox_rx,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(tokio::time::Instant::now().elapsed(), Duration::ZERO);
+
+        inbox_tx.send(Command::Reconnect).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), follow_task)
+            .await
+            .expect("loop stalled: command was not dispatched within 500ms")
+            .unwrap();
+        assert!(result.is_ok());
     }
 }
