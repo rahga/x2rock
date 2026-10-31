@@ -163,7 +163,7 @@ static REDACTIONS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"(?i)\b(?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b", "<mac>"),
         (r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b", "<address>"),
         (
-            r"(?i)\[?\b[0-9A-F]{0,4}(?::[0-9A-F]{0,4}){2,7}\b\]?(?::\d+)?",
+            r"(?i)\[[0-9A-F:]+\](?::\d+)?|(?:\b[0-9A-F]{1,4}:)*\b[0-9A-F]{1,4}::[0-9A-F]{0,4}(?::[0-9A-F]{1,4})*|::[0-9A-F]{1,4}(?::[0-9A-F]{1,4})*|\b(?:[0-9A-F]{1,4}:){7}[0-9A-F]{1,4}\b",
             "<address>",
         ),
     ]
@@ -395,6 +395,20 @@ mod tests {
             r.text.contains("Line-In (Kitchen)"),
             "the room name stays: {}",
             r.text
+        );
+    }
+
+    #[test]
+    fn clock_times_are_kept_while_ipv6_addresses_are_redacted() {
+        let msg = "Kitchen already has an alarm at 06:45:00; connect to fe80::1, [::1]:1400, or 2001:db8::";
+        let out = redact(msg);
+        assert!(out.contains("06:45:00"), "clock time preserved: {out}");
+        assert!(!out.contains("fe80:"), "fe80::1 redacted: {out}");
+        assert!(!out.contains("::1"), "[::1]:1400 redacted: {out}");
+        assert!(!out.contains("2001:db8"), "2001:db8:: redacted: {out}");
+        assert_eq!(
+            out,
+            "Kitchen already has an alarm at 06:45:00; connect to <address>, <address>, or <address>"
         );
     }
 
