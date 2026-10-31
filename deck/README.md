@@ -118,6 +118,13 @@ cargo build --profile release-deck -p x2rock-deck
 `release-deck` is the workspace's release profile with full optimisation and unwinding: the
 deck recovers from a panicked task, which x2rock's own `release` (abort) would not allow.
 
+If you have a speaker salt, a build can carry it, so the deck reads the household's sign-ins
+with no `household-salt` file: set `X2ROCK_SPEAKER_SALT_FILE` to a file holding its 32 hex
+digits (in the environment, or `[env]` in your own `~/.cargo/config.toml`). While that file is
+there the build includes it and its version ends `+salt`; once it is gone, the next build does
+not. Keep such a build to yourself. Without the variable, which is every build from a plain
+checkout and every release, nothing is built in.
+
 On Linux the build needs fontconfig, xkbcommon, wayland, udev and OpenGL headers
 (`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev` on Debian and Ubuntu).
 

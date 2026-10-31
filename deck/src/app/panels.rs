@@ -883,7 +883,7 @@ impl App {
                 "Look for updates",
                 self.prefs.check_for_updates != Some(false),
             ),
-            &format!("x2rock {}", env!("CARGO_PKG_VERSION")),
+            &format!("x2rock {}", crate::built_in::VERSION),
             PanelAction::ToggleUpdateCheck,
         );
         rows.plain(

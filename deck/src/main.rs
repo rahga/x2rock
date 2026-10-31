@@ -12,6 +12,10 @@
 
 mod app;
 mod art;
+/// What build.rs found to build in: a speaker salt, and the version that says so.
+mod built_in {
+    include!(concat!(env!("OUT_DIR"), "/built_in.rs"));
+}
 mod demo;
 mod household;
 mod input;
@@ -63,6 +67,9 @@ fn value(args: &[String], name: &str) -> Option<String> {
 }
 
 fn main() -> anyhow::Result<()> {
+    if let Some(salt) = built_in::SPEAKER_SALT {
+        x2rock::salt::set_built_in(salt);
+    }
     let args: Vec<String> = std::env::args().collect();
 
     if let Some(path) = value(&args, "--screenshot") {

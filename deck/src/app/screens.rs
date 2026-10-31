@@ -2426,7 +2426,7 @@ impl App {
                 .is_some_and(|t| t.contains("ERROR_NO_PERMISSION"))
         };
         crate::report::Input {
-            app: format!("x2rock-deck {}", env!("CARGO_PKG_VERSION")),
+            app: format!("x2rock-deck {}", crate::built_in::VERSION),
             device: crate::report::device(),
             authentication_required: refused(&connection) || refused(&self.last_refusal),
             connection,

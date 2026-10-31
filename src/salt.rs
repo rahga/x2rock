@@ -13,9 +13,14 @@
 //! catch a mistyped or truncated paste before it turns into a decrypt failure
 //! twelve seconds into a household read. `--force` saves a value that does not
 //! match, for the day a firmware changes it.
+//!
+//! A front end built with a salt of its own (the deck, built where one is
+//! named) hands it to [`set_built_in`] at start; it is taken before the file.
+//! The CLI never sets one.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use md5::{Digest, Md5};
@@ -101,8 +106,20 @@ pub fn load_from(path: &Path) -> Result<Option<Salt>> {
     }
 }
 
-/// The saved salt, or the `salt_missing` error that says how to supply one.
+static BUILT_IN: OnceLock<Salt> = OnceLock::new();
+
+/// The salt this program was built with, taken by [`require`] before the
+/// saved file. Set once, at start; a second call changes nothing.
+pub fn set_built_in(salt: Salt) {
+    let _ = BUILT_IN.set(salt);
+}
+
+/// The built-in salt, else the saved one, else the `salt_missing` error that
+/// says how to supply one.
 pub fn require() -> Result<Salt> {
+    if let Some(salt) = BUILT_IN.get() {
+        return Ok(*salt);
+    }
     let path = path()?;
     match load_from(&path)? {
         Some(salt) => Ok(salt),
