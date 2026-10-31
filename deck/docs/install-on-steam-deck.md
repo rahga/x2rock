@@ -18,11 +18,17 @@ in Gaming Mode it runs full screen as a non-Steam game, driven with the Deck's o
 
 1. Switch to **Desktop Mode** (Steam button, Power, Switch to Desktop).
 2. Download `x2rock-deck-<version>-linux-x86_64.tar.gz` and `SHA256SUMS` from the
-   [releases page](https://github.com/rahga/x2rock/releases). You can verify the archive:
+   [releases page](https://github.com/rahga/x2rock/releases). To check the archive, open
+   **Downloads**, right-click an empty space, **Open Terminal Here**, and run:
 
    ```sh
    sha256sum -c SHA256SUMS --ignore-missing
    ```
+
+   It should print the archive's name, with the version you downloaded, then `OK`. If a
+   `SHA256SUMS` from an earlier download is still there, delete both it and the new one and
+   download `SHA256SUMS` again: your browser saves a second copy under another name, and the
+   command would check the old file.
 
    Unpack it (right-click it in Dolphin, Extract, Extract archive here).
 3. Open the unpacked folder, right-click an empty space, **Open Terminal Here**, and run:
@@ -48,8 +54,8 @@ the app and its menu entry out again.
 When an update is released:
 
 1. Switch to **Desktop Mode**.
-2. Download the new `x2rock-deck-<version>-linux-x86_64.tar.gz` and `SHA256SUMS`, verify,
-   and unpack it.
+2. Download the new `x2rock-deck-<version>-linux-x86_64.tar.gz` and `SHA256SUMS`, check it as
+   in step 2 above (the old `SHA256SUMS` has to go first), and unpack it.
 3. Open the unpacked folder, **Open Terminal Here**, and run:
 
    ```sh

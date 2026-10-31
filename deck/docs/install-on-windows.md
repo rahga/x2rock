@@ -11,12 +11,17 @@ x2rock is built for Windows 10 and 11, including tablets, with touch, a keyboard
 controller.
 
 1. Download `x2rock-deck-<version>-windows-x86_64.zip` and `SHA256SUMS` from the
-   [releases page](https://github.com/rahga/x2rock/releases). You can check its integrity
-   in PowerShell:
+   [releases page](https://github.com/rahga/x2rock/releases). To check the zip, open
+   PowerShell and run, with the version you downloaded:
 
    ```powershell
-   Get-FileHash x2rock-deck-*-windows-x86_64.zip
+   cd $HOME\Downloads
+   Get-FileHash x2rock-deck-<version>-windows-x86_64.zip
    ```
+
+   Open `SHA256SUMS` in Notepad. The long number on the zip's line must match the `Hash`
+   that PowerShell printed, letter for letter (one is in capitals, the other not). If they
+   differ, delete the zip and download it again.
 
    Unzip it anywhere.
 2. Run `x2rock-deck.exe`.
