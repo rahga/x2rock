@@ -161,5 +161,7 @@ favourite groups, search categories) are the TV app's, with its test cases porte
 
 ## License
 
-GNU General Public License, version 3 only (`GPL-3.0-only`), as x2rock for Android TV. Slint
-is used under its GPLv3 licence. Roboto and the Material icons are Apache 2.0.
+GNU General Public License, version 3 only (`GPL-3.0-only`), as x2rock for Android TV (see
+[`LICENSE`](LICENSE)). Slint is used under its GPLv3 licence. Roboto and the Material icons are
+licensed under Apache 2.0 (see [`THIRD-PARTY.md`](THIRD-PARTY.md) and
+[`ui/assets/fonts/LICENSE-Roboto.txt`](ui/assets/fonts/LICENSE-Roboto.txt)).

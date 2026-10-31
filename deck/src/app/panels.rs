@@ -886,6 +886,10 @@ impl App {
             &format!("x2rock {}", env!("CARGO_PKG_VERSION")),
             PanelAction::ToggleUpdateCheck,
         );
+        rows.plain(
+            PanelKind::Note,
+            "GPL-3.0-only. Uses Slint (GPLv3), Roboto and Material Icons (Apache-2.0).",
+        );
         rows.plain(PanelKind::Heading, "Beta");
         rows.button(
             &on_off("Beta features", self.prefs.beta_features),

@@ -61,7 +61,7 @@ jobs:
           version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
           dir=x2rock-deck-$version-linux-x86_64
           mkdir -p $dir
-          cp target/release-deck/x2rock-deck deck/dist/install.sh deck/dist/x2rock-deck.desktop deck/dist/x2rock-deck.png deck/LICENSE $dir/
+          cp target/release-deck/x2rock-deck deck/dist/install.sh deck/dist/x2rock-deck.desktop deck/dist/x2rock-deck.png deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt $dir/
           cp deck/docs/install-on-steam-deck.md $dir/README.md
           tar czf $dir.tar.gz $dir
           echo "PACKAGE=$dir.tar.gz" >> $GITHUB_ENV
@@ -89,7 +89,7 @@ jobs:
           version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
           dir=x2rock-deck-$version-windows-x86_64
           mkdir -p $dir
-          cp target/release-deck/x2rock-deck.exe deck/LICENSE $dir/
+          cp target/release-deck/x2rock-deck.exe deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt $dir/
           cp deck/docs/install-on-windows.md $dir/README.md
           7z a $dir.zip $dir
           echo "PACKAGE=$dir.zip" >> $GITHUB_ENV
