@@ -913,6 +913,7 @@ fn navigation_follows_the_tv_apps_rules() {
     press(Action::Back);
 
     held_volume_is_paced_capped_and_ends_on_release();
+    cancel_after_press_leaves_nothing_clicked();
 
     // Out-of-order and stale responses: matched by request id, dropped after
     // reconnect, duplicate service page offsets ignored, and late search
@@ -2034,7 +2035,8 @@ fn readonly_command_logging_redacts_plex_token() {
     assert!(log.contains("<token>"));
 }
 
-#[test]
+/// A pad that drops out mid-press: no click and no hold. Called from the
+/// navigation test, since only its thread has an App for with_app to find.
 fn cancel_after_press_leaves_nothing_clicked() {
     with_app(|app| {
         app.close_panel();
@@ -2042,8 +2044,10 @@ fn cancel_after_press_leaves_nothing_clicked() {
         assert!(app.panel.is_none());
         app.action(Action::Select, Phase::Press);
         assert!(app.press.is_some());
+        assert!(app.hold_timer.running(), "a press arms the hold");
         app.action(Action::Select, Phase::Cancel);
         assert!(app.press.is_none());
+        assert!(!app.hold_timer.running(), "cancel disarms the hold");
         assert!(
             app.panel.is_none(),
             "cancel after press leaves nothing clicked"
