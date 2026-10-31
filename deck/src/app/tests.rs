@@ -1923,7 +1923,8 @@ fn test_all_rooms_gone_while_focus_in_pane_recovers_to_rooms_and_select_reconnec
 
         let sent = app.sent.borrow().clone();
         assert!(
-            sent.iter().any(|c| matches!(c, household::Command::Reconnect)),
+            sent.iter()
+                .any(|c| matches!(c, household::Command::Reconnect)),
             "Select reached the Reconnect action: {sent:?}"
         );
 
