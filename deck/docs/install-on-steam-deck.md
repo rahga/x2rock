@@ -2,12 +2,12 @@
 
 ## Status (as of 2026-10-30)
 
-x2rock-deck has been developed and verified on Linux desktop systems and tested read-only
-against a single-room Sonos household (2026-10-30). **It has not yet been run on physical Steam
-Deck hardware**, in either Gaming Mode or Desktop Mode. Steam shortcut integration, artwork
-placement, gamepad repeat pacing, on-screen keyboard interaction (Steam + X), and touchscreen
-support are implemented according to SteamOS specifications and unit tests, but await testing on a
-physical Deck. Hardware checks are tracked in [#7](https://github.com/rahga/x2rock/issues/7).
+x2rock-deck has been developed on Linux desktops and checked read-only against a single-room
+Sonos household (Media Room, 2026-10-30). **It has not yet been run on a Steam Deck**, in Gaming
+Mode or Desktop Mode. The Steam shortcut and its artwork, the gamepad, Steam's on-screen keyboard
+(Steam + X) and the touchscreen are all untried there. Unit tests cover the shortcut's id, the
+artwork files, the gamepad's repeat timing and the install script, not how Steam or the Deck
+behaves. Hardware checks are tracked in [#7](https://github.com/rahga/x2rock/issues/7).
 
 x2rock is designed to run in both of the Deck's modes. In Desktop Mode it is an ordinary window;
 in Gaming Mode it runs full screen as a non-Steam game, driven with the Deck's own controls.
@@ -77,8 +77,8 @@ x2rock's page in the library), pick the **Gamepad** template if it is not alread
 | L2 / R2 | Previous / next track |
 | View (⧉) | Full screen on or off |
 
-The touchscreen is designed to work too: a tap is a press, and a finger held half a second is a
-long press.
+The touchscreen should work too, though it is untried on a Deck: a tap is a press, and a finger
+held half a second is a long press.
 
 Search has a keyboard of its own on the screen. Steam's keyboard (Steam + X) is intended to type
 into Search as well.
