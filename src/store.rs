@@ -92,7 +92,7 @@ pub fn touch(path: &Path) {
 }
 
 /// `<file>.<ext>` beside `path`.
-fn sibling(path: &Path, ext: &str) -> PathBuf {
+pub fn sibling(path: &Path, ext: &str) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

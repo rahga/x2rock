@@ -1,7 +1,7 @@
 //! This device's own settings, under the TV app's names for them: the theme,
 //! the room order, the television's room, and the rest as they arrive. One
 //! JSON file in the platform's config directory (`~/.config/x2rock-deck/` on
-//! Linux, `%APPDATA%\rahga\x2rock-deck\` on Windows), written whole by
+//! Linux, `%APPDATA%\rahga\x2rock-deck\config\` on Windows), written whole by
 //! renaming a temporary over it.
 
 use std::path::PathBuf;
@@ -43,6 +43,8 @@ pub struct Prefs {
     pub theme: String,
     #[serde(skip)]
     path: Option<PathBuf>,
+    #[serde(skip)]
+    unreadable: bool,
 }
 
 impl Prefs {
@@ -52,13 +54,40 @@ impl Prefs {
     }
 
     pub fn load() -> Self {
-        let path = Self::path();
-        let mut prefs: Prefs = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        prefs.path = path;
+        Self::load_from(Self::path())
+    }
+
+    pub fn load_from(path: Option<PathBuf>) -> Self {
+        let Some(p) = path else {
+            return Self::default();
+        };
+        let mut prefs = match std::fs::read_to_string(&p) {
+            Ok(text) => match serde_json::from_str::<Prefs>(&text) {
+                Ok(prefs) => prefs,
+                Err(e) => {
+                    eprintln!(
+                        "x2rock-deck: could not parse settings from {}: {e}",
+                        p.display()
+                    );
+                    Prefs {
+                        unreadable: true,
+                        ..Default::default()
+                    }
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Prefs::default(),
+            Err(e) => {
+                eprintln!(
+                    "x2rock-deck: could not read settings from {}: {e}",
+                    p.display()
+                );
+                Prefs {
+                    unreadable: true,
+                    ..Default::default()
+                }
+            }
+        };
+        prefs.path = Some(p);
         prefs.theme = prefs
             .color_theme
             .clone()
@@ -80,19 +109,95 @@ impl Prefs {
         let Some(path) = self.path.clone() else {
             return;
         };
-        let result = (|| -> std::io::Result<()> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+        if self.unreadable {
+            if path.exists() {
+                let bad = x2rock::store::sibling(&path, "bad");
+                if let Err(e) = std::fs::rename(&path, &bad) {
+                    eprintln!(
+                        "x2rock-deck: could not preserve unreadable settings to {}: {e}",
+                        bad.display()
+                    );
+                }
             }
-            let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-            std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap_or_default())?;
-            std::fs::rename(&tmp, &path)
-        })();
-        if let Err(e) = result {
+            self.unreadable = false;
+        }
+        let text = serde_json::to_string_pretty(self).unwrap_or_default();
+        if let Err(e) = x2rock::store::write_atomically(&path, &text, x2rock::store::PLAIN) {
             eprintln!(
-                "x2rock-deck: could not save settings to {}: {e}",
+                "x2rock-deck: could not save settings to {}: {e:#}",
                 path.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_prefs_preserved_as_bad_and_no_tmp_left_behind() {
+        let temp = x2rock::testdir::TempDir::new("prefs-unreadable");
+        let prefs_path = temp.path().join("prefs.json");
+        let garbage = b"{ invalid json: true, oops ";
+        std::fs::write(&prefs_path, garbage).expect("write garbage prefs");
+
+        let mut prefs = Prefs::load_from(Some(prefs_path.clone()));
+        assert_eq!(prefs.theme, "DEFAULT");
+        assert!(prefs.unreadable);
+
+        prefs.save();
+
+        let bad_path = x2rock::store::sibling(&prefs_path, "bad");
+        assert!(bad_path.exists(), "prefs.json.bad should exist");
+        assert_eq!(
+            std::fs::read(&bad_path).expect("read bad file"),
+            garbage,
+            "garbage preserved under .bad"
+        );
+
+        assert!(prefs_path.exists(), "new prefs.json should exist");
+        let new_text = std::fs::read_to_string(&prefs_path).expect("read new prefs");
+        let parsed: Prefs = serde_json::from_str(&new_text).expect("new prefs must be valid json");
+        assert_eq!(parsed.color_theme.as_deref(), Some("DEFAULT"));
+        let reloaded = Prefs::load_from(Some(prefs_path.clone()));
+        assert_eq!(reloaded.theme, "DEFAULT");
+        assert!(!reloaded.unreadable);
+
+        // Verify no .tmp file was left behind
+        let entries = std::fs::read_dir(temp.path()).expect("read temp dir");
+        for entry in entries {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.ends_with(".tmp"),
+                "found leftover temporary file: {name}"
+            );
+        }
+
+        // A second save does not overwrite .bad with the newly saved prefs
+        prefs.theme = "OCEAN".into();
+        prefs.save();
+        assert_eq!(
+            std::fs::read(&bad_path).expect("read bad file"),
+            garbage,
+            ".bad still holds original garbage"
+        );
+    }
+
+    #[test]
+    fn missing_prefs_loads_defaults_without_creating_bad() {
+        let temp = x2rock::testdir::TempDir::new("prefs-missing");
+        let prefs_path = temp.path().join("prefs.json");
+
+        let mut prefs = Prefs::load_from(Some(prefs_path.clone()));
+        assert_eq!(prefs.theme, "DEFAULT");
+        assert!(!prefs.unreadable);
+
+        prefs.save();
+
+        let bad_path = x2rock::store::sibling(&prefs_path, "bad");
+        assert!(!bad_path.exists(), "no .bad should be created when missing");
+        assert!(prefs_path.exists(), "prefs.json should be created");
     }
 }
