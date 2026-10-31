@@ -1,7 +1,16 @@
 # Installing x2rock on a Steam Deck
 
-x2rock runs in both of the Deck's modes. In Desktop Mode it is an ordinary window; in Gaming
-Mode it is a non-Steam game, full screen, driven with the Deck's own controls.
+## Status (as of 2026-10-30)
+
+x2rock-deck has been developed and verified on Linux desktop systems and tested read-only
+against a single-room Sonos household (2026-10-30). **It has not yet been run on physical Steam
+Deck hardware**, in either Gaming Mode or Desktop Mode. Steam shortcut integration, artwork
+placement, gamepad repeat pacing, on-screen keyboard interaction (Steam + X), and touchscreen
+support are implemented according to SteamOS specifications and unit tests, but await testing on a
+physical Deck. Hardware checks are tracked in [#7](https://github.com/rahga/x2rock/issues/7).
+
+x2rock is designed to run in both of the Deck's modes. In Desktop Mode it is an ordinary window;
+in Gaming Mode it runs full screen as a non-Steam game, driven with the Deck's own controls.
 
 ## Install
 
@@ -21,8 +30,8 @@ Mode it is a non-Steam game, full screen, driven with the Deck's own controls.
 4. If the script says so, add it to Steam yourself: open Steam, **Games > Add a Non-Steam
    Game to My Library**, tick **x2rock**, **Add Selected Programs**.
 5. Return to Gaming Mode. x2rock is under **Non-Steam** in your library. The first time it
-   is opened from there it gives its tile Steam's artwork (capsule, hero and logo); a picture
-   you set yourself is left alone.
+   is opened from there, it is designed to give its tile Steam's artwork (capsule, hero and logo);
+   a picture you set yourself is left alone.
 
 To remove it: `~/Applications/x2rock` holds nothing else, and `./install.sh --remove` takes
 the app and its menu entry out again.
@@ -58,15 +67,16 @@ x2rock's page in the library), pick the **Gamepad** template if it is not alread
 | L2 / R2 | Previous / next track |
 | View (⧉) | Full screen on or off |
 
-The touchscreen works too: a tap is a press, and a finger held half a second is a long press.
+The touchscreen is designed to work too: a tap is a press, and a finger held half a second is a
+long press.
 
-Search has a keyboard of its own on the screen. Steam's keyboard (Steam + X) types into
-Search as well.
+Search has a keyboard of its own on the screen. Steam's keyboard (Steam + X) is intended to type
+into Search as well.
 
 ## Controls in Desktop Mode
 
 Steam's desktop layout turns the Deck's controls into keys: the D-pad and left stick are the
-arrows, A is Enter, B is Escape. x2rock takes those as it takes the gamepad.
+arrows, A is Enter, B is Escape. x2rock is built to take those as it takes the gamepad.
 
 ## Network
 

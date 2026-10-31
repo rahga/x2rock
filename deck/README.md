@@ -12,6 +12,15 @@ play and search the same way.
 
 ![The home screen at 1080p, from the demo household](docs/images/home.png)
 
+## Status (as of 2026-10-30)
+
+x2rock-deck has been developed on Linux desktops and verified read-only against a single-room
+Sonos household (Media Room, 2026-10-30). **It has not yet been run on physical Steam Deck
+hardware, a Windows tablet, or a multi-room household.** The Windows binary has only been built
+in CI. Physical hardware checks (gamepad feel and repeats on the Deck, Steam shortcuts and modes,
+Windows touch, multi-room grouping barriers, soundbars, Line-In) are tracked in
+[#7](https://github.com/rahga/x2rock/issues/7).
+
 ## What it does
 
 - **Rooms**: play, pause, skip, seek, shuffle, repeat; volume per room and per speaker, by
@@ -92,7 +101,7 @@ arrives beyond the last level asked for. Each pad tracks its own held controls. 
 releases its held actions and stops its repeats. Incoming axis noise does not delay repeats.
 
 Search has its own keyboard on screen, walked with the pad; a real keyboard types into it too,
-and so does Steam's (Steam + X in Gaming Mode).
+and Steam's (Steam + X in Gaming Mode) is intended to type into it as well.
 
 ## Building
 

@@ -1,6 +1,13 @@
 # Installing x2rock on Windows
 
-x2rock runs on Windows 10 and 11, including tablets, with touch, a keyboard or an Xbox
+## Status (as of 2026-10-30)
+
+**The Windows binary has only been built in CI and has not yet been run on physical Windows
+hardware or Windows tablets.** Touch input, on-screen keyboard, volume controls, and network
+prompt behaviour are implemented from Slint and Windows specifications, but await testing on
+real devices. Hardware checks are tracked in [#7](https://github.com/rahga/x2rock/issues/7).
+
+x2rock is built for Windows 10 and 11, including tablets, with touch, a keyboard or an Xbox
 controller.
 
 1. Download `x2rock-deck-<version>-windows-x86_64.zip` from the
