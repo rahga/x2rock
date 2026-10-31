@@ -2000,20 +2000,18 @@ fn held_volume_is_paced_capped_and_ends_on_release() {
 
 #[test]
 fn a_failed_plex_cover_does_not_log_its_token() {
-    with_app(|app| {
-        let url =
-            "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=supersecret123&width=300";
-        let key = super::ArtKey::new(url, super::ArtSize::Full);
-        let error = crate::art::LoadError::permanent(anyhow::anyhow!("raster size exceeds limit"));
-        app.art_arrived(key, Err(error));
-        let log = app.last_art_failure_log.as_deref().expect("failure logged");
-        assert!(!log.contains("supersecret123"));
-        assert!(log.contains("<token>"));
-        assert_eq!(
-            log,
-            "x2rock-deck: no art for http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
-        );
-    });
+    // Not through with_app: a test thread of its own has no App, and
+    // with_app would skip the body.
+    let url = "https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=supersecret123&width=300";
+    let line = super::format_art_failure(url, &anyhow::anyhow!("raster size exceeds limit"));
+    assert_eq!(
+        line,
+        "x2rock-deck: no art for https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
+    );
+    // As http.rs words a stalled fetch: the error carries the URL as well.
+    let error = anyhow::anyhow!("timed out after 8s talking to {url}");
+    let line = super::format_art_failure(url, &error);
+    assert!(!line.contains("supersecret123"), "{line}");
 }
 
 #[test]

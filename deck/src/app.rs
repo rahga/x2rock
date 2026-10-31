@@ -221,8 +221,6 @@ pub struct App {
     /// Added to the clock, for the tests: holds and bursts are timed.
     #[cfg(test)]
     pub(crate) skew_ms: u64,
-    #[cfg(test)]
-    pub(crate) last_art_failure_log: Option<String>,
     menu_down: bool,
     hold_timer: slint::Timer,
     moving: Option<Moving>,
@@ -296,8 +294,6 @@ impl App {
             sent: Default::default(),
             #[cfg(test)]
             skew_ms: 0,
-            #[cfg(test)]
-            last_art_failure_log: None,
             menu_down: false,
             hold_timer: slint::Timer::default(),
             moving: None,
@@ -687,10 +683,6 @@ impl App {
                 let retry_at = Instant::now() + e.retry_after();
                 let line = format_art_failure(&key.url, &e.error);
                 eprintln!("{line}");
-                #[cfg(test)]
-                {
-                    self.last_art_failure_log = Some(line);
-                }
                 self.art.failed(key, retry_at);
             }
         }
@@ -2268,7 +2260,8 @@ pub(crate) fn format_readonly_command(command: &Command) -> String {
     format!("x2rock-deck: read-only, not sent: {safe}")
 }
 
+/// The whole line is redacted: an error can name the URL too (a timeout does).
 pub(crate) fn format_art_failure(url: &str, error: &anyhow::Error) -> String {
-    let safe_url = x2rock::sonos::plex::redact_token(url);
-    format!("x2rock-deck: no art for {safe_url}: {error:#}")
+    x2rock::sonos::plex::redact_token(&format!("x2rock-deck: no art for {url}: {error:#}"))
+        .into_owned()
 }

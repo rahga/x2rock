@@ -614,9 +614,9 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
     Ok(())
 }
 
+/// The whole line is redacted: an error can name the URL too (a timeout does).
 pub(crate) fn format_failure(url: &str, error: &anyhow::Error) -> String {
-    let safe_url = crate::sonos::plex::redact_token(url);
-    format!("x2rock: {safe_url}: {error:#}")
+    crate::sonos::plex::redact_token(&format!("x2rock: {url}: {error:#}")).into_owned()
 }
 
 #[cfg(test)]
@@ -634,6 +634,12 @@ mod tests {
             line,
             "x2rock: http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
         );
+
+        // As http.rs words a stalled fetch: the error carries the URL as well.
+        let url = "https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=secret789&width=300";
+        let err = anyhow::anyhow!("timed out after 8s talking to {url}");
+        let line = format_failure(url, &err);
+        assert!(!line.contains("secret789"), "{line}");
 
         let encoded =
             "https://sonos.plex.tv/img?url=https%3A%2F%2Fx%3FX-Plex-Token%3Dsecret456&z=1";
