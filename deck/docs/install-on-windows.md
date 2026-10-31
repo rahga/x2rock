@@ -47,7 +47,7 @@ answer.
 On a tablet the − and + beside each level are always shown, and Search has its own keyboard
 on the screen.
 
-Settings are kept in `%APPDATA%\rahga\x2rock-deck\`.
+Settings are kept in `%APPDATA%\rahga\x2rock-deck\config\prefs.json`.
 
 For music services that need an account, x2rock reads the household's own sign-ins off a
 speaker, which needs the *speaker salt* (not part of x2rock's source): its 32 hex digits go in

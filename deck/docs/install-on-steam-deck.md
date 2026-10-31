@@ -12,6 +12,8 @@ physical Deck. Hardware checks are tracked in [#7](https://github.com/rahga/x2ro
 x2rock is designed to run in both of the Deck's modes. In Desktop Mode it is an ordinary window;
 in Gaming Mode it runs full screen as a non-Steam game, driven with the Deck's own controls.
 
+![x2rock-deck on the Steam Deck's 1280×800 display in the Ocean theme](images/deck-ocean.png)
+
 ## Install
 
 1. Switch to **Desktop Mode** (Steam button, Power, Switch to Desktop).

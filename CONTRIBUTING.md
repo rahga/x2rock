@@ -1,7 +1,9 @@
 # Contributing
 
-x2rock is a Linux Rust binary containing a CLI, an MPRIS daemon and a terminal UI.
-You can build it and run the default test suite without Sonos hardware or an account.
+x2rock is a Linux Rust binary containing a CLI, an MPRIS daemon and a terminal UI, beside
+`x2rock-deck` (in `deck/`), a Slint-based front end for the Steam Deck, Linux desktops and Windows tablets.
+You can build it and run the default test suite without Sonos hardware or an account. For working
+on the deck front end, see [deck/README.md](deck/README.md).
 The [README](README.md) documents current behavior; the [architecture notes](docs/architecture.md)
 are the current reference for the protocol and the decisions behind it, with the investigation
 history in git. The [custom D-Bus interface](docs/dbus-interface.md) is a proposal, not an implemented API.
@@ -73,11 +75,15 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 python3 scripts/test-follow-sink.py
+
+# For the deck front end:
+cargo test --locked -p x2rock-deck
+cargo clippy --locked --all-targets -p x2rock-deck -- -D warnings
 ```
 
-These are the checks in [CI](.github/workflows/ci.yml). With dependencies already cached,
-add `--offline` to build, Clippy or test to avoid registry access. To check the minimum Rust
-version locally with rustup:
+These are the checks in [CI](.github/workflows/ci.yml) and [deck CI](.github/workflows/deck.yml).
+With dependencies already cached, add `--offline` to build, Clippy or test to avoid registry access.
+To check the minimum Rust version locally with rustup:
 
 ```sh
 rustup toolchain install 1.89 --profile minimal
@@ -87,6 +93,10 @@ cargo +1.89 check --all-targets --locked
 rustup toolchain install 1.92 --profile minimal
 cargo +1.92 check --locked -p x2rock-deck
 ```
+
+For working on `x2rock-deck`, including its Linux system dependencies
+(`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev`),
+headless screenshots and Windows builds, see [deck/README.md](deck/README.md).
 
 Tests live beside the implementation in `#[cfg(test)]` modules. Run a subset by name, for example
 `cargo test --locked sonos::http::tests`. File-writing tests use temporary directories; transport
@@ -118,6 +128,7 @@ cargo test --locked netid::tests::finds_this_machines_gateway -- --ignored
 | Discovery and remembered networks | `src/discover.rs`, `src/netid.rs`, `src/state.rs` |
 | Persistent files and account/bookmark transactions | `src/store.rs`, `src/credentials.rs`, `src/bookmarks.rs` |
 | Terminal UI | `src/tui/` |
+| Deck front end | `deck/` |
 | Bar widget | `quickshell/x2rock.sonos/` |
 | Service installation and desktop integration | `src/service.rs`, `systemd/`, `desktop/` |
 | Embedded agent documentation | `skills/x2rock/SKILL.md` |

@@ -118,8 +118,8 @@ cargo build --profile release-deck -p x2rock-deck
 `release-deck` is the workspace's release profile with full optimisation and unwinding: the
 deck recovers from a panicked task, which x2rock's own `release` (abort) would not allow.
 
-On Linux the build needs fontconfig, xkbcommon, wayland and udev headers
-(`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev` on Debian and Ubuntu).
+On Linux the build needs fontconfig, xkbcommon, wayland, udev and OpenGL headers
+(`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev` on Debian and Ubuntu).
 
 A Windows build can be made from Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin)
 (it needs clang and an `lld-link`; the Rust toolchain's own `rust-lld` serves, under that name):
@@ -149,7 +149,7 @@ x2rock-deck --screenshot live.png --live 8                          # this netwo
 ## Tests
 
 ```sh
-cargo test
+cargo test -p x2rock-deck
 ```
 
 The wording rules (room lines, track lines, times, volume and seek bursts, sleep lengths,
