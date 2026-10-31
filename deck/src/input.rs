@@ -133,7 +133,45 @@ enum PadEvent {
 struct Pad {
     buttons: Vec<gilrs::Button>,
     stick: Option<Action>,
+    stick_x: f32,
+    stick_y: f32,
     repeater: Repeater,
+}
+
+fn derive_stick(x: f32, y: f32, axis: gilrs::Axis) -> Option<Action> {
+    use gilrs::Axis;
+    let x_action = if x > 0.5 {
+        Some(Action::Right)
+    } else if x < -0.5 {
+        Some(Action::Left)
+    } else {
+        None
+    };
+    let y_action = if y > 0.5 {
+        Some(Action::Up)
+    } else if y < -0.5 {
+        Some(Action::Down)
+    } else {
+        None
+    };
+    match (x_action, y_action) {
+        (Some(x_act), None) => Some(x_act),
+        (None, Some(y_act)) => Some(y_act),
+        (Some(x_act), Some(y_act)) => {
+            let x_mag = x.abs();
+            let y_mag = y.abs();
+            if x_mag > y_mag {
+                Some(x_act)
+            } else if y_mag > x_mag {
+                Some(y_act)
+            } else if axis == Axis::LeftStickX {
+                Some(x_act)
+            } else {
+                Some(y_act)
+            }
+        }
+        (None, None) => None,
+    }
 }
 
 impl Pad {
@@ -162,25 +200,18 @@ impl Pad {
             PadEvent::Button(button, false) => self.buttons.retain(|b| *b != button),
             PadEvent::Axis(axis, value) => {
                 use gilrs::Axis;
-                let toward = match axis {
-                    Axis::LeftStickX if value > 0.5 => Some(Action::Right),
-                    Axis::LeftStickX if value < -0.5 => Some(Action::Left),
-                    Axis::LeftStickY if value > 0.5 => Some(Action::Up),
-                    Axis::LeftStickY if value < -0.5 => Some(Action::Down),
-                    Axis::LeftStickX | Axis::LeftStickY => None,
+                match axis {
+                    Axis::LeftStickX => self.stick_x = value,
+                    Axis::LeftStickY => self.stick_y = value,
                     _ => return,
-                };
-                let same_axis = |a: Action| match axis {
-                    Axis::LeftStickX => matches!(a, Action::Left | Action::Right),
-                    _ => matches!(a, Action::Up | Action::Down),
-                };
-                if toward.is_some() || self.stick.is_some_and(same_axis) {
-                    self.stick = toward;
                 }
+                self.stick = derive_stick(self.stick_x, self.stick_y, axis);
             }
             PadEvent::Disconnect => {
                 self.buttons.clear();
                 self.stick = None;
+                self.stick_x = 0.0;
+                self.stick_y = 0.0;
             }
         }
     }
@@ -460,6 +491,55 @@ mod tests {
         assert_eq!(
             s.step(Some((1, PadEvent::Axis(LeftStickX, 0.0))), at(t0, 401)),
             [(Action::Right, Phase::Release)]
+        );
+    }
+
+    #[test]
+    fn left_stick_diagonal_preserves_first_axis_when_second_is_released() {
+        use gilrs::Axis::*;
+        let t0 = Instant::now();
+        let mut s = Gamepads::default();
+        // 1. Deflect X -> Right pressed
+        assert_eq!(
+            s.step(Some((1, PadEvent::Axis(LeftStickX, 1.0))), t0),
+            [(Action::Right, Phase::Press)]
+        );
+        // 2. Deflect Y -> Up pressed, Right released
+        assert_eq!(
+            s.step(Some((1, PadEvent::Axis(LeftStickY, 1.0))), at(t0, 50)),
+            [(Action::Right, Phase::Release), (Action::Up, Phase::Press)]
+        );
+        // 3. Release Y -> Up released, Right pressed again
+        assert_eq!(
+            s.step(Some((1, PadEvent::Axis(LeftStickY, 0.0))), at(t0, 100)),
+            [(Action::Up, Phase::Release), (Action::Right, Phase::Press)]
+        );
+        // 4. Past repeat delay -> Right repeats (held)
+        assert_eq!(s.step(None, at(t0, 500)), [(Action::Right, Phase::Repeat)]);
+        // 5. Release X -> Right released
+        assert_eq!(
+            s.step(Some((1, PadEvent::Axis(LeftStickX, 0.0))), at(t0, 550)),
+            [(Action::Right, Phase::Release)]
+        );
+
+        // Also test reverse: Y first, then X, then X released -> Up held again
+        let mut s2 = Gamepads::default();
+        assert_eq!(
+            s2.step(Some((1, PadEvent::Axis(LeftStickY, 1.0))), t0),
+            [(Action::Up, Phase::Press)]
+        );
+        assert_eq!(
+            s2.step(Some((1, PadEvent::Axis(LeftStickX, 1.0))), at(t0, 50)),
+            [(Action::Up, Phase::Release), (Action::Right, Phase::Press)]
+        );
+        assert_eq!(
+            s2.step(Some((1, PadEvent::Axis(LeftStickX, 0.0))), at(t0, 100)),
+            [(Action::Right, Phase::Release), (Action::Up, Phase::Press)]
+        );
+        assert_eq!(s2.step(None, at(t0, 500)), [(Action::Up, Phase::Repeat)]);
+        assert_eq!(
+            s2.step(Some((1, PadEvent::Axis(LeftStickY, 0.0))), at(t0, 550)),
+            [(Action::Up, Phase::Release)]
         );
     }
 }
