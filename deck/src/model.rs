@@ -424,13 +424,16 @@ impl VolumeBurst {
 /// One volume control's presses and holds, stepped as [`VolumeBurst`] says. A
 /// held control repeats at most every 250ms and moves at most 20 per hold;
 /// release and press again to go further. While a burst lasts, it steps from
-/// the level it last asked for, since the speaker's events lag behind.
+/// the level it last asked for, since the speaker's events lag behind; but
+/// not once the speaker says a level off the way from where the burst began
+/// to there, which means something else moved it.
 #[derive(Debug, Default)]
 pub struct VolumeHold {
     burst: VolumeBurst,
     held: i32,
     last_at: Option<u64>,
-    target: Option<i32>,
+    /// Where the burst began and the level it last asked for.
+    target: Option<(i32, i32)>,
 }
 
 impl VolumeHold {
@@ -454,9 +457,19 @@ impl VolumeHold {
         } else if since.is_some_and(|ms| ms < Self::REPEAT_MS) {
             return None;
         }
-        let from = match self.target {
-            Some(target) if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS) => target,
-            _ => level,
+        let (began, from) = match self.target {
+            Some((began, target))
+                if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS)
+                    && (began.min(target)..=began.max(target)).contains(&level) =>
+            {
+                (began, target)
+            }
+            // Moved elsewhere mid-burst: start a fresh one from there.
+            Some(_) if since.is_some_and(|ms| ms <= VolumeBurst::GAP_MS) => {
+                self.burst = VolumeBurst::default();
+                (level, level)
+            }
+            _ => (level, level),
         };
         let step = self.burst.step(from, direction, now_ms);
         let step = (self.held + step).clamp(-Self::MOST, Self::MOST) - self.held;
@@ -466,7 +479,7 @@ impl VolumeHold {
         }
         self.held += to - from;
         self.last_at = Some(now_ms);
-        self.target = Some(to);
+        self.target = Some((began, to));
         Some((from, to))
     }
 }
@@ -777,10 +790,25 @@ mod tests {
         assert_eq!(h.step(30, 1, false, 2_000), Some((50, 55)));
         // After a pause, from what the speaker says.
         assert_eq!(h.step(50, -1, false, 9_000), Some((50, 48)));
+        // Repeats closer than 250ms apart are dropped.
+        let mut h = VolumeHold::default();
+        assert_eq!(h.step(30, 1, false, 0), Some((30, 32)));
+        assert_eq!(h.step(30, 1, true, 249), None);
+        assert_eq!(h.step(30, 1, true, 250), Some((32, 35)));
         // Nowhere to go at the ends.
         let mut h = VolumeHold::default();
         assert_eq!(h.step(100, 1, false, 0), None);
         assert_eq!(h.step(0, -1, false, 0), None);
+    }
+
+    #[test]
+    fn a_level_set_elsewhere_mid_burst_is_stepped_from_not_overridden() {
+        let mut h = VolumeHold::default();
+        assert_eq!(h.step(50, 1, false, 0), Some((50, 52)));
+        // Lagging on the way up: still from the target.
+        assert_eq!(h.step(51, 1, false, 300), Some((52, 55)));
+        // A phone took it down to 20: from there, not back up to 58.
+        assert_eq!(h.step(20, 1, false, 600), Some((20, 22)));
     }
 
     #[test]

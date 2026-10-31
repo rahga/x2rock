@@ -1950,11 +1950,16 @@ fn held_volume_is_paced_capped_and_ends_on_release() {
         let group = app.selected_entry().expect("a room").group_id.clone();
         from = app.live(&group).volume.expect("a level").volume as i32;
         app.action(Action::VolumeUp, Phase::Press);
-        // The pad repeats after 400ms, then every 90ms: 1.5s held.
+        // The pad repeats after 400ms, then every 90ms: 1.5s held. Of the
+        // first four repeats, 250ms apart lets two through.
         app.skew_ms += 400;
-        for _ in 0..12 {
+        for i in 0..12 {
             app.action(Action::VolumeUp, Phase::Repeat);
             app.skew_ms += 90;
+            if i == 3 {
+                let sent = app.sent.borrow();
+                assert_eq!(sent.len(), 3, "paced: {sent:?}");
+            }
         }
     });
     let held = volume_reached(from);
