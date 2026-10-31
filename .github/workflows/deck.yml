@@ -61,7 +61,7 @@ jobs:
           version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
           dir=x2rock-deck-$version-linux-x86_64
           mkdir -p $dir
-          cp target/release-deck/x2rock-deck deck/dist/install.sh deck/dist/x2rock-deck.desktop deck/dist/x2rock-deck.png deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt $dir/
+          cp target/release-deck/x2rock-deck deck/dist/install.sh deck/dist/x2rock-deck.desktop deck/dist/x2rock-deck.png deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt deck/CHANGELOG.md $dir/
           cp deck/docs/install-on-steam-deck.md $dir/README.md
           tar czf $dir.tar.gz $dir
           echo "PACKAGE=$dir.tar.gz" >> $GITHUB_ENV
@@ -89,7 +89,7 @@ jobs:
           version=$(git describe --tags --match 'deck-v*' --always --dirty | sed 's/^deck-v//')
           dir=x2rock-deck-$version-windows-x86_64
           mkdir -p $dir
-          cp target/release-deck/x2rock-deck.exe deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt $dir/
+          cp target/release-deck/x2rock-deck.exe deck/LICENSE deck/THIRD-PARTY.md deck/ui/assets/fonts/LICENSE-Roboto.txt deck/CHANGELOG.md $dir/
           cp deck/docs/install-on-windows.md $dir/README.md
           7z a $dir.zip $dir
           echo "PACKAGE=$dir.zip" >> $GITHUB_ENV
@@ -105,13 +105,28 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+      - name: Verify tag matches deck/Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#deck-v}"
+          manifest_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "x2rock-deck") | .version')"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "Error: Tag version ($tag_version) does not match deck/Cargo.toml version ($manifest_version)" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: packages
+      - name: Prepare release assets and checksums
+        run: |
+          mkdir -p dist
+          cp packages/deck-linux/*.tar.gz packages/deck-windows/*.zip dist/
+          cd dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           # Not "latest": that stays x2rock's CLI release.
           make_latest: false
+          body_path: deck/CHANGELOG.md
           files: |
-            packages/deck-linux/*
-            packages/deck-windows/*
+            dist/*

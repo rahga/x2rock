@@ -10,8 +10,15 @@ real devices. Hardware checks are tracked in [#7](https://github.com/rahga/x2roc
 x2rock is built for Windows 10 and 11, including tablets, with touch, a keyboard or an Xbox
 controller.
 
-1. Download `x2rock-deck-<version>-windows-x86_64.zip` from the
-   [releases page](https://github.com/rahga/x2rock/releases) and unzip it anywhere.
+1. Download `x2rock-deck-<version>-windows-x86_64.zip` and `SHA256SUMS` from the
+   [releases page](https://github.com/rahga/x2rock/releases). You can check its integrity
+   in PowerShell:
+
+   ```powershell
+   Get-FileHash x2rock-deck-*-windows-x86_64.zip
+   ```
+
+   Unzip it anywhere.
 2. Run `x2rock-deck.exe`.
 
 **SmartScreen** may say "Windows protected your PC", since the build is not signed. Choose

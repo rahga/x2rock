@@ -81,6 +81,8 @@ mod tests {
         assert!(newer("v0.2.0", "0.1.9"));
         assert!(newer("v0.10.0", "0.9.0"));
         assert!(!newer("v0.1.0", "0.1.0"));
+        assert!(!newer("0.1.0", "0.1.0"));
+        assert!(newer("0.1.0", "0.0.9"));
         assert!(!newer("v0.1.0", "0.2.0"));
         assert!(!newer("nightly", "0.1.0"));
         assert!(newer("v1.0.0-rc1", "0.9.0"));
