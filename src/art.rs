@@ -586,7 +586,7 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
             match &results[url.as_str()] {
                 Ok(path) => println!("{}", path.display()),
                 Err(e) => {
-                    eprintln!("x2rock: {url}: {e:#}");
+                    eprintln!("{}", format_failure(url, e));
                     println!();
                 }
             }
@@ -595,10 +595,33 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
     Ok(())
 }
 
+pub(crate) fn format_failure(url: &str, error: &anyhow::Error) -> String {
+    let safe_url = crate::sonos::plex::redact_token(url);
+    format!("x2rock: {safe_url}: {error:#}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testdir::TempDir;
+
+    #[test]
+    fn failed_art_log_redacts_plex_token() {
+        let url = "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=secret123&width=300";
+        let err = anyhow::anyhow!("raster size exceeds limit");
+        let line = format_failure(url, &err);
+        assert!(!line.contains("secret123"));
+        assert_eq!(
+            line,
+            "x2rock: http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
+        );
+
+        let encoded =
+            "https://sonos.plex.tv/img?url=https%3A%2F%2Fx%3FX-Plex-Token%3Dsecret456&z=1";
+        let line = format_failure(encoded, &err);
+        assert!(!line.contains("secret456"));
+        assert!(line.contains("X-Plex-Token%3D<token>"));
+    }
 
     #[tokio::test]
     async fn refused_cover_is_permanent_even_after_adding_context() {

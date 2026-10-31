@@ -1732,3 +1732,41 @@ fn held_volume_is_paced_capped_and_ends_on_release() {
     );
     assert!(volume_reached(from) <= from + 20, "{:?}", sent());
 }
+
+#[test]
+fn a_failed_plex_cover_does_not_log_its_token() {
+    with_app(|app| {
+        let url =
+            "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=supersecret123&width=300";
+        let key = super::ArtKey::new(url, super::ArtSize::Full);
+        let error = crate::art::LoadError::permanent(anyhow::anyhow!("raster size exceeds limit"));
+        app.art_arrived(key, Err(error));
+        let log = app.last_art_failure_log.as_deref().expect("failure logged");
+        assert!(!log.contains("supersecret123"));
+        assert!(log.contains("<token>"));
+        assert_eq!(
+            log,
+            "x2rock-deck: no art for http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
+        );
+    });
+}
+
+#[test]
+fn readonly_command_logging_redacts_plex_token() {
+    let item = x2rock::sonos::smapi::Item {
+        id: "1".into(),
+        title: "Track".into(),
+        item_type: "track".into(),
+        summary: None,
+        art_url: Some("http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=secret456".into()),
+        container: false,
+    };
+    let cmd = household::Command::ServiceFavorite {
+        service: "Plex".into(),
+        item,
+        add: true,
+    };
+    let log = super::format_readonly_command(&cmd);
+    assert!(!log.contains("secret456"));
+    assert!(log.contains("<token>"));
+}

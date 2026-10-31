@@ -42,7 +42,7 @@ impl LoadError {
         }
     }
 
-    fn permanent(error: anyhow::Error) -> Self {
+    pub(crate) fn permanent(error: anyhow::Error) -> Self {
         Self {
             error,
             kind: x2rock::art::FailureKind::Permanent,

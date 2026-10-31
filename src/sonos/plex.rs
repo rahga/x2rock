@@ -21,6 +21,7 @@
 //! the token it mints is visible and revocable on the account's device list at
 //! plex.tv.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -165,6 +166,44 @@ pub fn token_in(url: &str) -> Option<String> {
     }
 }
 
+/// URL or text with every `X-Plex-Token` parameter redacted to `<token>`.
+pub fn redact_token(url: &str) -> Cow<'_, str> {
+    if !url.contains("X-Plex-Token") {
+        return Cow::Borrowed(url);
+    }
+    let mut out = String::with_capacity(url.len());
+    let mut remaining = url;
+    while let Some(at) = remaining.find("X-Plex-Token") {
+        let rest_start = at + "X-Plex-Token".len();
+        let rest = &remaining[rest_start..];
+        let eq_len = if rest.starts_with('=') {
+            1
+        } else if rest.starts_with("%3D") || rest.starts_with("%3d") {
+            3
+        } else {
+            out.push_str(&remaining[..rest_start]);
+            remaining = &remaining[rest_start..];
+            continue;
+        };
+        let token_start = rest_start + eq_len;
+        let token_len = remaining[token_start..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
+        if token_len == 0 {
+            out.push_str(&remaining[..token_start]);
+            remaining = &remaining[token_start..];
+            continue;
+        }
+        out.push_str(&remaining[..token_start]);
+        out.push_str("<token>");
+        remaining = &remaining[token_start + token_len..];
+    }
+    out.push_str(remaining);
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +247,33 @@ mod tests {
         );
         assert_eq!(token_in("http://x/y?X-Plex-Token="), None);
         assert_eq!(token_in("http://x/y?width=300"), None);
+    }
+
+    #[test]
+    fn redact_token_replaces_plain_and_percent_encoded_tokens() {
+        assert_eq!(
+            redact_token("https://example.com/art.jpg"),
+            "https://example.com/art.jpg"
+        );
+        assert_eq!(
+            redact_token(
+                "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=secret123&width=300"
+            ),
+            "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=<token>&width=300"
+        );
+        assert_eq!(
+            redact_token(
+                "https://sonos.plex.tv/img?url=https%3A%2F%2Fx%3FX-Plex-Token%3Dsecret456&z=1"
+            ),
+            "https://sonos.plex.tv/img?url=https%3A%2F%2Fx%3FX-Plex-Token%3D<token>&z=1"
+        );
+        assert_eq!(
+            redact_token("http://x?X-Plex-Token%3dabc_123-def"),
+            "http://x?X-Plex-Token%3d<token>"
+        );
+        assert_eq!(
+            redact_token("http://x?X-Plex-Token="),
+            "http://x?X-Plex-Token="
+        );
     }
 }

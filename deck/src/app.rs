@@ -221,6 +221,8 @@ pub struct App {
     /// Added to the clock, for the tests: holds and bursts are timed.
     #[cfg(test)]
     pub(crate) skew_ms: u64,
+    #[cfg(test)]
+    pub(crate) last_art_failure_log: Option<String>,
     menu_down: bool,
     hold_timer: slint::Timer,
     moving: Option<Moving>,
@@ -294,6 +296,8 @@ impl App {
             sent: Default::default(),
             #[cfg(test)]
             skew_ms: 0,
+            #[cfg(test)]
+            last_art_failure_log: None,
             menu_down: false,
             hold_timer: slint::Timer::default(),
             moving: None,
@@ -385,7 +389,8 @@ impl App {
 
     fn send(&self, command: Command) {
         if self.readonly && !matches!(command, Command::Fetch(_) | Command::ReadRoom { .. }) {
-            eprintln!("x2rock-deck: read-only, not sent: {command:?}");
+            let msg = format_readonly_command(&command);
+            eprintln!("{msg}");
             return;
         }
         #[cfg(test)]
@@ -680,11 +685,12 @@ impl App {
             }
             Err(e) => {
                 let retry_at = Instant::now() + e.retry_after();
-                eprintln!(
-                    "x2rock-deck: no art for {url}: {error:#}",
-                    url = key.url,
-                    error = e.error
-                );
+                let line = format_art_failure(&key.url, &e.error);
+                eprintln!("{line}");
+                #[cfg(test)]
+                {
+                    self.last_art_failure_log = Some(line);
+                }
                 self.art.failed(key, retry_at);
             }
         }
@@ -2231,4 +2237,15 @@ pub fn room_names(ui: &AppWindow) -> Vec<String> {
         .filter_map(|i| rooms.row_data(i))
         .map(|r| r.name.to_string())
         .collect()
+}
+
+pub(crate) fn format_readonly_command(command: &Command) -> String {
+    let debug = format!("{command:?}");
+    let safe = x2rock::sonos::plex::redact_token(&debug);
+    format!("x2rock-deck: read-only, not sent: {safe}")
+}
+
+pub(crate) fn format_art_failure(url: &str, error: &anyhow::Error) -> String {
+    let safe_url = x2rock::sonos::plex::redact_token(url);
+    format!("x2rock-deck: no art for {safe_url}: {error:#}")
 }
