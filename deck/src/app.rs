@@ -1418,7 +1418,7 @@ impl App {
 
     /// One key or button, pressed, repeated or released.
     pub fn action(&mut self, action: Action, phase: Phase) -> bool {
-        if self.touch && phase != Phase::Release {
+        if self.touch && !matches!(phase, Phase::Release | Phase::Cancel) {
             // The first key after touching brings focus back, and does only that.
             self.touch = false;
             self.push_focus();
@@ -1459,7 +1459,7 @@ impl App {
                         let (z, i) = self.focus;
                         self.hold(z, i);
                     }
-                    Phase::Release => self.menu_down = false,
+                    Phase::Release | Phase::Cancel => self.menu_down = false,
                     _ => {}
                 }
                 true
@@ -1471,11 +1471,11 @@ impl App {
                             self.left_from_room =
                                 self.focus.0 == zone::ROOMS && self.moving.is_none()
                         }
-                        Phase::Release => self.left_from_room = false,
+                        Phase::Release | Phase::Cancel => self.left_from_room = false,
                         Phase::Repeat => {}
                     }
                 }
-                if phase == Phase::Release {
+                if matches!(phase, Phase::Release | Phase::Cancel) {
                     return true;
                 }
                 if self.panel_open() {
@@ -1523,7 +1523,7 @@ impl App {
                 true
             }
             Action::VolumeUp | Action::VolumeDown => {
-                if phase != Phase::Release {
+                if !matches!(phase, Phase::Release | Phase::Cancel) {
                     let direction = if action == Action::VolumeUp { 1 } else { -1 };
                     self.group_volume_step(direction, phase == Phase::Repeat);
                 }
@@ -1576,6 +1576,10 @@ impl App {
                 {
                     self.click(press.zone, press.index);
                 }
+            }
+            Phase::Cancel => {
+                self.hold_timer.stop();
+                self.press = None;
             }
         }
         true

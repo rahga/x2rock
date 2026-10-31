@@ -1770,3 +1770,26 @@ fn readonly_command_logging_redacts_plex_token() {
     assert!(!log.contains("secret456"));
     assert!(log.contains("<token>"));
 }
+
+#[test]
+fn cancel_after_press_leaves_nothing_clicked() {
+    with_app(|app| {
+        app.close_panel();
+        app.focus = (zone::SETTINGS, 0);
+        assert!(app.panel.is_none());
+        app.action(Action::Select, Phase::Press);
+        assert!(app.press.is_some());
+        app.action(Action::Select, Phase::Cancel);
+        assert!(app.press.is_none());
+        assert!(
+            app.panel.is_none(),
+            "cancel after press leaves nothing clicked"
+        );
+
+        // Release after press normally clicks and opens settings:
+        app.action(Action::Select, Phase::Press);
+        app.action(Action::Select, Phase::Release);
+        assert!(app.panel.is_some(), "release after press opens settings");
+        app.close_panel();
+    });
+}

@@ -39,6 +39,8 @@ pub enum Phase {
     /// The platform's auto-repeat, or ours for a held pad direction or volume button.
     Repeat,
     Release,
+    /// The input device disconnected or was cancelled while held; clears held state without activating.
+    Cancel,
 }
 
 /// What a key means, from Slint's key text: a control character for a named
@@ -198,8 +200,13 @@ impl Gamepads {
             let before = pad.actions();
             pad.update(event);
             let after = pad.actions();
+            let phase = if matches!(event, PadEvent::Disconnect) {
+                Phase::Cancel
+            } else {
+                Phase::Release
+            };
             for action in before.iter().filter(|a| !after.contains(a)) {
-                out.push((*action, Phase::Release));
+                out.push((*action, phase));
                 pad.repeater.release(*action);
             }
             for action in after.iter().filter(|a| !before.contains(a)) {
@@ -376,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_releases_all_buttons_and_stick_and_clears_repeats() {
+    fn disconnect_cancels_all_buttons_and_stick_and_clears_repeats() {
         use gilrs::{Axis::*, Button::*};
         let t0 = Instant::now();
         let mut s = Gamepads::default();
@@ -387,9 +394,9 @@ mod tests {
         assert_eq!(
             s.step(Some((1, PadEvent::Disconnect)), at(t0, 100)),
             [
-                (Action::Select, Phase::Release),
-                (Action::VolumeDown, Phase::Release),
-                (Action::Left, Phase::Release),
+                (Action::Select, Phase::Cancel),
+                (Action::VolumeDown, Phase::Cancel),
+                (Action::Left, Phase::Cancel),
             ]
         );
         assert_eq!(s.step(None, at(t0, 400)), [(Action::Down, Phase::Repeat)]);
@@ -401,6 +408,23 @@ mod tests {
             s.step(button(1, South, true), at(t0, 402)),
             [(Action::Select, Phase::Press)]
         );
+    }
+
+    #[test]
+    fn disconnect_before_hold_emits_cancel_and_no_repeats() {
+        use gilrs::Button::*;
+        let t0 = Instant::now();
+        let mut s = Gamepads::default();
+        assert_eq!(
+            s.step(button(1, South, true), t0),
+            [(Action::Select, Phase::Press)]
+        );
+        assert_eq!(
+            s.step(Some((1, PadEvent::Disconnect)), at(t0, 100)),
+            [(Action::Select, Phase::Cancel)]
+        );
+        assert!(s.step(None, at(t0, 500)).is_empty());
+        assert!(s.step(None, at(t0, 600)).is_empty());
     }
 
     #[test]
