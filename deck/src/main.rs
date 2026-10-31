@@ -104,6 +104,7 @@ fn main() -> anyhow::Result<()> {
         .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()?;
+    slint::set_xdg_app_id("x2rock-deck")?;
     let ui = AppWindow::new()?;
     wire(&ui);
     let mut prefs = prefs::Prefs::load();
