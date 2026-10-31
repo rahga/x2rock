@@ -34,10 +34,11 @@ jobs:
         run: cargo +1.92 check --locked -p x2rock-deck
       # A credential store of its own, so the token-refresh test runs here
       # rather than skipping (it refuses to touch a store that is not temporary).
+      # X2ROCK_DECK_REQUIRE_STORE_TESTS ensures CI fails if the test ever skips.
       - name: Test
         run: |
           state=$(mktemp -d)
-          XDG_STATE_HOME=$state cargo test --locked -p x2rock-deck
+          X2ROCK_DECK_REQUIRE_STORE_TESTS=1 XDG_STATE_HOME=$state cargo test --locked -p x2rock-deck
       - name: Clippy
         run: cargo clippy --locked --all-targets -p x2rock-deck -- -D warnings
       - name: Build

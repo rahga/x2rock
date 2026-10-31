@@ -651,6 +651,12 @@ mod tests {
         // throwaway, as `pl check` makes it, never a person's own accounts.
         let store = x2rock::store::path("credentials.json").unwrap();
         if !store.starts_with(std::env::temp_dir()) {
+            if std::env::var("X2ROCK_DECK_REQUIRE_STORE_TESTS").is_ok() {
+                panic!(
+                    "required test skipped: credential store {} is not under temp_dir()",
+                    store.display()
+                );
+            }
             eprintln!(
                 "skipped: the credential store {} is not a temporary one",
                 store.display()
