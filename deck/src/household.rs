@@ -791,10 +791,17 @@ fn forward(connection: &Connection, events: mpsc::UnboundedSender<Tagged>) {
 }
 
 enum WireUpdate {
+    /// Sent before the group's subscriptions, so the state they push at once
+    /// finds the group taken from this coordinator.
     Group {
         id: String,
         ip: IpAddr,
         live: Box<crate::model::GroupLive>,
+    },
+    /// Its subscriptions failed after all: to be tried again.
+    GroupFailed {
+        id: String,
+        ip: IpAddr,
     },
     Player {
         id: String,
@@ -887,17 +894,24 @@ fn spawn_wire(
                     live.apply_playback(&playback, now);
                     live.metadata = Some(metadata);
                     live.volume = Some(volume);
-                    tokio::try_join!(
-                        conn.subscribe_group("playback:1", &group.id),
-                        conn.subscribe_group("playbackMetadata:1", &group.id),
-                        conn.subscribe_group("groupVolume:1", &group.id),
-                    )?;
-                    let _ = conn.subscribe_group("sleepTimer:1", &group.id).await;
                     let _ = wire_tx.send(WireUpdate::Group {
                         id: group.id.clone(),
                         ip,
                         live: Box::new(live),
                     });
+                    let subscribed = tokio::try_join!(
+                        conn.subscribe_group("playback:1", &group.id),
+                        conn.subscribe_group("playbackMetadata:1", &group.id),
+                        conn.subscribe_group("groupVolume:1", &group.id),
+                    );
+                    if subscribed.is_err() {
+                        let _ = wire_tx.send(WireUpdate::GroupFailed {
+                            id: group.id.clone(),
+                            ip,
+                        });
+                    }
+                    subscribed?;
+                    let _ = conn.subscribe_group("sleepTimer:1", &group.id).await;
                     Ok(())
                 }
                 .await;
@@ -949,6 +963,51 @@ fn spawn_wire(
         let _ = wire_tx.send(WireUpdate::Done);
     });
     task.abort_handle()
+}
+
+/// Take in what a wiring pass found; whether the household changed. A pass
+/// started before a regrouping can report a group or speaker the topology no
+/// longer has, or a group under another coordinator: that is dropped, or it
+/// would bring back a group that is gone.
+fn wired(household: &mut Household, wiring: &mut Wiring, update: WireUpdate) -> bool {
+    let groups = household.groups.as_ref();
+    let coordinator_ip = |id: &str| {
+        let groups = groups?;
+        let group = groups.groups.iter().find(|g| g.id == id)?;
+        groups
+            .player(&group.coordinator_id)
+            .and_then(proto::Player::ip)
+    };
+    match update {
+        WireUpdate::Group { id, ip, live } => {
+            if coordinator_ip(&id) != Some(ip) {
+                return false;
+            }
+            wiring.groups.insert(id.clone(), ip);
+            household.live.insert(id, *live);
+            true
+        }
+        WireUpdate::GroupFailed { id, ip } => {
+            if wiring.groups.get(&id) == Some(&ip) {
+                wiring.groups.remove(&id);
+            }
+            false
+        }
+        WireUpdate::Player { id, volume, ht } => {
+            if !groups.is_some_and(|g| g.players.iter().any(|p| p.id == id)) {
+                return false;
+            }
+            wiring.players.insert(id.clone());
+            if let Some(vol) = volume {
+                household.player_volumes.insert(id.clone(), vol);
+            }
+            if let Some(ht) = ht {
+                household.home_theater.insert(id, ht);
+            }
+            true
+        }
+        WireUpdate::Done => false,
+    }
 }
 
 /// Whether the topology has a group or a reachable speaker that is not yet
@@ -1079,25 +1138,12 @@ async fn follow_loop(
 
     loop {
         tokio::select! {
+            // Wiring first: a group's registration is sent before the
+            // subscriptions whose first events it lets through, so whenever
+            // such an event is waiting, so is the registration.
+            biased;
             Some(update) = wire_rx.recv() => {
                 match update {
-                    WireUpdate::Group { id, ip, live } => {
-                        wiring.groups.insert(id.clone(), ip);
-                        household.live.insert(id, *live);
-                        latest.send_replace(household.clone());
-                        updates(Update::Household(Box::new(household.clone())));
-                    }
-                    WireUpdate::Player { id, volume, ht } => {
-                        wiring.players.insert(id.clone());
-                        if let Some(vol) = volume {
-                            household.player_volumes.insert(id.clone(), vol);
-                        }
-                        if let Some(ht) = ht {
-                            household.home_theater.insert(id, ht);
-                        }
-                        latest.send_replace(household.clone());
-                        updates(Update::Household(Box::new(household.clone())));
-                    }
                     WireUpdate::Done => {
                         if unwired(&wiring, &household) {
                             retry_backoff = (retry_backoff * 2).min(Duration::from_secs(60));
@@ -1105,6 +1151,12 @@ async fn follow_loop(
                         } else {
                             retry_backoff = Duration::from_secs(2);
                             next_retry = None;
+                        }
+                    }
+                    update => {
+                        if wired(&mut household, &mut wiring, update) {
+                            latest.send_replace(household.clone());
+                            updates(Update::Household(Box::new(household.clone())));
                         }
                     }
                 }
@@ -2758,7 +2810,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_command_sent_while_a_probe_is_outstanding_is_dispatched_without_waiting() {
-        let unreachable_ip: IpAddr = "192.0.2.1".parse().unwrap();
+        // A speaker that takes the connection and never answers, on this
+        // machine (not the session's own 127.0.0.1, which it would reuse):
+        // the probe gets through and the handshake waits. Nothing leaves the
+        // host.
+        let listener = std::net::TcpListener::bind("127.0.0.2:1443")
+            .expect("127.0.0.2:1443 free for the stalled-speaker test");
+        let unreachable_ip: IpAddr = "127.0.0.2".parse().unwrap();
         let groups = proto::Groups {
             groups: vec![proto::Group {
                 id: "GROUP_1".into(),
@@ -2807,7 +2865,6 @@ mod tests {
         });
 
         tokio::task::yield_now().await;
-        assert_eq!(tokio::time::Instant::now().elapsed(), Duration::ZERO);
 
         inbox_tx.send(Command::Reconnect).unwrap();
 
@@ -2816,5 +2873,69 @@ mod tests {
             .expect("loop stalled: command was not dispatched within 500ms")
             .unwrap();
         assert!(result.is_ok());
+        drop(listener);
+    }
+
+    #[test]
+    fn a_wiring_pass_from_before_a_regrouping_does_not_bring_a_group_back() {
+        let group = |id: &str, coordinator: &str| proto::Group {
+            id: id.into(),
+            name: id.into(),
+            coordinator_id: coordinator.into(),
+            playback_state: "IDLE".into(),
+            player_ids: vec![coordinator.into()],
+        };
+        let player = |id: &str, ip: &str| proto::Player {
+            id: id.into(),
+            name: id.into(),
+            websocket_url: format!("wss://{ip}:1443/websocket/api"),
+            capabilities: vec![],
+        };
+        // G1 has gone; P1 now coordinates G3.
+        let mut household = Household {
+            groups: Some(proto::Groups {
+                groups: vec![group("G2", "P2"), group("G3", "P1")],
+                players: vec![player("P1", "10.0.0.1"), player("P2", "10.0.0.2")],
+            }),
+            ..Default::default()
+        };
+        let (events, _) = mpsc::unbounded_channel();
+        let mut wiring = Wiring {
+            events,
+            forwarded: Arc::default(),
+            groups: HashMap::new(),
+            players: HashSet::new(),
+        };
+        let update = |id: &str, ip: &str| WireUpdate::Group {
+            id: id.into(),
+            ip: ip.parse().unwrap(),
+            live: Box::default(),
+        };
+        assert!(!wired(
+            &mut household,
+            &mut wiring,
+            update("G1", "10.0.0.1")
+        ));
+        assert!(!wired(
+            &mut household,
+            &mut wiring,
+            update("G2", "10.0.0.1")
+        ));
+        assert!(wiring.groups.is_empty() && household.live.is_empty());
+        assert!(wired(&mut household, &mut wiring, update("G2", "10.0.0.2")));
+        assert!(household.live.contains_key("G2"));
+        let gone = WireUpdate::Player {
+            id: "P9".into(),
+            volume: None,
+            ht: None,
+        };
+        assert!(!wired(&mut household, &mut wiring, gone));
+        // Subscriptions that failed after registering: tried again.
+        let failed = WireUpdate::GroupFailed {
+            id: "G2".into(),
+            ip: "10.0.0.2".parse().unwrap(),
+        };
+        wired(&mut household, &mut wiring, failed);
+        assert!(!wiring.groups.contains_key("G2"));
     }
 }
