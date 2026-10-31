@@ -28,7 +28,8 @@ in Gaming Mode it runs full screen as a non-Steam game, driven with the Deck's o
    It should print the archive's name, with the version you downloaded, then `OK`. If a
    `SHA256SUMS` from an earlier download is still there, delete both it and the new one and
    download `SHA256SUMS` again: your browser saves a second copy under another name, and the
-   command would check the old file.
+   command would check the old file. The same goes for the archive itself if you download one
+   version twice.
 
    Unpack it (right-click it in Dolphin, Extract, Extract archive here).
 3. Open the unpacked folder, right-click an empty space, **Open Terminal Here**, and run:

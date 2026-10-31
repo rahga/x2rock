@@ -115,6 +115,15 @@ jobs:
             echo "Error: Tag version ($tag_version) does not match deck/Cargo.toml version ($manifest_version)" >&2
             exit 1
           fi
+      # The changelog is the release's notes: one dated heading for this
+      # version, not the placeholder it carries until tagging.
+      - name: Verify CHANGELOG dates this version
+        run: |
+          tag_version="${GITHUB_REF_NAME#deck-v}"
+          if ! grep -Eq "^## ${tag_version//./\\.} \([0-9]{4}-[0-9]{2}-[0-9]{2}\)$" deck/CHANGELOG.md; then
+            echo "Error: deck/CHANGELOG.md has no heading '## ${tag_version} (YYYY-MM-DD)'" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: packages
