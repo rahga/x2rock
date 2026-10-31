@@ -96,4 +96,106 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("42_hero.png")).unwrap(), HERO);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_script_adds_to_steam_only_on_first_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp =
+            std::env::temp_dir().join(format!("x2rock-deck-install-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let bin_dir = temp.join("bin");
+        let pkg_dir = temp.join("pkg");
+        let home_dir = temp.join("home");
+        let log_file = temp.join("calls.log");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        // Stub steamos-add-to-steam
+        let stub = bin_dir.join("steamos-add-to-steam");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n", log_file.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Copy install files to pkg_dir
+        let dist = Path::new(env!("CARGO_MANIFEST_DIR")).join("dist");
+        std::fs::copy(dist.join("install.sh"), pkg_dir.join("install.sh")).unwrap();
+        std::fs::copy(
+            dist.join("x2rock-deck.desktop"),
+            pkg_dir.join("x2rock-deck.desktop"),
+        )
+        .unwrap();
+        std::fs::copy(
+            dist.join("x2rock-deck.png"),
+            pkg_dir.join("x2rock-deck.png"),
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("x2rock-deck"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            pkg_dir.join("install.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            pkg_dir.join("x2rock-deck"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let path_env = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        // First run: fresh install
+        let output1 = std::process::Command::new("sh")
+            .arg(pkg_dir.join("install.sh"))
+            .env("HOME", &home_dir)
+            .env("PATH", &path_env)
+            .output()
+            .unwrap();
+        assert!(
+            output1.status.success(),
+            "first install failed: {}",
+            String::from_utf8_lossy(&output1.stderr)
+        );
+        let out1 = String::from_utf8_lossy(&output1.stdout);
+        assert!(out1.contains("Installed x2rock"), "{out1}");
+        assert!(out1.contains("Added to Steam"), "{out1}");
+        let calls = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(
+            calls.lines().count(),
+            1,
+            "should have called steamos-add-to-steam once"
+        );
+
+        // Second run: update
+        let output2 = std::process::Command::new("sh")
+            .arg(pkg_dir.join("install.sh"))
+            .env("HOME", &home_dir)
+            .env("PATH", &path_env)
+            .output()
+            .unwrap();
+        assert!(
+            output2.status.success(),
+            "second install failed: {}",
+            String::from_utf8_lossy(&output2.stderr)
+        );
+        let out2 = String::from_utf8_lossy(&output2.stdout);
+        assert!(out2.contains("Updated x2rock"), "{out2}");
+        assert!(!out2.contains("Added to Steam"), "{out2}");
+        let calls_after = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(
+            calls_after.lines().count(),
+            1,
+            "should not call steamos-add-to-steam on update"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

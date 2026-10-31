@@ -27,6 +27,21 @@ Mode it is a non-Steam game, full screen, driven with the Deck's own controls.
 To remove it: `~/Applications/x2rock` holds nothing else, and `./install.sh --remove` takes
 the app and its menu entry out again.
 
+## Updating
+
+When an update is released:
+
+1. Switch to **Desktop Mode**.
+2. Download the new `x2rock-deck-<version>-linux-x86_64.tar.gz` and unpack it.
+3. Open the unpacked folder, **Open Terminal Here**, and run:
+
+   ```sh
+   ./install.sh
+   ```
+
+It replaces the app in `~/Applications/x2rock` and updates the menu entry. The existing Steam
+shortcut, custom artwork, controller layout, and settings are preserved.
+
 ## Controls in Gaming Mode
 
 Steam gives a non-Steam game a gamepad. In its controller settings (the controller icon on

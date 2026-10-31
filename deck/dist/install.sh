@@ -21,12 +21,23 @@ if [ "${1:-}" = "--remove" ]; then
     exit 0
 fi
 
+is_update=0
+if [ "${1:-}" = "--update" ] || [ -f "$dest/x2rock-deck" ]; then
+    is_update=1
+fi
+
 mkdir -p "$dest" "$apps"
 install -m 755 "$here/x2rock-deck" "$dest/x2rock-deck"
 install -m 644 "$here/x2rock-deck.png" "$dest/x2rock-deck.png"
 sed -e "s|@BIN@|$dest/x2rock-deck|" -e "s|@ICON@|$dest/x2rock-deck.png|" "$here/x2rock-deck.desktop" > "$entry"
 chmod 755 "$entry"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$apps" 2>/dev/null || true
+
+if [ "$is_update" = 1 ]; then
+    echo "Updated x2rock in $dest. The existing Steam shortcut continues to launch the new version."
+    exit 0
+fi
+
 echo "Installed x2rock in $dest, with a menu entry."
 
 # On SteamOS, put it in the Steam library so Gaming Mode can open it.
