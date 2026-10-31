@@ -1088,25 +1088,31 @@ async fn follow(
         primary.ip(),
         household,
         wiring,
-        events,
+        (events, mpsc::unbounded_channel()),
         updates,
         inbox,
     )
     .await
 }
 
+/// Wiring passes' reports, and the sender each pass is given: from the caller,
+/// so a test can stand in for a pass.
+type WireChannel = (
+    mpsc::UnboundedSender<WireUpdate>,
+    mpsc::UnboundedReceiver<WireUpdate>,
+);
+
 async fn follow_loop(
     session: &Session,
     primary_ip: IpAddr,
     mut household: Household,
     mut wiring: Wiring,
-    mut events: mpsc::UnboundedReceiver<Tagged>,
+    (mut events, (wire_tx, mut wire_rx)): (mpsc::UnboundedReceiver<Tagged>, WireChannel),
     updates: &Sink,
     inbox: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<()> {
     updates(Update::Household(Box::new(household.clone())));
 
-    let (wire_tx, mut wire_rx) = mpsc::unbounded_channel::<WireUpdate>();
     let mut wiring_task = Latest::default();
 
     if let Some(groups) = household.groups.as_ref() {
@@ -1183,6 +1189,12 @@ async fn follow_loop(
                         if wired(&mut household, &mut wiring, update) {
                             latest.send_replace(household.clone());
                             updates(Update::Household(Box::new(household.clone())));
+                        }
+                        // An aborted pass's GroupFailed can come after its
+                        // replacement's Done: no Done follows it to schedule
+                        // the retry, so this does.
+                        if next_retry.is_none() && unwired(&wiring, &household) {
+                            next_retry = Some(tokio::time::Instant::now() + retry_backoff);
                         }
                     }
                 }
@@ -2890,7 +2902,7 @@ mod tests {
                 "127.0.0.1".parse().unwrap(),
                 household,
                 wiring,
-                events_rx,
+                (events_rx, mpsc::unbounded_channel()),
                 &updates,
                 &mut inbox_rx,
             )
@@ -2907,6 +2919,85 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         drop(listener);
+    }
+
+    /// Codex's ordering (review of d7d661f): an aborted pass's guard sends
+    /// GroupFailed after the replacement pass, which skipped the then
+    /// registered group, has sent Done. The group must still be tried again.
+    /// Seen from outside: the retry probes the coordinator, here a listener.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_group_failure_after_the_last_done_is_still_retried() {
+        let (listener, ip) = (2..=250)
+            .find_map(|n| {
+                let ip: IpAddr = format!("127.0.4.{n}").parse().unwrap();
+                std::net::TcpListener::bind((ip, 1443))
+                    .ok()
+                    .map(|l| (l, ip))
+            })
+            .expect("a free 127.0.4.x:1443");
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let groups = proto::Groups {
+            groups: vec![proto::Group {
+                id: "G1".into(),
+                name: "Room".into(),
+                coordinator_id: "P1".into(),
+                playback_state: "IDLE".into(),
+                player_ids: vec!["P1".into()],
+            }],
+            players: vec![proto::Player {
+                id: "P1".into(),
+                name: "Room".into(),
+                websocket_url: format!("wss://{ip}:1443/websocket/api"),
+                capabilities: vec![],
+            }],
+        };
+        let session = Session::new(
+            Connection::dummy("127.0.0.1".parse().unwrap()),
+            groups.clone(),
+        );
+        let household = Household {
+            groups: Some(groups),
+            ..Default::default()
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        // Registered and wired, as the aborted pass left it: nothing to do.
+        let wiring = Wiring {
+            events: events_tx,
+            forwarded: Arc::default(),
+            groups: HashMap::from([("G1".to_owned(), ip)]),
+            players: HashSet::from(["P1".to_owned()]),
+        };
+        let (wire_tx, wire_rx) = mpsc::unbounded_channel();
+        let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
+        let updates: Sink = Arc::new(|_| {});
+        let task = tokio::spawn({
+            let wire_tx = wire_tx.clone();
+            async move {
+                follow_loop(
+                    &session,
+                    "127.0.0.1".parse().unwrap(),
+                    household,
+                    wiring,
+                    (events_rx, (wire_tx, wire_rx)),
+                    &updates,
+                    &mut inbox_rx,
+                )
+                .await
+            }
+        });
+        // The replacement pass's Done, then the aborted pass's guard.
+        wire_tx.send(WireUpdate::Done).unwrap();
+        tokio::task::yield_now().await;
+        drop(Unregister {
+            tx: wire_tx.clone(),
+            id: "G1".into(),
+            ip,
+        });
+        let retried = tokio::time::timeout(Duration::from_secs(30), listener.accept()).await;
+        inbox_tx.send(Command::Reconnect).unwrap();
+        let _ = task.await;
+        assert!(retried.is_ok(), "the group was never tried again");
     }
 
     #[tokio::test]
