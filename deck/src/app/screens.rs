@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use x2rock::sonos::proto::Favorite;
 use x2rock::stations::Station;
 
@@ -284,6 +284,35 @@ pub fn favorite_line(f: &Favorite) -> String {
         .flatten()
         .collect::<Vec<_>>()
         .join(" \u{00B7} ")
+}
+
+/// Lays out the art slot across each section (the rows between headings)
+/// where any row has art or a glyph, and nowhere else: titles line up within
+/// a section, and a cover arriving later moves nothing.
+pub(super) fn section_art_slots(rows: &[ListRow]) {
+    let mut start = 0;
+    while start < rows.len() {
+        let end = rows[start + 1..]
+            .iter()
+            .position(|r| r.kind == RowKind::Heading)
+            .map_or(rows.len(), |at| start + 1 + at);
+        let section = &rows[start..end];
+        let any = section
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .any(|c| c.art_slot || c.glyph != Glyph::None);
+        for row in section {
+            for i in 0..row.cells.row_count() {
+                if let Some(mut cell) = row.cells.row_data(i)
+                    && cell.art_slot != any
+                {
+                    cell.art_slot = any;
+                    row.cells.set_row_data(i, cell);
+                }
+            }
+        }
+        start = end;
+    }
 }
 
 #[derive(Default)]
@@ -952,6 +981,7 @@ impl App {
                                 subtitle: subtitle.into(),
                                 number: item.index.to_string().into(),
                                 has_art: art.is_some(),
+                                art_slot: item.art_url.is_some(),
                                 art: art.unwrap_or_default(),
                                 active: q.current == Some(item.index),
                                 ..Default::default()
@@ -1017,6 +1047,7 @@ impl App {
                                         title: f.name.as_str().into(),
                                         subtitle: favorite_line(f).into(),
                                         has_art: art.is_some(),
+                                        art_slot: f.image_url.is_some(),
                                         art: art.unwrap_or_default(),
                                         active: playing.as_deref() == Some(f.name.as_str()),
                                         ..Default::default()
@@ -1071,6 +1102,7 @@ impl App {
                                 title: item.name.as_str().into(),
                                 subtitle: kind.into(),
                                 has_art: art.is_some(),
+                                art_slot: item.art_url().is_some(),
                                 art: art.unwrap_or_default(),
                                 glyph: if kind == "Radio" {
                                     Glyph::Radio
@@ -1238,6 +1270,7 @@ impl App {
                                         .unwrap_or_default()
                                         .into(),
                                     has_art: art.is_some(),
+                                    art_slot: logo.is_some(),
                                     art: art.unwrap_or_default(),
                                     active: rank.is_some(),
                                     ..Default::default()
@@ -1343,6 +1376,7 @@ impl App {
                                     }
                                     .into(),
                                     has_art: art.is_some(),
+                                    art_slot: logo.is_some(),
                                     art: art.unwrap_or_default(),
                                     ..Default::default()
                                 },
@@ -1398,6 +1432,7 @@ impl App {
                             title: item.title.as_str().into(),
                             subtitle: item_line(item).into(),
                             has_art: art.is_some(),
+                            art_slot: item.art_url.is_some(),
                             art: art.unwrap_or_default(),
                             glyph: if item.item_type.eq_ignore_ascii_case("stream")
                                 || x2rock::sonos::smapi::is_program(&item.item_type)
@@ -1483,6 +1518,7 @@ impl App {
         ui.set_list_title(title.into());
         ui.set_list_room(room_name.into());
         self.models.list_actions.set(header_buttons);
+        section_art_slots(&rows.rows);
         self.models.list_rows.set(rows.rows);
         ui.set_list_loading(loading);
         self.models.side.set(side);
@@ -2483,6 +2519,7 @@ impl App {
                         title: item.title.as_str().into(),
                         subtitle: item_line(item).into(),
                         has_art: art.is_some(),
+                        art_slot: item.art_url.is_some(),
                         art: art.unwrap_or_default(),
                         focus: rows.actions.len() as i32,
                         ..Default::default()

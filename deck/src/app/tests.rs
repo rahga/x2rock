@@ -2065,3 +2065,39 @@ fn cancel_after_press_leaves_nothing_clicked() {
         app.close_panel();
     });
 }
+
+/// Pure: no App needed. A section where one row has a cover (even one not yet
+/// loaded) lays out the slot on every row; a section with none lays out none.
+#[test]
+fn the_art_slot_is_kept_per_section_from_whether_rows_have_art() {
+    use crate::{ListCell, ListRow, RowKind};
+    use slint::{Model, ModelRc, VecModel};
+    let item = |art_slot: bool| ListRow {
+        kind: RowKind::Item,
+        cells: ModelRc::new(VecModel::from(vec![ListCell {
+            art_slot,
+            ..Default::default()
+        }])),
+        ..Default::default()
+    };
+    let heading = || ListRow {
+        kind: RowKind::Heading,
+        ..Default::default()
+    };
+    // A cover still loading: has_art false, art_slot true from its URL.
+    let rows = vec![
+        heading(),
+        item(true),
+        item(false),
+        heading(),
+        item(false),
+        item(false),
+    ];
+    super::screens::section_art_slots(&rows);
+    let slots: Vec<bool> = rows
+        .iter()
+        .filter(|r| r.kind == RowKind::Item)
+        .map(|r| r.cells.row_data(0).unwrap().art_slot)
+        .collect();
+    assert_eq!(slots, [true, true, false, false]);
+}

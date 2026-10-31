@@ -33,6 +33,10 @@ export struct ListCell {
     number: string,
     art: image,
     has-art: bool,
+    // Whether the art's 56px slot is laid out: set across a section where any
+    // row has a cover (loaded or not) or a glyph, so its titles line up and
+    // do not move as covers arrive.
+    art-slot: bool,
     glyph: Glyph,
     // What the room is playing now, outlined.
     active: bool,
@@ -85,7 +89,7 @@ export component MediaRow inherits Card {
     in property <ListCell> cell;
     active: cell.active;
     min-height: layout.preferred-height;
-    property <bool> show-art: root.cell.has-art || root.cell.glyph != Glyph.none;
+    property <bool> show-art: root.cell.art-slot;
     layout := HorizontalLayout {
         padding-left: 16px;
         padding-right: 16px;
@@ -100,7 +104,7 @@ export component MediaRow inherits Card {
             font-size: Theme.body-medium;
         }
         if root.cell.number != "" && !root.show-art: Rectangle { width: 16px; }
-        // The art slot collapses when the row carries no art or glyph.
+        // Laid out for the whole section, or for none of it.
         if root.show-art: Rectangle {
             width: 56px;
             height: 56px;
