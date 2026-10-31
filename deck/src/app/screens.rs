@@ -1762,6 +1762,8 @@ impl App {
                     s.stations = None;
                     s.url_mode = false;
                 }
+                self.keyboard = None;
+                self.set_focus(zone::SIDE, index);
                 self.send(Command::Fetch(Fetch::Stations {
                     id: Some(id),
                     tag,
@@ -2653,6 +2655,7 @@ impl App {
         };
         let title = crate::model::stream_name(&url);
         self.keyboard = None;
+        self.set_focus(zone::FIELD, 0);
         self.send(Command::PlayStream {
             group,
             url,

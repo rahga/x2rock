@@ -931,6 +931,8 @@ fn navigation_follows_the_tv_apps_rules() {
     test_reconnect_partially_answered_search_does_not_duplicate_sections();
     test_rejected_favorites_response_does_not_overwrite_cache();
     test_speaker_row_follows_speaker_across_regroup();
+    test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream();
+    test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone();
 
     // Closing a list (or opening full screen) must release the model's cover
     // references too, otherwise evicting the cache cannot release those pixels.
@@ -1774,6 +1776,106 @@ fn test_speaker_row_follows_speaker_across_regroup() {
     // Restore demo household for subsequent tests.
     with_app(|app| {
         app.update(household::Update::Household(Box::new(demo::household())));
+    });
+}
+
+fn test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream() {
+    with_app(|app| {
+        app.open_screen(super::screens::Kind::Radio);
+        // Switch to Play a URL:
+        app.screen_click(zone::SIDE, 0);
+        assert!(app.keyboard.is_some(), "keyboard is open");
+        assert_eq!(app.focus.0, zone::KEYS);
+
+        // Turn on "stay":
+        app.prefs.after_playing = Some("stay".into());
+
+        // Type a valid URL into query:
+        if let Some(s) = app.stack.last_mut() {
+            s.query = "http://example.com/radio.mp3".into();
+        }
+
+        // Click Done / Play on the keyboard:
+        app.sent.borrow_mut().clear();
+        app.submit_text();
+        assert!(app.keyboard.is_none(), "keyboard closed");
+
+        // Focus must be on a drawn zone with length > 0, not stranded in KEYS:
+        assert_ne!(
+            app.focus.0,
+            zone::KEYS,
+            "focus must not remain in KEYS zone with keyboard None"
+        );
+        assert!(
+            app.zone_len(app.focus.0) > 0,
+            "focus zone {:?} must have length > 0",
+            app.focus.0
+        );
+
+        // Assert exactly one PlayStream was sent:
+        let play_streams = app
+            .sent
+            .borrow()
+            .iter()
+            .filter(|c| matches!(c, household::Command::PlayStream { .. }))
+            .count();
+        assert_eq!(play_streams, 1, "exactly one PlayStream sent");
+
+        // Pressing Select on current focus must not send another PlayStream:
+        app.sent.borrow_mut().clear();
+        app.action(Action::Select, Phase::Press);
+        app.action(Action::Select, Phase::Release);
+        let play_streams = app
+            .sent
+            .borrow()
+            .iter()
+            .filter(|c| matches!(c, household::Command::PlayStream { .. }))
+            .count();
+        assert_eq!(play_streams, 0, "Select does not send second PlayStream");
+
+        app.prefs.after_playing = None;
+        app.close_screen();
+    });
+}
+
+fn test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone() {
+    with_app(|app| {
+        app.open_screen(super::screens::Kind::Radio);
+        // Switch to Play a URL:
+        app.screen_click(zone::SIDE, 0);
+        assert!(app.keyboard.is_some(), "keyboard is open");
+        assert_eq!(app.focus.0, zone::KEYS);
+
+        // Tap a Radio category in SIDE (index 1: Popular):
+        app.tap(zone::SIDE, 1);
+
+        assert!(
+            app.keyboard.is_none(),
+            "tapping SIDE category closes keyboard"
+        );
+        assert_ne!(
+            app.focus.0,
+            zone::KEYS,
+            "focus must not remain in KEYS zone after tapping SIDE"
+        );
+        assert!(
+            app.zone_len(app.focus.0) > 0,
+            "focus zone {:?} must have length > 0",
+            app.focus.0
+        );
+
+        // Directional navigation must navigate screen, not keyboard:
+        // And pressing Back must not strand focus in a zero-length FIELD zone:
+        app.action(Action::Back, Phase::Press);
+        app.action(Action::Back, Phase::Release);
+        assert!(
+            app.zone_len(app.focus.0) > 0 || !app.screen_open(),
+            "focus must be on a drawn zone or back in pane"
+        );
+
+        if app.screen_open() {
+            app.close_screen();
+        }
     });
 }
 

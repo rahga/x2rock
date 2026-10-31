@@ -2163,7 +2163,16 @@ impl App {
 
     fn close_keyboard(&mut self) {
         self.keyboard = None;
-        self.focus = (zone::FIELD, 0);
+        if self.zone_len(zone::FIELD) > 0 {
+            self.focus = (zone::FIELD, 0);
+        } else if self.zone_len(zone::SIDE) > 0 {
+            self.focus = (zone::SIDE, 0);
+        } else if self.zone_len(zone::LIST) > 0 {
+            self.focus = (zone::LIST, 0);
+        } else {
+            self.focus = (zone::HEADER, 0);
+        }
+        self.clamp_focus();
     }
 
     fn navigate_keyboard(&mut self, action: Action) {
