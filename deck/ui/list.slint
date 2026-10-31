@@ -85,6 +85,7 @@ export component MediaRow inherits Card {
     in property <ListCell> cell;
     active: cell.active;
     min-height: layout.preferred-height;
+    property <bool> show-art: root.cell.has-art || root.cell.glyph != Glyph.none;
     layout := HorizontalLayout {
         padding-left: 16px;
         padding-right: 16px;
@@ -98,8 +99,9 @@ export component MediaRow inherits Card {
             color: Theme.on-surface;
             font-size: Theme.body-medium;
         }
-        // The art slot is always laid out, so every title starts at the same x.
-        Rectangle {
+        if root.cell.number != "" && !root.show-art: Rectangle { width: 16px; }
+        // The art slot collapses when the row carries no art or glyph.
+        if root.show-art: Rectangle {
             width: 56px;
             height: 56px;
             y: (parent.height - self.height) / 2;
@@ -118,7 +120,7 @@ export component MediaRow inherits Card {
                 colorize: Theme.on-surface.with-alpha(0.7);
             }
         }
-        Rectangle { width: 16px; }
+        if root.show-art: Rectangle { width: 16px; }
         VerticalLayout {
             alignment: center;
             horizontal-stretch: 1;
