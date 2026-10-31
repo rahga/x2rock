@@ -1610,6 +1610,9 @@ impl App {
 
     pub fn touch_hold(&mut self, z: i32, index: i32) {
         self.touch = true;
+        if z == zone::ROOMS {
+            self.focus = (zone::ROOMS, index);
+        }
         self.hold(z, index);
         self.render();
     }
@@ -1642,7 +1645,7 @@ impl App {
                 // A held Left picks the room up, as a hold of Select does.
                 Action::Left if repeat && self.left_from_room => {
                     self.left_from_room = false;
-                    self.pick_up();
+                    self.pick_up(i as usize);
                 }
                 _ => {}
             },
@@ -1857,7 +1860,7 @@ impl App {
                 }
             }
             zone::LIST => self.screen_hold(z, index),
-            zone::ROOMS => self.pick_up(),
+            zone::ROOMS => self.pick_up(index.max(0) as usize),
             zone::VOLUME => self.open_volume_chooser(),
             _ => {}
         }
@@ -2035,12 +2038,12 @@ impl App {
 
     // ----- Moving a room -----------------------------------------------------------
 
-    fn pick_up(&mut self) {
+    fn pick_up(&mut self, index: usize) {
         // With one room in the list there is no hold at all.
-        if self.rooms.len() < 2 || self.focus.0 != zone::ROOMS {
+        if self.rooms.len() < 2 {
             return;
         }
-        if let Some(entry) = self.rooms.get(self.focus.1 as usize) {
+        if let Some(entry) = self.rooms.get(index) {
             self.selected = Some(entry.group_id.clone());
             self.moving = Some(Moving::Carrying(entry.group_id.clone()));
         }

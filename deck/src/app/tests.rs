@@ -933,6 +933,7 @@ fn navigation_follows_the_tv_apps_rules() {
     test_speaker_row_follows_speaker_across_regroup();
     test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream();
     test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone();
+    test_touch_hold_room_picks_up_held_row_not_focused_row();
 
     // Closing a list (or opening full screen) must release the model's cover
     // references too, otherwise evicting the cache cannot release those pixels.
@@ -1876,6 +1877,27 @@ fn test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone()
         if app.screen_open() {
             app.close_screen();
         }
+    });
+}
+
+fn test_touch_hold_room_picks_up_held_row_not_focused_row() {
+    with_app(|app| {
+        app.focus = (zone::ROOMS, 0);
+        let row2_group = app.rooms.get(2).expect("room 2").group_id.clone();
+        let row0_group = app.rooms.first().expect("room 0").group_id.clone();
+        assert_ne!(row0_group, row2_group, "rooms 0 and 2 are different groups");
+
+        app.touch_hold(zone::ROOMS, 2);
+
+        assert_eq!(
+            app.moving,
+            Some(super::Moving::Carrying(row2_group)),
+            "touch hold on room 2 carries room 2's group"
+        );
+        assert_eq!(app.focus, (zone::ROOMS, 2), "focus moved to held room");
+
+        // Clean up moving state:
+        app.moving = None;
     });
 }
 
