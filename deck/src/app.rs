@@ -814,6 +814,9 @@ impl App {
             self.places.clear();
             self.speakers.clear();
             self.pane_zones.clear();
+            if self.in_pane() && !self.panel_open() && !self.screen_open() {
+                self.focus = (zone::ROOMS, 0);
+            }
             return;
         };
         let live = self.live(&entry.group_id);

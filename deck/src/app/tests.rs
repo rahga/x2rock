@@ -934,6 +934,7 @@ fn navigation_follows_the_tv_apps_rules() {
     test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream();
     test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone();
     test_touch_hold_room_picks_up_held_row_not_focused_row();
+    test_all_rooms_gone_while_focus_in_pane_recovers_to_rooms_and_select_reconnects();
 
     // Closing a list (or opening full screen) must release the model's cover
     // references too, otherwise evicting the cache cannot release those pixels.
@@ -1898,6 +1899,35 @@ fn test_touch_hold_room_picks_up_held_row_not_focused_row() {
 
         // Clean up moving state:
         app.moving = None;
+    });
+}
+
+fn test_all_rooms_gone_while_focus_in_pane_recovers_to_rooms_and_select_reconnects() {
+    with_app(|app| {
+        let initial_house = app.house.clone();
+        assert!(!app.rooms.is_empty(), "app should start with rooms");
+
+        app.focus = (zone::TRANSPORT, 0);
+        assert!(app.in_pane(), "focus should be in the pane");
+
+        let mut empty_house = initial_house.clone();
+        empty_house.groups = None;
+        app.update(household::Update::Household(Box::new(empty_house)));
+
+        assert_eq!(app.rooms.len(), 0, "all rooms should be gone");
+        assert_eq!(app.focus, (zone::ROOMS, 0), "focus recovered to ROOMS");
+
+        app.sent.borrow_mut().clear();
+        app.action(Action::Select, Phase::Press);
+        app.action(Action::Select, Phase::Release);
+
+        let sent = app.sent.borrow().clone();
+        assert!(
+            sent.iter().any(|c| matches!(c, household::Command::Reconnect)),
+            "Select reached the Reconnect action: {sent:?}"
+        );
+
+        app.update(household::Update::Household(Box::new(initial_house)));
     });
 }
 
