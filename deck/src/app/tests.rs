@@ -932,6 +932,7 @@ fn navigation_follows_the_tv_apps_rules() {
     test_reconnect_partially_answered_search_does_not_duplicate_sections();
     test_rejected_favorites_response_does_not_overwrite_cache();
     test_speaker_row_follows_speaker_across_regroup();
+    test_speaker_without_a_reading_is_not_stepped();
     test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream();
     test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone();
     test_touch_hold_room_picks_up_held_row_not_focused_row();
@@ -1775,6 +1776,33 @@ fn test_speaker_row_follows_speaker_across_regroup() {
 
     // Restore demo household for subsequent tests.
     with_app(|app| {
+        app.update(household::Update::Household(Box::new(demo::household())));
+    });
+}
+
+/// A speaker whose level has not arrived is not stepped, as a group is not: a
+/// delta from nowhere lands anywhere.
+fn test_speaker_without_a_reading_is_not_stepped() {
+    let mut house = demo::household();
+    house.player_volumes.remove("RINCON_D2");
+    with_app(|app| {
+        app.update(household::Update::Household(Box::new(house)));
+        let dining = app
+            .rooms
+            .iter()
+            .position(|r| r.group_id == "RINCON_D1:2")
+            .expect("Dining Room");
+        app.select_row(dining);
+        app.render_pane();
+        assert_eq!(app.speakers.get(1).map(String::as_str), Some("RINCON_D2"));
+        app.set_focus(zone::SPEAKERS, 1);
+        app.sent.borrow_mut().clear();
+    });
+    press(Action::Right);
+    assert!(sent().is_empty(), "no reading, nothing sent: {:?}", sent());
+    with_app(|app| {
+        app.speaker_step_tapped(1, 1);
+        assert!(app.sent.borrow().is_empty(), "a tap neither");
         app.update(household::Update::Household(Box::new(demo::household())));
     });
 }

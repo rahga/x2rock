@@ -1972,12 +1972,15 @@ impl App {
         let Some(player) = self.speakers.get(index).cloned() else {
             return;
         };
-        let level = self
+        // Until the speaker says where it is, there is nothing to step from.
+        let Some(level) = self
             .house
             .player_volumes
             .get(&player)
             .map(|v| v.volume as i32)
-            .unwrap_or(0);
+        else {
+            return;
+        };
         let now = self.now_ms();
         let hold = self.speaker_holds.entry(player.clone()).or_default();
         if let Some((from, to)) = hold.step(level, direction, repeat, now) {
