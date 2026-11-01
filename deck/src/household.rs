@@ -823,33 +823,44 @@ enum WireUpdate {
     Done,
 }
 
-async fn reach_speaker(
-    session: &Session,
-    ip: IpAddr,
-    events_tx: &mpsc::UnboundedSender<Tagged>,
-    forwarded: &Arc<std::sync::Mutex<HashSet<IpAddr>>>,
-    failed: &Arc<std::sync::Mutex<HashSet<IpAddr>>>,
-) -> Result<Connection> {
-    let needs_probe = !forwarded.lock().unwrap().contains(&ip);
-    if needs_probe {
-        if failed.lock().unwrap().contains(&ip) {
-            bail!("{ip} did not answer");
+/// What one wiring pass's futures share: the session to reach speakers on,
+/// where their events and the pass's reports go, and which addresses already
+/// have a forwarder or did not answer this pass.
+#[derive(Clone)]
+struct Pass {
+    session: Session,
+    events: mpsc::UnboundedSender<Tagged>,
+    wire: mpsc::UnboundedSender<WireUpdate>,
+    forwarded: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
+    failed: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
+}
+
+impl Pass {
+    /// A connection to the speaker at `ip`, its events forwarded. A speaker
+    /// not reached before is probed first, so an unplugged one costs a second
+    /// once a pass rather than a handshake's timeout per group and player.
+    async fn reach(&self, ip: IpAddr) -> Result<Connection> {
+        let needs_probe = !self.forwarded.lock().unwrap().contains(&ip);
+        if needs_probe {
+            if self.failed.lock().unwrap().contains(&ip) {
+                bail!("{ip} did not answer");
+            }
+            let probe = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect((ip, x2rock::sonos::local::PORT)),
+            )
+            .await;
+            if !matches!(probe, Ok(Ok(_))) {
+                self.failed.lock().unwrap().insert(ip);
+                bail!("{ip} did not answer");
+            }
         }
-        let probe = tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::net::TcpStream::connect((ip, x2rock::sonos::local::PORT)),
-        )
-        .await;
-        if !matches!(probe, Ok(Ok(_))) {
-            failed.lock().unwrap().insert(ip);
-            bail!("{ip} did not answer");
+        let connection = self.session.player(Some(ip)).await?;
+        if self.forwarded.lock().unwrap().insert(connection.ip()) {
+            forward(&connection, self.events.clone());
         }
+        Ok(connection)
     }
-    let connection = session.player(Some(ip)).await?;
-    if forwarded.lock().unwrap().insert(connection.ip()) {
-        forward(&connection, events_tx.clone());
-    }
-    Ok(connection)
 }
 
 fn unwired_targets(
@@ -910,14 +921,14 @@ fn start_pass(
     retry: &mut Retry,
 ) {
     let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
-    task.replace(Some(spawn_wire(
-        session.clone(),
-        wiring.events.clone(),
-        wire_tx.clone(),
-        groups_to_wire,
-        players_to_wire,
-        wiring.forwarded.clone(),
-    )));
+    let pass = Pass {
+        session: session.clone(),
+        events: wiring.events.clone(),
+        wire: wire_tx.clone(),
+        forwarded: wiring.forwarded.clone(),
+        failed: Arc::default(),
+    };
+    task.replace(Some(spawn_wire(pass, groups_to_wire, players_to_wire)));
     retry.pass_started();
 }
 
@@ -971,29 +982,24 @@ impl Retry {
     }
 }
 
+/// Groups first, then players: in a household of single speakers every player
+/// is a coordinator, and reaching it for its group first means its own volume
+/// finds the socket open rather than racing to open a second.
 fn spawn_wire(
-    session: Session,
-    events_tx: mpsc::UnboundedSender<Tagged>,
-    wire_tx: mpsc::UnboundedSender<WireUpdate>,
+    pass: Pass,
     unwired_groups: Vec<(proto::Group, IpAddr)>,
     unwired_players: Vec<proto::Player>,
-    forwarded: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
 ) -> tokio::task::AbortHandle {
     let task = tokio::spawn(async move {
-        let failed = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let now = Instant::now();
 
         // Wire groups concurrently:
         let mut group_futures = Vec::new();
         for (group, ip) in unwired_groups {
-            let session = session.clone();
-            let events_tx = events_tx.clone();
-            let forwarded = forwarded.clone();
-            let failed = failed.clone();
-            let wire_tx = wire_tx.clone();
+            let pass = pass.clone();
             group_futures.push(async move {
                 let res: Result<()> = async {
-                    let conn = reach_speaker(&session, ip, &events_tx, &forwarded, &failed).await?;
+                    let conn = pass.reach(ip).await?;
                     let (playback, metadata, volume) = tokio::try_join!(
                         conn.playback_status(&group.id),
                         conn.metadata(&group.id),
@@ -1003,13 +1009,13 @@ fn spawn_wire(
                     live.apply_playback(&playback, now);
                     live.metadata = Some(metadata);
                     live.volume = Some(volume);
-                    let _ = wire_tx.send(WireUpdate::Group {
+                    let _ = pass.wire.send(WireUpdate::Group {
                         id: group.id.clone(),
                         ip,
                         live: Box::new(live),
                     });
                     let mut unregister = Unregister {
-                        tx: wire_tx.clone(),
+                        tx: pass.wire.clone(),
                         id: Some(group.id.clone()),
                         ip,
                     };
@@ -1034,14 +1040,10 @@ fn spawn_wire(
         let mut player_futures = Vec::new();
         for player in unwired_players {
             let Some(ip) = player.ip() else { continue };
-            let session = session.clone();
-            let events_tx = events_tx.clone();
-            let forwarded = forwarded.clone();
-            let failed = failed.clone();
-            let wire_tx = wire_tx.clone();
+            let pass = pass.clone();
             player_futures.push(async move {
                 let res: Result<()> = async {
-                    let conn = reach_speaker(&session, ip, &events_tx, &forwarded, &failed).await?;
+                    let conn = pass.reach(ip).await?;
                     let volume = conn.player_volume(&player.id).await.ok();
                     conn.subscribe_player("playerVolume:1", &player.id).await?;
                     let mut ht = None;
@@ -1053,7 +1055,7 @@ fn spawn_wire(
                         }
                         let _ = conn.subscribe_player("homeTheater:1", &player.id).await;
                     }
-                    let _ = wire_tx.send(WireUpdate::Player {
+                    let _ = pass.wire.send(WireUpdate::Player {
                         id: player.id.clone(),
                         volume,
                         ht,
@@ -1068,7 +1070,7 @@ fn spawn_wire(
         }
         futures_util::future::join_all(player_futures).await;
 
-        let _ = wire_tx.send(WireUpdate::Done);
+        let _ = pass.wire.send(WireUpdate::Done);
     });
     task.abort_handle()
 }
