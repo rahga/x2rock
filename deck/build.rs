@@ -49,13 +49,8 @@ fn built_in_salt() {
         )
     });
     let code = match &salt {
-        Some(bytes) => format!(
-            "pub const SPEAKER_SALT: Option<[u8; 16]> = Some({bytes:?});\n\
-             pub const VERSION: &str = concat!(env!(\"CARGO_PKG_VERSION\"), \"+salt\");\n"
-        ),
-        None => "pub const SPEAKER_SALT: Option<[u8; 16]> = None;\n\
-                 pub const VERSION: &str = env!(\"CARGO_PKG_VERSION\");\n"
-            .to_owned(),
+        Some(bytes) => format!("pub const SPEAKER_SALT: Option<[u8; 16]> = Some({bytes:?});\n"),
+        None => "pub const SPEAKER_SALT: Option<[u8; 16]> = None;\n".to_owned(),
     };
     std::fs::write(out.join("built_in.rs"), code).expect("OUT_DIR is writable");
 }

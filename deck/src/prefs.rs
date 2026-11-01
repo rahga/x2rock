@@ -61,32 +61,14 @@ impl Prefs {
         let Some(p) = path else {
             return Self::default();
         };
-        let mut prefs = match std::fs::read_to_string(&p) {
-            Ok(text) => match serde_json::from_str::<Prefs>(&text) {
-                Ok(prefs) => prefs,
-                Err(e) => {
-                    eprintln!(
-                        "x2rock-deck: could not parse settings from {}: {e}",
-                        p.display()
-                    );
-                    Prefs {
-                        unreadable: true,
-                        ..Default::default()
-                    }
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Prefs::default(),
-            Err(e) => {
-                eprintln!(
-                    "x2rock-deck: could not read settings from {}: {e}",
-                    p.display()
-                );
-                Prefs {
-                    unreadable: true,
-                    ..Default::default()
-                }
+        // Missing is default; unreadable or corrupt is kept aside at the next save.
+        let mut prefs = x2rock::store::load_json::<Prefs>(&p).unwrap_or_else(|e| {
+            eprintln!("x2rock-deck: could not load settings: {e:#}");
+            Prefs {
+                unreadable: true,
+                ..Default::default()
             }
-        };
+        });
         prefs.path = Some(p);
         prefs.theme = prefs
             .color_theme

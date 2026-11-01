@@ -101,16 +101,15 @@ mod tests {
     /// nothing but the arguments and environment set here reach it.
     #[cfg(unix)]
     struct Install {
-        root: PathBuf,
+        dir: x2rock::testdir::TempDir,
     }
 
     #[cfg(unix)]
     impl Install {
         fn new(name: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
-            let root = std::env::temp_dir()
-                .join(format!("x2rock-deck-install-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
+            let dir = x2rock::testdir::TempDir::new(&format!("deck-install-{name}"));
+            let root = dir.path();
             let (bin, pkg) = (root.join("bin"), root.join("pkg"));
             for dir in [&bin, &pkg, &root.join("home")] {
                 std::fs::create_dir_all(dir).unwrap();
@@ -129,15 +128,19 @@ mod tests {
             for file in [bin.join("steamos-add-to-steam"), pkg.join("x2rock-deck")] {
                 std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
-            Install { root }
+            Install { dir }
+        }
+
+        fn root(&self) -> &Path {
+            self.dir.path()
         }
 
         /// Exit code and standard output.
         fn run(&self, args: &[&str]) -> (i32, String) {
-            let home = self.root.join("home");
-            let path = format!("{}:/usr/bin:/bin", self.root.join("bin").display());
+            let home = self.root().join("home");
+            let path = format!("{}:/usr/bin:/bin", self.root().join("bin").display());
             let out = std::process::Command::new("/bin/sh")
-                .arg(self.root.join("pkg/install.sh"))
+                .arg(self.root().join("pkg/install.sh"))
                 .args(args)
                 .env_clear()
                 .env("HOME", &home)
@@ -150,16 +153,9 @@ mod tests {
         }
 
         fn calls(&self) -> usize {
-            std::fs::read_to_string(self.root.join("calls"))
+            std::fs::read_to_string(self.root().join("calls"))
                 .map(|s| s.lines().count())
                 .unwrap_or(0)
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for Install {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 
@@ -171,7 +167,7 @@ mod tests {
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Added to Steam"), "{out}");
         assert!(
-            i.root
+            i.root()
                 .join("home/.local/share/applications/x2rock-deck.desktop")
                 .exists(),
             "the menu entry goes under the given XDG_DATA_HOME"
@@ -184,11 +180,11 @@ mod tests {
 
         // A failed first add: later runs neither claim a shortcut nor add one.
         let i = Install::new("failed");
-        std::fs::write(i.root.join("fail"), b"").unwrap();
+        std::fs::write(i.root().join("fail"), b"").unwrap();
         let (code, out) = i.run(&[]);
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Add a Non-Steam Game"), "{out}");
-        std::fs::remove_file(i.root.join("fail")).unwrap();
+        std::fs::remove_file(i.root().join("fail")).unwrap();
         let (code, out) = i.run(&[]);
         assert_eq!(code, 0, "{out}");
         assert!(!out.contains("this script added"), "{out}");
@@ -203,7 +199,7 @@ mod tests {
         // A mistyped option installs nothing.
         let i = Install::new("typo");
         assert_eq!(i.run(&["--udpate"]).0, 2);
-        assert!(!i.root.join("home/Applications").exists());
+        assert!(!i.root().join("home/Applications").exists());
         assert_eq!(i.calls(), 0);
     }
 }

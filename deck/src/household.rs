@@ -771,6 +771,18 @@ struct Wiring {
     players: HashSet<String>,
 }
 
+impl Wiring {
+    /// Nothing subscribed yet.
+    fn new(events: mpsc::UnboundedSender<Tagged>) -> Self {
+        Wiring {
+            events,
+            forwarded: Arc::default(),
+            groups: HashMap::new(),
+            players: HashSet::new(),
+        }
+    }
+}
+
 fn forward(connection: &Connection, events: mpsc::UnboundedSender<Tagged>) {
     let mut rx = connection.events();
     let ip = connection.ip();
@@ -825,7 +837,7 @@ async fn reach_speaker(
         }
         let probe = tokio::time::timeout(
             Duration::from_secs(1),
-            tokio::net::TcpStream::connect((ip, 1443)),
+            tokio::net::TcpStream::connect((ip, x2rock::sonos::local::PORT)),
         )
         .await;
         if !matches!(probe, Ok(Ok(_))) {
@@ -868,25 +880,42 @@ fn unwired_targets(
 /// wired and never subscribed.
 struct Unregister {
     tx: mpsc::UnboundedSender<WireUpdate>,
-    id: String,
+    /// Taken once the group is subscribed.
+    id: Option<String>,
     ip: IpAddr,
 }
 
 impl Unregister {
     fn disarm(&mut self) {
-        self.id.clear();
+        self.id = None;
     }
 }
 
 impl Drop for Unregister {
     fn drop(&mut self) {
-        if !self.id.is_empty() {
-            let _ = self.tx.send(WireUpdate::GroupFailed {
-                id: std::mem::take(&mut self.id),
-                ip: self.ip,
-            });
+        if let Some(id) = self.id.take() {
+            let _ = self.tx.send(WireUpdate::GroupFailed { id, ip: self.ip });
         }
     }
+}
+
+/// Start a pass over whatever the topology has that is not yet subscribed.
+/// A pass with nothing to do still reports `Done`, which settles the retry.
+fn start_pass(
+    session: &Session,
+    wiring: &Wiring,
+    wire_tx: &mpsc::UnboundedSender<WireUpdate>,
+    groups: &Groups,
+) -> tokio::task::AbortHandle {
+    let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
+    spawn_wire(
+        session.clone(),
+        wiring.events.clone(),
+        wire_tx.clone(),
+        groups_to_wire,
+        players_to_wire,
+        wiring.forwarded.clone(),
+    )
 }
 
 fn spawn_wire(
@@ -928,7 +957,7 @@ fn spawn_wire(
                     });
                     let mut unregister = Unregister {
                         tx: wire_tx.clone(),
-                        id: group.id.clone(),
+                        id: Some(group.id.clone()),
                         ip,
                     };
                     tokio::try_join!(
@@ -1039,18 +1068,10 @@ fn wired(household: &mut Household, wiring: &mut Wiring, update: WireUpdate) -> 
 /// Whether the topology has a group or a reachable speaker that is not yet
 /// subscribed.
 fn unwired(wiring: &Wiring, household: &Household) -> bool {
-    let Some(groups) = household.groups.as_ref() else {
-        return false;
-    };
-    let group_unwired = groups.groups.iter().any(|g| {
-        let ip = groups.player(&g.coordinator_id).and_then(proto::Player::ip);
-        ip.is_some() && wiring.groups.get(&g.id) != ip.as_ref()
-    });
-    group_unwired
-        || groups
-            .players
-            .iter()
-            .any(|p| p.ip().is_some() && !wiring.players.contains(&p.id))
+    household.groups.as_ref().is_some_and(|groups| {
+        let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
+        !groups_to_wire.is_empty() || !players_to_wire.is_empty()
+    })
 }
 
 /// Publish the household and keep it current until a socket that matters is
@@ -1063,9 +1084,9 @@ async fn follow(
     let primary = session.connection.clone();
     let household_id = primary.household_id().await?;
     let (events_tx, events) = mpsc::unbounded_channel::<Tagged>();
-    let forwarded = Arc::new(std::sync::Mutex::new(HashSet::new()));
-    forwarded.lock().unwrap().insert(primary.ip());
-    forward(&primary, events_tx.clone());
+    let wiring = Wiring::new(events_tx.clone());
+    wiring.forwarded.lock().unwrap().insert(primary.ip());
+    forward(&primary, events_tx);
     primary
         .subscribe_household("groups:1", &household_id)
         .await?;
@@ -1073,12 +1094,6 @@ async fn follow(
     // without bonds has nothing to say here.
     let _ = primary.subscribe_household("zones:1", &household_id).await;
 
-    let wiring = Wiring {
-        events: events_tx,
-        forwarded,
-        groups: HashMap::new(),
-        players: HashSet::new(),
-    };
     let household = Household {
         groups: Some(session.groups.clone()),
         ..Default::default()
@@ -1116,17 +1131,7 @@ async fn follow_loop(
     let mut wiring_task = Latest::default();
 
     if let Some(groups) = household.groups.as_ref() {
-        let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, groups);
-        if !groups_to_wire.is_empty() || !players_to_wire.is_empty() {
-            wiring_task.replace(Some(spawn_wire(
-                session.clone(),
-                wiring.events.clone(),
-                wire_tx.clone(),
-                groups_to_wire,
-                players_to_wire,
-                wiring.forwarded.clone(),
-            )));
-        }
+        wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, groups)));
     }
 
     // A group or speaker that could not be subscribed is tried again, with the
@@ -1223,15 +1228,7 @@ async fn follow_loop(
                         let current: HashSet<&str> = groups.groups.iter().map(|g| g.id.as_str()).collect();
                         wiring.groups.retain(|id, _| current.contains(id.as_str()));
                         household.live.retain(|id, _| current.contains(id.as_str()));
-                        let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, &groups);
-                        wiring_task.replace(Some(spawn_wire(
-                            session.clone(),
-                            wiring.events.clone(),
-                            wire_tx.clone(),
-                            groups_to_wire,
-                            players_to_wire,
-                            wiring.forwarded.clone(),
-                        )));
+                        wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, &groups)));
                         if !unwired(&wiring, &household) {
                             next_retry = None;
                             retry_backoff = Duration::from_secs(2);
@@ -1246,15 +1243,7 @@ async fn follow_loop(
             _ = tokio::time::sleep_until(next_retry.unwrap_or_else(tokio::time::Instant::now)), if next_retry.is_some() => {
                 next_retry = None;
                 let groups = household.groups.clone().unwrap_or_default_groups();
-                let (groups_to_wire, players_to_wire) = unwired_targets(&wiring, &groups);
-                wiring_task.replace(Some(spawn_wire(
-                    session.clone(),
-                    wiring.events.clone(),
-                    wire_tx.clone(),
-                    groups_to_wire,
-                    players_to_wire,
-                    wiring.forwarded.clone(),
-                )));
+                wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, &groups)));
             }
             command = inbox.recv() => {
                 let Some(command) = command else { return Ok(()) };
@@ -2652,12 +2641,7 @@ mod wiring_tests {
         let household = crate::demo::household();
         let groups = household.groups.clone().unwrap();
         let (events, _rx) = mpsc::unbounded_channel();
-        let mut wiring = Wiring {
-            events,
-            forwarded: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            groups: HashMap::new(),
-            players: HashSet::new(),
-        };
+        let mut wiring = Wiring::new(events);
         for g in &groups.groups {
             let ip = groups
                 .player(&g.coordinator_id)
@@ -2846,39 +2830,47 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_command_sent_while_a_probe_is_outstanding_is_dispatched_without_waiting() {
-        // A speaker that takes the connection and never answers, on this
-        // machine (not the session's own 127.0.0.1, which it would reuse):
-        // the probe gets through and the handshake waits. Nothing leaves the
-        // host.
-        // The port is the speakers' own, so the address varies: the first free
-        // one, as two test runs at once would collide on one.
-        let (listener, unreachable_ip) = (2..=250)
+    /// A listener on the speakers' port, standing in for a speaker on this
+    /// machine (not the session's own 127.0.0.1, which it would reuse). The
+    /// port is fixed, so the address varies: the first free one under
+    /// `127.0.{subnet}`, as two test runs at once would collide on one.
+    fn speaker_listener(subnet: u8) -> (std::net::TcpListener, IpAddr) {
+        (2..=250)
             .find_map(|n| {
-                let ip: IpAddr = format!("127.0.3.{n}").parse().unwrap();
-                std::net::TcpListener::bind((ip, 1443))
+                let ip: IpAddr = format!("127.0.{subnet}.{n}").parse().unwrap();
+                std::net::TcpListener::bind((ip, x2rock::sonos::local::PORT))
                     .ok()
                     .map(|l| (l, ip))
             })
-            .expect("a free 127.0.3.x:1443 for the stalled-speaker test");
-        let groups = proto::Groups {
+            .unwrap_or_else(|| panic!("a free 127.0.{subnet}.x:{}", x2rock::sonos::local::PORT))
+    }
+
+    /// One group, coordinated by its one speaker at `ip`.
+    fn one_room(ip: IpAddr) -> proto::Groups {
+        proto::Groups {
             groups: vec![proto::Group {
-                id: "GROUP_1".into(),
-                name: "Living Room".into(),
-                coordinator_id: "PLAYER_1".into(),
+                id: "G1".into(),
+                name: "Room".into(),
+                coordinator_id: "P1".into(),
                 playback_state: "IDLE".into(),
-                player_ids: vec!["PLAYER_1".into()],
+                player_ids: vec!["P1".into()],
             }],
             players: vec![proto::Player {
-                id: "PLAYER_1".into(),
-                name: "Living Room".into(),
-                websocket_url: format!("wss://{unreachable_ip}:1443/websocket/api"),
+                id: "P1".into(),
+                name: "Room".into(),
+                websocket_url: format!("wss://{ip}:{}/websocket/api", x2rock::sonos::local::PORT),
                 capabilities: vec![],
             }],
-        };
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_command_sent_while_a_probe_is_outstanding_is_dispatched_without_waiting() {
+        // A speaker that takes the connection and never answers: the probe
+        // gets through and the handshake waits. Nothing leaves the host.
+        let (listener, unreachable_ip) = speaker_listener(3);
         let connection = Connection::dummy("127.0.0.1".parse().unwrap());
-        let session = Session::new(connection, groups);
+        let session = Session::new(connection, one_room(unreachable_ip));
         let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
         let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
         let updates: Sink = Arc::new(move |u| {
@@ -2886,12 +2878,7 @@ mod tests {
         });
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let wiring = Wiring {
-            events: events_tx,
-            forwarded: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            groups: HashMap::new(),
-            players: HashSet::new(),
-        };
+        let wiring = Wiring::new(events_tx);
         let household = Household {
             groups: Some(session.groups.clone()),
             ..Default::default()
@@ -2927,31 +2914,10 @@ mod tests {
     /// Seen from outside: the retry probes the coordinator, here a listener.
     #[tokio::test(start_paused = true)]
     async fn a_late_group_failure_after_the_last_done_is_still_retried() {
-        let (listener, ip) = (2..=250)
-            .find_map(|n| {
-                let ip: IpAddr = format!("127.0.4.{n}").parse().unwrap();
-                std::net::TcpListener::bind((ip, 1443))
-                    .ok()
-                    .map(|l| (l, ip))
-            })
-            .expect("a free 127.0.4.x:1443");
+        let (listener, ip) = speaker_listener(4);
         listener.set_nonblocking(true).unwrap();
         let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-        let groups = proto::Groups {
-            groups: vec![proto::Group {
-                id: "G1".into(),
-                name: "Room".into(),
-                coordinator_id: "P1".into(),
-                playback_state: "IDLE".into(),
-                player_ids: vec!["P1".into()],
-            }],
-            players: vec![proto::Player {
-                id: "P1".into(),
-                name: "Room".into(),
-                websocket_url: format!("wss://{ip}:1443/websocket/api"),
-                capabilities: vec![],
-            }],
-        };
+        let groups = one_room(ip);
         let session = Session::new(
             Connection::dummy("127.0.0.1".parse().unwrap()),
             groups.clone(),
@@ -2963,10 +2929,9 @@ mod tests {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         // Registered and wired, as the aborted pass left it: nothing to do.
         let wiring = Wiring {
-            events: events_tx,
-            forwarded: Arc::default(),
             groups: HashMap::from([("G1".to_owned(), ip)]),
             players: HashSet::from(["P1".to_owned()]),
+            ..Wiring::new(events_tx)
         };
         let (wire_tx, wire_rx) = mpsc::unbounded_channel();
         let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
@@ -2991,7 +2956,7 @@ mod tests {
         tokio::task::yield_now().await;
         drop(Unregister {
             tx: wire_tx.clone(),
-            id: "G1".into(),
+            id: Some("G1".into()),
             ip,
         });
         let retried = tokio::time::timeout(Duration::from_secs(30), listener.accept()).await;
@@ -3009,7 +2974,7 @@ mod tests {
             async move {
                 let _unregister = Unregister {
                     tx,
-                    id: "G1".into(),
+                    id: Some("G1".into()),
                     ip,
                 };
                 std::future::pending::<()>().await;
@@ -3024,7 +2989,7 @@ mod tests {
         ));
         let mut done = Unregister {
             tx,
-            id: "G2".into(),
+            id: Some("G2".into()),
             ip,
         };
         done.disarm();
@@ -3056,12 +3021,7 @@ mod tests {
             ..Default::default()
         };
         let (events, _) = mpsc::unbounded_channel();
-        let mut wiring = Wiring {
-            events,
-            forwarded: Arc::default(),
-            groups: HashMap::new(),
-            players: HashSet::new(),
-        };
+        let mut wiring = Wiring::new(events);
         let update = |id: &str, ip: &str| WireUpdate::Group {
             id: id.into(),
             ip: ip.parse().unwrap(),

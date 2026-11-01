@@ -12,9 +12,15 @@
 
 mod app;
 mod art;
-/// What build.rs found to build in: a speaker salt, and the version that says so.
+/// What build.rs found to build in: a speaker salt, or none.
 mod built_in {
     include!(concat!(env!("OUT_DIR"), "/built_in.rs"));
+
+    /// The package version, `+salt` when a salt is built in.
+    pub const VERSION: &str = match SPEAKER_SALT {
+        Some(_) => concat!(env!("CARGO_PKG_VERSION"), "+salt"),
+        None => env!("CARGO_PKG_VERSION"),
+    };
 }
 mod demo;
 mod household;

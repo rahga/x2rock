@@ -1675,10 +1675,15 @@ fn test_rejected_favorites_response_does_not_overwrite_cache() {
 
 fn test_speaker_row_follows_speaker_across_regroup() {
     let mut house = demo::household();
-    if let Some(groups) = house.groups.as_mut()
-        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
-    {
-        dining.player_ids = vec!["RINCON_D1".into(), "RINCON_D2".into(), "RINCON_D3".into()];
+    let set_dining = |house: &mut crate::model::Household, ids: &[&str]| {
+        if let Some(groups) = house.groups.as_mut()
+            && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
+        {
+            dining.player_ids = ids.iter().map(|&id| id.into()).collect();
+        }
+    };
+    set_dining(&mut house, &["RINCON_D1", "RINCON_D2", "RINCON_D3"]);
+    if let Some(groups) = house.groups.as_mut() {
         groups.players.push(x2rock::sonos::proto::Player {
             id: "RINCON_D3".into(),
             name: "Dining Room Sub".into(),
@@ -1709,11 +1714,7 @@ fn test_speaker_row_follows_speaker_across_regroup() {
     assert_eq!(focus(), (zone::SPEAKERS, 1), "focused on RINCON_D2");
 
     // Remove earlier speaker RINCON_D1: RINCON_D2 slides to index 0.
-    if let Some(groups) = house.groups.as_mut()
-        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
-    {
-        dining.player_ids = vec!["RINCON_D2".into(), "RINCON_D3".into()];
-    }
+    set_dining(&mut house, &["RINCON_D2", "RINCON_D3"]);
     with_app(|app| {
         app.update(household::Update::Household(Box::new(house.clone())));
         app.sent.borrow_mut().clear();
@@ -1753,11 +1754,7 @@ fn test_speaker_row_follows_speaker_across_regroup() {
 
     // When the focused speaker is removed, focus leaves for a safe row (pane_entry),
     // and subsequent Right does not adjust speaker volume.
-    if let Some(groups) = house.groups.as_mut()
-        && let Some(dining) = groups.groups.iter_mut().find(|g| g.name == "Dining Room")
-    {
-        dining.player_ids = vec!["RINCON_D3".into()];
-    }
+    set_dining(&mut house, &["RINCON_D3"]);
     with_app(|app| {
         app.update(household::Update::Household(Box::new(house.clone())));
         app.sent.borrow_mut().clear();
@@ -1782,13 +1779,39 @@ fn test_speaker_row_follows_speaker_across_regroup() {
     });
 }
 
+/// Radio open and switched to Play a URL: the keyboard is up.
+fn open_url_entry(app: &mut App) {
+    app.open_screen(super::screens::Kind::Radio);
+    app.screen_click(zone::SIDE, 0);
+    assert!(app.keyboard.is_some(), "keyboard is open");
+    assert_eq!(app.focus.0, zone::KEYS);
+}
+
+/// Focus is on a drawn zone, not stranded in KEYS once the keyboard is gone.
+fn assert_focus_drawn(app: &App) {
+    assert_ne!(
+        app.focus.0,
+        zone::KEYS,
+        "focus must not remain in KEYS with the keyboard closed"
+    );
+    assert!(
+        app.zone_len(app.focus.0) > 0,
+        "focus zone {:?} must have length > 0",
+        app.focus.0
+    );
+}
+
+fn play_streams_sent(app: &App) -> usize {
+    app.sent
+        .borrow()
+        .iter()
+        .filter(|c| matches!(c, household::Command::PlayStream { .. }))
+        .count()
+}
+
 fn test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream() {
     with_app(|app| {
-        app.open_screen(super::screens::Kind::Radio);
-        // Switch to Play a URL:
-        app.screen_click(zone::SIDE, 0);
-        assert!(app.keyboard.is_some(), "keyboard is open");
-        assert_eq!(app.focus.0, zone::KEYS);
+        open_url_entry(app);
 
         // Turn on "stay":
         app.prefs.after_playing = Some("stay".into());
@@ -1802,39 +1825,18 @@ fn test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream(
         app.sent.borrow_mut().clear();
         app.submit_text();
         assert!(app.keyboard.is_none(), "keyboard closed");
-
-        // Focus must be on a drawn zone with length > 0, not stranded in KEYS:
-        assert_ne!(
-            app.focus.0,
-            zone::KEYS,
-            "focus must not remain in KEYS zone with keyboard None"
-        );
-        assert!(
-            app.zone_len(app.focus.0) > 0,
-            "focus zone {:?} must have length > 0",
-            app.focus.0
-        );
-
-        // Assert exactly one PlayStream was sent:
-        let play_streams = app
-            .sent
-            .borrow()
-            .iter()
-            .filter(|c| matches!(c, household::Command::PlayStream { .. }))
-            .count();
-        assert_eq!(play_streams, 1, "exactly one PlayStream sent");
+        assert_focus_drawn(app);
+        assert_eq!(play_streams_sent(app), 1, "exactly one PlayStream sent");
 
         // Pressing Select on current focus must not send another PlayStream:
         app.sent.borrow_mut().clear();
         app.action(Action::Select, Phase::Press);
         app.action(Action::Select, Phase::Release);
-        let play_streams = app
-            .sent
-            .borrow()
-            .iter()
-            .filter(|c| matches!(c, household::Command::PlayStream { .. }))
-            .count();
-        assert_eq!(play_streams, 0, "Select does not send second PlayStream");
+        assert_eq!(
+            play_streams_sent(app),
+            0,
+            "Select does not send second PlayStream"
+        );
 
         app.prefs.after_playing = None;
         app.close_screen();
@@ -1843,11 +1845,7 @@ fn test_play_url_with_stay_leaves_focus_on_drawn_zone_and_sends_one_play_stream(
 
 fn test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone() {
     with_app(|app| {
-        app.open_screen(super::screens::Kind::Radio);
-        // Switch to Play a URL:
-        app.screen_click(zone::SIDE, 0);
-        assert!(app.keyboard.is_some(), "keyboard is open");
-        assert_eq!(app.focus.0, zone::KEYS);
+        open_url_entry(app);
 
         // Tap a Radio category in SIDE (index 1: Popular):
         app.tap(zone::SIDE, 1);
@@ -1856,16 +1854,7 @@ fn test_side_tap_during_url_entry_leaves_keyboard_none_and_focus_on_drawn_zone()
             app.keyboard.is_none(),
             "tapping SIDE category closes keyboard"
         );
-        assert_ne!(
-            app.focus.0,
-            zone::KEYS,
-            "focus must not remain in KEYS zone after tapping SIDE"
-        );
-        assert!(
-            app.zone_len(app.focus.0) > 0,
-            "focus zone {:?} must have length > 0",
-            app.focus.0
-        );
+        assert_focus_drawn(app);
 
         // Directional navigation must navigate screen, not keyboard:
         // And pressing Back must not strand focus in a zero-length FIELD zone:
@@ -2002,22 +1991,6 @@ fn held_volume_is_paced_capped_and_ends_on_release() {
         sent()
     );
     assert!(volume_reached(from) <= from + 20, "{:?}", sent());
-}
-
-#[test]
-fn a_failed_plex_cover_does_not_log_its_token() {
-    // Not through with_app: a test thread of its own has no App, and
-    // with_app would skip the body.
-    let url = "https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=supersecret123&width=300";
-    let line = super::format_art_failure(url, &anyhow::anyhow!("raster size exceeds limit"));
-    assert_eq!(
-        line,
-        "x2rock-deck: no art for https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=<token>&width=300: raster size exceeds limit"
-    );
-    // As http.rs words a stalled fetch: the error carries the URL as well.
-    let error = anyhow::anyhow!("timed out after 8s talking to {url}");
-    let line = super::format_art_failure(url, &error);
-    assert!(!line.contains("supersecret123"), "{line}");
 }
 
 #[test]

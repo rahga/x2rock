@@ -681,7 +681,8 @@ impl App {
             }
             Err(e) => {
                 let retry_at = Instant::now() + e.retry_after();
-                let line = format_art_failure(&key.url, &e.error);
+                let line =
+                    x2rock::art::format_failure("x2rock-deck: no art for", &key.url, &e.error);
                 eprintln!("{line}");
                 self.art.failed(key, retry_at);
             }
@@ -2159,18 +2160,14 @@ impl App {
         self.focus = (zone::KEYS, 0);
     }
 
+    /// Focus lands on the first drawn zone under the keyboard.
     fn close_keyboard(&mut self) {
         self.keyboard = None;
-        if self.zone_len(zone::FIELD) > 0 {
-            self.focus = (zone::FIELD, 0);
-        } else if self.zone_len(zone::SIDE) > 0 {
-            self.focus = (zone::SIDE, 0);
-        } else if self.zone_len(zone::LIST) > 0 {
-            self.focus = (zone::LIST, 0);
-        } else {
-            self.focus = (zone::HEADER, 0);
-        }
-        self.clamp_focus();
+        let zone = [zone::FIELD, zone::SIDE, zone::LIST]
+            .into_iter()
+            .find(|&z| self.zone_len(z) > 0)
+            .unwrap_or(zone::HEADER);
+        self.focus = (zone, 0);
     }
 
     fn navigate_keyboard(&mut self, action: Action) {
@@ -2258,10 +2255,4 @@ pub(crate) fn format_readonly_command(command: &Command) -> String {
     let debug = format!("{command:?}");
     let safe = x2rock::sonos::plex::redact_token(&debug);
     format!("x2rock-deck: read-only, not sent: {safe}")
-}
-
-/// The whole line is redacted: an error can name the URL too (a timeout does).
-pub(crate) fn format_art_failure(url: &str, error: &anyhow::Error) -> String {
-    x2rock::sonos::plex::redact_token(&format!("x2rock-deck: no art for {url}: {error:#}"))
-        .into_owned()
 }

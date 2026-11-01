@@ -161,10 +161,10 @@ fn rewrite_url(url: &str) -> Cow<'_, str> {
     }
 }
 
-/// Refuse a URL this module will not fetch - see the module docs.
+/// Refuse a URL this module will not fetch - see the module docs. The URL is
+/// as [`rewrite_url`] left it: [`resolve`] and [`fetch`]'s redirects see to that.
 fn allowed(url: &str) -> Result<()> {
-    let url = rewrite_url(url);
-    allowed_url(&url).map_err(permanent)
+    allowed_url(url).map_err(permanent)
 }
 
 fn allowed_url(url: &str) -> Result<()> {
@@ -420,10 +420,11 @@ fn follow(from: &str, location: &str) -> String {
     format!("{}{location}", &from[..origin_end])
 }
 
-/// Fetch one image, holding every hop to [`allowed`].
+/// Fetch one image, holding every hop to [`allowed`]. `url` is as
+/// [`rewrite_url`] left it; each redirect is rewritten in turn.
 async fn fetch(url: &str) -> Result<(Vec<u8>, &'static str)> {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
-    let mut current = rewrite_url(url).into_owned();
+    let mut current = url.to_owned();
     for _ in 0..=REDIRECTS {
         allowed(&current)?;
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -605,7 +606,7 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
             match &results[url.as_str()] {
                 Ok(path) => println!("{}", path.display()),
                 Err(e) => {
-                    eprintln!("{}", format_failure(url, e));
+                    eprintln!("{}", format_failure("x2rock:", url, e));
                     println!();
                 }
             }
@@ -614,9 +615,11 @@ pub async fn run(urls: &[String], clear: bool, json: bool, each: bool) -> Result
     Ok(())
 }
 
-/// The whole line is redacted: an error can name the URL too (a timeout does).
-pub(crate) fn format_failure(url: &str, error: &anyhow::Error) -> String {
-    crate::sonos::plex::redact_token(&format!("x2rock: {url}: {error:#}")).into_owned()
+/// A failed fetch as one log line, `prefix` first (the program's name, and
+/// what it was after). The whole line is redacted: an error can name the URL
+/// too (a timeout does).
+pub fn format_failure(prefix: &str, url: &str, error: &anyhow::Error) -> String {
+    crate::sonos::plex::redact_token(&format!("{prefix} {url}: {error:#}")).into_owned()
 }
 
 #[cfg(test)]
@@ -628,7 +631,7 @@ mod tests {
     fn failed_art_log_redacts_plex_token() {
         let url = "http://192.168.1.50:32400/photo/:/transcode?X-Plex-Token=secret123&width=300";
         let err = anyhow::anyhow!("raster size exceeds limit");
-        let line = format_failure(url, &err);
+        let line = format_failure("x2rock:", url, &err);
         assert!(!line.contains("secret123"));
         assert_eq!(
             line,
@@ -638,12 +641,12 @@ mod tests {
         // As http.rs words a stalled fetch: the error carries the URL as well.
         let url = "https://10.0.0.5:32400/photo/:/transcode?X-Plex-Token=secret789&width=300";
         let err = anyhow::anyhow!("timed out after 8s talking to {url}");
-        let line = format_failure(url, &err);
+        let line = format_failure("x2rock-deck: no art for", url, &err);
         assert!(!line.contains("secret789"), "{line}");
 
         let encoded =
             "https://sonos.plex.tv/img?url=https%3A%2F%2Fx%3FX-Plex-Token%3Dsecret456&z=1";
-        let line = format_failure(encoded, &err);
+        let line = format_failure("x2rock:", encoded, &err);
         assert!(!line.contains("secret456"));
         assert!(line.contains("X-Plex-Token%3D<token>"));
     }
@@ -706,7 +709,6 @@ mod tests {
         assert!(allowed("https://c.saavncdn.com/art.jpg").is_ok());
         assert!(allowed("http://192.168.77.94:1400/getaa?s=1&u=x").is_ok());
         assert!(allowed("http://10.0.0.5:1400/getaa").is_ok());
-        assert!(allowed("http://img.iheart.com/sca/imscale?w=500&img=x").is_ok());
 
         assert!(allowed("http://example.com/art.jpg").is_err());
         assert!(
@@ -731,8 +733,8 @@ mod tests {
 
         assert_eq!(rewrite_url(iheart_http), iheart_https);
         assert_eq!(rewrite_url(iheart_https), iheart_https);
-        assert!(allowed(iheart_http).is_ok());
-        assert!(allowed(iheart_https).is_ok());
+        assert!(allowed(iheart_http).is_err(), "rewritten first, not here");
+        assert!(allowed(&rewrite_url(iheart_http)).is_ok());
 
         let other_http = "http://example.com/art.jpg";
         assert_eq!(rewrite_url(other_http), other_http);
