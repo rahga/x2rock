@@ -767,8 +767,9 @@ struct Wiring {
     forwarded: Arc<std::sync::Mutex<HashSet<IpAddr>>>,
     /// Groups subscribed, by id, and the coordinator address they were subscribed on.
     groups: HashMap<String, IpAddr>,
-    /// Players whose own volume is subscribed.
-    players: HashSet<String>,
+    /// Players whose own volume is subscribed, by id, and the address it was
+    /// subscribed on: a speaker given a new address is subscribed again there.
+    players: HashMap<String, IpAddr>,
 }
 
 impl Wiring {
@@ -778,7 +779,7 @@ impl Wiring {
             events,
             forwarded: Arc::default(),
             groups: HashMap::new(),
-            players: HashSet::new(),
+            players: HashMap::new(),
         }
     }
 }
@@ -817,6 +818,7 @@ enum WireUpdate {
     },
     Player {
         id: String,
+        ip: IpAddr,
         volume: Option<proto::Volume>,
         ht: Option<(bool, bool)>,
     },
@@ -863,26 +865,28 @@ impl Pass {
     }
 }
 
-fn unwired_targets(
-    wiring: &Wiring,
-    groups: &Groups,
-) -> (Vec<(proto::Group, IpAddr)>, Vec<proto::Player>) {
-    let mut groups_to_wire = Vec::new();
-    for g in &groups.groups {
-        let coordinator_ip = groups.player(&g.coordinator_id).and_then(proto::Player::ip);
-        if let Some(ip) = coordinator_ip
-            && wiring.groups.get(&g.id) != Some(&ip)
-        {
-            groups_to_wire.push((g.clone(), ip));
-        }
-    }
-    let mut players_to_wire = Vec::new();
-    for p in &groups.players {
-        if p.ip().is_some() && !wiring.players.contains(&p.id) {
-            players_to_wire.push(p.clone());
-        }
-    }
-    (groups_to_wire, players_to_wire)
+/// The groups not subscribed on their coordinator's address, with that address.
+fn unwired_groups<'a>(
+    wiring: &'a Wiring,
+    groups: &'a Groups,
+) -> impl Iterator<Item = (&'a proto::Group, IpAddr)> + 'a {
+    groups.groups.iter().filter_map(move |g| {
+        let ip = groups
+            .player(&g.coordinator_id)
+            .and_then(proto::Player::ip)?;
+        (wiring.groups.get(&g.id) != Some(&ip)).then_some((g, ip))
+    })
+}
+
+/// The reachable players whose own volume is not subscribed at their address.
+fn unwired_players<'a>(
+    wiring: &'a Wiring,
+    groups: &'a Groups,
+) -> impl Iterator<Item = &'a proto::Player> + 'a {
+    groups.players.iter().filter(move |p| {
+        p.ip()
+            .is_some_and(|ip| wiring.players.get(&p.id) != Some(&ip))
+    })
 }
 
 /// Unregisters a group, unless disarmed, when dropped: on an error, and when
@@ -920,7 +924,10 @@ fn start_pass(
     task: &mut Latest,
     retry: &mut Retry,
 ) {
-    let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
+    let groups_to_wire = unwired_groups(wiring, groups)
+        .map(|(g, ip)| (g.clone(), ip))
+        .collect();
+    let players_to_wire = unwired_players(wiring, groups).cloned().collect();
     let pass = Pass {
         session: session.clone(),
         events: wiring.events.clone(),
@@ -1057,6 +1064,7 @@ fn spawn_wire(
                     }
                     let _ = pass.wire.send(WireUpdate::Player {
                         id: player.id.clone(),
+                        ip,
                         volume,
                         ht,
                     });
@@ -1103,11 +1111,14 @@ fn wired(household: &mut Household, wiring: &mut Wiring, update: WireUpdate) -> 
             }
             false
         }
-        WireUpdate::Player { id, volume, ht } => {
-            if !groups.is_some_and(|g| g.players.iter().any(|p| p.id == id)) {
+        WireUpdate::Player { id, ip, volume, ht } => {
+            let at = groups
+                .and_then(|g| g.player(&id))
+                .and_then(proto::Player::ip);
+            if at != Some(ip) {
                 return false;
             }
-            wiring.players.insert(id.clone());
+            wiring.players.insert(id.clone(), ip);
             if let Some(vol) = volume {
                 household.player_volumes.insert(id.clone(), vol);
             }
@@ -1124,8 +1135,8 @@ fn wired(household: &mut Household, wiring: &mut Wiring, update: WireUpdate) -> 
 /// subscribed.
 fn unwired(wiring: &Wiring, household: &Household) -> bool {
     household.groups.as_ref().is_some_and(|groups| {
-        let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
-        !groups_to_wire.is_empty() || !players_to_wire.is_empty()
+        unwired_groups(wiring, groups).next().is_some()
+            || unwired_players(wiring, groups).next().is_some()
     })
 }
 
@@ -1261,11 +1272,7 @@ async fn follow_loop(
                     // A speaker reached only for its own volume: subscribed again
                     // once it can be reached, on a socket of its own.
                     wiring.forwarded.lock().unwrap().remove(&ip);
-                    if let Some(groups) = household.groups.as_ref() {
-                        for player in groups.players.iter().filter(|p| p.ip() == Some(ip)) {
-                            wiring.players.remove(&player.id);
-                        }
-                    }
+                    wiring.players.retain(|_, at| *at != ip);
                 } else if apply(&mut household, &wiring, ip, &event)? {
                     if event.namespace == "groups:1" {
                         let groups = household.groups.clone().unwrap_or_default_groups();
@@ -2687,14 +2694,27 @@ mod wiring_tests {
                 .unwrap();
             wiring.groups.insert(g.id.clone(), ip);
         }
-        wiring.players = groups.players.iter().map(|p| p.id.clone()).collect();
+        wiring.players = groups
+            .players
+            .iter()
+            .map(|p| (p.id.clone(), p.ip().unwrap()))
+            .collect();
         assert!(!unwired(&wiring, &household), "everything subscribed");
-        wiring.players.remove("RINCON_K1");
+        let kitchen = wiring.players.remove("RINCON_K1").unwrap();
         assert!(
             unwired(&wiring, &household),
             "a speaker whose volume is not followed"
         );
-        wiring.players.insert("RINCON_K1".into());
+        // Subscribed at an address the speaker no longer has (Astra, review
+        // of f65fc6c): followed again at its new one.
+        wiring
+            .players
+            .insert("RINCON_K1".into(), "10.0.0.9".parse().unwrap());
+        assert!(
+            unwired(&wiring, &household),
+            "a speaker followed at its old address"
+        );
+        wiring.players.insert("RINCON_K1".into(), kitchen);
         wiring.groups.remove("RINCON_K1:4");
         assert!(unwired(&wiring, &household), "a group not followed");
         // Subscribed on another coordinator's address: a regroup moved it.
@@ -3002,7 +3022,7 @@ mod tests {
         // Registered already: the pass the loop starts has nothing to do.
         let wiring = Wiring {
             groups: HashMap::from([("G1".to_owned(), ip)]),
-            players: HashSet::from(["P1".to_owned()]),
+            players: HashMap::from([("P1".to_owned(), ip)]),
             ..Wiring::new(events_tx)
         };
         let (wire_tx, wire_rx) = mpsc::unbounded_channel();
@@ -3027,6 +3047,7 @@ mod tests {
         wire_tx
             .send(WireUpdate::Player {
                 id: "P1".into(),
+                ip,
                 volume: None,
                 ht: None,
             })
@@ -3076,7 +3097,7 @@ mod tests {
         // Registered and wired, as the aborted pass left it: nothing to do.
         let wiring = Wiring {
             groups: HashMap::from([("G1".to_owned(), ip)]),
-            players: HashSet::from(["P1".to_owned()]),
+            players: HashMap::from([("P1".to_owned(), ip)]),
             ..Wiring::new(events_tx)
         };
         let (wire_tx, wire_rx) = mpsc::unbounded_channel();
@@ -3186,12 +3207,30 @@ mod tests {
         assert!(wiring.groups.is_empty() && household.live.is_empty());
         assert!(wired(&mut household, &mut wiring, update("G2", "10.0.0.2")));
         assert!(household.live.contains_key("G2"));
-        let gone = WireUpdate::Player {
-            id: "P9".into(),
+        let player_at = |id: &str, ip: &str| WireUpdate::Player {
+            id: id.into(),
+            ip: ip.parse().unwrap(),
             volume: None,
             ht: None,
         };
-        assert!(!wired(&mut household, &mut wiring, gone));
+        assert!(!wired(
+            &mut household,
+            &mut wiring,
+            player_at("P9", "10.0.0.9")
+        ));
+        // Reported from an address the speaker has since left: not subscribed.
+        assert!(!wired(
+            &mut household,
+            &mut wiring,
+            player_at("P1", "10.0.0.9")
+        ));
+        assert!(wiring.players.is_empty());
+        assert!(wired(
+            &mut household,
+            &mut wiring,
+            player_at("P1", "10.0.0.1")
+        ));
+        assert_eq!(wiring.players.get("P1"), Some(&"10.0.0.1".parse().unwrap()));
         // Subscriptions that failed after registering: tried again.
         let failed = WireUpdate::GroupFailed {
             id: "G2".into(),
