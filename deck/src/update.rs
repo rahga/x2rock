@@ -11,7 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-const LIST: &str = "https://api.github.com/repos/rahga/x2rock/releases?per_page=100";
+const LIST: &str = "https://api.github.com/repos/rahga/x2rock/releases";
+/// GitHub's most per page; the list is read page by page to its end, so a
+/// deck release is found however many CLI releases come before it.
+const PER_PAGE: usize = 100;
+/// More pages than that is not a release list this code knows.
+const PAGES: usize = 10;
 pub const RELEASES: &str = "github.com/rahga/x2rock/releases";
 /// What the deck's release tags start with.
 const TAG: &str = "deck-v";
@@ -19,22 +24,34 @@ const TAG: &str = "deck-v";
 /// The newest release's version, where it is newer than this build.
 pub async fn newer_release() -> Result<Option<String>> {
     let agent = format!("x2rock-deck/{}", env!("CARGO_PKG_VERSION"));
-    let (status, body) = x2rock::sonos::http::get_with(
-        LIST,
-        Duration::from_secs(10),
-        &[
-            ("User-Agent", &agent),
-            ("Accept", "application/vnd.github+json"),
-        ],
-    )
-    .await
-    .context("asking GitHub for its releases")?;
-    if status == 404 {
-        return Ok(None);
+    let mut releases = Vec::new();
+    for page in 1..=PAGES {
+        let url = format!("{LIST}?per_page={PER_PAGE}&page={page}");
+        let (status, body) = x2rock::sonos::http::get_with(
+            &url,
+            Duration::from_secs(10),
+            &[
+                ("User-Agent", &agent),
+                ("Accept", "application/vnd.github+json"),
+            ],
+        )
+        .await
+        .context("asking GitHub for its releases")?;
+        if status == 404 {
+            return Ok(None);
+        }
+        anyhow::ensure!(status == 200, "GitHub answered HTTP {status}");
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let Some(listed) = json.as_array() else {
+            break;
+        };
+        let last_page = listed.len() < PER_PAGE;
+        releases.extend(listed.iter().cloned());
+        if last_page {
+            break;
+        }
     }
-    anyhow::ensure!(status == 200, "GitHub answered HTTP {status}");
-    let json: serde_json::Value = serde_json::from_str(&body)?;
-    let Some(version) = newest_deck(&json) else {
+    let Some(version) = newest_deck(&releases) else {
         return Ok(None);
     };
     Ok(newer(&version, env!("CARGO_PKG_VERSION")).then_some(version))
@@ -54,9 +71,8 @@ fn parse_version(v: &str) -> Option<Vec<u64>> {
 /// so that maintenance releases for older lines (e.g. 0.1.1 published after 0.2.0)
 /// do not mask newer lines. Drafts and pre-releases are not offered, as
 /// `releases/latest` never offered them.
-fn newest_deck(releases: &serde_json::Value) -> Option<String> {
+fn newest_deck(releases: &[serde_json::Value]) -> Option<String> {
     releases
-        .as_array()?
         .iter()
         .filter_map(|r| {
             let flag = |name| r.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -105,13 +121,13 @@ mod tests {
             { "tag_name": "deck-v0.1.0", "draft": false, "prerelease": false },
         ]);
         assert_eq!(
-            newest_deck(&releases).as_deref(),
+            newest_deck(releases.as_array().unwrap()).as_deref(),
             Some("0.1.1"),
             "the CLI's v0.3.0, a draft and a pre-release passed over"
         );
         assert!(newer("0.1.1", "0.1.0"));
         assert_eq!(
-            newest_deck(&serde_json::json!([{ "tag_name": "v0.2.0" }])),
+            newest_deck(&[serde_json::json!({ "tag_name": "v0.2.0" })]),
             None,
             "only CLI releases: nothing to offer"
         );
@@ -126,13 +142,15 @@ mod tests {
             { "tag_name": "deck-v0.1.1", "draft": false, "prerelease": false },
             { "tag_name": "deck-v0.2.0", "draft": false, "prerelease": false },
         ]);
-        assert_eq!(newest_deck(&releases).as_deref(), Some("0.2.0"));
+        assert_eq!(
+            newest_deck(releases.as_array().unwrap()).as_deref(),
+            Some("0.2.0")
+        );
     }
 
     #[test]
     fn deck_release_past_first_page_of_cli_releases_is_found() {
-        // When there are more than 30 CLI releases preceding the deck release,
-        // a 100-item page still finds the deck release.
+        // However many CLI releases come before the deck's, it is found.
         let mut list = Vec::new();
         for i in 1..=35 {
             list.push(serde_json::json!({
@@ -146,7 +164,6 @@ mod tests {
             "draft": false,
             "prerelease": false
         }));
-        let releases = serde_json::Value::Array(list);
-        assert_eq!(newest_deck(&releases).as_deref(), Some("0.1.0"));
+        assert_eq!(newest_deck(&list).as_deref(), Some("0.1.0"));
     }
 }
