@@ -899,23 +899,76 @@ impl Drop for Unregister {
     }
 }
 
-/// Start a pass over whatever the topology has that is not yet subscribed.
-/// A pass with nothing to do still reports `Done`, which settles the retry.
+/// Start a pass over whatever the topology has that is not yet subscribed, in
+/// place of any pass running. A pass with nothing to do still reports `Done`.
 fn start_pass(
     session: &Session,
     wiring: &Wiring,
     wire_tx: &mpsc::UnboundedSender<WireUpdate>,
     groups: &Groups,
-) -> tokio::task::AbortHandle {
+    task: &mut Latest,
+    retry: &mut Retry,
+) {
     let (groups_to_wire, players_to_wire) = unwired_targets(wiring, groups);
-    spawn_wire(
+    task.replace(Some(spawn_wire(
         session.clone(),
         wiring.events.clone(),
         wire_tx.clone(),
         groups_to_wire,
         players_to_wire,
         wiring.forwarded.clone(),
-    )
+    )));
+    retry.pass_started();
+}
+
+/// When what a pass could not subscribe is tried again: with the reconnect's
+/// backoff, once no pass is running, until it is subscribed or leaves the
+/// topology. Sonos lists an unplugged speaker for minutes, and no topology
+/// change may come to try it again once it is back (the TV app's frozen
+/// Kitchen).
+struct Retry {
+    backoff: Duration,
+    /// When the next pass starts, while one is due.
+    at: Option<tokio::time::Instant>,
+    pass_running: bool,
+}
+
+impl Retry {
+    const FIRST: Duration = Duration::from_secs(2);
+    const MOST: Duration = Duration::from_secs(60);
+
+    fn new() -> Self {
+        Retry {
+            backoff: Self::FIRST,
+            at: None,
+            pass_running: false,
+        }
+    }
+
+    /// A pass is seeing to everything unwired: nothing is due until it is done.
+    fn pass_started(&mut self) {
+        self.pass_running = true;
+        self.at = None;
+    }
+
+    /// The pass is over; what it left unwired waits longer each time.
+    fn pass_done(&mut self, unwired: bool) {
+        self.pass_running = false;
+        if unwired {
+            self.backoff = (self.backoff * 2).min(Self::MOST);
+        }
+    }
+
+    /// After any change: a pass is due exactly while something is unwired and
+    /// no pass is seeing to it. Nothing unwired puts the backoff back.
+    fn settle(&mut self, unwired: bool, now: tokio::time::Instant) {
+        if !unwired {
+            self.backoff = Self::FIRST;
+            self.at = None;
+        } else if !self.pass_running && self.at.is_none() {
+            self.at = Some(now + self.backoff);
+        }
+    }
 }
 
 fn spawn_wire(
@@ -1129,18 +1182,17 @@ async fn follow_loop(
     updates(Update::Household(Box::new(household.clone())));
 
     let mut wiring_task = Latest::default();
-
+    let mut retry = Retry::new();
     if let Some(groups) = household.groups.as_ref() {
-        wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, groups)));
+        start_pass(
+            session,
+            &wiring,
+            &wire_tx,
+            groups,
+            &mut wiring_task,
+            &mut retry,
+        );
     }
-
-    // A group or speaker that could not be subscribed is tried again, with the
-    // reconnect's backoff, until it is or it leaves the topology: Sonos lists
-    // an unplugged speaker for minutes, and no topology change may come to try
-    // it again once it is back (the TV app's frozen Kitchen).
-    let mut retry_backoff = Duration::from_secs(2);
-    let mut next_retry =
-        unwired(&wiring, &household).then(|| tokio::time::Instant::now() + retry_backoff);
     // The music services, opened on first use and kept for the session.
     let services: crate::services::Shared = Arc::default();
     // Commands, in order per target (see `order`). Each starts from the
@@ -1180,28 +1232,21 @@ async fn follow_loop(
             // such an event is waiting, so is the registration.
             biased;
             Some(update) = wire_rx.recv() => {
-                match update {
-                    WireUpdate::Done => {
-                        if unwired(&wiring, &household) {
-                            retry_backoff = (retry_backoff * 2).min(Duration::from_secs(60));
-                            next_retry = Some(tokio::time::Instant::now() + retry_backoff);
-                        } else {
-                            retry_backoff = Duration::from_secs(2);
-                            next_retry = None;
-                        }
+                // A pass reports in bursts, as a household's speakers answer
+                // together: all that is waiting is taken in, and the household
+                // published once.
+                let mut changed = false;
+                let mut next = Some(update);
+                while let Some(update) = next.take() {
+                    match update {
+                        WireUpdate::Done => retry.pass_done(unwired(&wiring, &household)),
+                        update => changed |= wired(&mut household, &mut wiring, update),
                     }
-                    update => {
-                        if wired(&mut household, &mut wiring, update) {
-                            latest.send_replace(household.clone());
-                            updates(Update::Household(Box::new(household.clone())));
-                        }
-                        // An aborted pass's GroupFailed can come after its
-                        // replacement's Done: no Done follows it to schedule
-                        // the retry, so this does.
-                        if next_retry.is_none() && unwired(&wiring, &household) {
-                            next_retry = Some(tokio::time::Instant::now() + retry_backoff);
-                        }
-                    }
+                    next = wire_rx.try_recv().ok();
+                }
+                if changed {
+                    latest.send_replace(household.clone());
+                    updates(Update::Household(Box::new(household.clone())));
                 }
             }
             tagged = events.recv() => {
@@ -1219,31 +1264,21 @@ async fn follow_loop(
                             wiring.players.remove(&player.id);
                         }
                     }
-                    next_retry = next_retry.or_else(|| Some(tokio::time::Instant::now() + retry_backoff));
-                    continue;
-                }
-                if apply(&mut household, &wiring, ip, &event)? {
+                } else if apply(&mut household, &wiring, ip, &event)? {
                     if event.namespace == "groups:1" {
                         let groups = household.groups.clone().unwrap_or_default_groups();
                         let current: HashSet<&str> = groups.groups.iter().map(|g| g.id.as_str()).collect();
                         wiring.groups.retain(|id, _| current.contains(id.as_str()));
                         household.live.retain(|id, _| current.contains(id.as_str()));
-                        wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, &groups)));
-                        if !unwired(&wiring, &household) {
-                            next_retry = None;
-                            retry_backoff = Duration::from_secs(2);
-                        } else if next_retry.is_none() {
-                            next_retry = Some(tokio::time::Instant::now() + retry_backoff);
-                        }
+                        start_pass(session, &wiring, &wire_tx, &groups, &mut wiring_task, &mut retry);
                     }
                     latest.send_replace(household.clone());
                     updates(Update::Household(Box::new(household.clone())));
                 }
             }
-            _ = tokio::time::sleep_until(next_retry.unwrap_or_else(tokio::time::Instant::now)), if next_retry.is_some() => {
-                next_retry = None;
+            _ = tokio::time::sleep_until(retry.at.unwrap_or_else(tokio::time::Instant::now)), if retry.at.is_some() => {
                 let groups = household.groups.clone().unwrap_or_default_groups();
-                wiring_task.replace(Some(start_pass(session, &wiring, &wire_tx, &groups)));
+                start_pass(session, &wiring, &wire_tx, &groups, &mut wiring_task, &mut retry);
             }
             command = inbox.recv() => {
                 let Some(command) = command else { return Ok(()) };
@@ -1261,6 +1296,7 @@ async fn follow_loop(
                 }
             }
         }
+        retry.settle(unwired(&wiring, &household), tokio::time::Instant::now());
     }
 }
 
@@ -2668,6 +2704,45 @@ mod wiring_tests {
             "a group followed on its old coordinator"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_is_due_only_while_something_is_unwired_and_no_pass_runs() {
+        let now = tokio::time::Instant::now();
+        let mut retry = Retry::new();
+        retry.settle(false, now);
+        assert_eq!(retry.at, None, "nothing unwired");
+        retry.pass_started();
+        retry.settle(true, now);
+        assert_eq!(retry.at, None, "a pass is seeing to it");
+        retry.pass_done(true);
+        retry.settle(true, now);
+        assert_eq!(
+            retry.at,
+            Some(now + Duration::from_secs(4)),
+            "waits longer after each pass that left some"
+        );
+        retry.settle(true, now + Duration::from_secs(1));
+        assert_eq!(
+            retry.at,
+            Some(now + Duration::from_secs(4)),
+            "a pass due stays due"
+        );
+        retry.pass_started();
+        retry.pass_done(true);
+        retry.settle(true, now);
+        assert_eq!(retry.at, Some(now + Duration::from_secs(8)));
+        retry.settle(false, now);
+        assert_eq!(
+            (retry.at, retry.backoff),
+            (None, Retry::FIRST),
+            "all wired: the backoff starts over"
+        );
+        for _ in 0..10 {
+            retry.pass_started();
+            retry.pass_done(true);
+        }
+        assert_eq!(retry.backoff, Retry::MOST);
+    }
 }
 
 #[cfg(test)]
@@ -2906,6 +2981,75 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         drop(listener);
+    }
+
+    /// A pass's reports that are waiting together are taken in together: the
+    /// household is published once for the burst, not once per speaker.
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_of_wiring_reports_is_published_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let groups = one_room(ip);
+        let session = Session::new(Connection::dummy(ip), groups.clone());
+        let household = Household {
+            groups: Some(groups),
+            ..Default::default()
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        // Registered already: the pass the loop starts has nothing to do.
+        let wiring = Wiring {
+            groups: HashMap::from([("G1".to_owned(), ip)]),
+            players: HashSet::from(["P1".to_owned()]),
+            ..Wiring::new(events_tx)
+        };
+        let (wire_tx, wire_rx) = mpsc::unbounded_channel();
+        let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
+        let published = Arc::new(AtomicUsize::new(0));
+        let updates: Sink = {
+            let published = published.clone();
+            Arc::new(move |u| {
+                if matches!(u, Update::Household(_)) {
+                    published.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        // The burst, waiting before the loop first looks.
+        wire_tx
+            .send(WireUpdate::Group {
+                id: "G1".into(),
+                ip,
+                live: Box::default(),
+            })
+            .unwrap();
+        wire_tx
+            .send(WireUpdate::Player {
+                id: "P1".into(),
+                volume: None,
+                ht: None,
+            })
+            .unwrap();
+        wire_tx.send(WireUpdate::Done).unwrap();
+        let task = tokio::spawn(async move {
+            follow_loop(
+                &session,
+                ip,
+                household,
+                wiring,
+                (events_rx, (wire_tx, wire_rx)),
+                &updates,
+                &mut inbox_rx,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        inbox_tx.send(Command::Reconnect).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            2,
+            "the household as it opened, and once for the burst"
+        );
     }
 
     /// Codex's ordering (review of d7d661f): an aborted pass's guard sends
