@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (not yet released: when tagged, `## 0.1.0 (YYYY-MM-DD)`, which the release checks)
+## 0.1.0 (2026-11-02)
 
 First release of `x2rock-deck`, a native Sonos controller for the Steam Deck, Linux desktops, and Windows tablets, built with Slint.
 
