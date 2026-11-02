@@ -125,8 +125,10 @@ there the build includes it and its version ends `+salt`; once it is gone, the n
 not. Keep such a build to yourself. Without the variable, which is every build from a plain
 checkout and every release, nothing is built in.
 
-On Linux the build needs fontconfig, xkbcommon, wayland, udev and OpenGL headers
-(`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev` on Debian and Ubuntu).
+On Linux the build needs fontconfig, FreeType, xkbcommon, wayland, udev and OpenGL headers
+(`libfontconfig1-dev libxkbcommon-dev libwayland-dev libudev-dev libgl1-mesa-dev` on Debian and
+Ubuntu; FreeType comes with fontconfig's). The first build also fetches Skia's prebuilt library
+(`skia-bindings`, some 25 MB) over the network; later builds have it.
 
 A Windows build can be made from Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin)
 (it needs clang and an `lld-link`; the Rust toolchain's own `rust-lld` serves, under that name):

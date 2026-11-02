@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Text is drawn by Skia** instead of femtovg. At a 100% display scale, as on a Windows
+  desktop, femtovg's unhinted Roboto came out thin and soft; Skia's is crisp. Skia uses
+  OpenGL or Vulkan on Linux and Direct3D 12 on Windows; the software fallback stays.
+
 ## 0.1.0 (2026-11-02)
 
 First release of `x2rock-deck`, a native Sonos controller for the Steam Deck, Linux desktops, and Windows tablets, built with Slint.

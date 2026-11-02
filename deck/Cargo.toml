@@ -22,9 +22,13 @@ qrcode = { version = "0.14.1", default-features = false }
 regex = "1.13"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-# The GPLv3 licence option. femtovg (OpenGL) is the renderer; the software
-# renderer is here for headless tests and as a fallback where GL is missing.
-slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "software-renderer-path", "software-renderer-systemfonts"] }
+# The GPLv3 licence option. Skia is the renderer (OpenGL or Vulkan on Linux,
+# Direct3D on Windows), for its text: femtovg drew Roboto unhinted, thin and
+# soft at a 100% display scale, which is how a Windows desktop met it. Its
+# prebuilt binaries are fetched by skia-bindings at build time, so a first
+# build needs the network. The software renderer is here for headless tests
+# and as a fallback where no GPU API is found.
+slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "renderer-software", "software-renderer-path", "software-renderer-systemfonts"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 # The Sonos layer, from the x2rock CLI's own package with the CLI left out.
 x2rock = { path = "..", default-features = false }

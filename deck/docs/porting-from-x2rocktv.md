@@ -54,7 +54,7 @@ moved into that repository (2026-10-30):
   element scaled by `transform-scale` (`zoom` in `ui/app.slint`), and the window keeps the
   size and scale the system gives it.
 - **The software renderer does not draw `transform-scale`**, so headless screenshots still set
-  the scale factor, which is safe there. A real window (femtovg) was checked with the app's
+  the scale factor, which is safe there. A real window (femtovg then, Skia now) was checked with the app's
   own `take_snapshot` (`X2ROCK_DECK_SNAPSHOT`), and touch with a synthetic tap
   (`X2ROCK_DECK_TAP`): a tap lands where it is drawn on the scaled canvas.
 - **`grim` cannot capture from the sandbox this was built in**; the in-app snapshot is the
